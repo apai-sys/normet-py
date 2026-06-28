@@ -218,7 +218,6 @@ def placebo_in_time(
         **kwargs,
     )
     dates_all = df_true.index.sort_values()
-    post_mask_true = dates_all >= cutoff_dt
     post_dates_true = dates_all[dates_all >= cutoff_dt]
     post_len = len(post_dates_true)
     if post_len == 0:
