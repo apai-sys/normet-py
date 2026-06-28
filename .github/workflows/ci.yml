@@ -33,6 +33,9 @@ jobs:
         # Measured ~72% with flaml+lgb installed; gate set just below with margin.
         # Raise further as tests are added for the causal pipeline (do_all,
         # placebo, panel) and the FLAML backend.
+        env:
+          MPLBACKEND: Agg
+          PYTENSOR_FLAGS: "cxx="
         run: pytest --cov=normet --cov-report=term-missing --cov-fail-under=70
       - name: mypy
         run: mypy src/normet
