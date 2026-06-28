@@ -1,0 +1,192 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "normet"
+version = "0.1.0"
+description = "Normalisation, Decomposition, and Counterfactual Modelling for Environmental Time-series"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+authors = [{ name = "Congbo Song", email = "congbo.song@manchester.ac.uk" }]
+keywords = [
+  "environmental-data",
+  "time series",
+  "deweathering",
+  "normalisation",
+  "counterfactual",
+  "synthetic control",
+  "causal inference",
+  "air quality",
+  "air pollution"
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Topic :: Scientific/Engineering :: Atmospheric Science"
+]
+
+# Core dependencies
+dependencies = [
+    "numpy>=1.22",
+    "pandas>=1.5",
+    "scipy>=1.10",
+    "scikit-learn>=1.1",
+    "joblib>=1.2",
+    "matplotlib>=3.6"
+]
+
+# Optional dependencies: user can choose one AutoML backend
+[project.optional-dependencies]
+flaml = ["flaml>=2.1"]
+lgb = ["lightgbm>=4.0"]
+
+dask = ["dask[dataframe]>=2023.1"]
+data = ["requests>=2.31", "cdsapi>=0.6"]
+cli = ["click>=8.0", "pyyaml>=6.0"]
+stats = ["statsmodels>=0.14"]
+bayes = ["pymc>=5.0", "arviz>=0.17"]
+docs = ["sphinx>=7.0", "sphinx-rtd-theme>=1.3", "myst-parser>=2.0"]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.4",
+    "mypy>=1.6",
+    "pre-commit>=3.0",
+    "pandas-stubs",
+    "types-PyYAML",
+]
+gpu = ["cupy>=12.0"]
+# Everything optional except `gpu` (cupy is CUDA/platform-specific and would
+# break installs on machines without a matching toolkit) and dev/docs tooling.
+all = [
+    "flaml>=2.1",
+    "lightgbm>=4.0",
+    "dask[dataframe]>=2023.1",
+    "requests>=2.31",
+    "cdsapi>=0.6",
+    "click>=8.0",
+    "pyyaml>=6.0",
+    "statsmodels>=0.14",
+    "pymc>=5.0",
+    "arviz>=0.17",
+]
+
+[project.scripts]
+normet = "normet.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/normet-dev/normet-py"
+Issues = "https://github.com/normet-dev/normet-py/issues"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["normet*"]
+
+# Include non-code files (README, LICENSE) in sdists/wheels
+[tool.setuptools.package-data]
+"normet" = ["py.typed"]
+
+# Optional: exclude heavy assets if you add any later
+[tool.setuptools.exclude-package-data]
+"normet" = ["*.ipynb_checkpoints*", "*.tmp"]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-ra -q"
+testpaths = ["tests"]
+filterwarnings = [
+    "ignore::DeprecationWarning:pandas",
+    "ignore::FutureWarning:joblib",
+]
+
+# ----------------------
+# Developer tools
+# ----------------------
+
+[tool.black]
+line-length = 88
+target-version = ["py310", "py311", "py312"]
+
+[tool.isort]
+profile = "black"
+line_length = 88
+known_first_party = ["normet"]
+
+# ----------------------
+# Ruff (lint + format)
+# ----------------------
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = ["notebooks", "docs/_build", "examples"]
+
+[tool.ruff.lint]
+# UP (pyupgrade) is enabled: minimum is Python 3.10, so annotations use the
+# modern `X | None` / `list[X]` forms.
+select = ["E", "F", "W", "I", "B", "SIM", "UP"]
+ignore = [
+    "E501",  # line length handled by formatter
+    "B008",  # function defaults
+    "B007",  # unused loop var (often intentional in tight tests)
+    "SIM105", # contextlib.suppress nags are noisy on try/except pass blocks
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["F401", "F811"]
+
+# ----------------------
+# mypy (lenient by default; strict on public surface)
+# ----------------------
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+warn_unused_ignores = false
+warn_redundant_casts = true
+warn_unreachable = true
+show_error_codes = true
+files = ["src/normet"]
+
+# Optional deps are lazy-imported; tell mypy not to choke if they're absent.
+[[tool.mypy.overrides]]
+module = [
+    "flaml.*", "dask.*",
+    "lightgbm.*", "xgboost.*", "matplotlib.*", "scipy.*",
+    "sklearn.*", "joblib.*", "yaml.*", "click.*", "cdsapi.*", "pymc.*",
+]
+ignore_missing_imports = true
+
+# ----------------------
+# Coverage
+# ----------------------
+[tool.coverage.run]
+source = ["normet"]
+branch = true
+omit = [
+    "*/tests/*",
+    "*/cli.py",
+    "*/_lazy.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+]
+show_missing = true
+skip_covered = true
