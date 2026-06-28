@@ -146,7 +146,7 @@ def placebo_in_space(
     ref_band["band_low_1sd"] = ref_band["mean"] - ref_band["std"]
     ref_band["band_high_1sd"] = ref_band["mean"] + ref_band["std"]
 
-    post_mask = df_true.index >= cutoff_ts
+    post_mask = df_true.index.to_series() >= cutoff_ts
     if not post_mask.any():
         p_value = float("nan")
     else:
@@ -218,7 +218,7 @@ def placebo_in_time(
         **kwargs,
     )
     dates_all = df_true.index.sort_values()
-    post_dates_true = dates_all[dates_all >= cutoff_dt]
+    post_dates_true = dates_all[(dates_all >= cutoff_dt).tolist()]
     post_len = len(post_dates_true)
     if post_len == 0:
         raise ValueError("No post-period observations at/after the true cutoff date.")
@@ -301,7 +301,7 @@ def placebo_in_time(
         {pc.strftime("%Y-%m-%d"): stat for (pc, _, stat) in jobs}
     ).sort_index()
 
-    obs_series = df_true["effect"][df_true.index >= cutoff_dt]
+    obs_series = df_true["effect"][df_true.index.to_series() >= cutoff_dt]
     obs_stat = float(obs_series.mean() if post_agg == "mean" else obs_series.sum())
     p_value = (np.sum(np.abs(placebo_stats.values) >= np.abs(obs_stat)) + 1) / (
         len(placebo_stats) + 1
