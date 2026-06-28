@@ -116,8 +116,8 @@ def prepare_panel(
             f"within [{full_range.min().date()}, {full_range.max().date()}]."
         )
 
-    pre_cov = wide.loc[pre_mask].notna().mean()
-    post_cov = wide.loc[post_mask].notna().mean()
+    pre_cov = wide[pre_mask].notna().mean()
+    post_cov = wide[post_mask].notna().mean()
     coverage = pd.DataFrame({"pre_coverage": pre_cov, "post_coverage": post_cov})
 
     keep = (pre_cov >= min_coverage) & (post_cov >= min_coverage)

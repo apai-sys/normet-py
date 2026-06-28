@@ -151,11 +151,11 @@ def placebo_in_space(
         p_value = float("nan")
     else:
         if post_agg == "sum":
-            obs_stat = float(df_true.loc[post_mask, "effect"].sum())
-            plc_stats = placebo_mat.loc[post_mask].sum(axis=0, skipna=True)
+            obs_stat = float(df_true["effect"][post_mask].sum())
+            plc_stats = placebo_mat[post_mask].sum(axis=0, skipna=True)
         else:
-            obs_stat = float(df_true.loc[post_mask, "effect"].mean())
-            plc_stats = placebo_mat.loc[post_mask].mean(axis=0, skipna=True)
+            obs_stat = float(df_true["effect"][post_mask].mean())
+            plc_stats = placebo_mat[post_mask].mean(axis=0, skipna=True)
 
         p_value = (np.sum(np.abs(plc_stats.values) >= np.abs(obs_stat)) + 1) / (len(plc_stats) + 1)
 
@@ -219,7 +219,7 @@ def placebo_in_time(
     )
     dates_all = df_true.index.sort_values()
     post_mask_true = dates_all >= cutoff_dt
-    post_dates_true = dates_all[post_mask_true]
+    post_dates_true = dates_all[dates_all >= cutoff_dt]
     post_len = len(post_dates_true)
     if post_len == 0:
         raise ValueError("No post-period observations at/after the true cutoff date.")
@@ -264,8 +264,9 @@ def placebo_in_time(
             )
             eff = syn_pc["effect"]
 
-            eff_aligned = eff.reindex(pd.to_datetime(treated_dates))
-            idx = np.where(pd.to_datetime(treated_dates) == pc_date)[0]
+            treated_dates_ts = pd.to_datetime(treated_dates.tolist())
+            eff_aligned = eff.reindex(treated_dates_ts)
+            idx = np.where(treated_dates_ts == pc_date)[0]
             if len(idx) == 0:
                 return None
             start = int(idx[0])
@@ -301,7 +302,7 @@ def placebo_in_time(
         {pc.strftime("%Y-%m-%d"): stat for (pc, _, stat) in jobs}
     ).sort_index()
 
-    obs_series = df_true.loc[df_true.index >= cutoff_dt, "effect"]
+    obs_series = df_true["effect"][df_true.index >= cutoff_dt]
     obs_stat = float(obs_series.mean() if post_agg == "mean" else obs_series.sum())
     p_value = (np.sum(np.abs(placebo_stats.values) >= np.abs(obs_stat)) + 1) / (
         len(placebo_stats) + 1

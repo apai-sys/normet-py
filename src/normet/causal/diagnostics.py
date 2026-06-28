@@ -24,7 +24,7 @@ __all__ = ["scm_diagnostics", "loo_weight_stability"]
 
 def _pre_period_fit(synthetic_df: pd.DataFrame, cutoff_ts: pd.Timestamp) -> dict[str, float]:
     """Pre-period observed-vs-synthetic fit metrics."""
-    pre = synthetic_df.loc[synthetic_df.index < cutoff_ts]
+    pre = synthetic_df[synthetic_df.index < cutoff_ts]
     if pre.empty:
         return {
             "pre_n": 0,
@@ -61,7 +61,7 @@ def _pre_period_fit(synthetic_df: pd.DataFrame, cutoff_ts: pd.Timestamp) -> dict
 
 
 def _post_period_effect(synthetic_df: pd.DataFrame, cutoff_ts: pd.Timestamp) -> dict[str, float]:
-    post = synthetic_df.loc[synthetic_df.index >= cutoff_ts]
+    post = synthetic_df[synthetic_df.index >= cutoff_ts]
     if post.empty:
         return {"post_n": 0, "att": np.nan, "att_cum": np.nan, "post_rmse": np.nan}
     eff = post["effect"].to_numpy(dtype=float)

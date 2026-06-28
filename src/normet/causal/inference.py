@@ -83,7 +83,7 @@ def conformal_effect_interval(
     """
     eff = _coerce_effect_series(scm_result).dropna()
     cutoff_ts = pd.to_datetime(cutoff_date)
-    post = eff.loc[eff.index >= cutoff_ts]
+    post = eff[eff.index >= cutoff_ts]
     n_post = len(post)
     if n_post == 0:
         raise ValueError("No post-period observations.")
@@ -153,8 +153,8 @@ def rmspe_ratio_test(
     cutoff_ts = pd.to_datetime(cutoff_date)
 
     def _ratio(eff_series: pd.Series) -> float:
-        pre = eff_series.loc[eff_series.index < cutoff_ts].dropna()
-        post = eff_series.loc[eff_series.index >= cutoff_ts].dropna()
+        pre = eff_series[eff_series.index < cutoff_ts].dropna()
+        post = eff_series[eff_series.index >= cutoff_ts].dropna()
         if pre.empty or post.empty:
             return np.nan
         pre_rmspe = float(np.sqrt(np.mean(pre.to_numpy() ** 2)))

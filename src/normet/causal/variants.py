@@ -78,7 +78,7 @@ def scm_abadie(
     panel, donors = _pivot_panel(df, date_col, unit_col, outcome_col, treated_unit, donors)
     cutoff_ts = pd.to_datetime(cutoff_date)
 
-    pre = panel.loc[panel.index < cutoff_ts, donors + [treated_unit]].dropna(how="any")
+    pre = panel[panel.index < cutoff_ts][donors + [treated_unit]].dropna(how="any")
     if pre.shape[0] < 2:
         raise ValueError("Not enough complete pre-treatment rows.")
 
@@ -118,7 +118,7 @@ def did_baseline(
         raise ValueError("`treated_unit` and `cutoff_date` are required.")
     panel, donors = _pivot_panel(df, date_col, unit_col, outcome_col, treated_unit, donors)
     cutoff_ts = pd.to_datetime(cutoff_date)
-    pre = panel.loc[panel.index < cutoff_ts]
+    pre = panel[panel.index < cutoff_ts]
 
     treated_pre_mean = float(np.nanmean(pre[treated_unit].to_numpy()))
     donor_pre_mean = float(np.nanmean(pre[donors].to_numpy()))

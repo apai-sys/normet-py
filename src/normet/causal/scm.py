@@ -189,7 +189,7 @@ def scm(
 
     # --- Pre/post masks & slices ---
     pre_idx = panel.index < cutoff_ts
-    dates_pre = panel.index[pre_idx]
+    dates_pre = panel[pre_idx].index
     if dates_pre.size < 3:
         log.warning(
             "Very short pre-period (%d timestamps); results may be unstable.", dates_pre.size

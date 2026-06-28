@@ -224,7 +224,7 @@ def mlscm(
     donors_safe = [col_map[u] for u in donor_units]
 
     # Pre-treatment
-    pre_panel_safe = panel_safe.loc[panel_safe.index < cutoff_ts]
+    pre_panel_safe = panel_safe[panel_safe.index < cutoff_ts]
 
     log.info(
         "ML-SCM training on pre-period: %d dates, donors=%d (backend=%s)",

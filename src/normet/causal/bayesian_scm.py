@@ -111,7 +111,7 @@ def bayesian_scm(
     pm = require("pymc", hint="pip install pymc")
     np_module = require("numpy")  # always available — sanity
     cutoff_ts = pd.to_datetime(cutoff_date)
-    pre = panel.loc[panel.index < cutoff_ts, donors + [treated_unit]].dropna(how="any")
+    pre = panel[panel.index < cutoff_ts][donors + [treated_unit]].dropna(how="any")
     if pre.shape[0] < 5:
         raise ValueError("Not enough complete pre-treatment rows for Bayesian SCM.")
 
