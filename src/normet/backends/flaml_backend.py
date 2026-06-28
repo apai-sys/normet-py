@@ -234,6 +234,10 @@ def train_flaml(
         "filename": "automl.joblib",
         "verbose": verbose,
     }
+    # ``split_type`` / ``n_splits`` let callers request time-ordered internal
+    # validation (split_type="time"), which prevents the model-selection step
+    # from being fooled by temporally-leaked random folds on autocorrelated
+    # air-quality series. Only forwarded to FLAML when explicitly set.
     if n_cores is not None:
         default_cfg.setdefault("n_jobs", n_cores)
     if model_config:
@@ -248,6 +252,8 @@ def train_flaml(
         "eval_method",
         "verbose",
         "n_jobs",
+        "split_type",
+        "n_splits",
     }
     automl_kwargs = {k: default_cfg[k] for k in passthrough if k in default_cfg}
 
