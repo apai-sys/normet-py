@@ -40,7 +40,6 @@ class Backend(Protocol):
         seed: int = DEFAULT_SEED,
         verbose: bool = False,
         n_cores: int | None = None,
-        use_gpu: bool = False,
     ) -> object:
         """Train a model and return it with a ``.backend`` attribute set.
 

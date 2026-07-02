@@ -14,19 +14,11 @@ from ..utils.logging import get_logger
 log = get_logger(__name__)
 
 
-def _lgb_model_type():
-    """Return LgbModel class (lazy import to avoid circular dependency)."""
-    from ..backends.lgb_backend import LgbModel
-
-    return LgbModel
-
-
 def ml_predict(
     model,
     newdata: pd.DataFrame,
     *,
     chunk_size: int | None = None,
-    use_gpu: bool | None = None,
 ) -> np.ndarray:
     """
     Predict using a trained AutoML model.
@@ -83,22 +75,6 @@ def ml_predict(
     n_rows = len(X)
     if n_rows == 0:
         return np.array([], dtype=float)
-
-    # Resolve effective GPU flag: explicit arg overrides model attribute.
-    _use_gpu = use_gpu if use_gpu is not None else getattr(model, "use_gpu", False)
-
-    # cuDF path: convert feature frame to GPU DataFrame for models that
-    # accept cuDF natively (cuML, cuDF-native models).  LightGBM and FLAML
-    # handle their own CUDA context after GPU training — no cuDF needed there.
-    if _use_gpu and not isinstance(model, _lgb_model_type()):
-        try:
-            import cudf as _cudf
-
-            X = _cudf.DataFrame.from_pandas(X)
-        except ImportError:
-            pass  # cuDF not installed; model.predict falls back to numpy
-        except Exception as _e:
-            log.debug("cuDF conversion failed (%s); using pandas X.", _e)
 
     try:
         cs = int(chunk_size) if chunk_size is not None else 200_000

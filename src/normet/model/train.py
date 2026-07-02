@@ -40,7 +40,6 @@ def build_model(
     verbose: bool = False,
     drop_time_features: bool = False,
     n_cores: int | None = None,
-    use_gpu: bool = False,
     cache: str | Path | None = None,
 ) -> tuple[pd.DataFrame, object]:
     """
@@ -138,7 +137,6 @@ def build_model(
         seed=seed,
         verbose=verbose,
         n_cores=n_cores,
-        use_gpu=use_gpu,
         cache=cache,
     )
 
@@ -156,7 +154,6 @@ def train_model(
     seed: int = DEFAULT_SEED,
     verbose: bool = False,
     n_cores: int | None = None,
-    use_gpu: bool = False,
     cache: str | Path | None = None,
 ) -> object:
     """
@@ -229,7 +226,6 @@ def train_model(
         seed=seed,
         verbose=verbose,
         n_cores=n_cores,
-        use_gpu=use_gpu,
     )
 
     if cache is None:
@@ -248,7 +244,6 @@ def train_model(
         sorted(feature_names),
         model_config,
         seed,
-        use_gpu,
         dataframe_hash(df[key_cols]),
     )
     memory = make_memory(cache)

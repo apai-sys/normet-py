@@ -69,18 +69,14 @@ class LgbModel:
         Predictor column names the model was trained on.
     booster : lightgbm.Booster
         The underlying trained booster.
-    use_gpu : bool
-        Whether the model was trained with ``device_type="cuda"``.
-        If True, LightGBM uses CUDA for prediction automatically.
     """
 
-    __slots__ = ("_booster", "backend", "feature_names", "use_gpu")
+    __slots__ = ("_booster", "backend", "feature_names")
 
-    def __init__(self, booster: Any, feature_names: list[str], use_gpu: bool = False) -> None:
+    def __init__(self, booster: Any, feature_names: list[str]) -> None:
         self._booster = booster
         self.backend = "lightgbm"
         self.feature_names = list(feature_names)
-        self.use_gpu = use_gpu
 
     @property
     def booster(self) -> object:
@@ -98,7 +94,6 @@ class LgbModel:
         if np.any(non_finite):
             X_arr = X_arr.copy()
             X_arr[non_finite] = 0.0
-        # When use_gpu=True, the booster was CUDA-trained and predicts on GPU internally.
         return np.asarray(self._booster.predict(X_arr), dtype=float).reshape(-1)
 
     def feature_name(self) -> list[str]:
@@ -215,7 +210,6 @@ def train_lgb(
     seed: int = DEFAULT_SEED,
     verbose: bool = False,
     n_cores: int | None = None,
-    use_gpu: bool = False,
 ) -> LgbModel:
     """Train a LightGBM model with random hyperparameter search + CV.
 
@@ -324,26 +318,6 @@ def train_lgb(
         n,
     )
 
-    import platform as _platform
-    import sys as _sys
-
-    _is_apple_silicon = _sys.platform == "darwin" and _platform.machine() in {"arm64", "aarch64"}
-    _lgb_device = "cpu"
-    if use_gpu:
-        if _is_apple_silicon:
-            log.warning(
-                "use_gpu=True has no effect on Apple Silicon: LightGBM does not support "
-                "Metal/MPS. Training will run on CPU. "
-                "For GPU-accelerated tree models on macOS, consider XGBoost with Metal support."
-            )
-        else:
-            _lgb_device = "cuda"
-            log.info(
-                "LightGBM GPU training requested (device_type='cuda'). "
-                "Requires LightGBM built with CUDA support: "
-                "pip install lightgbm --config-settings=cmake.define.USE_CUDA=ON"
-            )
-
     for i in range(1, cfg["n_trials"] + 1):
         params: dict[str, Any] = {
             "objective": "regression",
@@ -351,7 +325,7 @@ def train_lgb(
             "verbosity": -1,
             "feature_pre_filter": False,
             "num_threads": n_cores if n_cores is not None else 0,
-            "device_type": _lgb_device,
+            "device_type": "cpu",
             "num_leaves": int(rng.integers(leaves_min, leaves_max + 1)),
             "learning_rate": float(rng.uniform(cfg["learning_rate_min"], cfg["learning_rate_max"])),
             "min_data_in_leaf": int(rng.integers(min_data_low, min_data_high + 1)),
@@ -419,7 +393,7 @@ def train_lgb(
         num_boost_round=best_nrounds,
     )
 
-    return LgbModel(booster, feature_names, use_gpu=use_gpu)
+    return LgbModel(booster, feature_names)
 
 
 class _LgbBackend:
@@ -437,7 +411,6 @@ class _LgbBackend:
         seed: int = DEFAULT_SEED,
         verbose: bool = False,
         n_cores: int | None = None,
-        use_gpu: bool = False,
     ) -> LgbModel:
         return train_lgb(
             df,
@@ -448,7 +421,6 @@ class _LgbBackend:
             seed=seed,
             verbose=verbose,
             n_cores=n_cores,
-            use_gpu=use_gpu,
         )
 
     def save(

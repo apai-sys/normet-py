@@ -49,7 +49,6 @@ class DecomposeConfig:
     seed: int = DEFAULT_SEED
     n_cores: int | None = None
     memory_save: bool = False
-    use_gpu: bool = False
     verbose: bool = False
     importance_ascending: bool = False
     method: str = "emission"
@@ -286,7 +285,6 @@ def decom_emi(
             n_cores=n_cores_eff,
             resample_df=None,
             memory_save=_cfg.memory_save,
-            use_gpu=_cfg.use_gpu,
         )
         if "normalised" not in df_norm.columns:
             log.exception("`normalise` did not return 'normalised' column (aggregate=True).")
@@ -478,7 +476,6 @@ def decom_met(
             n_cores=n_cores_eff,
             resample_df=None,
             memory_save=_cfg.memory_save,
-            use_gpu=_cfg.use_gpu,
         )
         if "normalised" not in df_norm.columns:
             log.exception("`normalise` did not return 'normalised' column (aggregate=True).")

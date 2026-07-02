@@ -148,7 +148,6 @@ def train_flaml(
     seed: int = DEFAULT_SEED,
     verbose: bool = False,
     n_cores: int | None = None,
-    use_gpu: bool = False,
 ) -> object:
     """
     Train a model with FLAML AutoML and tag it with ``backend='flaml'``.
@@ -257,34 +256,6 @@ def train_flaml(
     }
     automl_kwargs = {k: default_cfg[k] for k in passthrough if k in default_cfg}
 
-    if use_gpu:
-        import platform as _platform
-        import sys as _sys
-
-        _is_apple_silicon = _sys.platform == "darwin" and _platform.machine() in {
-            "arm64",
-            "aarch64",
-        }
-        if _is_apple_silicon:
-            log.warning(
-                "use_gpu=True has no effect on Apple Silicon: neither FLAML nor its "
-                "LightGBM estimator support Metal/MPS. Training will run on CPU."
-            )
-        else:
-            log.info(
-                "FLAML GPU training requested. Injecting device_type='cuda' for lgbm estimator. "
-                "Requires LightGBM built with CUDA support and flaml[tune] installed."
-            )
-        if not _is_apple_silicon:
-            try:
-                from flaml import tune as _flaml_tune
-
-                automl_kwargs.setdefault("custom_hp", {}).setdefault("lgbm", {})["device_type"] = {
-                    "domain": _flaml_tune.choice(["cuda"])
-                }
-            except Exception as _e:
-                log.warning("Could not inject GPU config into FLAML (%s). Training on CPU.", _e)
-
     AutoML = _import_flaml_automl()
     automl = AutoML()
 
@@ -312,7 +283,6 @@ def train_flaml(
         )
 
     automl.backend = "flaml"
-    automl.use_gpu = use_gpu
     return automl
 
 
@@ -331,7 +301,6 @@ class _FlamlBackend:
         seed: int = DEFAULT_SEED,
         verbose: bool = False,
         n_cores: int | None = None,
-        use_gpu: bool = False,
     ) -> object:
         return train_flaml(
             df,
@@ -342,7 +311,6 @@ class _FlamlBackend:
             seed=seed,
             verbose=verbose,
             n_cores=n_cores,
-            use_gpu=use_gpu,
         )
 
     def save(
