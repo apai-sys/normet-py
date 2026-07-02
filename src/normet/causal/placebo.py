@@ -97,10 +97,13 @@ def placebo_in_space(
 
     def _one_donor_placebo(u: str) -> tuple[str, pd.DataFrame] | None:
         try:
-            # Build each placebo's synthetic from the *other donors only*: the
-            # real treated unit is excluded so its post-cutoff intervention
-            # cannot leak into the placebo fits and inflate their effects
-            # (standard Abadie placebo-in-space). ``u`` itself is also excluded.
+            # Build each placebo's synthetic from the *same donor pool* the user
+            # supplied, minus ``u`` itself (and the real treated unit, already
+            # excluded from ``donor_pool``). Reusing the caller's donor pool — rather
+            # than every unit in ``df`` — keeps the placebo fits consistent with the
+            # true fit and respects deliberate donor restrictions (e.g. complete-data
+            # or same-type donors); pulling in excluded units can reintroduce missing
+            # values and make every placebo SCM fail (standard Abadie placebo-in-space).
             syn_u = run_scm(
                 df=df,
                 date_col=date_col,
@@ -108,7 +111,7 @@ def placebo_in_space(
                 outcome_col=outcome_col,
                 treated_unit=u,
                 cutoff_date=cutoff_ts.strftime("%Y-%m-%d"),
-                donors=[d for d in all_units if d != u and d != treated_unit],
+                donors=[d for d in donor_pool if d != u],
                 scm_backend=scm_backend,
                 **kwargs,
             )
