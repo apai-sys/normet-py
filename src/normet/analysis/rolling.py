@@ -42,7 +42,6 @@ class RollingConfig:
     seed: int = DEFAULT_SEED
     n_cores: int | None = None
     memory_save: bool = False
-    use_gpu: bool = False
     verbose: bool = False
 
 
@@ -68,7 +67,6 @@ def rolling(
     seed: int = DEFAULT_SEED,
     n_cores: int | None = None,
     memory_save: bool = False,
-    use_gpu: bool = False,
     verbose: bool = False,
     **kwargs: Any,
 ) -> pd.DataFrame:
@@ -113,7 +111,6 @@ def rolling(
         seed=seed,
         n_cores=n_cores,
         memory_save=memory_save,
-        use_gpu=use_gpu,
         verbose=verbose,
         **kwargs,
     )
@@ -209,6 +206,12 @@ def rolling(
             continue
 
         try:
+            # resample_df=dfa (not the full df_work): each window draws its
+            # meteorological resample pool exclusively from its own date
+            # range. Using the full dataset here would make window_days
+            # irrelevant to the resampled distribution, defeating the point
+            # of testing whether meteorological influence separates by
+            # timescale (matches the corrected default in R's nm_rolling()).
             df_norm = normalise(
                 df=dfa,
                 model=model,
@@ -218,9 +221,8 @@ def rolling(
                 aggregate=True,
                 seed=_cfg.seed + (i * 997),
                 n_cores=n_cores_eff,
-                resample_df=None,
+                resample_df=dfa,
                 memory_save=_cfg.memory_save,
-                use_gpu=_cfg.use_gpu,
             )
             result[f"rolling_{i - 1}"] = df_norm["normalised"]
         except Exception as e:
