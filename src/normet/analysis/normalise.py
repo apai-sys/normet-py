@@ -270,7 +270,7 @@ def normalise(
     else:
         eff_batch_size = int(_cfg.batch_size)
 
-    use_batch_reduce = eff_batch_size > 0 and _cfg.aggregate
+    use_batch_reduce = eff_batch_size > 0 and _cfg.aggregate and not _cfg.return_quantiles
 
     (log.info if _cfg.verbose else log.debug)(
         "Normalising with %d resamples (aggregate=%s, memory_save=%s, "
