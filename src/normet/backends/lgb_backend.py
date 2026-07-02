@@ -78,6 +78,21 @@ class LgbModel:
         self.backend = "lightgbm"
         self.feature_names = list(feature_names)
 
+    def __setstate__(self, state: object) -> None:
+        # Models saved by older normet versions carry attributes that no
+        # longer exist as slots (e.g. ``use_gpu``); a plain slotted unpickle
+        # would raise AttributeError on them, breaking every saved model
+        # across an upgrade. Restore known slots, drop anything else.
+        if isinstance(state, tuple):  # (dict_or_None, slots_dict) protocol form
+            dict_state, slots_state = state
+        else:
+            dict_state, slots_state = state, None
+        for src in (dict_state, slots_state):
+            if isinstance(src, dict):
+                for k, v in src.items():
+                    if k in type(self).__slots__:
+                        object.__setattr__(self, k, v)
+
     @property
     def booster(self) -> object:
         """The underlying ``lightgbm.Booster``."""
