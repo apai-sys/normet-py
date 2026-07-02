@@ -41,10 +41,26 @@ class NormaliseConfig:
     n_cores: int | None = None
     resample_df: pd.DataFrame | None = None
     memory_save: bool = False
-    use_gpu: bool = False
     verbose: bool = False
     return_quantiles: Sequence[float] | None = None
     conditional_on: Mapping[str, Any] | None = None
+    batch_size: int | None = None
+    """Batch-reduce strategy (mirrors R's transient-memory pipeline).
+
+    When batching is active and ``aggregate=True``, predictions are produced
+    and immediately reduced into running sums *batch by batch* so peak memory
+    is O(batch_size × n_rows) rather than O(n_samples × n_rows).  Each batch
+    is discarded via explicit ``del`` before the next is allocated.
+
+    - ``None`` (default): auto-derive the batch size from the data footprint,
+      matching normet-R's heuristic -- the largest number of resampled copies
+      of ``df`` that fits in a ~400 MB payload budget, clamped to
+      ``[1, n_samples]``.
+    - ``0``: disable batching (materialise the full n_samples × n_rows frame).
+    - ``> 0``: use exactly this many samples per batch.
+
+    Has no effect when ``aggregate=False`` (full wide table requires all seeds).
+    """
 
 
 def _resolve_normalise_config(config: NormaliseConfig | None = None, **kwargs) -> NormaliseConfig:
@@ -204,9 +220,11 @@ def normalise(
 
     resample_df = df if _cfg.resample_df is None else _cfg.resample_df
     time_vars = {"date_unix", "day_julian", "weekday", "hour"}
-    variables_resample = _cfg.variables_resample or [
-        c for c in _cfg.feature_names if c not in time_vars
-    ]
+    variables_resample = (
+        _cfg.variables_resample
+        if _cfg.variables_resample is not None
+        else [c for c in _cfg.feature_names if c not in time_vars]
+    )
 
     if _cfg.conditional_on:
         before = len(resample_df)
@@ -229,30 +247,38 @@ def normalise(
     rng = np.random.default_rng(_cfg.seed)
     random_seeds = rng.choice(1_000_000, size=_cfg.n_samples, replace=False)
 
-    # GPU only accelerates the sampling/gather stage, not ml_predict (which runs on CPU).
-    # memory_save=True path uses joblib and bypasses the GPU gather entirely.
-    if _cfg.use_gpu and _cfg.memory_save:
-        log.warning(
-            "use_gpu=True has no effect when memory_save=True (joblib path bypasses GPU gather). "
-            "Set memory_save=False to enable GPU-accelerated resampling."
-        )
+    # Resolve the effective batch size. None -> auto-derive from the data
+    # footprint (normet-R's heuristic: as many resampled copies of `df` as fit
+    # in a ~400 MB payload budget); 0 -> batching disabled; >0 -> as given.
+    if _cfg.batch_size is None:
+        if _cfg.memory_save:
+            # Explicit memory_save=True selects the joblib-threaded path;
+            # don't let the auto default shadow that choice. An explicit
+            # batch_size > 0 still takes precedence over memory_save.
+            eff_batch_size = 0
+        else:
+            one_copy_bytes = int(df.memory_usage(deep=True).sum())
+            safe_payload_bytes = 400 * 1024**2
+            eff_batch_size = int(
+                max(1, min(safe_payload_bytes // max(one_copy_bytes, 1), _cfg.n_samples))
+            )
+            (log.info if _cfg.verbose else log.debug)(
+                "Auto-batching: one resampled copy ≈ %.1f MB -> batch_size=%d.",
+                one_copy_bytes / 1024**2, eff_batch_size,
+            )
+    else:
+        eff_batch_size = int(_cfg.batch_size)
 
-    is_gpu = False
-    if _cfg.use_gpu and not _cfg.memory_save:
-        try:
-            import cupy as _cupy  # noqa: F401 — presence check only
-
-            is_gpu = True
-        except ImportError:
-            log.warning("use_gpu=True but cupy is not installed. Falling back to numpy.")
+    use_batch_reduce = eff_batch_size > 0 and _cfg.aggregate
 
     (log.info if _cfg.verbose else log.debug)(
-        "Normalising with %d resamples (aggregate=%s, memory_save=%s, n_cores=%d, gpu=%s).",
+        "Normalising with %d resamples (aggregate=%s, memory_save=%s, "
+        "batch_reduce=%s, n_cores=%d).",
         _cfg.n_samples,
         _cfg.aggregate,
         _cfg.memory_save,
+        use_batch_reduce,
         n_cores_eff,
-        is_gpu,
     )
 
     def process_one(seed_i: int) -> pd.DataFrame | None:
@@ -273,7 +299,82 @@ def normalise(
             log.exception("Error in seed %d", seed_i)
             return None
 
-    if _cfg.memory_save:
+    # ── Batch-reduce path: O(batch_size × n_rows) peak memory ──────────────
+    # Mirrors R's transient-memory pipeline: generate → predict → accumulate
+    # → delete, one batch at a time.  Only available when aggregate=True.
+    if use_batch_reduce:
+        import gc
+
+        n_rows = len(df)
+        pool_arr = resample_df[variables_resample].to_numpy()
+        resample_pos = {c: i for i, c in enumerate(variables_resample)}
+        obs_arr = df["value"].to_numpy()
+        dates_arr = df["date"].to_numpy()
+
+        sum_norm = np.zeros(n_rows, dtype=np.float64)
+        sum_obs  = np.zeros(n_rows, dtype=np.float64)
+        n_completed = 0
+
+        seeds_batched = [
+            random_seeds[i : i + eff_batch_size]
+            for i in range(0, _cfg.n_samples, eff_batch_size)
+        ]
+        (log.info if _cfg.verbose else log.debug)(
+            "Batch-reduce: %d batches of ≤%d (total %d resamples).",
+            len(seeds_batched), eff_batch_size, _cfg.n_samples,
+        )
+
+        for b_idx, batch_seeds in enumerate(seeds_batched):
+            b_size = len(batch_seeds)
+
+            # Generate indices for this batch (one row of indices per seed)
+            batch_idx = np.empty((b_size, n_rows), dtype=np.int64)
+            for k, s_val in enumerate(batch_seeds):
+                rng_s = np.random.default_rng(int(s_val))
+                batch_idx[k] = rng_s.choice(len(resample_df), size=n_rows,
+                                             replace=_cfg.replace)
+
+            # Gather resampled pool values for the batch
+            flat_idx = batch_idx.flatten()  # shape (b_size × n_rows,)
+            batch_data = pool_arr[flat_idx]  # shape (b_size × n_rows, n_resample_vars)
+
+            # Build prediction DataFrame without materialising the full n_samples × n_rows frame
+            df_batch_dict: dict[str, np.ndarray] = {}
+            for c in df.columns:
+                if c in resample_pos:
+                    df_batch_dict[c] = batch_data[:, resample_pos[c]]
+                else:
+                    df_batch_dict[c] = np.tile(df[c].to_numpy(), b_size)
+            df_batch = pd.DataFrame(df_batch_dict)
+
+            batch_preds = ml_predict(model, df_batch)  # shape (b_size × n_rows,)
+
+            # Accumulate into running sums and immediately free batch arrays
+            batch_preds_2d = batch_preds.reshape(b_size, n_rows)
+            sum_norm += batch_preds_2d.sum(axis=0)
+            sum_obs  += np.tile(obs_arr, b_size).reshape(b_size, n_rows).sum(axis=0)
+            n_completed += b_size
+
+            del batch_idx, flat_idx, batch_data, df_batch_dict, df_batch
+            del batch_preds, batch_preds_2d
+            gc.collect()
+
+            (log.debug)(
+                "Batch %d/%d done (%d/%d total resamples).",
+                b_idx + 1, len(seeds_batched), n_completed, _cfg.n_samples,
+            )
+
+        df_out = pd.DataFrame(
+            {
+                "observed":   sum_obs  / n_completed,
+                "normalised": sum_norm / n_completed,
+            },
+            index=pd.Index(dates_arr, name="date"),
+        )
+        df_out.index.name = "date"
+
+    # ── joblib threaded path: memory_save=True ─────────────────────────────
+    elif _cfg.memory_save:
         from joblib import Parallel, delayed
 
         # prefer="threads" keeps the (large) model + frame shared in-process
@@ -287,6 +388,22 @@ def normalise(
         if not results:
             raise ModelError("No successful resamples produced results.")
         df_result = pd.concat(results, ignore_index=True)
+
+        if _cfg.aggregate:
+            (log.info if _cfg.verbose else log.debug)("Aggregating %d predictions.", _cfg.n_samples)
+            gb = df_result.groupby("date", as_index=True)
+            df_out = gb[["observed", "normalised"]].mean()
+            if _cfg.return_quantiles:
+                q_arr = sorted({float(q) for q in _cfg.return_quantiles})
+                q_df = gb["normalised"].quantile(q_arr).unstack(level=-1)  # type: ignore[arg-type]
+                q_df.columns = pd.Index([_format_quantile_name(float(q)) for q in q_df.columns])
+                df_out = df_out.join(q_df, how="left")
+        else:
+            observed = df_result.drop_duplicates(subset=["date"]).set_index("date")[["observed"]]
+            wide = df_result.pivot(index="date", columns="seed", values="normalised")
+            df_out = pd.concat([observed, wide], axis=1)
+
+    # ── Vectorised path: default, O(n_samples × n_rows) ───────────────────
     else:
         n_rows = len(df)
         n_pool = len(resample_df)
@@ -300,16 +417,7 @@ def normalise(
 
         indices_flat = indices_np.flatten()
         pool_arr = resample_df[variables_resample].to_numpy()
-
-        if is_gpu:
-            import cupy as cp
-
-            # Transfer pool and flat indices to GPU; perform the gather there.
-            pool_gpu = cp.array(pool_arr)
-            idx_gpu = cp.array(indices_flat)
-            resampled_data: np.ndarray = cp.take(pool_gpu, idx_gpu, axis=0).get()
-        else:
-            resampled_data = pool_arr[indices_flat]
+        resampled_data = pool_arr[indices_flat]
 
         # Pre-build column → position map to avoid O(n) list.index() per column.
         resample_pos = {c: i for i, c in enumerate(variables_resample)}
@@ -335,23 +443,23 @@ def normalise(
             }
         )
 
-    if _cfg.aggregate:
-        (log.info if _cfg.verbose else log.debug)("Aggregating %d predictions.", _cfg.n_samples)
-        gb = df_result.groupby("date", as_index=True)
-        df_out = gb[["observed", "normalised"]].mean()
-        if _cfg.return_quantiles:
-            q_arr = sorted({float(q) for q in _cfg.return_quantiles})
-            q_df = gb["normalised"].quantile(q_arr).unstack(level=-1)  # type: ignore[arg-type]
-            q_df.columns = pd.Index([_format_quantile_name(float(q)) for q in q_df.columns])
-            df_out = df_out.join(q_df, how="left")
-    else:
-        observed = df_result.drop_duplicates(subset=["date"]).set_index("date")[["observed"]]
-        wide = df_result.pivot(index="date", columns="seed", values="normalised")
-        df_out = pd.concat([observed, wide], axis=1)
-        if _cfg.return_quantiles:
-            log.debug(
-                "`return_quantiles` ignored when aggregate=False (wide table already exposes all seeds)."
-            )
+        if _cfg.aggregate:
+            (log.info if _cfg.verbose else log.debug)("Aggregating %d predictions.", _cfg.n_samples)
+            gb = df_result.groupby("date", as_index=True)
+            df_out = gb[["observed", "normalised"]].mean()
+            if _cfg.return_quantiles:
+                q_arr = sorted({float(q) for q in _cfg.return_quantiles})
+                q_df = gb["normalised"].quantile(q_arr).unstack(level=-1)  # type: ignore[arg-type]
+                q_df.columns = pd.Index([_format_quantile_name(float(q)) for q in q_df.columns])
+                df_out = df_out.join(q_df, how="left")
+        else:
+            observed = df_result.drop_duplicates(subset=["date"]).set_index("date")[["observed"]]
+            wide = df_result.pivot(index="date", columns="seed", values="normalised")
+            df_out = pd.concat([observed, wide], axis=1)
+            if _cfg.return_quantiles:
+                log.debug(
+                    "`return_quantiles` ignored when aggregate=False (wide table already exposes all seeds)."
+                )
 
     (log.info if _cfg.verbose else log.debug)("Finished normalisation.")
     return df_out
@@ -368,6 +476,7 @@ def normalise_auto(
     stability_streak: int = 5,
     batch_size: int = 100,
     max_samples: int = 5000,
+    seed: int = 7_654_321,
     verbose: bool = True,
     **normalise_kwargs,
 ) -> dict:
@@ -402,9 +511,16 @@ def normalise_auto(
         strict convergence.
     verbose : bool, default True
         Print progress to the logger.
+    seed : int, default 7654321
+        Base random seed. Varied per batch internally (``seed + total_n``)
+        so each batch is an independent Monte-Carlo draw -- required for
+        the convergence check to be meaningful (a fixed seed would make
+        every batch bit-identical, trivially "converged" from the second
+        batch on regardless of true stability).
     **normalise_kwargs :
         Extra keyword arguments forwarded to :func:`normalise` (e.g.
-        ``n_cores``, ``seed``, ``memory_save``).
+        ``n_cores``, ``memory_save``). A ``seed`` passed here is ignored
+        in favour of the explicit ``seed`` parameter above.
 
     Returns
     -------
@@ -413,6 +529,8 @@ def normalise_auto(
         ``res``    : pandas.DataFrame with columns ``date``, ``observed``,
                      ``normalised``.
     """
+    normalise_kwargs.pop("seed", None)
+
     # --- 0. Parse convergence_tol ---
     if isinstance(convergence_tol, str):
         if "%" in convergence_tol:
@@ -458,6 +576,7 @@ def normalise_auto(
             resample_df=resample_df,
             n_samples=batch_size,
             aggregate=True,
+            seed=seed + total_n,
             verbose=False,
             **normalise_kwargs,
         )
