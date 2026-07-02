@@ -264,7 +264,8 @@ def normalise(
             )
             (log.info if _cfg.verbose else log.debug)(
                 "Auto-batching: one resampled copy ≈ %.1f MB -> batch_size=%d.",
-                one_copy_bytes / 1024**2, eff_batch_size,
+                one_copy_bytes / 1024**2,
+                eff_batch_size,
             )
     else:
         eff_batch_size = int(_cfg.batch_size)
@@ -312,16 +313,17 @@ def normalise(
         dates_arr = df["date"].to_numpy()
 
         sum_norm = np.zeros(n_rows, dtype=np.float64)
-        sum_obs  = np.zeros(n_rows, dtype=np.float64)
+        sum_obs = np.zeros(n_rows, dtype=np.float64)
         n_completed = 0
 
         seeds_batched = [
-            random_seeds[i : i + eff_batch_size]
-            for i in range(0, _cfg.n_samples, eff_batch_size)
+            random_seeds[i : i + eff_batch_size] for i in range(0, _cfg.n_samples, eff_batch_size)
         ]
         (log.info if _cfg.verbose else log.debug)(
             "Batch-reduce: %d batches of ≤%d (total %d resamples).",
-            len(seeds_batched), eff_batch_size, _cfg.n_samples,
+            len(seeds_batched),
+            eff_batch_size,
+            _cfg.n_samples,
         )
 
         for b_idx, batch_seeds in enumerate(seeds_batched):
@@ -331,8 +333,7 @@ def normalise(
             batch_idx = np.empty((b_size, n_rows), dtype=np.int64)
             for k, s_val in enumerate(batch_seeds):
                 rng_s = np.random.default_rng(int(s_val))
-                batch_idx[k] = rng_s.choice(len(resample_df), size=n_rows,
-                                             replace=_cfg.replace)
+                batch_idx[k] = rng_s.choice(len(resample_df), size=n_rows, replace=_cfg.replace)
 
             # Gather resampled pool values for the batch
             flat_idx = batch_idx.flatten()  # shape (b_size × n_rows,)
@@ -352,7 +353,7 @@ def normalise(
             # Accumulate into running sums and immediately free batch arrays
             batch_preds_2d = batch_preds.reshape(b_size, n_rows)
             sum_norm += batch_preds_2d.sum(axis=0)
-            sum_obs  += np.tile(obs_arr, b_size).reshape(b_size, n_rows).sum(axis=0)
+            sum_obs += np.tile(obs_arr, b_size).reshape(b_size, n_rows).sum(axis=0)
             n_completed += b_size
 
             del batch_idx, flat_idx, batch_data, df_batch_dict, df_batch
@@ -361,12 +362,15 @@ def normalise(
 
             (log.debug)(
                 "Batch %d/%d done (%d/%d total resamples).",
-                b_idx + 1, len(seeds_batched), n_completed, _cfg.n_samples,
+                b_idx + 1,
+                len(seeds_batched),
+                n_completed,
+                _cfg.n_samples,
             )
 
         df_out = pd.DataFrame(
             {
-                "observed":   sum_obs  / n_completed,
+                "observed": sum_obs / n_completed,
                 "normalised": sum_norm / n_completed,
             },
             index=pd.Index(dates_arr, name="date"),
