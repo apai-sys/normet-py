@@ -1,0 +1,42 @@
+name: Bug report
+description: Something is broken or doesn't behave as documented.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. A minimal reproducer makes it dramatically
+        more likely we can fix it.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the problem and what you expected to happen.
+      placeholder: |
+        I ran `nm.do_all(...)` and got <error / wrong output>. I expected ...
+    validations:
+      required: true
+  - type: textarea
+    id: reproducer
+    attributes:
+      label: Minimal reproducer
+      description: Smallest snippet that triggers the issue (synthetic data is fine).
+      render: python
+      placeholder: |
+        import normet as nm
+        import pandas as pd, numpy as np
+        ...
+    validations:
+      required: true
+  - type: textarea
+    id: traceback
+    attributes:
+      label: Traceback / log output
+      render: shell
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment (output of `normet info`)
+      render: json
+    validations:
+      required: true
