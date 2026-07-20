@@ -25,14 +25,14 @@ def wind_aq_df():
 
 
 def test_polar_plot_returns_axes(wind_aq_df):
-    ax = polar_plot(wind_aq_df, value="PM2.5")
+    ax = polar_plot(wind_aq_df, target="PM2.5")
     assert ax is not None
     assert hasattr(ax, "pcolormesh")
 
 
 def test_polar_plot_rejects_unknown_stat(wind_aq_df):
     with pytest.raises(ValueError):
-        polar_plot(wind_aq_df, value="PM2.5", statistic="bogus")
+        polar_plot(wind_aq_df, target="PM2.5", statistic="bogus")
 
 
 def test_pdp_grid_minimal():

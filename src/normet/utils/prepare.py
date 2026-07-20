@@ -23,11 +23,11 @@ __all__ = [
 
 def prepare_data(
     df: pd.DataFrame,
-    value: str,
-    feature_names: list[str],
-    na_rm: bool = True,
+    target: str,
+    covariates: list[str],
+    dropna: bool = True,
     split_method: str = "random",
-    fraction: float = 0.75,
+    train_fraction: float = 0.75,
     seed: int = 7_654_321,
 ) -> pd.DataFrame:
     """
@@ -35,7 +35,7 @@ def prepare_data(
 
     Steps:
       1) Ensure a datetime column named ``date`` is present.
-      2) Validate target and features.
+      2) Validate target and covariates.
       3) Impute/drop missing values.
       4) Add derived date variables (unix, julian day, weekday, hour).
       5) Split into training/testing sets.
@@ -44,15 +44,23 @@ def prepare_data(
     ----------
     df : pandas.DataFrame
         Raw input dataset containing at least the target column and date/time info.
-    value : str
+    target : str
         Target column name in ``df``.
-    feature_names : list of str
-        Predictor variable names to keep (must exist in ``df``).
-    na_rm : bool, default True
+    covariates : list of str
+        External predictor variable names to keep (must exist in ``df``).
+        Time variables (``date_unix``/``day_julian``/``weekday``/``hour``)
+        are added automatically by this pipeline -- don't list them here;
+        see :func:`add_date_variables`.
+    dropna : bool, default True
         If True, drop rows where the target is NA. Also imputes other NAs.
-    split_method : {"random","ts","season","month"}, default "random"
-        Train/test split method.
-    fraction : float, default 0.75
+    split_method : {"random","ts","month_ts","season_ts"}, default "random"
+        Train/test split method. See :func:`split_into_sets` for the exact
+        mechanics -- in particular, "month_ts"/"season_ts" hold out a
+        contiguous block at a randomised (seeded) position within every
+        period, rather than always the trailing slice; read that
+        docstring's note for why that matters and its remaining caveats
+        before choosing them over "random".
+    train_fraction : float, default 0.75
         Training fraction for data splitting.
     seed : int, default 7654321
         Random seed for reproducibility.
@@ -62,18 +70,18 @@ def prepare_data(
     pandas.DataFrame
         Processed dataset with:
           - ``date`` column
-          - ``value`` column (target)
-          - predictors
+          - ``value`` column (target, renamed internally)
+          - covariates
           - derived date features
           - ``set`` column indicating "training"/"testing".
     """
-    log.debug("Preparing data with split_method=%s, fraction=%.3f", split_method, fraction)
+    log.debug("Preparing data with split_method=%s, train_fraction=%.3f", split_method, train_fraction)
     df_out = (
         df.pipe(process_date)
-        .pipe(check_data, feature_names=feature_names, value=value)
-        .pipe(impute_values, na_rm=na_rm)
+        .pipe(check_data, covariates=covariates, target=target)
+        .pipe(impute_values, dropna=dropna)
         .pipe(add_date_variables)
-        .pipe(split_into_sets, split_method=split_method, fraction=fraction, seed=seed)
+        .pipe(split_into_sets, split_method=split_method, train_fraction=train_fraction, seed=seed)
         .reset_index(drop=True)
     )
     log.info("Prepared data: %d rows, %d columns", len(df_out), df_out.shape[1])
@@ -140,43 +148,49 @@ def process_date(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def check_data(df: pd.DataFrame, feature_names: list[str], value: str) -> pd.DataFrame:
+def check_data(df: pd.DataFrame, covariates: list[str], target: str) -> pd.DataFrame:
     """
     Validate target column and restrict DataFrame to relevant variables.
 
     Parameters
     ----------
     df : pandas.DataFrame
-        Input dataset (must contain ``value`` and ``date``).
-    feature_names : list of str
+        Input dataset (must contain ``target`` and ``date``).
+    covariates : list of str
         Requested predictor columns.
-    value : str
+    target : str
         Target variable name.
 
     Returns
     -------
     pandas.DataFrame
-        Subset with predictors, ``date``, and target renamed to ``value``.
+        Subset with covariates, ``date``, and target renamed to ``value``.
 
     Raises
     ------
     ValueError
         If target missing, or ``date`` not datetime, or has NA.
     """
-    if value not in df.columns:
-        raise ValueError(f"The target variable `{value}` is not in the DataFrame columns.")
+    if target not in df.columns:
+        raise ValueError(f"The target variable `{target}` is not in the DataFrame columns.")
 
-    selected = [c for c in feature_names if c in df.columns]
+    # Excludes "date"/target here (added back once below) so a caller who
+    # accidentally includes either in `covariates` doesn't end up with
+    # duplicate-named columns in `df_sel` -- `df[selected]` on a list with
+    # a repeated name silently returns a 2-column-wide slice under that
+    # name, which corrupts everything downstream with a confusing failure
+    # far from the actual mistake.
+    selected = [c for c in covariates if c in df.columns and c not in ("date", target)]
     if not selected:
-        log.warning("No requested features found; proceeding with 'date' + target only.")
-    selected.extend(["date", value])
+        log.warning("No requested covariates found; proceeding with 'date' + target only.")
+    selected.extend(["date", target])
     df_sel = df[selected].copy()
 
     if not pdt.is_datetime64_any_dtype(df_sel["date"]):
         raise ValueError("`date` must be datetime64[ns] or datetimetz.")
 
-    if value != "value":
-        df_sel = df_sel.rename(columns={value: "value"})
+    if target != "value":
+        df_sel = df_sel.rename(columns={target: "value"})
 
     if df_sel["date"].isna().any():
         raise ValueError("`date` must not contain missing (NA) values.")
@@ -184,7 +198,7 @@ def check_data(df: pd.DataFrame, feature_names: list[str], value: str) -> pd.Dat
     return df_sel
 
 
-def impute_values(df: pd.DataFrame, na_rm: bool) -> pd.DataFrame:
+def impute_values(df: pd.DataFrame, dropna: bool) -> pd.DataFrame:
     """
     Impute or drop missing values in predictors and target.
 
@@ -192,7 +206,7 @@ def impute_values(df: pd.DataFrame, na_rm: bool) -> pd.DataFrame:
     ----------
     df : pandas.DataFrame
         Input dataset with target and features.
-    na_rm : bool
+    dropna : bool
         If True, drop rows with NA in target ``value``.
 
     Returns
@@ -202,7 +216,7 @@ def impute_values(df: pd.DataFrame, na_rm: bool) -> pd.DataFrame:
     """
     out = df.copy()
 
-    if na_rm:
+    if dropna:
         before = len(out)
         out = out.dropna(subset=["value"]).reset_index(drop=True)
         dropped = before - len(out)
@@ -234,6 +248,19 @@ def add_date_variables(df: pd.DataFrame) -> pd.DataFrame:
       - ``weekday``   : day of week (1=Mon..7=Sun, categorical)
       - ``hour``      : hour of day
 
+    .. note::
+        This always computes and adds all four columns, regardless of
+        whether any of them will actually be used to train a model --
+        they're opt-in, not mandatory. :func:`normet.build_model` /
+        :func:`normet.train_model` only use whichever of these four end up
+        in the caller's ``predictors``; a subset (e.g. only ``weekday``
+        and ``hour``, omitting ``date_unix``/``day_julian``) or none at all
+        (training purely on meteorology, traffic counts, or other
+        non-temporal predictors) both work -- just don't list the ones you
+        don't want. :func:`normet.decompose`/:func:`normet.decom_emi`
+        adapt automatically, producing a component only for whichever time
+        variables actually ended up in the model.
+
     Parameters
     ----------
     df : pandas.DataFrame
@@ -256,8 +283,30 @@ def add_date_variables(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _mark_random_window_training(
+    out: pd.DataFrame, group_index: pd.Index, train_fraction: float, rng: np.random.Generator
+) -> None:
+    """Mark one group's rows "training" outside a random contiguous test window.
+
+    The window (size ``n - int(train_fraction * n)``) is placed at a random
+    start position within the group, drawn from ``rng`` -- unlike a fixed
+    trailing slice, this doesn't anchor the held-out block to the same
+    relative calendar position in every period instance. See
+    :func:`split_into_sets` for why this matters. Mutates ``out["set"]`` in
+    place for this group's rows; ``out["set"]`` must already default to
+    "testing".
+    """
+    n = len(group_index)
+    cut = int(train_fraction * n)
+    test_len = n - cut
+    max_start = max(n - test_len, 0)
+    start = int(rng.integers(0, max_start + 1)) if max_start > 0 else 0
+    train_idx = group_index[:start].append(group_index[start + test_len :])
+    out.loc[train_idx, "set"] = "training"
+
+
 def split_into_sets(
-    df: pd.DataFrame, split_method: str, fraction: float, seed: int
+    df: pd.DataFrame, split_method: str, train_fraction: float, seed: int
 ) -> pd.DataFrame:
     """
     Split dataset into training/testing subsets.
@@ -266,13 +315,45 @@ def split_into_sets(
     ----------
     df : pandas.DataFrame
         Input dataset with ``date`` column.
-    split_method : {"random","ts","season","month"}
+    split_method : {"random","ts","month_ts","season_ts"}
         Splitting strategy:
           - "random": random sample by fraction.
-          - "ts": sequential split by time order.
-          - "season": stratified by climatological season (DJF, MAM, JJA, SON).
-          - "month": stratified by calendar month.
-    fraction : float
+          - "ts": sequential split by time order (single global cutoff).
+          - "month_ts": chronological split within each individual
+            (year, month); a contiguous (1 - train_fraction) block is held
+            out as testing, at a random position within the month (seeded
+            by ``seed``, reproducible).
+          - "season_ts": chronological split within each individual
+            (meteorological year, season) --- DJF/MAM/JJA/SON per year,
+            with December assigned to the following year's DJF block; a
+            contiguous (1 - train_fraction) block is held out as testing,
+            at a random position within the season (seeded by ``seed``,
+            reproducible).
+
+        .. note::
+            Before this random-position placement, "month_ts"/"season_ts"
+            held out a block at a **fixed relative position** within every
+            period -- always the trailing ``1 - train_fraction`` -- which
+            meant any calendar window consistently falling in that
+            trailing slice (e.g. late December, with
+            ``train_fraction=0.75``'s trailing ~8 days of a 31-day month)
+            was excluded from training in *every* year of the record, not
+            just some of them. That created a permanent blind spot: a
+            decomposition/feature-importance step built on such a model
+            could systematically fail to represent whatever real signal
+            lived in that window (observed directly in practice: a genuine
+            network-corroborated holiday-period activity drop was absent
+            from the recovered components under the old fixed-trailing
+            "month_ts" but present under "random"). Randomising the
+            window's start position per period (via ``seed``) removes that
+            permanent alignment -- a given calendar window is no longer
+            excluded in every year. Note this doesn't make a *single* run
+            immune to coincidentally missing a specific window in some
+            subset of years (the window position is still fixed once
+            ``seed`` is fixed, just no longer calendar-anchored); "random"
+            remains the safest default for data with a recurring feature
+            you must not systematically lose from training.
+    train_fraction : float
         Proportion of rows per group to assign to training.
     seed : int
         Random seed for reproducibility.
@@ -291,14 +372,40 @@ def split_into_sets(
 
     if split_method == "random":
         out["set"] = "testing"
-        out.loc[out.sample(frac=fraction, random_state=seed).index, "set"] = "training"
+        out.loc[out.sample(frac=train_fraction, random_state=seed).index, "set"] = "training"
 
     elif split_method == "ts":
         n = len(out)
-        cut = int(fraction * n)
+        cut = int(train_fraction * n)
         out["set"] = np.where(np.arange(n) < cut, "training", "testing")
 
-    elif split_method == "season":
+    elif split_method == "month_ts":
+        # Chronological split within each individual (year, month) instance:
+        # a contiguous (1 - train_fraction) block, at a random position
+        # (seeded), is held out as testing; the rest of the month is
+        # training. Combines the "ts" split's within-month temporal
+        # ordering (a contiguous block is held out, not randomly
+        # interleaved with training hours from the same days) with
+        # full-record coverage (every calendar month, across every year,
+        # contributes training rows) -- avoiding the trend-feature
+        # extrapolation failure a single global "ts" cutoff causes for
+        # monotonic features like a Unix-time trend.
+        out["ym"] = out["date"].dt.to_period("M")
+        out["set"] = "testing"
+        rng = np.random.default_rng(seed)
+        for _, grp in out.groupby("ym"):
+            _mark_random_window_training(out, grp.index, train_fraction, rng)
+        out = out.drop(columns=["ym"])
+
+    elif split_method == "season_ts":
+        # Chronological split within each individual (climatological year,
+        # season) instance: a contiguous (1 - train_fraction) block, at a
+        # random position (seeded), is held out as testing. Same
+        # construction as "month_ts" but grouped by season instead of
+        # calendar month. December is assigned to the following year's DJF
+        # block (standard meteorological-year convention), so each DJF
+        # group is a single contiguous Dec-Jan-Feb span rather than being
+        # split across two groups.
         season_map = {
             12: "DJF",
             1: "DJF",
@@ -314,27 +421,13 @@ def split_into_sets(
             11: "SON",
         }
         out["season"] = out["date"].dt.month.map(season_map)
+        out["season_year"] = out["date"].dt.year
+        out.loc[out["date"].dt.month == 12, "season_year"] += 1
         out["set"] = "testing"
         rng = np.random.default_rng(seed)
-        for s in out["season"].dropna().unique():
-            idx = out.index[out["season"] == s]
-            k = int(fraction * len(idx))
-            if k > 0:
-                train_idx = rng.choice(idx.to_numpy(), size=k, replace=False)
-                out.loc[train_idx, "set"] = "training"
-        out = out.drop(columns=["season"])
-
-    elif split_method == "month":
-        out["month"] = out["date"].dt.month
-        out["set"] = "testing"
-        rng = np.random.default_rng(seed)
-        for m in range(1, 13):
-            idx = out.index[out["month"] == m]
-            k = int(fraction * len(idx))
-            if k > 0:
-                train_idx = rng.choice(idx.to_numpy(), size=k, replace=False)
-                out.loc[train_idx, "set"] = "training"
-        out = out.drop(columns=["month"])
+        for _, grp in out.groupby(["season_year", "season"]):
+            _mark_random_window_training(out, grp.index, train_fraction, rng)
+        out = out.drop(columns=["season", "season_year"])
 
     else:
         raise ValueError(f"Unknown split_method '{split_method}'.")

@@ -134,9 +134,9 @@ predictors = met_vars + ["date_unix", "day_julian", "weekday", "hour"]
 # Full pipeline: prepare -> train (AutoML) -> normalise
 out, model, df_prep = nm.do_all(
     df=panel,
-    value="value",            # the PM2.5 column returned by OpenAQ
+    target="value",            # the PM2.5 column returned by OpenAQ
     backend="flaml",
-    feature_names=predictors,
+    covariates=predictors,
     variables_resample=met_vars,
     n_samples=50,
 )

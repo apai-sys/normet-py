@@ -66,7 +66,7 @@ def test_fetch_openmeteo_units_and_shape(fake_archive):
     params = fake_archive[0]["params"]
     assert params["timezone"] == "UTC"
     assert "temperature_2m" in params["hourly"]
-    assert "boundary_layer_height" not in params["hourly"]  # archive lacks it
+    assert "boundary_layer_height" in params["hourly"]  # part of the default fetch
 
 
 def test_fetch_openmeteo_sites_dataframe(fake_archive):

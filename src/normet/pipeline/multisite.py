@@ -105,9 +105,9 @@ def multisite_apply(
 def do_all_multisite(
     df: pd.DataFrame,
     site_col: str,
-    value: str,
+    target: str,
     *,
-    feature_names: list[str] | None = None,
+    covariates: list[str] | None = None,
     backend: str = "flaml",
     n_cores: int | None = None,
     return_models: bool = False,
@@ -119,12 +119,12 @@ def do_all_multisite(
     Parameters
     ----------
     df : pandas.DataFrame
-        Long-format input with ``site_col`` and the target ``value``.
+        Long-format input with ``site_col`` and the target ``target``.
     site_col : str
         Site/station identifier column.
-    value : str
+    target : str
         Target column name (e.g., "PM2.5").
-    feature_names : list of str, optional
+    covariates : list of str, optional
         Predictor columns. Required by ``do_all`` for non-trivial runs.
     backend : {"flaml", "lightgbm"}, default "flaml"
         AutoML or model training backend.
@@ -134,7 +134,7 @@ def do_all_multisite(
         If True, also return a ``dict`` mapping site → trained model.
     **do_all_kwargs :
         Forwarded to :func:`do_all` (e.g., ``n_samples``, ``model_config``,
-        ``split_method``, ``fraction``).
+        ``split_method``, ``train_fraction``).
 
     Returns
     -------
@@ -155,9 +155,9 @@ def do_all_multisite(
         try:
             out, model, df_prep = do_all(
                 df=sub.drop(columns=[site_col]),
-                value=value,
+                target=target,
                 backend=backend,
-                feature_names=feature_names,
+                covariates=covariates,
                 **do_all_kwargs,
             )
             return site_value, out, model
@@ -185,10 +185,10 @@ def do_all_multisite(
 def decompose_multisite(
     df: pd.DataFrame,
     site_col: str,
-    value: str,
+    target: str,
     *,
     method: str = "emission",
-    feature_names: list[str] | None = None,
+    covariates: list[str] | None = None,
     backend: str = "flaml",
     n_cores: int | None = None,
     **decompose_kwargs,
@@ -202,11 +202,11 @@ def decompose_multisite(
         Combined multi-site input data.
     site_col : str
         Column identifying each site.
-    value : str
+    target : str
         Target column name.
     method : {"emission", "meteorology"}
         Decomposition strategy forwarded to :func:`normet.decompose`.
-    feature_names : list of str, optional
+    covariates : list of str, optional
         Features used for training and decomposition.
     backend : str
         Model training backend.
@@ -228,8 +228,8 @@ def decompose_multisite(
         func=lambda df: decompose(
             method=method,
             df=df.drop(columns=[site_col]) if site_col in df.columns else df,
-            value=value,
-            feature_names=feature_names,
+            target=target,
+            covariates=covariates,
             backend=backend,
             **decompose_kwargs,
         ),

@@ -25,6 +25,21 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   `run_back_trajectories` can run when no local meteorology is available.
 
 ### Changed (breaking)
+- **Renamed the `value`/`feature_names`/`na_rm`/`fraction` parameters to
+  `target`/`covariates`/`dropna`/`train_fraction` across the entire public
+  API**, extending the rename already applied to `prepare_data`/`check_data`/
+  `impute_values`/`split_into_sets`. Affected functions: `normalise`,
+  `normalise_auto` (and `NormaliseConfig.feature_names` → `.covariates`),
+  `decompose`, `decom_emi`, `decom_met` (and `DecomposeConfig`'s `value`/
+  `feature_names`/`fraction` fields), `rolling` (and `RollingConfig`),
+  `mlscm`, `build_model`, `train_model`, `do_all`, `do_all_unc` (and
+  `SingleConfig`/`UncConfig`), `do_all_multisite`, `decompose_multisite`,
+  `cv_score`, `polar_plot`, `time_series_plot`, and the `Backend.train`
+  protocol (`flaml`/`lightgbm` backends). CLI flags follow suit:
+  `--value` → `--target`, `--fraction` → `--train-fraction`, and the
+  features flag is now `--covariates` (kebab-case, matching
+  `--split-method`). Update any code, scripts, or saved YAML configs that
+  call these functions or the CLI with the old keyword/flag names.
 - **Removed the xarray/NetCDF gridded ERA5 path.** `fetch_era5_at_sites`,
   `download_era5`, and the generic xarray ingestion helpers
   (`prepare_from_xarray`, `sample_xarray_at_sites`) are gone, along with the

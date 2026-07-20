@@ -211,8 +211,8 @@ traj_feats = [c for c in df.columns if c.startswith("traj_")]
 local_met = ["t2m", "blh", "u10", "v10", "ssrd", "tp"]
 
 out, model, df_prep = nm.do_all(
-    df=df, value="PM2.5", backend="flaml",
-    feature_names=local_met + traj_feats + ["date_unix", "day_julian", "weekday", "hour"],
+    df=df, target="PM2.5", backend="flaml",
+    covariates=local_met + traj_feats + ["date_unix", "day_julian", "weekday", "hour"],
     variables_resample=local_met + traj_feats,
     n_samples=300,
 )

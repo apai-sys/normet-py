@@ -31,8 +31,13 @@ __all__ = ["OPENMETEO_HOURLY_DEFAULT", "fetch_openmeteo_timeseries"]
 _ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 
 #: Open-Meteo hourly fields fetched by default → normet/ERA5 column mapping.
-#: ``boundary_layer_height`` is deliberately absent — the archive API does not
-#: backfill it (all-NaN), only the forecast API serves it.
+#: ``boundary_layer_height`` was historically excluded on the assumption that
+#: the archive API did not backfill it (all-NaN). Verified 2026-07-19: spot
+#: checks across 2018-01, 2019-06, 2020-01, 2021-01, and 2022-12 all returned
+#: complete, physically plausible hourly values via the archive endpoint (no
+#: NaNs), so Open-Meteo has since added historical backfill for this field.
+#: Included here as ``blh`` (metres) since it is a well-established control
+#: on urban pollutant dilution and a useful deweathering predictor.
 OPENMETEO_HOURLY_DEFAULT: dict[str, str] = {
     "temperature_2m": "t2m",
     "dew_point_2m": "d2m",
@@ -43,6 +48,7 @@ OPENMETEO_HOURLY_DEFAULT: dict[str, str] = {
     "shortwave_radiation": "ssrd",
     "wind_speed_10m": "ws",
     "wind_direction_10m": "wd",
+    "boundary_layer_height": "blh",
 }
 
 

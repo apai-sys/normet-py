@@ -5,14 +5,14 @@ drivers:
 
 ```python
 df_norm = nm.do_all_multisite(
-    df, site_col="station_id", value="PM2.5",
-    feature_names=feats, backend="flaml",
+    df, site_col="station_id", target="PM2.5",
+    covariates=feats, backend="flaml",
     n_samples=300, n_cores=8,
 )
 
 df_decomp = nm.decompose_multisite(
-    df, site_col="station_id", value="PM2.5",
-    method="emission", feature_names=feats, n_cores=8,
+    df, site_col="station_id", target="PM2.5",
+    method="emission", covariates=feats, n_cores=8,
 )
 ```
 

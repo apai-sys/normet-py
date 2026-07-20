@@ -146,7 +146,7 @@ def test_train_includes_time_features(qapp):
 
         win.runner.submit = fake_submit
         win._run_train()
-        feats = captured["feature_names"]
+        feats = captured["covariates"]
         assert all(tv in feats for tv in TIME_VARS)
         assert "t2m" in feats
         # the resample-candidate list must NOT offer the time features

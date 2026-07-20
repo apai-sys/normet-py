@@ -95,8 +95,8 @@ def test_do_all_multisite_with_sklearn(synthetic_aq):
     result = do_all_multisite(
         aq,
         site_col="site",
-        value="PM2.5",
-        feature_names=["t2m", "blh"],
+        target="PM2.5",
+        covariates=["t2m", "blh"],
         backend="sklearn",
         n_cores=1,
         n_samples=3,
@@ -110,8 +110,8 @@ def test_do_all_multisite_raises_on_missing_col(synthetic_aq):
         do_all_multisite(
             synthetic_aq,
             site_col="site",
-            value="PM2.5",
-            feature_names=["t2m", "blh"],
+            target="PM2.5",
+            covariates=["t2m", "blh"],
             backend="flaml",
             n_cores=1,
         )
@@ -122,8 +122,8 @@ def test_decompose_multisite_raises_on_missing_col(synthetic_aq):
         decompose_multisite(
             synthetic_aq,
             site_col="not_a_col",
-            value="PM2.5",
-            feature_names=["t2m", "blh"],
+            target="PM2.5",
+            covariates=["t2m", "blh"],
             backend="flaml",
             n_cores=1,
         )
@@ -134,8 +134,8 @@ def test_decompose_multisite_raises_on_missing_col(synthetic_aq):
         decompose_multisite(
             synthetic_aq,
             site_col="site",
-            value="PM2.5",
-            feature_names=["t2m", "blh"],
+            target="PM2.5",
+            covariates=["t2m", "blh"],
             backend="flaml",
             n_cores=1,
         )

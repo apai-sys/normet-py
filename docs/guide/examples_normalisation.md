@@ -14,9 +14,9 @@ df = pd.read_csv("my_site.csv", parse_dates=["date"])
 
 out, model, df_prep = nm.do_all(
     df=df,
-    value="PM2.5",
+    target="PM2.5",
     backend="flaml",
-    feature_names=["t2m", "blh", "u10", "v10", "date_unix", "day_julian", "weekday", "hour"],
+    covariates=["t2m", "blh", "u10", "v10", "date_unix", "day_julian", "weekday", "hour"],
     variables_resample=["t2m", "blh", "u10", "v10"],
     n_samples=300,
 )
@@ -32,7 +32,7 @@ For a single trained model, ask `normalise` for quantile columns:
 ```python
 out = nm.normalise(
     df=df_prep, model=model,
-    feature_names=feats, variables_resample=met_vars,
+    covariates=feats, variables_resample=met_vars,
     n_samples=300,
     return_quantiles=(0.025, 0.5, 0.975),
 )
@@ -51,14 +51,14 @@ The `conditional_on` argument restricts the resample pool:
 # What would PM2.5 have been with summer-like meteorology?
 out_summer = nm.normalise(
     df=df_prep, model=model,
-    feature_names=feats, variables_resample=met_vars,
+    covariates=feats, variables_resample=met_vars,
     conditional_on={"month": [6, 7, 8]},
 )
 
 # Holding wind direction in the south-westerly sector
 out_sw = nm.normalise(
     df=df_prep, model=model,
-    feature_names=feats, variables_resample=met_vars,
+    covariates=feats, variables_resample=met_vars,
     conditional_on={"wdir": lambda d: 180 <= d <= 270},
 )
 ```

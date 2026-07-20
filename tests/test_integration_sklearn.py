@@ -31,18 +31,18 @@ class _SklearnBackend:
     def train(
         self,
         df: pd.DataFrame,
-        value: str = "value",
-        feature_names: list[str] | None = None,
+        target: str = "value",
+        covariates: list[str] | None = None,
         variables: list[str] | None = None,
         model_config: dict[str, Any] | None = None,
         seed: int = 7654321,
         verbose: bool = False,
         n_cores: int | None = None,
     ) -> object:
-        if variables is not None and feature_names is None:
-            feature_names = variables
-        if not feature_names:
-            raise ValueError("feature_names required")
+        if variables is not None and covariates is None:
+            covariates = variables
+        if not covariates:
+            raise ValueError("covariates required")
         # Use training subset if available
         if "set" in df.columns:
             df_train = df[df["set"] == "training"]
@@ -51,9 +51,9 @@ class _SklearnBackend:
         else:
             df_train = df
         model = RandomForestRegressor(n_estimators=10, random_state=seed, n_jobs=1)
-        model.fit(df_train[feature_names], df_train[value])
+        model.fit(df_train[covariates], df_train[target])
         model.backend = "sklearn"
-        model.feature_names_ = list(feature_names)
+        model.feature_names_ = list(covariates)
         return model
 
     def save(
@@ -125,9 +125,9 @@ class TestSklearnBackendE2E:
     def test_train_predict_roundtrip(self, simple_data):
         df, model = build_model(
             df=simple_data,
-            value="value",
+            target="value",
             backend="sklearn",
-            feature_names=["x1", "x2"],
+            covariates=["x1", "x2"],
             seed=42,
         )
         assert hasattr(model, "predict")
@@ -140,47 +140,47 @@ class TestSklearnBackendE2E:
     def test_train_model_directly(self, simple_data):
         model = train_model(
             df=simple_data,
-            value="value",
+            target="value",
             backend="sklearn",
-            feature_names=["x1", "x2"],
+            covariates=["x1", "x2"],
             seed=42,
         )
         assert getattr(model, "backend", None) == "sklearn"
 
     def test_train_model_raises_no_features(self, simple_data):
-        with pytest.raises(ValueError, match="feature_names"):
-            train_model(df=simple_data, value="value", backend="sklearn", feature_names=None)
+        with pytest.raises(ValueError, match="covariates"):
+            train_model(df=simple_data, target="value", backend="sklearn", covariates=None)
 
     def test_train_model_raises_duplicate_features(self, simple_data):
         with pytest.raises(ValueError, match="duplicate"):
             train_model(
                 df=simple_data,
-                value="value",
+                target="value",
                 backend="sklearn",
-                feature_names=["x1", "x1"],
+                covariates=["x1", "x1"],
             )
 
     def test_train_model_raises_missing_column(self, simple_data):
         with pytest.raises(ValueError, match="not found"):
             train_model(
                 df=simple_data,
-                value="value",
+                target="value",
                 backend="sklearn",
-                feature_names=["not_a_col"],
+                covariates=["not_a_col"],
             )
 
     def test_normalise_with_sklearn_backend(self, simple_data):
         df, model = build_model(
             df=simple_data,
-            value="value",
+            target="value",
             backend="sklearn",
-            feature_names=["x1", "x2"],
+            covariates=["x1", "x2"],
             seed=42,
         )
         result = normalise(
             df=df,
             model=model,
-            feature_names=["x1", "x2"],
+            covariates=["x1", "x2"],
             n_samples=5,
             aggregate=True,
             seed=123,
@@ -193,15 +193,15 @@ class TestSklearnBackendE2E:
     def test_normalise_with_return_quantiles(self, simple_data):
         df, model = build_model(
             df=simple_data,
-            value="value",
+            target="value",
             backend="sklearn",
-            feature_names=["x1", "x2"],
+            covariates=["x1", "x2"],
             seed=42,
         )
         result = normalise(
             df=df,
             model=model,
-            feature_names=["x1", "x2"],
+            covariates=["x1", "x2"],
             n_samples=10,
             aggregate=True,
             return_quantiles=[0.025, 0.5, 0.975],
@@ -215,15 +215,15 @@ class TestSklearnBackendE2E:
     def test_normalise_aggregate_false(self, simple_data):
         df, model = build_model(
             df=simple_data,
-            value="value",
+            target="value",
             backend="sklearn",
-            feature_names=["x1", "x2"],
+            covariates=["x1", "x2"],
             seed=42,
         )
         result = normalise(
             df=df,
             model=model,
-            feature_names=["x1", "x2"],
+            covariates=["x1", "x2"],
             n_samples=3,
             aggregate=False,
             seed=123,

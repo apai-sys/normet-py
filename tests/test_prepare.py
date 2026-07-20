@@ -45,7 +45,7 @@ def test_check_data_renames_target_to_value():
             "t2m": [10, 11, 12, 13],
         }
     )
-    out = check_data(df, feature_names=["t2m"], value="PM2.5")
+    out = check_data(df, covariates=["t2m"], target="PM2.5")
     assert "value" in out.columns
     assert "PM2.5" not in out.columns
 
@@ -57,7 +57,7 @@ def test_impute_values_fills_numeric_with_median():
             "x": [10.0, np.nan, np.nan, 40.0],
         }
     )
-    out = impute_values(df, na_rm=True)
+    out = impute_values(df, dropna=True)
     # NaN in target → row dropped
     assert len(out) == 3
     # NaN in feature → filled with median (which is 25.0 after target row drop)
@@ -83,8 +83,8 @@ def test_split_into_sets_partitions_all_rows():
             "value": np.arange(100, dtype=float),
         }
     )
-    for method in ("random", "ts", "season", "month"):
-        out = split_into_sets(df, split_method=method, fraction=0.75, seed=0)
+    for method in ("random", "ts", "month_ts", "season_ts"):
+        out = split_into_sets(df, split_method=method, train_fraction=0.75, seed=0)
         assert set(out["set"].unique()) <= {"training", "testing"}
         assert len(out) == 100
 
@@ -92,10 +92,10 @@ def test_split_into_sets_partitions_all_rows():
 def test_prepare_data_full_pipeline(synthetic_aq):
     out = prepare_data(
         synthetic_aq.copy(),
-        value="PM2.5",
-        feature_names=["t2m", "blh", "u10", "v10"],
+        target="PM2.5",
+        covariates=["t2m", "blh", "u10", "v10"],
         split_method="ts",
-        fraction=0.8,
+        train_fraction=0.8,
     )
     assert "value" in out.columns
     assert "set" in out.columns

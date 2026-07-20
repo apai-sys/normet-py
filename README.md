@@ -127,9 +127,9 @@ predictors = met_vars + ["date_unix", "day_julian", "weekday", "hour"]
 
 out, model, df_prep = nm.do_all(
     df=df,
-    value="NO2",
+    target="NO2",
     backend="flaml",          # or "lightgbm"
-    feature_names=predictors,
+    covariates=predictors,
     variables_resample=met_vars,  # resample met only — not time features
     n_samples=300,
     n_cores=4,                # parallelise resampling
@@ -166,10 +166,10 @@ Climate Change Service); HYSPLIT (NOAA ARL).
 ```python
 df_prep = nm.prepare_data(
     df=df,
-    value="NO2",
-    feature_names=predictors,
-    split_method="random",   # "random" | "ts" | "season" | "month"
-    fraction=0.75,
+    target="NO2",
+    covariates=predictors,
+    split_method="random",   # "random" | "ts" | "month_ts" | "season_ts"
+    train_fraction=0.75,
 )
 ```
 
@@ -178,9 +178,9 @@ df_prep = nm.prepare_data(
 ```python
 model = nm.train_model(
     df=df_prep,
-    value="value",
+    target="value",
     backend="flaml",
-    feature_names=predictors,
+    covariates=predictors,
     model_config={
         "time_budget": 120,
         "metric": "r2",
@@ -198,7 +198,7 @@ nm.modStats(df_prep, model)
 df_norm = nm.normalise(
     df=df_prep,
     model=model,
-    feature_names=predictors,
+    covariates=predictors,
     variables_resample=met_vars,
     n_samples=300,
     n_cores=4,
@@ -219,7 +219,7 @@ ref_weather = df_prep.loc["2019", met_vars]
 df_norm_ref = nm.normalise(
     df=df_prep,
     model=model,
-    feature_names=predictors,
+    covariates=predictors,
     variables_resample=met_vars,
     resample_df=ref_weather,
     n_samples=300,
@@ -234,10 +234,10 @@ Split the time series into emission-driven and meteorology-driven components:
 
 ```python
 df_emi = nm.decompose(df=df_prep, model=model,
-                      feature_names=predictors, method="emission")
+                      covariates=predictors, method="emission")
 
 df_met = nm.decompose(df=df_prep, model=model,
-                      feature_names=predictors, method="meteorology")
+                      covariates=predictors, method="meteorology")
 ```
 
 ---
@@ -324,9 +324,9 @@ statistics:
 ```python
 out, stats = nm.do_all_unc(
     df=df,
-    value="PM2.5",
+    target="PM2.5",
     backend="flaml",
-    feature_names=predictors,
+    covariates=predictors,
     variables_resample=met_vars,
     n_samples=300,
     n_models=10,
@@ -344,9 +344,9 @@ sites = {"Beijing": df_bj, "Shanghai": df_sh, "Guangzhou": df_gz}
 
 results = nm.do_all_multisite(
     site_dfs=sites,
-    value="PM2.5",
+    target="PM2.5",
     backend="lightgbm",
-    feature_names=predictors,
+    covariates=predictors,
     variables_resample=met_vars,
     n_cores=4,
 )
@@ -364,7 +364,7 @@ df = nm.wind_to_uv(df, speed_col="ws", dir_col="wd")
 ### Cross-validation
 
 ```python
-scores = nm.cv_score(df_prep, model, feature_names=predictors, n_splits=5)
+scores = nm.cv_score(df_prep, model, covariates=predictors, n_splits=5)
 print(scores)
 ```
 
@@ -379,7 +379,7 @@ def cached_normalise(df_hash, **cfg):
     return nm.normalise(df, model, **cfg)
 
 key = nm.dataframe_hash(df_prep)
-result = cached_normalise(key, feature_names=predictors, n_samples=300)
+result = cached_normalise(key, covariates=predictors, n_samples=300)
 ```
 
 ### Provenance tracking

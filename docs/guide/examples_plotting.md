@@ -31,7 +31,7 @@ df_wind.loc[mask, "val"] += 25.0
 fig, ax = plt.subplots(figsize=(6, 6), subplot_kw={"projection": "polar"})
 nm.polar_plot(
     df=df_wind,
-    value="val",
+    target="val",
     ws_col="ws",
     wd_col="wd",
     statistic="mean",   # "mean" | "median" | "max" | "sum" | "p95"
@@ -62,7 +62,7 @@ df_ts = pd.DataFrame({
 fig, ax = plt.subplots(figsize=(10, 5))
 nm.time_series_plot(
     df=df_ts,
-    value="observed",
+    target="observed",
     ci_low="low",
     ci_high="high",
     resample="W",   # pandas resample rule; resamples using the mean

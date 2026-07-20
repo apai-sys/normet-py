@@ -288,14 +288,14 @@ class MainWindow(QMainWindow):
         self.backend_combo.currentTextChanged.connect(self._train_backend_changed)
         form.addRow("Backend", self.backend_combo)
         self.split_combo = NoWheelComboBox()
-        self.split_combo.addItems(["random", "ts", "season", "month"])
+        self.split_combo.addItems(["random", "ts", "month_ts", "season_ts"])
         self.split_combo.setToolTip("How the train/test split is drawn.")
         form.addRow("Split method", self.split_combo)
-        self.fraction_spin = NoWheelDoubleSpinBox()
-        self.fraction_spin.setRange(0.1, 0.95)
-        self.fraction_spin.setSingleStep(0.05)
-        self.fraction_spin.setValue(0.75)
-        form.addRow("Training fraction", self.fraction_spin)
+        self.train_fraction_spin = NoWheelDoubleSpinBox()
+        self.train_fraction_spin.setRange(0.1, 0.95)
+        self.train_fraction_spin.setSingleStep(0.05)
+        self.train_fraction_spin.setValue(0.75)
+        form.addRow("Training fraction", self.train_fraction_spin)
         self.budget_spin = NoWheelSpinBox()
         self.budget_spin.setRange(5, 36_000)
         self.budget_spin.setValue(60)
@@ -895,7 +895,7 @@ class MainWindow(QMainWindow):
             "features": _checked_items(self.feature_list),
             "backend": self.backend_combo.currentText(),
             "split_method": self.split_combo.currentText(),
-            "fraction": self.fraction_spin.value(),
+            "train_fraction": self.train_fraction_spin.value(),
             "time_budget": (
                 self.budget_spin.value()
                 if self.backend_combo.currentText() == "flaml"
@@ -937,7 +937,7 @@ class MainWindow(QMainWindow):
         self._budget_values["lightgbm"] = c.get("lgb_trials", 20)
         self.backend_combo.setCurrentText(c.get("backend", "flaml"))
         self.split_combo.setCurrentText(c.get("split_method", "random"))
-        self.fraction_spin.setValue(c.get("fraction", 0.75))
+        self.train_fraction_spin.setValue(c.get("train_fraction", 0.75))
         self.budget_spin.setValue(self._budget_values.get(self.backend_combo.currentText(), 60))
         ests = set(c.get("flaml_estimators") or ["lgbm"])
         for i in range(self.estimator_list.count()):
@@ -1161,7 +1161,7 @@ class MainWindow(QMainWindow):
             return
         from normet import build_model
 
-        value = self.target_combo.currentText()
+        target = self.target_combo.currentText()
         features = self._selected_features()
         backend = self.backend_combo.currentText()
         if backend == "flaml":
@@ -1183,11 +1183,11 @@ class MainWindow(QMainWindow):
             self._train_done,
             self._show_error,
             self.df_raw,
-            value,
+            target,
             backend=backend,
-            feature_names=features + list(TIME_VARS),
+            covariates=features + list(TIME_VARS),
             split_method=self.split_combo.currentText(),
-            fraction=self.fraction_spin.value(),
+            train_fraction=self.train_fraction_spin.value(),
             model_config=model_config,
             seed=self.seed_spin.value(),
             verbose=True,
@@ -1350,7 +1350,7 @@ class MainWindow(QMainWindow):
             self._show_error,
             self.df_prep,
             self.model,
-            feature_names=self.trained_features + list(TIME_VARS),
+            covariates=self.trained_features + list(TIME_VARS),
             variables_resample=resample_vars,
             n_samples=self.norm_samples.value(),
             n_cores=self._n_cores(self.norm_cores),
@@ -1400,7 +1400,7 @@ class MainWindow(QMainWindow):
             self.df_prep,
             self.model,
             method=self.decom_method.currentText(),
-            feature_names=self.trained_features + list(TIME_VARS),
+            covariates=self.trained_features + list(TIME_VARS),
             n_samples=self.decom_samples.value(),
         )
 
@@ -1460,7 +1460,7 @@ class MainWindow(QMainWindow):
             self._show_error,
             self.df_prep,
             self.model,
-            feature_names=self.trained_features + list(TIME_VARS),
+            covariates=self.trained_features + list(TIME_VARS),
             variables_resample=self._selected_norm_vars() or None,
             window_days=self.roll_window.value(),
             rolling_every=self.roll_step.value(),
@@ -1532,7 +1532,7 @@ class MainWindow(QMainWindow):
             self._show_error,
             df_prep=self.df_prep,
             model=self.model,
-            feature_names=self.trained_features + list(TIME_VARS),
+            covariates=self.trained_features + list(TIME_VARS),
             variables_resample=self._selected_norm_vars() or None,
             y_inf=y_inf,
             fast_days=self.ms_fast.value(),
