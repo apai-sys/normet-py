@@ -24,7 +24,7 @@ cache keys without pickling huge DataFrames into the key.
 For reproducibility, wrap a result with provenance metadata and save it:
 
 ```python
-out, model, df_prep = nm.do_all(df, value="PM2.5", ...)
+out, model, df_prep = nm.do_all(df, target="PM2.5", ...)
 run = nm.make_run(
     result=out, model=model, df_prep=df_prep, df=df,
     kind="do_all", config={...}, seed=42,

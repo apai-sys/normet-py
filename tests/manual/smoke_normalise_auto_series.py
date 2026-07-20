@@ -22,11 +22,11 @@ FEATS = ["met1", "met2", "date_unix", "day_julian", "weekday", "hour"]
 
 prep, model = nm.build_model(
     df,
-    value="y",
+    target="y",
     backend="lightgbm",
-    feature_names=FEATS,
+    covariates=FEATS,
     split_method="random",
-    fraction=0.75,
+    train_fraction=0.75,
     seed=1,
     model_config={"n_trials": 1, "cv_folds": 2, "nrounds": 20},
     verbose=False,
@@ -34,7 +34,7 @@ prep, model = nm.build_model(
 print(f"model built {time.time() - t0:.1f}s", flush=True)
 
 kw = dict(
-    feature_names=FEATS,
+    covariates=FEATS,
     variables_resample=["met1", "met2"],
     batch_size=10,
     seed=1,

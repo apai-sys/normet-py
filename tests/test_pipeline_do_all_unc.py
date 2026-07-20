@@ -27,12 +27,12 @@ def test_do_all_unc_returns_bands_and_weights(synthetic_aq):
 
     out, mod_stats = do_all_unc(
         df=synthetic_aq.copy(),
-        value="PM2.5",
+        target="PM2.5",
         backend="lightgbm",
-        feature_names=FEATURES,
+        covariates=FEATURES,
         variables_resample=["t2m", "blh", "u10", "v10"],
         split_method="ts",
-        fraction=0.8,
+        train_fraction=0.8,
         model_config=FAST_LGB,
         n_samples=5,
         n_models=3,
@@ -73,11 +73,11 @@ def test_do_all_unc_rmse_weighting(synthetic_aq):
 
     out, _ = do_all_unc(
         df=synthetic_aq.copy(),
-        value="PM2.5",
+        target="PM2.5",
         backend="lightgbm",
-        feature_names=FEATURES,
+        covariates=FEATURES,
         split_method="ts",
-        fraction=0.8,
+        train_fraction=0.8,
         model_config=FAST_LGB,
         n_samples=5,
         n_models=2,
@@ -95,9 +95,9 @@ def test_do_all_unc_rejects_bad_weighted_method(synthetic_aq):
     with pytest.raises(ValueError, match="weighted_method"):
         do_all_unc(
             df=synthetic_aq.copy(),
-            value="PM2.5",
+            target="PM2.5",
             backend="lightgbm",
-            feature_names=FEATURES,
+            covariates=FEATURES,
             model_config=FAST_LGB,
             n_models=2,
             weighted_method="bogus",

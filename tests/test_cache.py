@@ -65,7 +65,7 @@ def test_train_model_cache_hits_on_repeat(tmp_path):
     backend_registry.register(backend)
 
     df = pd.DataFrame({"value": [1.0, 2.0, 3.0, 4.0], "x": [1.0, 2.0, 3.0, 4.0]})
-    kw = dict(value="value", backend="counting", feature_names=["x"], cache=str(tmp_path / "c"))
+    kw = dict(target="value", backend="counting", covariates=["x"], cache=str(tmp_path / "c"))
 
     m1 = train_model(df, **kw)
     m2 = train_model(df, **kw)  # identical data + config → served from disk
@@ -83,7 +83,7 @@ def test_train_model_no_cache_always_trains(tmp_path):
     backend = _CountingBackend()
     backend_registry.register(backend)
     df = pd.DataFrame({"value": [1.0, 2.0, 3.0], "x": [1.0, 2.0, 3.0]})
-    kw = dict(value="value", backend="counting", feature_names=["x"])
+    kw = dict(target="value", backend="counting", covariates=["x"])
     train_model(df, **kw)
     train_model(df, **kw)
     assert backend.train_calls == 2  # no cache → trains every time

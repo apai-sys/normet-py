@@ -17,7 +17,7 @@ from .do_all import SingleConfig, UncConfig, do_all, do_all_unc
 # Config type aliases
 # =========================
 Backend = str
-SplitMethod = Literal["random", "ts", "season", "month"]
+SplitMethod = Literal["random", "ts", "month_ts", "season_ts"]
 
 
 # =========================

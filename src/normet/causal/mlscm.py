@@ -70,7 +70,7 @@ def mlscm(
     backend: str = "flaml",
     model_config: dict[str, Any] | None = None,
     split_method: str = "random",
-    fraction: float = 1.0,
+    train_fraction: float = 1.0,
     seed: int = 7_654_321,
     verbose: bool = False,
 ) -> pd.DataFrame:
@@ -116,8 +116,8 @@ def mlscm(
         (e.g., time budget, estimators, evaluation metric).
     split_method : {"random","chronological"}, default="random"
         Strategy for splitting pre-treatment data into train/test when training
-        the AutoML model. Ignored if ``fraction=1.0``.
-    fraction : float, default=1.0
+        the AutoML model. Ignored if ``train_fraction=1.0``.
+    train_fraction : float, default=1.0
         Training fraction of pre-treatment data (0–1). ``1.0`` uses all available
         pre-treatment observations for training.
     seed : int, default=7_654_321
@@ -236,11 +236,11 @@ def mlscm(
     # Train model
     _, model = build_model(
         df=pre_panel_safe,
-        value=treated_safe,
+        target=treated_safe,
         backend=backend,
-        feature_names=donors_safe,
+        covariates=donors_safe,
         split_method=split_method,
-        fraction=fraction,
+        train_fraction=train_fraction,
         model_config=model_config,
         seed=seed,
         verbose=verbose,

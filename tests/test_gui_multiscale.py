@@ -56,7 +56,7 @@ def test_rolling_mean_series_span_too_short(patch_rolling):
     series, n_windows, reason = ms.rolling_mean_series(
         df_prep=df,
         model=object(),
-        feature_names=["t2m"],
+        covariates=["t2m"],
         variables_resample=["t2m"],
         window_days=90,
         n_samples=10,
@@ -73,7 +73,7 @@ def test_rolling_mean_series_below_min_windows_is_skipped(patch_rolling):
     series, n_windows, reason = ms.rolling_mean_series(
         df_prep=df,
         model=object(),
-        feature_names=["t2m"],
+        covariates=["t2m"],
         variables_resample=["t2m"],
         window_days=90,
         n_samples=10,
@@ -90,7 +90,7 @@ def test_rolling_mean_series_aggregates_row_mean(patch_rolling):
     series, n_windows, reason = ms.rolling_mean_series(
         df_prep=df,
         model=object(),
-        feature_names=["t2m"],
+        covariates=["t2m"],
         variables_resample=["t2m"],
         window_days=14,
         n_samples=10,
@@ -115,7 +115,7 @@ def test_compute_multiscale_all_bands_available(patch_rolling):
     out = ms.compute_multiscale(
         df_prep=df,
         model=object(),
-        feature_names=["t2m"],
+        covariates=["t2m"],
         variables_resample=["t2m"],
         y_inf=y_inf,
         fast_days=14,
@@ -144,7 +144,7 @@ def test_compute_multiscale_skips_unavailable_slow_scale(patch_rolling):
     out = ms.compute_multiscale(
         df_prep=df,
         model=object(),
-        feature_names=["t2m"],
+        covariates=["t2m"],
         variables_resample=["t2m"],
         y_inf=y_inf,
         fast_days=14,

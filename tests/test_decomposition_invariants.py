@@ -34,16 +34,16 @@ def trained(synthetic_aq):
 
     df_prep = prepare_data(
         synthetic_aq.copy(),
-        value="PM2.5",
-        feature_names=FEATS,
+        target="PM2.5",
+        covariates=FEATS,
         split_method="ts",
-        fraction=0.8,
+        train_fraction=0.8,
     )
     model = train_model(
         df_prep,
-        value="value",
+        target="value",
         backend="flaml",
-        feature_names=FEATS,
+        covariates=FEATS,
         model_config=MODELCFG,
         verbose=False,
     )
@@ -59,8 +59,8 @@ def test_meteorology_decomposition_closure(trained):
         df=df_prep,
         model=model,
         method="meteorology",
-        value="value",
-        feature_names=FEATS,
+        target="value",
+        covariates=FEATS,
         n_samples=8,
         seed=7654321,
         n_cores=1,
@@ -81,8 +81,8 @@ def test_decomposition_is_deterministic(trained):
         df=df_prep,
         model=model,
         method="meteorology",
-        value="value",
-        feature_names=FEATS,
+        target="value",
+        covariates=FEATS,
         n_samples=8,
         seed=7654321,
         n_cores=1,

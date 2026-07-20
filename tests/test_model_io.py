@@ -22,8 +22,8 @@ class MockIOBackend:
     def train(
         self,
         df: Any,
-        value: str = "value",
-        feature_names: list[str] | None = None,
+        target: str = "value",
+        covariates: list[str] | None = None,
         variables: list[str] | None = None,
         model_config: dict[str, Any] | None = None,
         seed: int = 7654321,

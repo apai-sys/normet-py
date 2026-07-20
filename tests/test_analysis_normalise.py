@@ -165,7 +165,7 @@ def test_normalise_core_runs(monkeypatch):
     result = normalise(
         df=df,
         model="dummy-model",
-        feature_names=["ws", "wd"],
+        covariates=["ws", "wd"],
         variables_resample=["ws", "wd"],
         n_samples=5,
         aggregate=True,
@@ -186,7 +186,7 @@ def test_normalise_core_runs(monkeypatch):
     result_wide = normalise(
         df=df,
         model="dummy-model",
-        feature_names=["ws", "wd"],
+        covariates=["ws", "wd"],
         variables_resample=["ws", "wd"],
         n_samples=5,
         aggregate=False,
@@ -203,7 +203,7 @@ def test_normalise_core_runs(monkeypatch):
     result_mem = normalise(
         df=df,
         model="dummy-model",
-        feature_names=["ws", "wd"],
+        covariates=["ws", "wd"],
         variables_resample=["ws", "wd"],
         n_samples=5,
         aggregate=True,
@@ -217,7 +217,7 @@ def test_normalise_core_runs(monkeypatch):
     result_filtered = normalise(
         df=df,
         model="dummy-model",
-        feature_names=["ws", "wd"],
+        covariates=["ws", "wd"],
         variables_resample=["ws", "wd"],
         n_samples=5,
         aggregate=True,
@@ -232,7 +232,7 @@ def test_normalise_core_runs(monkeypatch):
         normalise(
             df=df,
             model="dummy-model",
-            feature_names=["ws", "wd"],
+            covariates=["ws", "wd"],
             variables_resample=["ws", "wd"],
             n_samples=5,
             aggregate=True,
@@ -246,7 +246,7 @@ def test_normalise_core_runs(monkeypatch):
         normalise(
             df=df,
             model="dummy-model",
-            feature_names=["ws", "wd"],
+            covariates=["ws", "wd"],
             variables_resample=["missing_col"],
             n_samples=5,
             aggregate=True,

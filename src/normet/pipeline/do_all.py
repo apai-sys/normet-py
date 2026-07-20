@@ -31,12 +31,12 @@ __all__ = ["SingleConfig", "UncConfig", "do_all", "do_all_unc"]
 class SingleConfig:
     """Configuration for :func:`do_all`."""
 
-    value: str = "value"
+    target: str = "value"
     backend: str = "flaml"
-    feature_names: list[str] | None = None
+    covariates: list[str] | None = None
     variables_resample: list[str] | None = None
     split_method: str = "random"
-    fraction: float = 0.75
+    train_fraction: float = 0.75
     model_config: dict[str, Any] | None = None
     n_samples: int = 300
     aggregate: bool = True
@@ -65,14 +65,14 @@ def _resolve_unc_config(config: UncConfig | None = None, **kwargs: Any) -> UncCo
 
 def do_all(
     df: pd.DataFrame,
-    value: str | None = None,
+    target: str | None = None,
     *,
     config: SingleConfig | None = None,
     backend: str = "flaml",
-    feature_names: list[str] | None = None,
+    covariates: list[str] | None = None,
     variables_resample: list[str] | None = None,
     split_method: str = "random",
-    fraction: float = 0.75,
+    train_fraction: float = 0.75,
     model_config: dict[str, Any] | None = None,
     n_samples: int = 300,
     seed: int = 7_654_321,
@@ -89,9 +89,9 @@ def do_all(
     ----------
     df : pandas.DataFrame
         Input dataset.
-    value : str or None, default=None
+    target : str or None, default=None
         Target column in *df*. Can be ``None`` when *config* is provided
-        with a non-None ``value`` field.
+        with a non-None ``target`` field.
     config : SingleConfig or None, default=None
         Optional :class:`SingleConfig` holding all parameters.
         Individual keyword arguments override fields on *config*\ .
@@ -110,17 +110,17 @@ def do_all(
     >>> from normet import do_all
     >>> df = pd.DataFrame({"date": pd.date_range("2024-01-01", periods=48, freq="h"),
     ...                    "PM2.5": range(48), "t2m": 10.0, "blh": 500.0})
-    >>> result, model, df_prep = do_all(df, value="PM2.5",
-    ...                                 feature_names=["t2m", "blh"])  # doctest: +SKIP
+    >>> result, model, df_prep = do_all(df, target="PM2.5",
+    ...                                 covariates=["t2m", "blh"])  # doctest: +SKIP
     """
     _cfg = _resolve_single_config(
         config=config,
-        value=value,
+        target=target,
         backend=backend,
-        feature_names=feature_names,
+        covariates=covariates,
         variables_resample=variables_resample,
         split_method=split_method,
-        fraction=fraction,
+        train_fraction=train_fraction,
         model_config=model_config,
         n_samples=n_samples,
         seed=seed,
@@ -132,24 +132,24 @@ def do_all(
         **kwargs,
     )
 
-    if _cfg.value is None:
-        raise ValueError("`value` must be provided either directly or via config.")
+    if _cfg.target is None:
+        raise ValueError("`target` must be provided either directly or via config.")
 
     log.info(
-        "Starting do_all | backend=%s | value=%s | n_samples=%d",
+        "Starting do_all | backend=%s | target=%s | n_samples=%d",
         _cfg.backend,
-        _cfg.value,
+        _cfg.target,
         _cfg.n_samples,
     )
 
-    if _cfg.feature_names is None:
-        raise ValueError("feature_names must be provided")
+    if _cfg.covariates is None:
+        raise ValueError("covariates must be provided")
     df_prep = prepare_data(
         df,
-        value=_cfg.value,
-        feature_names=_cfg.feature_names,
+        target=_cfg.target,
+        covariates=_cfg.covariates,
         split_method=_cfg.split_method,
-        fraction=_cfg.fraction,
+        train_fraction=_cfg.train_fraction,
         seed=_cfg.seed,
     )
     log.info(
@@ -161,11 +161,11 @@ def do_all(
 
     df_prep, model = build_model(
         df=df_prep,
-        value="value",
+        target="value",
         backend=_cfg.backend,
-        feature_names=_cfg.feature_names,
+        covariates=_cfg.covariates,
         split_method=_cfg.split_method,
-        fraction=_cfg.fraction,
+        train_fraction=_cfg.train_fraction,
         model_config=_cfg.model_config,
         seed=_cfg.seed,
         n_cores=_cfg.n_cores,
@@ -176,7 +176,7 @@ def do_all(
     out = normalise(
         df=df_prep,
         model=model,
-        feature_names=_cfg.feature_names or [c for c in df_prep.columns if c not in {"value"}],
+        covariates=_cfg.covariates or [c for c in df_prep.columns if c not in {"value"}],
         variables_resample=_cfg.variables_resample,
         n_samples=_cfg.n_samples,
         aggregate=_cfg.aggregate,
@@ -193,14 +193,14 @@ def do_all(
 
 def do_all_unc(
     df: pd.DataFrame,
-    value: str | None = None,
+    target: str | None = None,
     *,
     config: UncConfig | None = None,
     backend: str = "flaml",
-    feature_names: list[str] | None = None,
+    covariates: list[str] | None = None,
     variables_resample: list[str] | None = None,
     split_method: str = "random",
-    fraction: float = 0.75,
+    train_fraction: float = 0.75,
     model_config: dict[str, Any] | None = None,
     n_samples: int = 300,
     n_models: int = 10,
@@ -219,9 +219,9 @@ def do_all_unc(
     ----------
     df : pandas.DataFrame
         Input dataset.
-    value : str or None, default=None
+    target : str or None, default=None
         Target column in *df*. Can be ``None`` when *config* is provided
-        with a non-None ``value`` field.
+        with a non-None ``target`` field.
     config : UncConfig or None, default=None
         Optional :class:`UncConfig` holding all parameters.
         Individual keyword arguments override fields on *config*\ .
@@ -236,12 +236,12 @@ def do_all_unc(
     """
     _cfg = _resolve_unc_config(
         config=config,
-        value=value,
+        target=target,
         backend=backend,
-        feature_names=feature_names,
+        covariates=covariates,
         variables_resample=variables_resample,
         split_method=split_method,
-        fraction=fraction,
+        train_fraction=train_fraction,
         model_config=model_config,
         n_samples=n_samples,
         n_models=n_models,
@@ -277,12 +277,12 @@ def do_all_unc(
 
         out_i, model_i, df_prep_i = do_all(
             df=df,
-            value=_cfg.value,
+            target=_cfg.target,
             backend=_cfg.backend,
-            feature_names=_cfg.feature_names,
+            covariates=_cfg.covariates,
             variables_resample=_cfg.variables_resample,
             split_method=_cfg.split_method,
-            fraction=_cfg.fraction,
+            train_fraction=_cfg.train_fraction,
             model_config=_cfg.model_config,
             n_samples=_cfg.n_samples,
             seed=int(s),

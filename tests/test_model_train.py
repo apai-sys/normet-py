@@ -27,16 +27,16 @@ class MockBackend:
     def train(
         self,
         df: pd.DataFrame,
-        value: str = "value",
-        feature_names: list[str] | None = None,
+        target: str = "value",
+        covariates: list[str] | None = None,
         variables: list[str] | None = None,
         model_config: dict[str, Any] | None = None,
         seed: int = 7654321,
         verbose: bool = True,
         n_cores: int | None = None,
     ) -> object:
-        resolved = list(feature_names or variables or [])
-        MockBackend.last_call = {"variables": resolved, "value": value}
+        resolved = list(covariates or variables or [])
+        MockBackend.last_call = {"variables": resolved, "value": target}
 
         class _StubModel:
             backend = "mock"
@@ -93,22 +93,22 @@ def sample_df() -> pd.DataFrame:
 class TestTrainModel:
     def test_unknown_backend(self, sample_df: pd.DataFrame) -> None:
         with pytest.raises(ValueError, match="Unknown backend"):
-            train_model(sample_df, backend="nonexistent", feature_names=["t2m"])
+            train_model(sample_df, backend="nonexistent", covariates=["t2m"])
 
     def test_empty_variables(self, sample_df: pd.DataFrame) -> None:
         with pytest.raises(ValueError, match="non-empty"):
-            train_model(sample_df, feature_names=[])
+            train_model(sample_df, covariates=[])
 
     def test_duplicate_variables(self, sample_df: pd.DataFrame) -> None:
         with pytest.raises(ValueError, match="duplicates"):
-            train_model(sample_df, feature_names=["t2m", "t2m"])
+            train_model(sample_df, covariates=["t2m", "t2m"])
 
     def test_missing_columns(self, sample_df: pd.DataFrame) -> None:
         with pytest.raises(ValueError, match="Columns not found"):
-            train_model(sample_df, feature_names=["nonexistent"])
+            train_model(sample_df, covariates=["nonexistent"])
 
     def test_happy_path(self, sample_df: pd.DataFrame) -> None:
-        model = train_model(sample_df, value="NO2", backend="mock", feature_names=["t2m", "ws"])
+        model = train_model(sample_df, target="NO2", backend="mock", covariates=["t2m", "ws"])
         assert model.backend == "mock"
         preds = model.predict(sample_df[["t2m", "ws"]].head(5))
         assert len(preds) == 5
@@ -117,7 +117,7 @@ class TestTrainModel:
         df = sample_df.copy()
         df["set"] = "testing"
         df.iloc[:24, df.columns.get_loc("set")] = "training"
-        model = train_model(df, value="NO2", backend="mock", feature_names=["t2m", "ws"])
+        model = train_model(df, target="NO2", backend="mock", covariates=["t2m", "ws"])
         assert model.backend == "mock"
 
     def test_default_backend_is_flaml(self) -> None:
@@ -136,19 +136,19 @@ class TestTrainModel:
 
 class TestBuildModel:
     def test_empty_feature_names(self, sample_df: pd.DataFrame) -> None:
-        with pytest.raises(ValueError, match="feature_names"):
-            build_model(sample_df, value="NO2", feature_names=[])
+        with pytest.raises(ValueError, match="covariates"):
+            build_model(sample_df, target="NO2", covariates=[])
 
     def test_unknown_backend(self, sample_df: pd.DataFrame) -> None:
         with pytest.raises(ValueError, match="Unknown backend"):
-            build_model(sample_df, value="NO2", backend="nonexistent", feature_names=["t2m"])
+            build_model(sample_df, target="NO2", backend="nonexistent", covariates=["t2m"])
 
     def test_happy_path(self, sample_df: pd.DataFrame) -> None:
         df_prep, model = build_model(
             sample_df,
-            value="NO2",
+            target="NO2",
             backend="mock",
-            feature_names=["t2m", "ws"],
+            covariates=["t2m", "ws"],
         )
         assert model.backend == "mock"
         assert "set" in df_prep.columns
@@ -160,16 +160,16 @@ class TestBuildModel:
 
     def test_happy_path_different_target_name(self, sample_df: pd.DataFrame) -> None:
         df = sample_df.rename(columns={"NO2": "PM25"})
-        df_prep, model = build_model(df, value="PM25", backend="mock", feature_names=["t2m", "ws"])
+        df_prep, model = build_model(df, target="PM25", backend="mock", covariates=["t2m", "ws"])
         assert "value" in df_prep.columns
         assert model.backend == "mock"
 
     def test_drop_time_features(self, sample_df: pd.DataFrame) -> None:
         build_model(
             sample_df,
-            value="NO2",
+            target="NO2",
             backend="mock",
-            feature_names=["t2m", "ws", "date_unix", "day_julian"],
+            covariates=["t2m", "ws", "date_unix", "day_julian"],
             drop_time_features=True,
         )
         assert MockBackend.last_call is not None
@@ -182,11 +182,11 @@ class TestBuildModel:
     def test_ts_split(self, sample_df: pd.DataFrame) -> None:
         df_prep, model = build_model(
             sample_df,
-            value="NO2",
+            target="NO2",
             backend="mock",
-            feature_names=["t2m", "ws"],
+            covariates=["t2m", "ws"],
             split_method="ts",
-            fraction=0.8,
+            train_fraction=0.8,
         )
         assert model.backend == "mock"
         # With ts split, first 80% should be training
@@ -197,8 +197,8 @@ class TestBuildModel:
         config: dict[str, Any] = {"time_budget": 10, "metric": "mae"}
         build_model(
             sample_df,
-            value="NO2",
+            target="NO2",
             backend="mock",
-            feature_names=["t2m"],
+            covariates=["t2m"],
             model_config=config,
         )

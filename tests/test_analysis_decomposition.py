@@ -36,7 +36,7 @@ class DummyModel:
 def mock_normalise(
     df: pd.DataFrame,
     *,
-    feature_names: list[str],
+    covariates: list[str],
     variables_resample: list[str] | None = None,
     n_samples: int = 300,
     seed: int = 0,
@@ -82,17 +82,17 @@ def test_decompose_input_validation():
         decompose(df=None)
 
     df = pd.DataFrame({"x": [1, 2]})
-    with pytest.raises(DataError, match="`value` must be provided"):
-        decompose(df=df, value=None)
+    with pytest.raises(DataError, match="`target` must be provided"):
+        decompose(df=df, target=None)
 
-    with pytest.raises(ConfigError, match="Either `model` or `feature_names`"):
-        decompose(df=df, value="value", model=None, feature_names=None)
+    with pytest.raises(ConfigError, match="Either `model` or `covariates`"):
+        decompose(df=df, target="value", model=None, covariates=None)
 
     with pytest.raises(ConfigError, match="When training a model, `backend`"):
-        decompose(df=df, value="value", model=None, feature_names=["x"], backend=None)
+        decompose(df=df, target="value", model=None, covariates=["x"], backend=None)
 
     with pytest.raises(ConfigError, match="Unsupported decomposition method"):
-        decompose(df=df, value="value", feature_names=["x"], backend="flaml", method="invalid")
+        decompose(df=df, target="value", covariates=["x"], backend="flaml", method="invalid")
 
 
 def test_effective_cores():
@@ -107,13 +107,13 @@ def test_decom_emi_validation():
 
     df = pd.DataFrame({"x": [1, 2]})
     with pytest.raises(DataError, match="target column.*must be provided"):
-        decom_emi(df=df, value=None)
+        decom_emi(df=df, target=None)
 
-    with pytest.raises(ConfigError, match="Either `model` or `feature_names`"):
-        decom_emi(df=df, value="value", model=None, feature_names=None)
+    with pytest.raises(ConfigError, match="Either `model` or `covariates`"):
+        decom_emi(df=df, target="value", model=None, covariates=None)
 
     with pytest.raises(ConfigError, match="When training a model, `backend`"):
-        decom_emi(df=df, value="value", model=None, feature_names=["x"], backend=None)
+        decom_emi(df=df, target="value", model=None, covariates=["x"], backend=None)
 
 
 def test_decom_met_validation():
@@ -122,13 +122,13 @@ def test_decom_met_validation():
 
     df = pd.DataFrame({"x": [1, 2]})
     with pytest.raises(DataError, match="target column.*must be provided"):
-        decom_met(df=df, value=None)
+        decom_met(df=df, target=None)
 
-    with pytest.raises(ConfigError, match="Either `model` or `feature_names`"):
-        decom_met(df=df, value="value", model=None, feature_names=None)
+    with pytest.raises(ConfigError, match="Either `model` or `covariates`"):
+        decom_met(df=df, target="value", model=None, covariates=None)
 
     with pytest.raises(ConfigError, match="When training a model, `backend`"):
-        decom_met(df=df, value="value", model=None, feature_names=["x"], backend=None)
+        decom_met(df=df, target="value", model=None, covariates=["x"], backend=None)
 
 
 def test_decompose_emission(decomp_df, monkeypatch):
@@ -138,8 +138,8 @@ def test_decompose_emission(decomp_df, monkeypatch):
     result = decompose(
         method="emission",
         df=decomp_df,
-        value="value",
-        feature_names=["ws", "wd", "date_unix"],
+        target="value",
+        covariates=["ws", "wd", "date_unix"],
         backend="flaml",
         n_samples=10,
         verbose=False,
@@ -158,8 +158,8 @@ def test_decompose_meteorology(decomp_df, monkeypatch):
     result = decompose(
         method="meteorology",
         df=decomp_df,
-        value="value",
-        feature_names=["ws", "wd"],
+        target="value",
+        covariates=["ws", "wd"],
         backend="flaml",
         n_samples=10,
         verbose=False,
@@ -178,7 +178,7 @@ def test_decompose_shap_removed(decomp_df):
         decompose(
             method="shap",
             df=decomp_df,
-            value="value",
-            feature_names=["ws", "wd"],
+            target="value",
+            covariates=["ws", "wd"],
             backend="flaml",
         )

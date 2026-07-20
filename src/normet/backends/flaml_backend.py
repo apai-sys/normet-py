@@ -141,8 +141,8 @@ def load_flaml(
 
 def train_flaml(
     df: pd.DataFrame,
-    value: str = "value",
-    feature_names: list[str] | None = None,
+    target: str = "value",
+    covariates: list[str] | None = None,
     variables: list[str] | None = None,
     model_config: dict[str, Any] | None = None,
     seed: int = DEFAULT_SEED,
@@ -157,13 +157,13 @@ def train_flaml(
     df : pandas.DataFrame
         Training dataset containing predictors and target column.
         If a ``'set'`` column is present, rows with ``set == 'training'`` are used.
-    value : str, default="value"
+    target : str, default="value"
         Name of the target column.
-    feature_names : list of str, optional
+    covariates : list of str, optional
         Predictor column names. Must be non-empty and unique.
     variables : list of str, optional
         .. deprecated::
-            Use *feature_names* instead.
+            Use *covariates* instead.
     model_config : dict, optional
         FLAML configuration overrides. Recognized keys and **defaults**:
           - ``time_budget`` : int (default 90)
@@ -189,36 +189,36 @@ def train_flaml(
     Raises
     ------
     ValueError
-        If feature_names are missing/empty, duplicated, or columns not found.
+        If covariates are missing/empty, duplicated, or columns not found.
 
     .. versionchanged:: 0.3.0
-        ``variables`` is deprecated in favour of ``feature_names``.
+        ``variables`` is deprecated in favour of ``covariates``.
     """
     if variables is not None:
         warnings.warn(
-            "`variables` is deprecated, use `feature_names` instead.",
+            "`variables` is deprecated, use `covariates` instead.",
             DeprecationWarning,
             stacklevel=2,
         )
-        if feature_names is None:
-            feature_names = variables
-    if not feature_names:
-        raise ValueError("`feature_names` must be a non-empty list.")
-    if len(feature_names) != len(set(feature_names)):
-        raise ValueError("`feature_names` contains duplicates.")
-    missing = set(feature_names + [value]) - set(df.columns)
+        if covariates is None:
+            covariates = variables
+    if not covariates:
+        raise ValueError("`covariates` must be a non-empty list.")
+    if len(covariates) != len(set(covariates)):
+        raise ValueError("`covariates` contains duplicates.")
+    missing = set(covariates + [target]) - set(df.columns)
     if missing:
         raise ValueError(f"Columns not found in df: {sorted(missing)}")
 
     # Pick training rows if a split is present
     if "set" in df.columns:
-        df_train = df.loc[df["set"] == "training", [value] + feature_names]
+        df_train = df.loc[df["set"] == "training", [target] + covariates]
         if df_train.empty:
-            df_train = df[[value] + feature_names]
+            df_train = df[[target] + covariates]
     else:
-        df_train = df[[value] + feature_names]
+        df_train = df[[target] + covariates]
 
-    if df_train[feature_names].shape[1] == 0:
+    if df_train[covariates].shape[1] == 0:
         raise ValueError("No predictor columns available after preprocessing.")
 
     # Defaults
@@ -260,12 +260,12 @@ def train_flaml(
     automl = AutoML()
 
     (log.info if verbose else log.debug)(
-        "Training FLAML AutoML: X shape=%s, target='%s'", df_train[feature_names].shape, value
+        "Training FLAML AutoML: X shape=%s, target='%s'", df_train[covariates].shape, target
     )
 
     automl.fit(
-        X_train=df_train[feature_names],
-        y_train=df_train[value],
+        X_train=df_train[covariates],
+        y_train=df_train[target],
         seed=seed,
         **automl_kwargs,
     )
@@ -294,8 +294,8 @@ class _FlamlBackend:
     def train(
         self,
         df: pd.DataFrame,
-        value: str = "value",
-        feature_names: list[str] | None = None,
+        target: str = "value",
+        covariates: list[str] | None = None,
         variables: list[str] | None = None,
         model_config: dict[str, Any] | None = None,
         seed: int = DEFAULT_SEED,
@@ -304,8 +304,8 @@ class _FlamlBackend:
     ) -> object:
         return train_flaml(
             df,
-            value=value,
-            feature_names=feature_names,
+            target=target,
+            covariates=covariates,
             variables=variables,
             model_config=model_config,
             seed=seed,

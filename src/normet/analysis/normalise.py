@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -32,7 +33,13 @@ class NormaliseConfig:
     the overrides that differ from the standard values.
     """
 
-    feature_names: list[str] | None = None
+    covariates: list[str] | None = None
+    """The model's full trained feature set, not a subset of interest. If
+    None, auto-derived from ``model`` via :func:`extract_features`. If
+    given, must be a superset of the model's actual trained features --
+    :func:`normalise` validates this and raises :class:`ConfigError`
+    immediately on a mismatch. Use ``variables_resample`` to select which
+    of these get resampled; do not trim ``covariates`` itself for that."""
     variables_resample: list[str] | None = None
     n_samples: int = 300
     replace: bool = True
@@ -60,6 +67,16 @@ class NormaliseConfig:
     - ``> 0``: use exactly this many samples per batch.
 
     Has no effect when ``aggregate=False`` (full wide table requires all seeds).
+    """
+    cache: str | Path | None = None
+    """If given, memoize the resample-and-predict result to this directory
+    (a :class:`joblib.Memory` location). Repeat calls with the same data,
+    resample pool, model, and configuration are served from disk instead of
+    re-running the Monte Carlo resampling -- useful since :func:`decompose`
+    calls :func:`normalise` once per fixed time-variable and each call is a
+    full ``n_samples``-draw resample-and-predict. Off by default. The model
+    is fingerprinted via :func:`normet.utils.cache.model_hash`, so a re-fit
+    model (even with identical config) correctly invalidates the cache.
     """
 
 
@@ -155,7 +172,7 @@ def normalise(
     model: object,
     *,
     config: NormaliseConfig | None = None,
-    feature_names: list[str] | None = None,
+    covariates: list[str] | None = None,
     **kwargs,
 ) -> pd.DataFrame:
     """
@@ -174,16 +191,28 @@ def normalise(
         Trained model with a ``predict`` method.
     config : NormaliseConfig, optional
         Consolidated config object. Individual keyword arguments (``n_samples``,
-        ``feature_names``, ``variables_resample``, …) override the corresponding
+        ``covariates``, ``variables_resample``, …) override the corresponding
         field when provided.
-    feature_names : list[str], optional
-        Deprecated — prefer ``config.feature_names`` or passing via kwargs.
-        Predictor columns used by the model.
+    covariates : list[str], optional
+        Deprecated — prefer ``config.covariates`` or passing via kwargs.
+        Predictor columns used by the model. If omitted (and ``model`` is
+        given), auto-derived from the model's own trained features via
+        :func:`normet.utils.features.extract_features` -- the same
+        detection :func:`decompose`/:func:`decom_emi`/:func:`decom_met`
+        already perform before calling this function. If given explicitly,
+        it must be a **superset** of the model's trained features (extra
+        columns are fine and simply pass through unused); a smaller/wrong
+        set raises :class:`ConfigError` immediately, rather than silently
+        dropping columns via :func:`normet.utils.prepare.check_data` and
+        failing later inside ``model.predict()`` with a confusing
+        backend-level ``KeyError``. Use ``variables_resample`` (not a
+        trimmed ``covariates``) to control which of the model's features
+        get resampled.
     **kwargs
         Supported shorthand for overriding individual :class:`NormaliseConfig`
-        fields (e.g. ``n_samples=300``, ``n_cores=4``) without constructing a
-        config object. Any field passed both via ``config`` and as a keyword is
-        resolved in favour of the keyword.
+        fields (e.g. ``n_samples=300``, ``n_cores=4``, ``cache=".normet_cache"``)
+        without constructing a config object. Any field passed both via
+        ``config`` and as a keyword is resolved in favour of the keyword.
 
     Examples
     --------
@@ -191,7 +220,7 @@ def normalise(
     >>> from normet import normalise, build_model
     >>> df = pd.DataFrame({"date": pd.date_range("2024-01-01", periods=48, freq="h"),
     ...                    "value": range(48), "t2m": 10.0, "blh": 500.0})
-    >>> df, model = build_model(df, value="value", feature_names=["t2m", "blh"])
+    >>> df, model = build_model(df, target="value", covariates=["t2m", "blh"])
     >>> result = normalise(df, model, n_samples=5, n_cores=1)  # doctest: +SKIP
 
     Returns
@@ -207,14 +236,80 @@ def normalise(
               - observed
               - one column per seed (e.g., ``12345``).
     """
-    if feature_names is not None:
-        kwargs.setdefault("feature_names", feature_names)
+    if covariates is not None:
+        kwargs.setdefault("covariates", covariates)
     _cfg = _resolve_normalise_config(config=config, **kwargs)
 
-    if _cfg.feature_names is None:
-        raise ConfigError("`feature_names` must be provided (either directly or via config).")
+    if _cfg.covariates is None:
+        if model is None:
+            raise ConfigError("`covariates` must be provided (either directly or via config).")
+        try:
+            from ..utils.features import extract_features
 
-    df = process_date(df).pipe(check_data, _cfg.feature_names, "value")
+            _cfg.covariates = [str(c) for c in extract_features(model)]
+        except Exception as exc:
+            raise ConfigError(
+                "`covariates` must be provided (either directly or via config) -- "
+                "it could not be auto-detected from `model`."
+            ) from exc
+    elif model is not None:
+        try:
+            from ..utils.features import extract_features
+
+            model_feats = {str(c) for c in extract_features(model)}
+        except Exception:
+            model_feats = None
+        if model_feats is not None:
+            missing = sorted(model_feats - set(_cfg.covariates))
+            if missing:
+                raise ConfigError(
+                    f"`covariates` is missing {missing}, which `model` requires for "
+                    "prediction. `covariates` must be a superset of the model's trained "
+                    "features -- pass the full feature list and use `variables_resample` to "
+                    "choose which of those get resampled."
+                )
+
+    if _cfg.cache is None:
+        return _normalise_uncached(df, model, _cfg)
+
+    from ..utils.cache import config_hash, dataframe_hash, make_memory, model_hash
+
+    key_cols = list(dict.fromkeys([*_cfg.covariates, "value", "date"]))
+    df_keyed = process_date(df.copy()).pipe(check_data, _cfg.covariates, "value")
+    resample_pool = df_keyed if _cfg.resample_df is None else _cfg.resample_df
+    resample_key_cols = [
+        c for c in (_cfg.variables_resample or key_cols) if c in resample_pool.columns
+    ]
+    cache_key = config_hash(
+        sorted(_cfg.covariates),
+        _cfg.variables_resample,
+        _cfg.n_samples,
+        _cfg.replace,
+        _cfg.aggregate,
+        _cfg.seed,
+        _cfg.memory_save,
+        list(_cfg.return_quantiles) if _cfg.return_quantiles else None,
+        dict(_cfg.conditional_on) if _cfg.conditional_on else None,
+        _cfg.batch_size,
+        dataframe_hash(df_keyed[[c for c in key_cols if c in df_keyed.columns]]),
+        dataframe_hash(resample_pool[resample_key_cols]),
+        model_hash(model),
+    )
+    memory = make_memory(_cfg.cache)
+    cached = memory.cache(_normalise_cached_call, ignore=["df", "model", "cfg"])
+    return cached(cache_key, df=df, model=model, cfg=_cfg)
+
+
+def _normalise_cached_call(
+    _cache_key: str, *, df: pd.DataFrame, model: object, cfg: NormaliseConfig
+) -> pd.DataFrame:
+    """Cache-keyed wrapper so joblib can memoize on ``_cache_key`` alone (see :func:`normalise`)."""
+    return _normalise_uncached(df, model, cfg)
+
+
+def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) -> pd.DataFrame:
+    """Uncached resample-and-predict core of :func:`normalise`."""
+    df = process_date(df).pipe(check_data, _cfg.covariates, "value")
     if "date" not in df.columns:
         raise DataError("`df` must contain a 'date' column.")
 
@@ -223,7 +318,7 @@ def normalise(
     variables_resample = (
         _cfg.variables_resample
         if _cfg.variables_resample is not None
-        else [c for c in _cfg.feature_names if c not in time_vars]
+        else [c for c in _cfg.covariates if c not in time_vars]
     )
 
     if _cfg.conditional_on:
@@ -391,6 +486,16 @@ def normalise(
         results: list[pd.DataFrame] = [r for r in results_raw if r is not None]
         if not results:
             raise ModelError("No successful resamples produced results.")
+        n_failed = len(results_raw) - len(results)
+        if n_failed:
+            log.warning(
+                "%d/%d resample seeds failed and were dropped (see prior error logs); "
+                "aggregate is based on %d samples instead of the requested %d.",
+                n_failed,
+                _cfg.n_samples,
+                len(results),
+                _cfg.n_samples,
+            )
         df_result = pd.concat(results, ignore_index=True)
 
         if _cfg.aggregate:
@@ -472,7 +577,7 @@ def normalise_auto(
     df: pd.DataFrame,
     model: object,
     *,
-    feature_names: list[str] | None = None,
+    covariates: list[str] | None = None,
     variables_resample: list[str] | None = None,
     resample_df: pd.DataFrame | None = None,
     convergence_metric: str = "series",
@@ -521,7 +626,7 @@ def normalise_auto(
         Input dataset with ``date`` and target ``value`` columns.
     model : object
         Trained model with a ``predict`` method.
-    feature_names : list[str], optional
+    covariates : list[str], optional
         Predictor columns used by the model (required).
     variables_resample : list[str], optional
         Predictor columns to resample. Defaults to all non-time features.
@@ -625,7 +730,7 @@ def normalise_auto(
         batch_result = normalise(
             df,
             model,
-            feature_names=feature_names,
+            covariates=covariates,
             variables_resample=variables_resample,
             resample_df=resample_df,
             n_samples=batch_size,

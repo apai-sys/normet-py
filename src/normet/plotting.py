@@ -36,7 +36,7 @@ __all__ = [
 def polar_plot(
     df: pd.DataFrame,
     *,
-    value: str,
+    target: str,
     ws_col: str = "ws",
     wd_col: str = "wd",
     statistic: str = "mean",
@@ -49,13 +49,13 @@ def polar_plot(
     """
     Wind-direction × wind-speed concentration polar plot ("openair" style).
 
-    For each (wind direction, wind speed) bin, aggregate ``value`` with the
+    For each (wind direction, wind speed) bin, aggregate ``target`` with the
     given statistic (mean/median/max/percentile_X). Plot as a polar pcolor.
 
     Parameters
     ----------
     df : pandas.DataFrame
-    value : str
+    target : str
         Column to aggregate (e.g., concentration).
     ws_col, wd_col : str
         Wind speed and wind direction columns (degrees from north).
@@ -73,12 +73,12 @@ def polar_plot(
     """
     import matplotlib.pyplot as plt
 
-    for col in (value, ws_col, wd_col):
+    for col in (target, ws_col, wd_col):
         if col not in df.columns:
             raise ValueError(f"Column '{col}' not in df.")
 
-    mask = df[[value, ws_col, wd_col]].notna().all(axis=1)
-    sub = df.loc[mask, [value, ws_col, wd_col]].copy()
+    mask = df[[target, ws_col, wd_col]].notna().all(axis=1)
+    sub = df.loc[mask, [target, ws_col, wd_col]].copy()
     if sub.empty:
         raise ValueError("No non-null rows for polar plot.")
 
@@ -91,9 +91,9 @@ def polar_plot(
 
     if statistic.startswith("p") and statistic[1:].isdigit():
         q = float(statistic[1:]) / 100.0
-        grid = sub.groupby(["_wd_bin", "_ws_bin"], observed=True)[value].quantile(q).unstack()
+        grid = sub.groupby(["_wd_bin", "_ws_bin"], observed=True)[target].quantile(q).unstack()
     elif statistic in ("mean", "median", "max", "min", "sum", "std"):
-        grid = sub.groupby(["_wd_bin", "_ws_bin"], observed=True)[value].agg(statistic).unstack()
+        grid = sub.groupby(["_wd_bin", "_ws_bin"], observed=True)[target].agg(statistic).unstack()
     else:
         raise ValueError(f"Unsupported statistic: {statistic}")
 
@@ -108,8 +108,8 @@ def polar_plot(
     ax.set_theta_direction(-1)  # type: ignore[union-attr]
     mesh = ax.pcolormesh(Theta, R, Z, cmap=cmap, shading="auto")
     cbar = ax.figure.colorbar(mesh, ax=ax, pad=0.1, shrink=0.8)
-    cbar.set_label(f"{statistic}({value})")
-    ax.set_title(title or f"{value} by wind direction × speed")
+    cbar.set_label(f"{statistic}({target})")
+    ax.set_title(title or f"{target} by wind direction × speed")
     try:
         ax.figure.tight_layout()  # type: ignore[union-attr]
     except Exception:
@@ -517,7 +517,7 @@ def plot_bayesian_scm(
 # ---------------------------------------------------------------------------
 def time_series_plot(
     df: pd.DataFrame,
-    value: str,
+    target: str,
     *,
     ci_low: str | None = None,
     ci_high: str | None = None,
@@ -534,7 +534,7 @@ def time_series_plot(
     ----------
     df : pandas.DataFrame
         DataFrame indexed by datetime (or having a DatetimeIndex).
-    value : str
+    target : str
         Column name to plot.
     ci_low, ci_high : str, optional
         Column names for the lower and upper bounds of the confidence band.
@@ -553,8 +553,8 @@ def time_series_plot(
     """
     import matplotlib.pyplot as plt
 
-    if value not in df.columns:
-        raise ValueError(f"Column '{value}' not found in DataFrame.")
+    if target not in df.columns:
+        raise ValueError(f"Column '{target}' not found in DataFrame.")
 
     df_plot = df.copy()
     if resample:
@@ -563,7 +563,7 @@ def time_series_plot(
     if ax is None:
         _, ax = plt.subplots(figsize=(11, 4))
 
-    ax.plot(df_plot.index, df_plot[value], color=color, lw=1.5, label=value)
+    ax.plot(df_plot.index, df_plot[target], color=color, lw=1.5, label=target)
 
     if ci_low and ci_high and ci_low in df_plot.columns and ci_high in df_plot.columns:
         ax.fill_between(
@@ -575,8 +575,8 @@ def time_series_plot(
             label="Uncertainty band",
         )
 
-    ax.set_title(title or f"Time series of {value}")
-    ax.set_ylabel(ylabel or value)
+    ax.set_title(title or f"Time series of {target}")
+    ax.set_ylabel(ylabel or target)
     ax.grid(alpha=0.2)
     ax.legend(frameon=False, fontsize=9)
     return ax

@@ -109,15 +109,15 @@ class TestLgbModel:
 class TestTrainLgbValidation:
     def test_empty_feature_names(self, sample_df: pd.DataFrame) -> None:
         with pytest.raises(ValueError, match="non-empty"):
-            train_lgb(sample_df, feature_names=[])
+            train_lgb(sample_df, covariates=[])
 
     def test_duplicate_feature_names(self, sample_df: pd.DataFrame) -> None:
         with pytest.raises(ValueError, match="duplicates"):
-            train_lgb(sample_df, feature_names=["x1", "x1"])
+            train_lgb(sample_df, covariates=["x1", "x1"])
 
     def test_missing_columns(self, sample_df: pd.DataFrame) -> None:
         with pytest.raises(ValueError, match="Columns not found"):
-            train_lgb(sample_df, feature_names=["nonexistent"])
+            train_lgb(sample_df, covariates=["nonexistent"])
 
     def test_deprecated_variables(self, sample_df: pd.DataFrame) -> None:
         exc = ImportError("mock no lightgbm")
@@ -139,8 +139,8 @@ class TestTrainLgbIntegration:
     def test_happy_path(self, sample_df: pd.DataFrame) -> None:
         model = train_lgb(
             sample_df,
-            value="value",
-            feature_names=["x1", "x2"],
+            target="value",
+            covariates=["x1", "x2"],
             model_config={"n_trials": 2, "cv_folds": 2, "nrounds": 10, "early_stopping_rounds": 0},
             seed=42,
         )
@@ -158,8 +158,8 @@ class TestTrainLgbIntegration:
         df.iloc[:24, df.columns.get_loc("set")] = "training"
         model = train_lgb(
             df,
-            value="value",
-            feature_names=["x1", "x2"],
+            target="value",
+            covariates=["x1", "x2"],
             model_config={"n_trials": 2, "cv_folds": 2, "nrounds": 10, "early_stopping_rounds": 0},
             seed=42,
         )
@@ -171,8 +171,8 @@ class TestTrainLgbIntegration:
         with pytest.raises(ValueError, match="NA"):
             train_lgb(
                 df,
-                value="value",
-                feature_names=["x1", "x2"],
+                target="value",
+                covariates=["x1", "x2"],
                 model_config={
                     "n_trials": 1,
                     "cv_folds": 2,
@@ -238,7 +238,7 @@ class TestLgbBackendWrapper:
         with pytest.warns(DeprecationWarning, match="variables"):
             model = be.train(
                 sample_df,
-                value="value",
+                target="value",
                 variables=["x1", "x2"],
                 model_config={
                     "n_trials": 1,

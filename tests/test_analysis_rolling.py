@@ -34,7 +34,7 @@ class DummyModel:
 def mock_normalise(
     df: pd.DataFrame,
     *,
-    feature_names: list[str],
+    covariates: list[str],
     variables_resample: list[str] | None = None,
     n_samples: int = 300,
     seed: int = 0,
@@ -83,9 +83,9 @@ def test_rolling_missing_df():
 
 def test_rolling_missing_value():
     df = pd.DataFrame({"date": pd.date_range("2024-01-01", periods=5)})
-    # pass feature_names so it gets past the model/feature verification step
+    # pass covariates so it gets past the model/feature verification step
     with pytest.raises(ValueError, match="does not contain the target column"):
-        rolling(df=df, value="nonexistent", feature_names=["ws"])
+        rolling(df=df, target="nonexistent", covariates=["ws"])
 
 
 def test_rolling_window_too_large(rolling_df):
@@ -105,8 +105,8 @@ def test_rolling_runs_successfully(rolling_df, monkeypatch):
     result = rolling(
         df=rolling_df,
         model=model,
-        value="value",
-        feature_names=["ws", "wd"],
+        target="value",
+        covariates=["ws", "wd"],
         window_days=10,
         rolling_every=5,
         n_samples=50,
@@ -132,8 +132,8 @@ def test_rolling_with_training(rolling_df, monkeypatch):
     result = rolling(
         df=rolling_df,
         model=None,
-        value="value",
-        feature_names=["ws", "wd"],
+        target="value",
+        covariates=["ws", "wd"],
         window_days=12,
         rolling_every=6,
         n_samples=10,
@@ -146,19 +146,19 @@ def test_rolling_with_training(rolling_df, monkeypatch):
 
 
 def test_rolling_no_features_raises_error(rolling_df):
-    # When model is None, training needs feature_names
-    with pytest.raises(ValueError, match="must provide `feature_names`"):
+    # When model is None, training needs covariates
+    with pytest.raises(ValueError, match="must provide `covariates`"):
         rolling(
             df=rolling_df,
             model=None,
-            feature_names=None,
+            covariates=None,
             window_days=10,
             rolling_every=5,
         )
 
 
 def test_rolling_extracts_features_from_model(rolling_df, monkeypatch):
-    """When model is given without feature_names, extract from model."""
+    """When model is given without covariates, extract from model."""
     monkeypatch.setattr(rolling_mod, "normalise", mock_normalise)
     monkeypatch.setattr(rolling_mod, "build_model", mock_build_model)
 
@@ -166,7 +166,7 @@ def test_rolling_extracts_features_from_model(rolling_df, monkeypatch):
     result = rolling(
         df=rolling_df,
         model=model,
-        feature_names=None,  # ← not provided; should be auto-extracted
+        covariates=None,  # ← not provided; should be auto-extracted
         window_days=10,
         rolling_every=5,
         n_samples=10,
@@ -179,17 +179,17 @@ def test_rolling_extracts_features_from_model(rolling_df, monkeypatch):
 
 
 def test_rolling_no_features_model_without_features(rolling_df):
-    """Model without feature_names_in_ raises when feature_names=None."""
+    """Model without feature_names_in_ raises when covariates=None."""
 
     class FeaturelessModel:
         backend = "flaml"
         # no feature_names_in_, no feature_importances_
 
-    with pytest.raises(ValueError, match="feature_names"):
+    with pytest.raises(ValueError, match="covariates"):
         rolling(
             df=rolling_df,
             model=FeaturelessModel(),
-            feature_names=None,
+            covariates=None,
             window_days=10,
             rolling_every=5,
         )

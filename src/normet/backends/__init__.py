@@ -33,8 +33,8 @@ class Backend(Protocol):
     def train(
         self,
         df: pd.DataFrame,
-        value: str = "value",
-        feature_names: list[str] | None = None,
+        target: str = "value",
+        covariates: list[str] | None = None,
         variables: list[str] | None = None,
         model_config: dict[str, Any] | None = None,
         seed: int = DEFAULT_SEED,
@@ -45,14 +45,14 @@ class Backend(Protocol):
 
         Parameters
         ----------
-        feature_names : list of str, optional
+        covariates : list of str, optional
             Names of predictor columns in *df*.
         variables : list of str, optional
             .. deprecated::
-                Use *feature_names* instead.
+                Use *covariates* instead.
 
         .. versionchanged:: 0.3.0
-            ``variables`` is deprecated in favour of ``feature_names``.
+            ``variables`` is deprecated in favour of ``covariates``.
         """
 
     def save(

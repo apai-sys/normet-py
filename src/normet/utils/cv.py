@@ -116,8 +116,8 @@ def time_series_cv(
 
 def cv_score(
     df: pd.DataFrame,
-    value: str = "value",
-    feature_names: list[str] | None = None,
+    target: str = "value",
+    covariates: list[str] | None = None,
     *,
     backend: str = "flaml",
     n_splits: int = 5,
@@ -139,9 +139,9 @@ def cv_score(
     df : pandas.DataFrame
         Prepared data with a datetime column ``date_col``, target column,
         and predictor columns.
-    value : str, default "value"
+    target : str, default "value"
         Target column name.
-    feature_names : list of str, optional
+    covariates : list of str, optional
         Predictor columns. Must be non-empty.
     backend : {"flaml"}, default "flaml"
         AutoML backend.
@@ -162,10 +162,10 @@ def cv_score(
         and metadata: ``fold``, ``train_start``, ``train_end``, ``test_start``,
         ``test_end``, ``n_train``, ``n_test``.
     """
-    if not feature_names:
-        raise ValueError("`feature_names` must be a non-empty list.")
-    if value not in df.columns:
-        raise ValueError(f"Target column '{value}' not found.")
+    if not covariates:
+        raise ValueError("`covariates` must be a non-empty list.")
+    if target not in df.columns:
+        raise ValueError(f"Target column '{target}' not found.")
     stats_keys = statistic or _DEFAULT_STATS
 
     from ..model.predict import ml_predict
@@ -197,16 +197,16 @@ def cv_score(
         df_te = work.iloc[te_idx]
         model = train_model(
             df=df_tr,
-            value=value,
+            target=target,
             backend=backend,
-            feature_names=list(feature_names),
+            covariates=list(covariates),
             model_config=model_config,
             seed=seed,
             n_cores=n_cores,
             verbose=verbose,
         )
         y_pred = ml_predict(model, df_te)
-        y_true = df_te[value].to_numpy()
+        y_true = df_te[target].to_numpy()
         row = _stats_from_arrays(y_pred, y_true, stats_keys)
         row["fold"] = i
         row["train_start"] = df_tr[date_col].iloc[0]

@@ -29,12 +29,12 @@ def _train_backend(_cache_key: str, *, be: Any, df: pd.DataFrame, **train_kw: An
 
 def build_model(
     df: pd.DataFrame,
-    value: str,
+    target: str,
     *,
     backend: str = "flaml",
-    feature_names: list[str] | None = None,
+    covariates: list[str] | None = None,
     split_method: str = "random",
-    fraction: float = 0.75,
+    train_fraction: float = 0.75,
     model_config: dict[str, Any] | None = None,
     seed: int = DEFAULT_SEED,
     verbose: bool = False,
@@ -49,15 +49,23 @@ def build_model(
     ----------
     df : pandas.DataFrame
         Raw input data.
-    value : str
+    target : str
         Target column in `df`.
     backend : str, default="flaml"
         AutoML backend name. Must be registered in :data:`backend_registry`.
-    feature_names : List[str], optional
-        Predictors to use. Must be non-empty when training a model.
+    covariates : List[str], optional
+        Predictors to use. Must be non-empty when training a model. The
+        time variables ``date_unix``/``day_julian``/``weekday``/``hour``
+        are opt-in, not automatic: :func:`normet.utils.prepare.add_date_variables`
+        always computes all four internally, but only whichever of them
+        you list here become model predictors. Include a subset (e.g. only
+        ``weekday``+``hour``) or omit all four entirely to train purely on
+        meteorology/traffic/other non-temporal predictors --
+        :func:`normet.decompose` adapts automatically to whatever subset
+        ends up in the trained model.
     split_method : str, default="random"
         Data split strategy for training.
-    fraction : float, default=0.75
+    train_fraction : float, default=0.75
         Train fraction for the split.
     model_config : dict, optional
         Backend-specific configuration passed through to the trainer.
@@ -66,8 +74,11 @@ def build_model(
     verbose : bool, default=True
         Verbose logging.
     drop_time_features : bool, default=False
-        If True, drop helper time features like {"date_unix","day_julian","weekday","hour"}.
-        By default we keep them.
+        If True, force-drop all four helper time features from
+        ``covariates`` even if some were listed there. By default we
+        keep whichever ones the caller listed. Use this as a blanket
+        override; to select a specific subset of time features instead,
+        simply list only those in ``covariates`` and leave this False.
 
     Returns
     -------
@@ -80,29 +91,29 @@ def build_model(
     >>> from normet import build_model
     >>> df = pd.DataFrame({"date": pd.date_range("2024-01-01", periods=48, freq="h"),
     ...                    "PM2.5": range(48), "t2m": 10.0, "blh": 500.0})
-    >>> df_prep, model = build_model(df, value="PM2.5",
-    ...                              feature_names=["t2m", "blh"])  # doctest: +SKIP
+    >>> df_prep, model = build_model(df, target="PM2.5",
+    ...                              covariates=["t2m", "blh"])  # doctest: +SKIP
     """
     backend = (backend or "flaml").lower()
     backend_registry.get(backend)  # validate early
 
-    if not feature_names:
-        raise ValueError("`feature_names` must be provided and non-empty.")
+    if not covariates:
+        raise ValueError("`covariates` must be provided and non-empty.")
 
     # Optionally drop helper time features (default: keep them)
     if drop_time_features:
         drop_cols = {"date_unix", "day_julian", "weekday", "hour"}
-        variables = [c for c in feature_names if c not in drop_cols]
+        variables = [c for c in covariates if c not in drop_cols]
     else:
-        variables = list(feature_names)
+        variables = list(covariates)
 
     # Prepare data (ensures 'date', renames target to 'value', splits sets, etc.)
     df_prep = prepare_data(
         df=df,
-        value=value,
-        feature_names=variables,
+        target=target,
+        covariates=variables,
         split_method=split_method,
-        fraction=fraction,
+        train_fraction=train_fraction,
         seed=seed,
     )
 
@@ -111,28 +122,28 @@ def build_model(
     if not variables:
         raise ValueError(
             "None of the requested features remain after prepare_data(). "
-            "Check `feature_names` and your input columns."
+            "Check `covariates` and your input columns."
         )
 
     # Resolve target column consistently
     if "value" in df_prep.columns:
         target_col = "value"
-    elif value in df_prep.columns:
-        target_col = value
+    elif target in df_prep.columns:
+        target_col = target
         df_prep = df_prep.copy()
-        df_prep["value"] = df_prep[value]
+        df_prep["value"] = df_prep[target]
     else:
         raise ValueError(
             "Target column not found after prepare_data(); "
-            "tried 'value' and '" + value + "'. Columns: " + str(list(df_prep.columns))
+            "tried 'value' and '" + target + "'. Columns: " + str(list(df_prep.columns))
         )
 
     # Train
     model = train_model(
         df=df_prep,
-        value=target_col,
+        target=target_col,
         backend=backend,
-        feature_names=variables,
+        covariates=variables,
         model_config=model_config,
         seed=seed,
         verbose=verbose,
@@ -147,9 +158,9 @@ def build_model(
 def train_model(
     df: pd.DataFrame,
     *,
-    value: str = "value",
+    target: str = "value",
     backend: str = "flaml",
-    feature_names: list[str] | None = None,
+    covariates: list[str] | None = None,
     model_config: dict[str, Any] | None = None,
     seed: int = DEFAULT_SEED,
     verbose: bool = False,
@@ -164,11 +175,11 @@ def train_model(
     df : pandas.DataFrame
         Prepared dataset (must contain the target and predictor columns;
         may include a 'set' column for train/test partition).
-    value : str, default="value"
+    target : str, default="value"
         Name of the target column.
     backend : str, default="flaml"
         AutoML backend name. Must be registered in :data:`backend_registry`.
-    feature_names : list[str], optional
+    covariates : list[str], optional
         Predictor names. Must be non-empty and unique.
     model_config : dict, optional
         Backend-specific configuration options.
@@ -191,7 +202,7 @@ def train_model(
     Raises
     ------
     ValueError
-        If feature_names are missing, empty, duplicated, or not present in ``df``.
+        If covariates are missing, empty, duplicated, or not present in ``df``.
     RuntimeError
         If backend training fails.
 
@@ -206,22 +217,22 @@ def train_model(
     >>> from normet import train_model
     >>> df = pd.DataFrame({"date": pd.date_range("2024-01-01", periods=48, freq="h"),
     ...                    "value": range(48), "t2m": 10.0, "blh": 500.0})
-    >>> model = train_model(df, feature_names=["t2m", "blh"])  # doctest: +SKIP
+    >>> model = train_model(df, covariates=["t2m", "blh"])  # doctest: +SKIP
     """
     backend = (backend or "flaml").lower()
     be = backend_registry.get(backend)
 
-    if not feature_names:
-        raise ValueError("`feature_names` must be a non-empty list.")
-    if len(feature_names) != len(set(feature_names)):
-        raise ValueError("`feature_names` contains duplicates.")
-    missing = set(feature_names + [value]) - set(df.columns)
+    if not covariates:
+        raise ValueError("`covariates` must be a non-empty list.")
+    if len(covariates) != len(set(covariates)):
+        raise ValueError("`covariates` contains duplicates.")
+    missing = set(covariates + [target]) - set(df.columns)
     if missing:
         raise ValueError("Columns not found in df: " + str(sorted(missing)))
 
     train_kw: dict[str, Any] = dict(
-        value=value,
-        feature_names=feature_names,
+        target=target,
+        covariates=covariates,
         model_config=model_config,
         seed=seed,
         verbose=verbose,
@@ -236,12 +247,12 @@ def train_model(
     from ..utils.cache import config_hash, dataframe_hash, make_memory
 
     key_cols = list(
-        dict.fromkeys([*feature_names, value, *(["set"] if "set" in df.columns else [])])
+        dict.fromkeys([*covariates, target, *(["set"] if "set" in df.columns else [])])
     )
     cache_key = config_hash(
         backend,
-        value,
-        sorted(feature_names),
+        target,
+        sorted(covariates),
         model_config,
         seed,
         dataframe_hash(df[key_cols]),

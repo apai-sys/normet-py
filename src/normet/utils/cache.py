@@ -34,7 +34,7 @@ from .logging import get_logger
 
 log = get_logger(__name__)
 
-__all__ = ["make_memory", "dataframe_hash", "config_hash"]
+__all__ = ["make_memory", "dataframe_hash", "config_hash", "model_hash"]
 
 
 def make_memory(
@@ -101,6 +101,31 @@ def dataframe_hash(
     row_hash = pd.util.hash_pandas_object(sub, index=include_index, encoding="utf8")
     digest = hashlib.sha1(row_hash.values.tobytes()).hexdigest()  # type: ignore[union-attr]
     return digest
+
+
+def model_hash(model: Any) -> str:
+    """
+    Content hash of an arbitrary (typically trained-model) object.
+
+    Unlike :func:`dataframe_hash`, which uses a fast pandas-native row hash,
+    this delegates to ``joblib.hash`` (pickle-based) since trained model
+    objects have no cheaper stable fingerprint. Intended for cache keys that
+    need to invalidate when the model itself changes -- e.g. re-running
+    :func:`normet.normalise` with a re-fit model on otherwise identical data
+    and config should not silently reuse a stale cached result.
+
+    Parameters
+    ----------
+    model : object
+        Any picklable object, typically a trained model.
+
+    Returns
+    -------
+    str
+        Hex digest from ``joblib.hash``.
+    """
+    joblib = require("joblib", hint="pip install joblib")
+    return str(joblib.hash(model))
 
 
 def config_hash(*objs: Any) -> str:

@@ -71,7 +71,7 @@ def model() -> _LinearStubModel:
 
 
 KW = dict(
-    feature_names=["met1", "met2"],
+    covariates=["met1", "met2"],
     variables_resample=["met1", "met2"],
     batch_size=10,
     seed=1,

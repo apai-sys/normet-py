@@ -99,15 +99,15 @@ class TestPrepareRegression:
 
     def test_check_data_value_missing(self, df):
         with pytest.raises(ValueError, match="not in the DataFrame"):
-            check_data(df, feature_names=["t2m"], value="NO2")
+            check_data(df, covariates=["t2m"], target="NO2")
 
     def test_prepare_data_roundtrip(self, df):
         out = prepare_data(
             df,
-            value="PM2.5",
-            feature_names=["t2m"],
+            target="PM2.5",
+            covariates=["t2m"],
             split_method="ts",
-            fraction=0.7,
+            train_fraction=0.7,
             seed=42,
         )
         assert "value" in out.columns
@@ -118,13 +118,13 @@ class TestPrepareRegression:
         assert out["set"].value_counts()["testing"] == 6
 
     def test_prepare_data_split_methods(self, df):
-        for method in ["random", "ts", "season", "month"]:
+        for method in ["random", "ts", "month_ts", "season_ts"]:
             out = prepare_data(
                 df,
-                value="PM2.5",
-                feature_names=["t2m"],
+                target="PM2.5",
+                covariates=["t2m"],
                 split_method=method,
-                fraction=0.75,
+                train_fraction=0.75,
                 seed=42,
             )
             assert "set" in out.columns
@@ -132,4 +132,4 @@ class TestPrepareRegression:
 
     def test_split_into_sets_unknown_method(self, df):
         with pytest.raises(ValueError, match="Unknown"):
-            split_into_sets(df, split_method="invalid", fraction=0.75, seed=42)
+            split_into_sets(df, split_method="invalid", train_fraction=0.75, seed=42)

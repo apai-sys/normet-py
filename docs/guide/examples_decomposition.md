@@ -3,7 +3,7 @@
 `normet` exposes two decomposition strategies through a single entry point:
 
 ```python
-nm.decompose(method="emission", df=df, value="PM2.5", model=model, feature_names=feats)
+nm.decompose(method="emission", df=df, target="PM2.5", model=model, covariates=feats)
 nm.decompose(method="meteorology", ...)
 ```
 
@@ -19,7 +19,7 @@ trends, giving a hierarchical attribution (trend → seasonality → diurnal).
 
 ```python
 df_emi = nm.decompose(method="emission", df=df_prep, model=model,
-                      feature_names=feats)
+                      covariates=feats)
 # columns: observed, date_unix, day_julian, weekday, hour,
 #          emi_total, emi_base, emi_noise
 ```
@@ -36,7 +36,7 @@ top of the emission signal.
 
 ```python
 df_met = nm.decompose(method="meteorology", df=df_prep, model=model,
-                      feature_names=feats)
+                      covariates=feats)
 # columns: observed, emi_total, <each met feature>, met_total, met_base, met_noise
 ```
 

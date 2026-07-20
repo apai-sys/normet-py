@@ -75,10 +75,10 @@ def test_time_series_cv_no_date_column_no_datetimeindex():
 
 def test_cv_score_raises_no_features():
     df = pd.DataFrame({"value": [1.0], "date": pd.Timestamp("2024-01-01")})
-    with pytest.raises(ValueError, match="feature_names"):
+    with pytest.raises(ValueError, match="covariates"):
         from normet.utils.cv import cv_score
 
-        cv_score(df, feature_names=None)
+        cv_score(df, covariates=None)
 
 
 def test_time_series_cv_empty_fold_logged(caplog):
@@ -122,7 +122,7 @@ def test_cv_score_raises_missing_value():
     from normet.utils.cv import cv_score
 
     with pytest.raises(ValueError, match="not found"):
-        cv_score(df, value="y", feature_names=["x"])
+        cv_score(df, target="y", covariates=["x"])
 
 
 def test_cv_score_bad_date_col():
@@ -137,7 +137,7 @@ def test_cv_score_bad_date_col():
     from normet.utils.cv import cv_score
 
     with pytest.raises(ValueError, match="must be present"):
-        cv_score(df, value="value", feature_names=["x"], date_col="bad_date")
+        cv_score(df, target="value", covariates=["x"], date_col="bad_date")
 
 
 def test_cv_score_no_train_room():
@@ -152,4 +152,4 @@ def test_cv_score_no_train_room():
         }
     )
     with pytest.raises(ValueError, match="no room"):
-        cv_score(df, value="value", feature_names=["x"], n_splits=2, test_size=5)
+        cv_score(df, target="value", covariates=["x"], n_splits=2, test_size=5)

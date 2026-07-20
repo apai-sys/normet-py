@@ -98,8 +98,8 @@ def _build_cli():
     # ---- do-all ----
     @cli.command("do-all")
     @click.argument("input", type=click.Path(exists=True, path_type=Path))
-    @click.option("--value", help="Target column name (e.g., PM2.5).")
-    @click.option("--features", help="Comma-separated predictor columns.")
+    @click.option("--target", help="Target column name (e.g., PM2.5).")
+    @click.option("--covariates", help="Comma-separated predictor columns.")
     @click.option(
         "--resample-vars", "resample_vars", help="Comma-separated subset of features to resample."
     )
@@ -108,10 +108,10 @@ def _build_cli():
     @click.option(
         "--split-method",
         "split_method",
-        type=click.Choice(["random", "ts", "season", "month"]),
+        type=click.Choice(["random", "ts", "month_ts", "season_ts"]),
         default=None,
     )
-    @click.option("--fraction", type=float, default=None)
+    @click.option("--train-fraction", "train_fraction", type=float, default=None)
     @click.option("--seed", type=int, default=None)
     @click.option(
         "--out",
@@ -141,13 +141,15 @@ def _build_cli():
 
         out, model, df_prep = do_all(
             df=df,
-            value=cfg["value"],
-            feature_names=_split_csv(cfg.get("features")),
+            target=cfg["target"],
+            covariates=_split_csv(cfg.get("covariates")),
             variables_resample=_split_csv(cfg.get("resample_vars")),
             backend=cfg.get("backend") or "flaml",
             n_samples=cfg.get("n_samples") or 300,
             split_method=cfg.get("split_method") or "random",
-            fraction=cfg.get("fraction") if cfg.get("fraction") is not None else 0.75,
+            train_fraction=cfg.get("train_fraction")
+            if cfg.get("train_fraction") is not None
+            else 0.75,
             seed=cfg.get("seed") if cfg.get("seed") is not None else 7_654_321,
             verbose=True,
         )
@@ -170,8 +172,8 @@ def _build_cli():
     # ---- decompose ----
     @cli.command("decompose")
     @click.argument("input", type=click.Path(exists=True, path_type=Path))
-    @click.option("--value", required=False)
-    @click.option("--features", help="Comma-separated predictor columns.")
+    @click.option("--target", required=False)
+    @click.option("--covariates", help="Comma-separated predictor columns.")
     @click.option("--method", type=click.Choice(["emission", "meteorology"]), default=None)
     @click.option("--backend", type=click.Choice(["flaml"]), default=None)
     @click.option("--n-samples", "n_samples", type=int, default=None)
@@ -187,8 +189,8 @@ def _build_cli():
         out = decompose(
             method=cfg.get("method") or "emission",
             df=df,
-            value=cfg["value"],
-            feature_names=_split_csv(cfg.get("features")),
+            target=cfg["target"],
+            covariates=_split_csv(cfg.get("covariates")),
             backend=cfg.get("backend") or "flaml",
             n_samples=cfg.get("n_samples") or 300,
             seed=cfg.get("seed") if cfg.get("seed") is not None else 7_654_321,
@@ -236,8 +238,8 @@ def _build_cli():
     # ---- cv ----
     @cli.command("cv")
     @click.argument("input", type=click.Path(exists=True, path_type=Path))
-    @click.option("--value", required=False)
-    @click.option("--features", required=False, help="Comma-separated predictor columns.")
+    @click.option("--target", required=False)
+    @click.option("--covariates", required=False, help="Comma-separated predictor columns.")
     @click.option("--n-splits", "n_splits", type=int, default=None)
     @click.option("--gap", type=int, default=None)
     @click.option("--backend", type=click.Choice(["flaml"]), default=None)
@@ -248,18 +250,18 @@ def _build_cli():
 
         cfg = _merge_cli_over_yaml(_load_yaml(opts.pop("config_path", None)), opts)
         df = _load_table(input)
-        feats = _split_csv(cfg.get("features")) or []
+        feats = _split_csv(cfg.get("covariates")) or []
         df_prep = prepare_data(
             df,
-            value=cfg["value"],
-            feature_names=feats,
+            target=cfg["target"],
+            covariates=feats,
             split_method="ts",
-            fraction=0.999,  # we only need date sorting + value rename here
+            train_fraction=0.999,  # we only need date sorting + value rename here
         )
         scores = cv_score(
             df_prep,
-            value="value",
-            feature_names=feats,
+            target="value",
+            covariates=feats,
             backend=cfg.get("backend") or "flaml",
             n_splits=cfg.get("n_splits") or 5,
             gap=cfg.get("gap") or 0,
