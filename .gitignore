@@ -153,3 +153,7 @@ docs/_build/
 # HPC notebook-execution artifacts
 notebooks/*.log
 notebooks/*.sbatch
+
+# HPC CI-check job logs (ci_check.sh itself is kept, tracked)
+ci_check_*.out
+ci_check_*.err
