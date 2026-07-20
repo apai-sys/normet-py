@@ -246,9 +246,7 @@ def train_model(
     # DataFrame / backend object, which we tell joblib to ignore).
     from ..utils.cache import config_hash, dataframe_hash, make_memory
 
-    key_cols = list(
-        dict.fromkeys([*covariates, target, *(["set"] if "set" in df.columns else [])])
-    )
+    key_cols = list(dict.fromkeys([*covariates, target, *(["set"] if "set" in df.columns else [])]))
     cache_key = config_hash(
         backend,
         target,
