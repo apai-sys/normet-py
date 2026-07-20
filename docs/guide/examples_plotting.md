@@ -112,7 +112,7 @@ meteorological features. `pdp_grid` consumes the long-format DataFrame returned 
 `nm.pdp` — columns `["variable", "value", "pdp_mean", "pdp_std"]`:
 
 ```python
-# In practice: pdp_df = nm.pdp(df_prep, model, feature_names=["t2m", "ws"])
+# In practice: pdp_df = nm.pdp(df_prep, model, var_list=["t2m", "ws"])
 # Here we build a DataFrame with the same schema for illustration.
 temp_grid = np.linspace(-5, 30, 20)
 ws_grid = np.linspace(0, 12, 20)
