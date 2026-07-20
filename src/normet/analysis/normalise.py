@@ -309,6 +309,9 @@ def _normalise_cached_call(
 
 def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) -> pd.DataFrame:
     """Uncached resample-and-predict core of :func:`normalise`."""
+    # narrowing: normalise() always resolves _cfg.covariates (auto-detecting
+    # from `model` or raising ConfigError) before calling this helper.
+    assert _cfg.covariates is not None
     df = process_date(df).pipe(check_data, _cfg.covariates, "value")
     if "date" not in df.columns:
         raise DataError("`df` must contain a 'date' column.")

@@ -75,7 +75,9 @@ def prepare_data(
           - derived date features
           - ``set`` column indicating "training"/"testing".
     """
-    log.debug("Preparing data with split_method=%s, train_fraction=%.3f", split_method, train_fraction)
+    log.debug(
+        "Preparing data with split_method=%s, train_fraction=%.3f", split_method, train_fraction
+    )
     df_out = (
         df.pipe(process_date)
         .pipe(check_data, covariates=covariates, target=target)

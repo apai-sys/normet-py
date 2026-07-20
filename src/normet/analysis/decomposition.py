@@ -304,9 +304,7 @@ def decom_emi(
         model_feats = [str(c) for c in extract_features(model)]
     except Exception as exc:
         if not _cfg.covariates:
-            raise ModelError(
-                "Cannot infer model features; please provide `covariates`."
-            ) from exc
+            raise ModelError("Cannot infer model features; please provide `covariates`.") from exc
         model_feats = [str(c) for c in _cfg.covariates]
 
     model_feats = [c for c in model_feats if c in df_work.columns]
@@ -490,9 +488,7 @@ def decom_met(
         feat_sorted = extract_features(model, importance_ascending=_cfg.importance_ascending)
     except Exception as exc:
         if not _cfg.covariates:
-            raise ModelError(
-                "Cannot infer model features; please provide `covariates`."
-            ) from exc
+            raise ModelError("Cannot infer model features; please provide `covariates`.") from exc
         feat_sorted = list(_cfg.covariates)
 
     feat_sorted = [f for f in feat_sorted if f in df_work.columns]
