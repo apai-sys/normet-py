@@ -307,6 +307,29 @@ def decom_emi(
             raise ModelError("Cannot infer model features; please provide `covariates`.") from exc
         model_feats = [str(c) for c in _cfg.covariates]
 
+    # The missing-time-vars generation above only runs when the caller
+    # passes `covariates` explicitly. Repeat it here against model_feats
+    # (covers the case where covariates is instead auto-derived from
+    # `model` via extract_features()) so date_unix/day_julian/weekday/hour
+    # get generated whenever the model needs them, regardless of which
+    # path supplied the feature list. add_date_variables() is idempotent,
+    # so this is a no-op whenever the first pass above already handled it.
+    missing_time_vars = [
+        v
+        for v in ["date_unix", "day_julian", "weekday", "hour"]
+        if v in model_feats and v not in df_work.columns
+    ]
+    if missing_time_vars:
+        try:
+            df_work = add_date_variables(df_work)
+            (log.info if _cfg.verbose else log.debug)(
+                "Generated time variables: %s", missing_time_vars
+            )
+        except Exception:
+            log.warning(
+                "Could not generate some time features: %s", missing_time_vars, exc_info=False
+            )
+
     model_feats = [c for c in model_feats if c in df_work.columns]
     if not model_feats:
         raise DataError("No valid model features found in the provided `df` for decomposition.")
