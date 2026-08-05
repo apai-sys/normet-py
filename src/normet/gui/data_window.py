@@ -2,8 +2,8 @@
 
 Two-step workflow in the house style (parameter panel left, result tabs right):
 
-1. **Find stations** — tick pollutants, query the UK-AIR (AURN/DEFRA) API for
-   the sites that measure them, browse/search the station table and pick one.
+1. **Find stations** — pick a network, tick pollutants, list the sites that
+   measure them, browse/search the station table and pick one.
 2. **Fetch & merge** — download the hourly measurements for every ticked
    pollutant at that site, fetch hourly meteorology for the site coordinates
    (Open-Meteo ERA5 archive by default — no API key; Copernicus CDS
@@ -11,6 +11,25 @@ Two-step workflow in the house style (parameter panel left, result tabs right):
    wide ``date + pollutants + met`` table the modelling steps expect.
 
 The merged table can be saved as CSV or sent straight to the main window.
+
+Data source
+-----------
+This window reads the openair-format ``.RData`` archives via
+:mod:`normet.io.ukaq`, covering all six UK networks (AURN, AQE, SAQN, WAQN,
+NI, LMAM) — around 1500 stations.
+
+It used to call DEFRA's UK-AIR SOS REST API through
+:mod:`normet.io.defra`, which had two problems. The smaller one is that the
+SOS API is AURN-only, roughly 210 stations, excluding the entire
+local-authority estate and most rural and suburban background sites. The
+decisive one is that **the SOS service stopped responding** (checked
+2026-07-26: ``uk-air.defra.gov.uk`` serves ``/``, ``/networks/…`` and
+``/openair/R_data/…`` normally, while every ``/sos-ukair/…`` path times
+out), so that path no longer worked at all.
+
+A side effect of the move: the SOS API only served a recent rolling window,
+whereas the archives go back to whenever each station opened. The date
+pickers are no longer clamped to a few months.
 """
 
 from __future__ import annotations
@@ -49,81 +68,89 @@ from .workers import TaskRunner
 
 log = logging.getLogger(__name__)
 
-POLLUTANTS = ["PM2.5", "PM10", "NO2", "NOX", "NO", "O3", "SO2", "CO"]
+# Column names as they appear in BOTH the archives and the metadata
+# ``variable`` column — the two agree exactly, so no name mapping is needed.
+# NOx is "NOXasNO2" here, not "NOX": that is the archive's own name for it
+# and what the merged table's column will be called.
+POLLUTANTS = ["PM2.5", "PM10", "NO2", "NOXasNO2", "NO", "O3", "SO2", "CO"]
 DEFAULT_POLLUTANTS = {"PM2.5", "NO2", "O3"}
+
+# Label -> normet.io.ukaq source key. AURN first so it stays the default.
+NETWORKS: dict[str, str] = {
+    "AURN — UK national network": "aurn",
+    "AQE — Air Quality England": "aqe",
+    "SAQN — Scotland": "saqn",
+    "WAQN — Wales": "waqn",
+    "NI — Northern Ireland": "ni",
+    "LMAM — DEFRA locally managed": "local",
+}
 
 MET_OPEN_METEO = "Open-Meteo (ERA5, no key needed)"
 MET_CDS = "Copernicus CDS (needs ~/.cdsapirc)"
 MET_NONE = "None (air quality only)"
 
 
-def _site_name(station_label: str) -> str:
-    """'Manchester Piccadilly-Nitrogen dioxide (air)' → 'Manchester Piccadilly'."""
-    return str(station_label).rsplit("-", 1)[0].strip()
+def _find_stations(pollutants: list[str], source: str) -> pd.DataFrame:
+    """One row per station in *source* measuring any of *pollutants*.
 
+    Columns: ``site``, ``code``, ``site_type``, ``pollutants`` (which of the
+    ticked ones it reports), ``from``/``to`` (the period the archive covers,
+    from the network metadata), ``lat``, ``lon``.
 
-def _find_stations(pollutants: list[str]) -> pd.DataFrame:
-    """One row per site: which of *pollutants* it measures, where it is, the
-    per-pollutant station ids needed to fetch the data, the period the API
-    actually holds (it only serves a recent rolling window), and its
-    official AURN site ``code`` (e.g. "MAN3" for Manchester Piccadilly, from
-    :func:`normet.fetch_aurn_site_codes` — blank if it can't be matched)."""
-    from normet.io.defra import (
-        _API_BASE,
-        _request,
-        _resolve_pollutant_code,
-        fetch_aurn_site_codes,
-    )
+    ``end_date`` is blank in the metadata for a station still operating, so
+    a missing value is shown as today rather than as an empty cell — an
+    empty "to" would otherwise read as "no data".
+    """
+    from normet import list_ukaq_stations
 
-    site_codes = fetch_aurn_site_codes()
-    sites: dict[str, dict] = {}
-    for pol in pollutants:
-        code = _resolve_pollutant_code(pol)
-        ts_list = _request(
-            f"{_API_BASE}/timeseries",
-            {"phenomenon": str(code), "limit": 5000, "expanded": "true"},
+    meta = list_ukaq_stations(source, all_variables=True)
+    if meta.empty:
+        return pd.DataFrame(
+            columns=["site", "code", "site_type", "pollutants", "n", "from", "to", "lat", "lon"]
         )
-        log.info("UK-AIR: %d stations measure %s", len(ts_list), pol)
-        for ts in ts_list:
-            props = (ts.get("station") or {}).get("properties") or {}
-            label = props.get("label") or ""
-            geom = (ts.get("station") or {}).get("geometry") or {}
-            coords = geom.get("coordinates") or [None, None]
-            name = _site_name(label)
-            if not name:
-                continue
-            rec = sites.setdefault(
-                name,
-                {
-                    "site": name,
-                    "lat": coords[0],
-                    "lon": coords[1],
-                    "ids": {},
-                    "t0": None,
-                    "t1": None,
-                },
-            )
-            rec["ids"].setdefault(pol, props.get("id"))
-            fv = (ts.get("firstValue") or {}).get("timestamp")
-            lv = (ts.get("lastValue") or {}).get("timestamp")
-            if fv is not None:
-                rec["t0"] = fv if rec["t0"] is None else min(rec["t0"], fv)
-            if lv is not None:
-                rec["t1"] = lv if rec["t1"] is None else max(rec["t1"], lv)
-    rows = [
-        {
-            "site": r["site"],
-            "code": site_codes.get(r["site"], ""),
-            "pollutants": ", ".join(p for p in pollutants if p in r["ids"]),
-            "n": len(r["ids"]),
-            "from": (pd.Timestamp(r["t0"], unit="ms").strftime("%Y-%m-%d") if r["t0"] else ""),
-            "to": (pd.Timestamp(r["t1"], unit="ms").strftime("%Y-%m-%d") if r["t1"] else ""),
-            "lat": r["lat"],
-            "lon": r["lon"],
-            "ids": r["ids"],
-        }
-        for r in sites.values()
-    ]
+
+    wanted = set(pollutants)
+    sub = meta[meta["variable"].astype(str).isin(wanted)]
+    log.info("%s: %d station-species rows match %s", source.upper(), len(sub), sorted(wanted))
+    if sub.empty:
+        return pd.DataFrame(
+            columns=["site", "code", "site_type", "pollutants", "n", "from", "to", "lat", "lon"]
+        )
+
+    # Parse the two date columns once for the whole frame, not per group:
+    # doing it inside the loop made pandas re-infer the format on every one
+    # of ~1500 groups and emit a UserWarning each time. The metadata uses
+    # ISO dates, so the format is stated rather than guessed.
+    sub = sub.copy()
+    for col in ("start_date", "end_date"):
+        sub[col] = (
+            pd.to_datetime(sub[col], format="%Y-%m-%d", errors="coerce")
+            if col in sub.columns
+            else pd.NaT
+        )
+
+    today = pd.Timestamp.today().normalize()
+    rows = []
+    for code, g in sub.groupby("code", sort=False):
+        have = [p for p in pollutants if p in set(g["variable"].astype(str))]
+        starts = g["start_date"]
+        ends = g["end_date"]
+        t0 = starts.min() if starts.notna().any() else pd.NaT
+        # Any still-open series means the station is still reporting.
+        t1 = today if ends.isna().any() else ends.max()
+        rows.append(
+            {
+                "site": str(g["site"].iloc[0]),
+                "code": str(code),
+                "site_type": str(g["site_type"].iloc[0]) if "site_type" in g else "",
+                "pollutants": ", ".join(have),
+                "n": len(have),
+                "from": t0.strftime("%Y-%m-%d") if pd.notna(t0) else "",
+                "to": t1.strftime("%Y-%m-%d") if pd.notna(t1) else "",
+                "lat": g["latitude"].iloc[0] if "latitude" in g else None,
+                "lon": g["longitude"].iloc[0] if "longitude" in g else None,
+            }
+        )
     df = pd.DataFrame(rows).sort_values(["n", "site"], ascending=[False, True])
     return df.reset_index(drop=True)
 
@@ -134,37 +161,47 @@ def _fetch_and_merge(
     date_from: str,
     date_to: str,
     met_source: str,
+    source: str,
 ) -> pd.DataFrame:
     """Download AQ + met for one site and outer-join on the hourly timestamp."""
-    from normet import fetch_aurn_measurements
+    from normet import fetch_ukaq_measurements
 
-    frames: list[pd.DataFrame] = []
-    for pol in pollutants:
-        sid = site["ids"].get(pol)
-        if sid is None:
-            log.info("%s does not measure %s — skipped", site["site"], pol)
-            continue
-        log.info("Fetching %s at %s (station id %s)…", pol, site["site"], sid)
-        aq = fetch_aurn_measurements(
-            station=int(sid), pollutant=pol, date_from=date_from, date_to=date_to
+    t0 = pd.Timestamp(date_from)
+    t1 = pd.Timestamp(date_to)
+    # The archives are one file per station-year, so whole years are fetched
+    # and then trimmed to the requested range.
+    years = list(range(t0.year, t1.year + 1))
+    log.info(
+        "Fetching %s at %s (%s) for %d-%d…",
+        ", ".join(pollutants),
+        site["site"],
+        site["code"],
+        years[0],
+        years[-1],
+    )
+    aq = fetch_ukaq_measurements(
+        site["code"], years, source=source, pollutant=pollutants, on_missing="warn"
+    )
+    if aq.empty:
+        raise RuntimeError(
+            f"No data returned for {site['site']} ({site['code']}) in "
+            f"{years[0]}–{years[-1]} — try a different station or date range."
         )
-        if aq.empty:
-            log.warning("No %s data returned for %s", pol, site["site"])
-            continue
-        # UK-AIR marks missing hours with sentinel values around -99.
-        n_sentinel = int((aq["value"] <= -50).sum())
-        if n_sentinel:
-            log.info("%s: dropped %d missing-value sentinels (≤ -50)", pol, n_sentinel)
-            aq = aq[aq["value"] > -50]
-        aq["date"] = pd.to_datetime(aq["date"], utc=True).dt.tz_localize(None)
-        series = aq.groupby("date")["value"].mean().rename(pol)
-        frames.append(series.to_frame())
-    if not frames:
+
+    aq["date"] = pd.to_datetime(aq["date"], utc=True).dt.tz_localize(None)
+    aq = aq[(aq["date"] >= t0) & (aq["date"] <= t1 + pd.Timedelta(hours=23, minutes=59))]
+    pol_cols = [c for c in pollutants if c in aq.columns]
+    if not pol_cols or aq.empty:
         raise RuntimeError(
             "No air-quality data came back for this site/date range — "
             "try different pollutants or dates."
         )
-    merged = pd.concat(frames, axis=1).sort_index()
+    dropped = [p for p in pollutants if p not in pol_cols]
+    if dropped:
+        log.info("%s does not report %s — skipped", site["site"], ", ".join(dropped))
+    # Already wide (one column per species); collapse any duplicate hours
+    # that a station-year overlap could produce.
+    merged = aq.groupby("date")[pol_cols].mean().sort_index()
 
     if met_source == MET_OPEN_METEO:
         from normet import fetch_openmeteo_timeseries
@@ -198,7 +235,7 @@ def _fetch_and_merge(
 
 
 class DataWindow(QMainWindow):
-    """'Get UK data' window: AURN measurements + reanalysis met, merged."""
+    """'Get UK data' window: UK network measurements + reanalysis met, merged."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -235,7 +272,8 @@ class DataWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self.cancel_btn)
         self.statusBar().addPermanentWidget(self.progress)
         self.statusBar().showMessage(
-            "Tick pollutants, click 🔍 Find stations, pick a site, then ▶ Fetch & merge."
+            "Pick a network, tick pollutants, click 🔍 Find stations, "
+            "pick a site, then ▶ Fetch & merge."
         )
         self._sync_enabled()
 
@@ -244,8 +282,19 @@ class DataWindow(QMainWindow):
         panel = QWidget()
         v = QVBoxLayout(panel)
 
-        aq_box = QGroupBox("Air quality (UK AURN)")
+        aq_box = QGroupBox("Air quality (UK networks)")
         av = QVBoxLayout(aq_box)
+        av.addWidget(QLabel("Network"))
+        self.net_combo = NoWheelComboBox()
+        self.net_combo.addItems(list(NETWORKS))
+        self.net_combo.setToolTip(
+            "Which UK network to search.\n"
+            "AURN is the national network (~210 sites); the others are the\n"
+            "local-authority networks, which together hold most of the\n"
+            "roadside, rural and suburban background sites."
+        )
+        self.net_combo.currentIndexChanged.connect(self._network_changed)
+        av.addWidget(self.net_combo)
         av.addWidget(QLabel("Pollutants"))
         self.pol_list = QListWidget()
         self.pol_list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
@@ -261,7 +310,7 @@ class DataWindow(QMainWindow):
         av.addWidget(self.pol_list)
         self.find_btn = run_button(
             "🔍  Find stations",
-            "Query the UK-AIR API for all AURN sites measuring the ticked\npollutants and list them on the right.",
+            "List every site in the chosen network measuring the ticked\npollutants, on the right.",
         )
         self.find_btn.clicked.connect(self._run_find_stations)
         av.addWidget(self.find_btn)
@@ -273,7 +322,7 @@ class DataWindow(QMainWindow):
         rf = QFormLayout(rng_box)
         rf.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         today = QDate.currentDate()
-        self.date_from = QDateEdit(today.addDays(-190))
+        self.date_from = QDateEdit(QDate(today.year() - 3, 1, 1))
         self.date_to = QDateEdit(today.addDays(-3))
         for de in (self.date_from, self.date_to):
             de.setCalendarPopup(True)
@@ -282,8 +331,9 @@ class DataWindow(QMainWindow):
         rf.addRow("To", self.date_to)
         rf.addRow(
             hint_label(
-                "The UK-AIR API only serves a recent rolling window (see the\n"
-                "from/to columns); selecting a station snaps the range to it."
+                "The archives run from each station's opening date (see the\n"
+                "from/to columns); selecting a station snaps the range to it.\n"
+                "Whole years are downloaded, then trimmed to this range."
             )
         )
         v.addWidget(rng_box)
@@ -417,6 +467,20 @@ class DataWindow(QMainWindow):
         log.error("%s", tb)
 
     # ---------------------------------------------------------------- actions
+    def _current_source(self) -> str:
+        return NETWORKS[self.net_combo.currentText()]
+
+    def _network_changed(self) -> None:
+        """A station list belongs to one network; drop it when that changes."""
+        self.stations = None
+        self.station_table.clearContents()
+        self.station_table.setRowCount(0)
+        self.station_hint.setText("No station chosen yet")
+        self.statusBar().showMessage(
+            f"Network set to {self.net_combo.currentText()} — click 🔍 Find stations."
+        )
+        self._sync_enabled()
+
     def _run_find_stations(self) -> None:
         pollutants = self._checked_pollutants()
         if not pollutants:
@@ -428,6 +492,7 @@ class DataWindow(QMainWindow):
             self._stations_done,
             self._show_error,
             pollutants,
+            self._current_source(),
         )
 
     def _stations_done(self, df: pd.DataFrame) -> None:
@@ -439,7 +504,7 @@ class DataWindow(QMainWindow):
         )
 
     def _fill_station_table(self, df: pd.DataFrame) -> None:
-        cols = ["site", "code", "pollutants", "from", "to", "lat", "lon"]
+        cols = ["site", "code", "site_type", "pollutants", "from", "to", "lat", "lon"]
         self.station_table.clear()
         self.station_table.setRowCount(len(df))
         self.station_table.setColumnCount(len(cols))
@@ -461,8 +526,11 @@ class DataWindow(QMainWindow):
         text = text.strip().lower()
         df = self.stations
         if text:
-            match = df["site"].str.lower().str.contains(text, na=False)
-            match |= df["code"].str.lower().str.contains(text, na=False)
+            match = df["site"].astype(str).str.lower().str.contains(text, na=False)
+            match |= df["code"].astype(str).str.lower().str.contains(text, na=False)
+            # Site type is searchable too: "rural" or "traffic" is often what
+            # you actually want to filter on across ~1500 stations.
+            match |= df["site_type"].astype(str).str.lower().str.contains(text, na=False)
             df = df[match]
         self._fill_station_table(df)
 
@@ -482,18 +550,23 @@ class DataWindow(QMainWindow):
         if st:
             cov = f"{st.get('from', '')} → {st.get('to', '')}" if st.get("to") else "unknown"
             code = f" ({st['code']})" if st.get("code") else ""
+            stype = f"\ntype: {st['site_type']}" if st.get("site_type") else ""
             self.station_hint.setText(
-                f"Selected: {st['site']}{code}\nmeasures: {st['pollutants']}\ndata held: {cov}"
+                f"Selected: {st['site']}{code}{stype}\n"
+                f"measures: {st['pollutants']}\ndata held: {cov}"
             )
             self.station_hint.setStyleSheet("")
-            # Snap the pickers to the period the API actually holds.
+            # Snap the pickers to the period the archive covers. Unlike the
+            # old SOS path there is no rolling window to fight, so the whole
+            # record is offered rather than the last ~6 months -- but capped
+            # at 5 years so a first click does not queue a 25-year download.
             if st.get("from") and st.get("to"):
                 lo = QDate.fromString(str(st["from"]), "yyyy-MM-dd")
                 hi = QDate.fromString(str(st["to"]), "yyyy-MM-dd")
                 if lo.isValid() and hi.isValid():
                     # Open-Meteo's archive lags a few days behind real time.
                     hi = min(hi, QDate.currentDate().addDays(-5))
-                    self.date_from.setDate(max(lo, hi.addDays(-190)))
+                    self.date_from.setDate(max(lo, hi.addYears(-5)))
                     self.date_to.setDate(hi)
         self._sync_enabled()
 
@@ -521,6 +594,7 @@ class DataWindow(QMainWindow):
             d_from,
             d_to,
             met,
+            self._current_source(),
         )
 
     def _fetch_done(self, df: pd.DataFrame) -> None:
