@@ -152,7 +152,7 @@ class MainWindow(QMainWindow):
         act = fm.addAction("&Open CSV…", self._open_csv)
         act.setShortcut("Ctrl+O")
         fm.addAction("Load &Example Data", self.load_example)
-        act = fm.addAction("Get &UK Data (AURN + met)…", self.open_data_studio)
+        act = fm.addAction("Get &UK Data (AQ networks + met)…", self.open_data_studio)
         act.setShortcut("Ctrl+D")
         self.recent_menu = fm.addMenu("Open &Recent")
         self._rebuild_recent_menu()
@@ -568,8 +568,9 @@ class MainWindow(QMainWindow):
         self.scm_btn.clicked.connect(self.open_scm_studio)
         self.data_btn = QPushButton("🌐  Get UK data")
         self.data_btn.setToolTip(
-            "Fetch UK AURN air quality + reanalysis meteorology from the\n"
-            "internet and merge them into a model-ready table (no API key)."
+            "Fetch UK air quality (AURN, AQE, SAQN, WAQN, NI, LMAM) plus\n"
+            "reanalysis meteorology and merge them into a model-ready table\n"
+            "(no API key)."
         )
         self.data_btn.clicked.connect(self.open_data_studio)
         self.transport_btn = QPushButton("🧭  Transport Studio")

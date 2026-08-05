@@ -69,7 +69,7 @@ def test_train_backend_budget_row(qapp):
 
 
 def test_data_window_construction(qapp):
-    from normet.gui.data_window import DEFAULT_POLLUTANTS, DataWindow, _site_name
+    from normet.gui.data_window import DEFAULT_POLLUTANTS, NETWORKS, DataWindow
 
     win = DataWindow()
     try:
@@ -79,52 +79,98 @@ def test_data_window_construction(qapp):
         assert win.find_btn.isEnabled()
         assert not win.fetch_btn.isEnabled()
         assert not win.save_btn.isEnabled()
-        assert _site_name("Manchester Piccadilly-Nitrogen dioxide (air)") == (
-            "Manchester Piccadilly"
-        )
-        assert _site_name("Stoke-on-Trent Centre-PM10") == "Stoke-on-Trent Centre"
+        # Network picker defaults to AURN and offers all six UK networks.
+        assert win._current_source() == "aurn"
+        assert win.net_combo.count() == len(NETWORKS) == 6
     finally:
         win.close()
 
 
-def test_find_stations_includes_aurn_code_column(qapp, monkeypatch):
-    """Each station row carries its official AURN site code (e.g. 'MAN3'),
-    looked up by name; unmatched sites get a blank code, not a crash."""
-    from normet.gui.data_window import _find_stations
-    from normet.io import defra
+def test_data_window_network_change_clears_stations(qapp):
+    """A station list belongs to one network, so switching must drop it —
+    otherwise Fetch would run a code from network A against network B."""
+    import pandas as pd
 
-    def fake_timeseries(url, params):
-        assert url == f"{defra._API_BASE}/timeseries"
-        return [
-            {
-                "id": "ts-1",
-                "station": {
-                    "properties": {"id": 1, "label": "Manchester Piccadilly-PM2.5"},
-                    "geometry": {"coordinates": [53.48, -2.24]},
-                },
-                "firstValue": {"timestamp": 1704067200000},
-                "lastValue": {"timestamp": 1706745600000},
-            },
-            {
-                "id": "ts-2",
-                "station": {
-                    "properties": {"id": 2, "label": "Some Unlisted Site-PM2.5"},
-                    "geometry": {"coordinates": [51.0, -1.0]},
-                },
-                "firstValue": {"timestamp": 1704067200000},
-                "lastValue": {"timestamp": 1706745600000},
-            },
-        ]
+    from normet.gui.data_window import DataWindow
 
-    monkeypatch.setattr(defra, "_request", fake_timeseries)
-    monkeypatch.setattr(defra, "fetch_aurn_site_codes", lambda: {"Manchester Piccadilly": "MAN3"})
+    win = DataWindow()
+    try:
+        win.stations = pd.DataFrame(
+            [
+                {
+                    "site": "X",
+                    "code": "X1",
+                    "site_type": "Urban Traffic",
+                    "pollutants": "NO2",
+                    "n": 1,
+                    "from": "2018-01-01",
+                    "to": "2022-12-31",
+                    "lat": 53.0,
+                    "lon": -2.0,
+                }
+            ]
+        )
+        win._fill_station_table(win.stations)
+        win.net_combo.setCurrentIndex(1)
+        assert win.stations is None
+        assert win.station_table.rowCount() == 0
+        assert win._current_source() != "aurn"
+    finally:
+        win.close()
 
-    df = _find_stations(["PM2.5"])
-    assert set(df["code"]) == {"MAN3", ""}
-    row = df[df["site"] == "Manchester Piccadilly"].iloc[0]
-    assert row["code"] == "MAN3"
-    row2 = df[df["site"] == "Some Unlisted Site"].iloc[0]
-    assert row2["code"] == ""
+
+def test_find_stations_aggregates_metadata_per_station(monkeypatch):
+    """One row per station, carrying its code, site type and the archive
+    coverage window.
+
+    Replaces an older test that exercised the DEFRA SOS path. That backend
+    stopped responding (2026-07-26) and the window now reads the openair
+    .RData archives through normet.io.ukaq, so a station's identity comes
+    from the network metadata rather than from parsing a timeseries label.
+    """
+    import pandas as pd
+
+    from normet.gui import data_window
+
+    meta = pd.DataFrame(
+        {
+            "code": ["MAN3", "MAN3", "GLAZ", "OLD1"],
+            "site": ["Manchester Piccadilly", "Manchester Piccadilly", "Glazebury", "Closed Site"],
+            "site_type": [
+                "Urban Background",
+                "Urban Background",
+                "Rural Background",
+                "Urban Traffic",
+            ],
+            "variable": ["PM2.5", "NO2", "PM2.5", "PM2.5"],
+            "latitude": [53.48, 53.48, 53.46, 51.0],
+            "longitude": [-2.24, -2.24, -2.47, -1.0],
+            "start_date": ["1995-12-18", "1995-12-18", "2004-01-26", "2001-01-01"],
+            # A blank end_date means the station is still open; a real one
+            # means it closed and must NOT be reported as running to today.
+            "end_date": [None, None, None, "2015-06-30"],
+        }
+    )
+    # _find_stations does `from normet import list_ukaq_stations` at call
+    # time, so the attribute on the normet package is the patch target.
+    # No qapp fixture here on purpose: this is a plain function, and gating
+    # it on Qt would have hidden it behind this environment's broken PySide6
+    # (libQt6Core Qt_6.6_PRIVATE_API) like the rest of this file.
+    monkeypatch.setattr("normet.list_ukaq_stations", lambda *a, **k: meta)
+
+    df = data_window._find_stations(["PM2.5", "NO2"], "aurn")
+
+    assert set(df["code"]) == {"MAN3", "GLAZ", "OLD1"}
+    man3 = df[df["code"] == "MAN3"].iloc[0]
+    # Both requested species collapse into one station row.
+    assert man3["n"] == 2
+    assert man3["pollutants"] == "PM2.5, NO2"
+    assert man3["site_type"] == "Urban Background"
+    assert man3["from"] == "1995-12-18"
+    # Still open -> coverage runs to today, not blank.
+    assert man3["to"] == pd.Timestamp.today().strftime("%Y-%m-%d")
+    closed = df[df["code"] == "OLD1"].iloc[0]
+    assert closed["to"] == "2015-06-30"
 
 
 def test_train_includes_time_features(qapp):

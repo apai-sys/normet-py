@@ -19,6 +19,7 @@ from .trajectory import (
     run_back_trajectories,
     trajectory_features,
 )
+from .ukaq import UKAQ_SOURCES, fetch_ukaq_measurements, list_ukaq_stations
 
 __all__ = [
     "fetch_openaq_measurements",
@@ -34,6 +35,9 @@ __all__ = [
     "fetch_aurn_measurements",
     "fetch_aurn_site_codes",
     "list_aurn_stations",
+    "UKAQ_SOURCES",
+    "fetch_ukaq_measurements",
+    "list_ukaq_stations",
     "read_trajectory_tdump",
     "trajectory_features",
     "build_trajectory_features",

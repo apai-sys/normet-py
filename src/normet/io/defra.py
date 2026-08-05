@@ -2,6 +2,22 @@
 """
 UK AURN (Automatic Urban and Rural Network) air-quality data adapter.
 
+.. deprecated::
+    Use :mod:`normet.io.ukaq` instead. **The upstream service this module
+    depends on has stopped responding.** Checked 2026-07-26:
+    ``uk-air.defra.gov.uk`` serves ``/``, ``/networks/…`` and
+    ``/openair/R_data/…`` normally, while every ``/sos-ukair/…`` path times
+    out. Every function here therefore fails at call time, and there is no
+    workaround within this adapter.
+
+    :func:`normet.fetch_ukaq_measurements` covers AURN and the five other UK
+    networks (AQE, SAQN, WAQN, NI, LMAM) from the openair ``.RData``
+    archives on the same host, which are up. It also returns the full
+    record rather than the recent rolling window this API served.
+
+    These functions are kept so existing scripts fail with a clear pointer
+    rather than an ``AttributeError``.
+
 Fetches hourly pollutant measurements from DEFRA's UK-AIR Sensor Observation
 Service (SOS) REST API (52°North Timeseries API).
 
@@ -20,6 +36,7 @@ from __future__ import annotations
 import functools
 import html
 import re
+import warnings
 from collections.abc import Iterable
 from typing import Any
 
@@ -56,6 +73,23 @@ AURN_POLLUTANT_CODES: dict[str, int] = {
 }
 
 
+def _deprecated(name: str) -> None:
+    """Warn that this adapter is superseded and its backend is unreachable.
+
+    Raised as a warning rather than an error so a caller that has a cached
+    result, or is only introspecting the module, is not broken by the import.
+    The actual network call will fail on its own a moment later.
+    """
+    warnings.warn(
+        f"normet.io.defra.{name} is deprecated and its backend "
+        "(uk-air.defra.gov.uk/sos-ukair) is no longer responding. "
+        "Use normet.fetch_ukaq_measurements / normet.list_ukaq_stations "
+        "instead, which cover AURN plus AQE, SAQN, WAQN, NI and LMAM.",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+
+
 def _resolve_pollutant_code(pollutant: str | int) -> int:
     if isinstance(pollutant, int):
         return pollutant
@@ -89,6 +123,7 @@ def fetch_aurn_site_codes() -> dict[str, str]:
         layout changes and the codes can't be parsed, so callers should treat
         a missing/blank code as "unknown" rather than fail outright.
     """
+    _deprecated("fetch_aurn_site_codes")
     try:
         resp = request_with_retry(_NETWORK_INFO_URL, params={"view": "aurn"}, source="DEFRA")
         match = re.search(r'<select id="site_id"[^>]*>(.*?)</select>', resp.text, re.S)
@@ -124,6 +159,7 @@ def list_aurn_stations(
     pandas.DataFrame
         Columns: ``id``, ``label``, ``lat``, ``lon``.
     """
+    _deprecated("list_aurn_stations")
     if pollutant is not None:
         code = _resolve_pollutant_code(pollutant)
         timeseries_list = _request(
@@ -197,6 +233,7 @@ def fetch_aurn_measurements(
         ``pollutant``, ``value``, ``unit``, ``lat``, ``lon``.
         Sorted by ``(site, date)``.
     """
+    _deprecated("fetch_aurn_measurements")
     code = _resolve_pollutant_code(pollutant)
     df_from = pd.to_datetime(date_from, utc=True)
     df_to = pd.to_datetime(date_to, utc=True)
