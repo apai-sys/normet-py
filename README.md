@@ -97,7 +97,7 @@ pip install "normet[lgb]"
 # Dask support for large datasets
 pip install "normet[dask]"
 
-# ERA5 / EEA / OpenAQ / AURN data adapters
+# ERA5 / EEA / OpenAQ / UK air quality (ukaq) data adapters
 pip install "normet[data]"
 
 # CLI entry point
@@ -407,10 +407,10 @@ era5 = nio.fetch_era5_timeseries(
     cache_dir=".era5_cache",
 )
 
-# UK AURN network
-aurn = nio.fetch_aurn_measurements(
-    station="MY1", pollutant="PM2.5",
-    date_from="2018-01-01", date_to="2023-12-31",
+# UK air quality — 6 networks (AURN, AQE, SAQN, WAQN, NI, LMAM) from
+# whole-year archives, or source="aurn_live" for a near-real-time window
+aurn = nio.fetch_ukaq_measurements(
+    "MY1", range(2018, 2024), source="aurn", pollutant="PM2.5",
 )
 
 # Open-Meteo — keyless ERA5-derived meteorology (no CDS account needed)
@@ -482,12 +482,13 @@ loading, recent files, config save/load, run history, CSV/HTML export, a
 live log dock, and one-click synthetic example data.
 
 **Data Studio** (🌐 toolbar button, or File → Get UK Data) — assemble a
-model-ready dataset without leaving the app: browse/search every UK AURN
-station by the pollutants it measures or its official site code (e.g.
-"MAN3" for Manchester Piccadilly, via `fetch_aurn_site_codes`), pick a date
-range, and fetch the hourly measurements together with ERA5-derived
-meteorology from Open-Meteo (no API key; Copernicus CDS optional). The
-merged hourly table can be saved as CSV or sent straight into Step 1.
+model-ready dataset without leaving the app: pick a network (AURN, AQE,
+SAQN, WAQN, NI, LMAM), browse/search its stations by the pollutants they
+measure or official site code (e.g. "MAN3" for Manchester Piccadilly),
+pick a date range, and fetch the hourly measurements together with
+ERA5-derived meteorology from Open-Meteo (no API key; Copernicus CDS
+optional). The merged hourly table can be saved as CSV or sent straight
+into Step 1.
 
 **SCM Studio** (Analysis → Synthetic Control, or the 🧪 toolbar button) — the
 counterfactual workflow on panel data: map date/unit/outcome columns, pick the

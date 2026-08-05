@@ -227,13 +227,17 @@ def test_fetch_eea_data_mocked(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# DEFRA / AURN Mocks & Tests
+# UKAQ aurn_live (SOS API) Mocks & Tests
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.skipif(not requests_available, reason="requests not installed")
-def test_list_aurn_stations_mocked(monkeypatch):
+def test_list_ukaq_stations_aurn_live_mocked(monkeypatch):
     import requests
+
+    from normet.io import ukaq
+
+    monkeypatch.setattr(ukaq, "_aurn_live_site_codes", lambda: {"London N. Kensington": "MY1"})
 
     station_payload = [
         {
@@ -249,27 +253,40 @@ def test_list_aurn_stations_mocked(monkeypatch):
     ]
 
     def mock_get(url, params=None, headers=None, timeout=None):
-        from normet.io.defra import _API_BASE
-
-        assert url == f"{_API_BASE}/stations"
+        assert url == f"{ukaq._AURN_LIVE_API_BASE}/stations"
         return MockResponse(station_payload)
 
     monkeypatch.setattr(requests, "get", mock_get)
 
-    from normet.io.defra import list_aurn_stations
-
-    df = list_aurn_stations()
+    df = ukaq.list_ukaq_stations("aurn_live")
     assert len(df) == 2
-    assert list(df.columns) == ["id", "label", "lat", "lon"]
-    assert df.loc[0, "id"] == "100"
-    assert df.loc[0, "label"] == "London N. Kensington"
-    assert df.loc[0, "lat"] == 51.521
-    assert df.loc[0, "lon"] == -0.213
+    assert list(df.columns) == [
+        "code",
+        "site",
+        "site_type",
+        "latitude",
+        "longitude",
+        "start_date",
+        "end_date",
+        "network",
+    ]
+    row = df[df["site"] == "London N. Kensington"].iloc[0]
+    assert row["code"] == "MY1"
+    assert row["latitude"] == 51.521
+    assert row["longitude"] == -0.213
+    assert row["network"] == "aurn_live"
+    assert pd.isna(row["site_type"])
+    birmingham = df[df["site"] == "Birmingham Centre"].iloc[0]
+    assert pd.isna(birmingham["code"])  # not in the mocked site-code lookup
 
 
 @pytest.mark.skipif(not requests_available, reason="requests not installed")
-def test_list_aurn_stations_by_pollutant_mocked(monkeypatch):
+def test_list_ukaq_stations_aurn_live_by_pollutant_mocked(monkeypatch):
     import requests
+
+    from normet.io import ukaq
+
+    monkeypatch.setattr(ukaq, "_aurn_live_site_codes", lambda: {"London N. Kensington": "MY1"})
 
     timeseries_payload = [
         {
@@ -284,39 +301,73 @@ def test_list_aurn_stations_by_pollutant_mocked(monkeypatch):
     ]
 
     def mock_get(url, params=None, headers=None, timeout=None):
-        from normet.io.defra import _API_BASE
-
-        assert url == f"{_API_BASE}/timeseries"
+        assert url == f"{ukaq._AURN_LIVE_API_BASE}/timeseries"
         assert params == {"phenomenon": "6001", "limit": 5000}
         return MockResponse(timeseries_payload)
 
     monkeypatch.setattr(requests, "get", mock_get)
 
-    from normet.io.defra import list_aurn_stations
-
-    df = list_aurn_stations(pollutant="PM2.5")
+    df = ukaq.list_ukaq_stations("aurn_live", pollutant="PM2.5")
     assert len(df) == 1
-    assert "timeseries_id" in df.columns
-    assert df.loc[0, "id"] == "100"
-    assert df.loc[0, "label"] == "London N. Kensington"
-    assert df.loc[0, "timeseries_id"] == "ts-1"
+    assert df.loc[0, "code"] == "MY1"
+    assert df.loc[0, "site"] == "London N. Kensington"
+    assert df.loc[0, "network"] == "aurn_live"
+    assert "variable" not in df.columns  # all_variables=False (default) drops it
 
 
 @pytest.mark.skipif(not requests_available, reason="requests not installed")
-def test_fetch_aurn_measurements_mocked(monkeypatch):
+def test_list_ukaq_stations_aurn_live_all_variables_mocked(monkeypatch):
     import requests
+
+    from normet.io import ukaq
+
+    monkeypatch.setattr(ukaq, "_aurn_live_site_codes", lambda: {})
+
+    def mock_get(url, params=None, headers=None, timeout=None):
+        assert url == f"{ukaq._AURN_LIVE_API_BASE}/timeseries"
+        return MockResponse(
+            [
+                {
+                    "id": "ts-1",
+                    "station": {
+                        "properties": {"id": "100", "label": "London N. Kensington"},
+                        "geometry": {"coordinates": [51.521, -0.213]},
+                    },
+                }
+            ]
+        )
+
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    df = ukaq.list_ukaq_stations("aurn_live", pollutant=["NO2", "O3"], all_variables=True)
+    assert set(df["variable"]) == {"NO2", "O3"}
+    assert len(df) == 2  # one row per (site, pollutant) -- both requested species queried
+
+
+def test_list_ukaq_stations_aurn_live_rejects_site_type():
+    from normet.io import ukaq
+
+    with pytest.raises(ValueError, match="site_type"):
+        ukaq.list_ukaq_stations("aurn_live", site_type="Urban Traffic")
+
+
+@pytest.mark.skipif(not requests_available, reason="requests not installed")
+def test_fetch_ukaq_measurements_aurn_live_mocked(monkeypatch):
+    import requests
+
+    from normet.io import ukaq
+
+    monkeypatch.setattr(ukaq, "_aurn_live_site_codes", lambda: {"London N. Kensington": "MY1"})
 
     ts_discovery = [
         {
             "id": "ts-1",
             "station": {
-                "type": "Feature",
                 "properties": {"id": "100", "label": "London N. Kensington"},
-                "geometry": {"type": "Point", "coordinates": [51.521, -0.213]},
+                "geometry": {"coordinates": [51.521, -0.213]},
             },
         },
     ]
-
     ts_data = {
         "values": [
             {"timestamp": 1704067200000, "value": 12.5},
@@ -324,13 +375,8 @@ def test_fetch_aurn_measurements_mocked(monkeypatch):
         ]
     }
 
-    call_log: list[str] = []
-
     def mock_get(url, params=None, headers=None, timeout=None):
-        from normet.io.defra import _API_BASE
-
-        call_log.append(url)
-        if f"{_API_BASE}/timeseries" == url and params is not None:
+        if url == f"{ukaq._AURN_LIVE_API_BASE}/timeseries":
             return MockResponse(ts_discovery)
         if "getData" in url:
             return MockResponse(ts_data)
@@ -338,174 +384,53 @@ def test_fetch_aurn_measurements_mocked(monkeypatch):
 
     monkeypatch.setattr(requests, "get", mock_get)
 
-    from normet.io.defra import fetch_aurn_measurements
+    df = ukaq.fetch_ukaq_measurements("MY1", 2024, source="aurn_live", pollutant="PM2.5")
 
-    df = fetch_aurn_measurements(
-        station="100",
-        pollutant="PM2.5",
-        date_from="2024-01-01",
-        date_to="2024-01-02",
-    )
-
+    assert list(df.columns) == ["date", "code", "site", "PM2.5", "network"]
     assert len(df) == 2
-    assert list(df.columns) == [
-        "date",
-        "site",
-        "station_id",
-        "pollutant",
-        "value",
-        "unit",
-        "lat",
-        "lon",
-    ]
-    assert df.loc[0, "value"] == 12.5
-    assert df.loc[1, "value"] == 14.2
+    assert df.loc[0, "code"] == "MY1"
     assert df.loc[0, "site"] == "London N. Kensington"
-    assert df.loc[0, "station_id"] == "100"
-    assert df.loc[0, "pollutant"] == "PM2.5"
-    assert df.loc[0, "unit"] == "ug.m-3"
+    assert df.loc[0, "network"] == "aurn_live"
+    assert sorted(df["PM2.5"]) == [12.5, 14.2]
+
+
+def test_fetch_ukaq_measurements_aurn_live_unknown_code_warns(monkeypatch):
+    from normet.io import ukaq
+
+    monkeypatch.setattr(ukaq, "_aurn_live_site_codes", lambda: {})
+
+    df = ukaq.fetch_ukaq_measurements("NOPE", 2024, source="aurn_live", pollutant="NO2")
+    assert df.empty
+
+
+def test_fetch_ukaq_measurements_aurn_live_unknown_code_raises(monkeypatch):
+    from normet.io import ukaq
+
+    monkeypatch.setattr(ukaq, "_aurn_live_site_codes", lambda: {})
+
+    with pytest.raises(RuntimeError, match="unknown AURN code"):
+        ukaq.fetch_ukaq_measurements(
+            "NOPE", 2024, source="aurn_live", pollutant="NO2", on_missing="raise"
+        )
 
 
 @pytest.mark.skipif(not requests_available, reason="requests not installed")
-def test_fetch_aurn_measurements_station_label_filter(monkeypatch):
+def test_fetch_ukaq_measurements_aurn_live_skips_none_values(monkeypatch):
     import requests
 
-    ts_discovery = [
-        {
-            "id": "ts-a",
-            "label": "PM2.5 London N. Kensington",
-            "station": {
-                "type": "Feature",
-                "properties": {"id": "100", "label": "London N. Kensington"},
-                "geometry": {"type": "Point", "coordinates": [51.521, -0.213]},
-            },
-        },
-        {
-            "id": "ts-b",
-            "label": "PM2.5 Birmingham Centre",
-            "station": {
-                "type": "Feature",
-                "properties": {"id": "200", "label": "Birmingham Centre"},
-                "geometry": {"type": "Point", "coordinates": [52.479, -1.906]},
-            },
-        },
-    ]
+    from normet.io import ukaq
 
-    ts_data_a = {
-        "values": [
-            {"timestamp": 1704067200000, "value": 12.5},
-        ]
-    }
-
-    call_log: list[str] = []
-
-    def mock_get(url, params=None, headers=None, timeout=None):
-        from normet.io.defra import _API_BASE
-
-        call_log.append(url)
-        if f"{_API_BASE}/timeseries" == url and params is not None:
-            return MockResponse(ts_discovery)
-        if "timeseries/ts-a/getData" in url:
-            return MockResponse(ts_data_a)
-        return MockResponse({"values": []})
-
-    monkeypatch.setattr(requests, "get", mock_get)
-
-    from normet.io.defra import fetch_aurn_measurements
-
-    df = fetch_aurn_measurements(
-        station_label="kensington",
-        pollutant="PM2.5",
-        date_from="2024-01-01",
-        date_to="2024-01-02",
-    )
-
-    assert len(df) == 1
-    assert df.loc[0, "site"] == "London N. Kensington"
-    assert df.loc[0, "value"] == 12.5
-
-
-@pytest.mark.skipif(not requests_available, reason="requests not installed")
-def test_fetch_aurn_measurements_no_matches(monkeypatch):
-    import requests
-
-    def mock_get(url, params=None, headers=None, timeout=None):
-        from normet.io.defra import _API_BASE
-
-        if f"{_API_BASE}/timeseries" == url and params is not None:
-            return MockResponse([])
-        return MockResponse({"values": []})
-
-    monkeypatch.setattr(requests, "get", mock_get)
-
-    from normet.io.defra import fetch_aurn_measurements
-
-    df = fetch_aurn_measurements(
-        station="999",
-        pollutant="PM2.5",
-        date_from="2024-01-01",
-        date_to="2024-01-02",
-    )
-
-    assert len(df) == 0
-    assert isinstance(df, pd.DataFrame)
-
-
-@pytest.mark.skipif(not requests_available, reason="requests not installed")
-def test_fetch_aurn_measurements_all_stations(monkeypatch):
-    import requests
+    monkeypatch.setattr(ukaq, "_aurn_live_site_codes", lambda: {"London N. Kensington": "MY1"})
 
     ts_discovery = [
         {
             "id": "ts-1",
             "station": {
-                "type": "Feature",
                 "properties": {"id": "100", "label": "London N. Kensington"},
-                "geometry": {"type": "Point", "coordinates": [51.521, -0.213]},
+                "geometry": {"coordinates": [51.521, -0.213]},
             },
         },
     ]
-
-    ts_data = {"values": [{"timestamp": 1704067200000, "value": 8.0}]}
-
-    def mock_get(url, params=None, headers=None, timeout=None):
-        from normet.io.defra import _API_BASE
-
-        if f"{_API_BASE}/timeseries" == url and params is not None:
-            return MockResponse(ts_discovery)
-        if "getData" in url:
-            return MockResponse(ts_data)
-        return MockResponse([])
-
-    monkeypatch.setattr(requests, "get", mock_get)
-
-    from normet.io.defra import fetch_aurn_measurements
-
-    df = fetch_aurn_measurements(
-        pollutant="PM2.5",
-        date_from="2024-01-01",
-        date_to="2024-01-02",
-    )
-
-    assert len(df) == 1
-    assert df.loc[0, "value"] == 8.0
-
-
-@pytest.mark.skipif(not requests_available, reason="requests not installed")
-def test_fetch_aurn_measurements_skips_none_values(monkeypatch):
-    import requests
-
-    ts_discovery = [
-        {
-            "id": "ts-1",
-            "station": {
-                "type": "Feature",
-                "properties": {"id": "100", "label": "London N. Kensington"},
-                "geometry": {"type": "Point", "coordinates": [51.521, -0.213]},
-            },
-        },
-    ]
-
     ts_data = {
         "values": [
             {"timestamp": 1704067200000, "value": 10.0},
@@ -515,9 +440,7 @@ def test_fetch_aurn_measurements_skips_none_values(monkeypatch):
     }
 
     def mock_get(url, params=None, headers=None, timeout=None):
-        from normet.io.defra import _API_BASE
-
-        if f"{_API_BASE}/timeseries" == url and params is not None:
+        if url == f"{ukaq._AURN_LIVE_API_BASE}/timeseries":
             return MockResponse(ts_discovery)
         if "getData" in url:
             return MockResponse(ts_data)
@@ -525,17 +448,9 @@ def test_fetch_aurn_measurements_skips_none_values(monkeypatch):
 
     monkeypatch.setattr(requests, "get", mock_get)
 
-    from normet.io.defra import fetch_aurn_measurements
-
-    df = fetch_aurn_measurements(
-        station="100",
-        pollutant="PM2.5",
-        date_from="2024-01-01",
-        date_to="2024-01-02",
-    )
-
+    df = ukaq.fetch_ukaq_measurements("MY1", 2024, source="aurn_live", pollutant="NO2")
     assert len(df) == 1
-    assert df.loc[0, "value"] == 10.0
+    assert df.loc[0, "NO2"] == 10.0
 
 
 _FAKE_NETWORK_INFO_HTML = """
@@ -551,21 +466,21 @@ _FAKE_NETWORK_INFO_HTML = """
 
 
 @pytest.mark.skipif(not requests_available, reason="requests not installed")
-def test_fetch_aurn_site_codes_mocked(monkeypatch):
+def test_aurn_live_site_codes_mocked(monkeypatch):
     import requests
 
-    from normet.io import defra
+    from normet.io import ukaq
 
-    defra.fetch_aurn_site_codes.cache_clear()
+    ukaq._aurn_live_site_codes.cache_clear()
 
     def mock_get(url, params=None, headers=None, timeout=None):
-        assert url == defra._NETWORK_INFO_URL
+        assert url == ukaq._AURN_NETWORK_INFO_URL
         assert params == {"view": "aurn"}
         return MockResponse({}, text_data=_FAKE_NETWORK_INFO_HTML)
 
     monkeypatch.setattr(requests, "get", mock_get)
 
-    codes = defra.fetch_aurn_site_codes()
+    codes = ukaq._aurn_live_site_codes()
     assert codes["Manchester Piccadilly"] == "MAN3"
     assert codes["London Marylebone Road"] == "MY1"
     assert codes["Bristol St Paul's"] == "BRS8"  # plain apostrophe survives unescaped
@@ -575,24 +490,24 @@ def test_fetch_aurn_site_codes_mocked(monkeypatch):
     monkeypatch.setattr(
         requests, "get", lambda *a, **k: (_ for _ in ()).throw(AssertionError("not cached"))
     )
-    assert defra.fetch_aurn_site_codes() is codes
-    defra.fetch_aurn_site_codes.cache_clear()
+    assert ukaq._aurn_live_site_codes() is codes
+    ukaq._aurn_live_site_codes.cache_clear()
 
 
 @pytest.mark.skipif(not requests_available, reason="requests not installed")
-def test_fetch_aurn_site_codes_graceful_on_bad_html(monkeypatch):
+def test_aurn_live_site_codes_graceful_on_bad_html(monkeypatch):
     import requests
 
-    from normet.io import defra
+    from normet.io import ukaq
 
-    defra.fetch_aurn_site_codes.cache_clear()
+    ukaq._aurn_live_site_codes.cache_clear()
     monkeypatch.setattr(
         requests, "get", lambda *a, **k: MockResponse({}, text_data="<html>no select here</html>")
     )
 
-    codes = defra.fetch_aurn_site_codes()
+    codes = ukaq._aurn_live_site_codes()
     assert codes == {}
-    defra.fetch_aurn_site_codes.cache_clear()
+    ukaq._aurn_live_site_codes.cache_clear()
 
 
 @pytest.mark.skipif(not cdsapi_available, reason="cdsapi not installed")

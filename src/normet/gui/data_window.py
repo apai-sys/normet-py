@@ -16,20 +16,17 @@ Data source
 -----------
 This window reads the openair-format ``.RData`` archives via
 :mod:`normet.io.ukaq`, covering all six UK networks (AURN, AQE, SAQN, WAQN,
-NI, LMAM) — around 1500 stations.
+NI, LMAM) — around 1500 stations, whole calendar years, back to whenever
+each station opened.
 
-It used to call DEFRA's UK-AIR SOS REST API through
-:mod:`normet.io.defra`, which had two problems. The smaller one is that the
-SOS API is AURN-only, roughly 210 stations, excluding the entire
-local-authority estate and most rural and suburban background sites. The
-decisive one is that **the SOS service stopped responding** (checked
-2026-07-26: ``uk-air.defra.gov.uk`` serves ``/``, ``/networks/…`` and
-``/openair/R_data/…`` normally, while every ``/sos-ukair/…`` path times
-out), so that path no longer worked at all.
-
-A side effect of the move: the SOS API only served a recent rolling window,
-whereas the archives go back to whenever each station opened. The date
-pickers are no longer clamped to a few months.
+``normet.io.ukaq`` also exposes ``source="aurn_live"``, DEFRA's UK-AIR SOS
+REST API (AURN-only, ~210 stations, a rolling recent window rather than
+full history) -- not wired into this window's network picker, only used
+programmatically for now. It used to be a separate module
+(:mod:`normet.io.defra`) briefly deprecated on the theory that its
+backend had gone permanently offline; that theory turned out to be wrong
+(checked again 2026-08-05, it answers normally), so the two were merged
+as complementary sources behind one interface instead.
 """
 
 from __future__ import annotations

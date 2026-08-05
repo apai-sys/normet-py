@@ -112,61 +112,55 @@ df_eea = nm.io.fetch_eea_data(
 
 ---
 
-## AURN (UK Automatic Urban and Rural Network)
+## UK Air Quality Networks (AURN, AQE, SAQN, WAQN, NI, LMAM)
 
-The AURN adapter fetches hourly pollutant measurements from the DEFRA UK-AIR
-Sensor Observation Service (52°North SOS) REST API, using the same EIONET
-pollutant codes as the EEA adapter. No API key is required.
+`normet.io.ukaq` covers all six UK networks -- around 1500 stations -- from
+two complementary backends behind one `source=` argument:
 
-### 1. List Stations
+| `source`                              | backend                | coverage         | freshness                    |
+|----------------------------------------|-------------------------|-------------------|-------------------------------|
+| `aurn`, `aqe`, `saqn`, `waqn`, `ni`, `local` | openair `.RData` archives | that network only | whole calendar years, no gap  |
+| `aurn_live`                            | DEFRA SOS REST API      | AURN only          | rolling recent window, near real-time |
+
+No API key is required for either.
+
+### 1. List stations
 
 ```python
-# All stations
-df_stations = nm.io.list_aurn_stations()
+# Whole-year archive, all six networks available via `source`
+df_stations = nm.io.list_ukaq_stations("aurn")
+df_pm25 = nm.io.list_ukaq_stations("aurn", pollutant="PM2.5")
+# Columns: [code, site, site_type, latitude, longitude, start_date, end_date, network]
 
-# Filtered by pollutant
-df_pm25 = nm.io.list_aurn_stations(pollutant="PM2.5")
-# Columns: [id, label, lat, lon]
+# Live/recent window -- site_type and start_date/end_date are always NaN here,
+# the SOS API has no station classification or period metadata
+df_live = nm.io.list_ukaq_stations("aurn_live", pollutant="NO2")
 ```
 
-### 2. Fetch Measurements
+### 2. Fetch measurements
 
 ```python
-df_aurn = nm.io.fetch_aurn_measurements(
-    station="London North Kensington",  # station ID or label substring
+df_aurn = nm.io.fetch_ukaq_measurements(
+    "MY1", 2024, source="aurn",  # "MY1" = London North Kensington's AURN code
     pollutant="NO2",
-    date_from="2024-01-01",
-    date_to="2024-01-07",
 )
-# Columns: [date, site, station_id, pollutant, value, unit, lat, lon]
-```
+# Columns: [date, code, site, NO2, network]
 
-Filter by label substring instead of exact station:
-
-```python
-df_london = nm.io.fetch_aurn_measurements(
-    station_label="London",
-    pollutant="PM2.5",
-    date_from="2024-01-01",
-    date_to="2024-01-07",
+df_live = nm.io.fetch_ukaq_measurements(
+    "MY1", 2024, source="aurn_live",
+    pollutant="NO2",
 )
 ```
 
-### Supported Pollutants
+`year` always selects whole calendar year(s), on both backends -- even
+though the live API itself can serve an arbitrary date range, this keeps
+the two sources' contract identical so a caller can switch `source=`
+without changing anything else.
 
-`AURN_POLLUTANT_CODES` maps names to EIONET numeric codes:
+### Supported pollutants
 
-| Pollutant | Code |
-|-----------|------|
-| PM2.5     | 6001 |
-| PM10      | 5    |
-| NO2       | 8    |
-| NOX       | 9    |
-| NO        | 20   |
-| O3        | 7    |
-| SO2       | 1    |
-| CO        | 10   |
-| BENZENE   | 24   |
+Pass any of the archive's own column names, e.g. `"NOXasNO2"` for NOx (not
+`"NOX"`) -- the same names work for `source="aurn_live"`.
 
 ---
 

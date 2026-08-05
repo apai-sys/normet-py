@@ -60,35 +60,41 @@ def test_openaq_locations_signature():
     assert callable(openaq_locations)
 
 
-# ---- AURN / DEFRA ----
+# ---- UKAQ (archives + aurn_live) ----
 
 
-def test_defra_module_importable():
-    from normet.io import defra
+def test_ukaq_module_importable():
+    from normet.io import ukaq
 
-    assert defra.AURN_POLLUTANT_CODES["PM2.5"] == 6001
-    assert defra.AURN_POLLUTANT_CODES["NO2"] == 8
-    assert defra.AURN_POLLUTANT_CODES["O3"] == 7
+    assert ukaq.UKAQ_SOURCES["aurn"]["data"]
+    assert callable(ukaq.list_ukaq_stations)
+    assert callable(ukaq.fetch_ukaq_measurements)
 
 
-def test_defra_resolve_pollutant_code():
-    from normet.io.defra import _resolve_pollutant_code
+def test_ukaq_aurn_live_resolve_pollutant_code():
+    from normet.io.ukaq import _aurn_live_resolve_pollutant_code
 
-    assert _resolve_pollutant_code("PM2.5") == 6001
-    assert _resolve_pollutant_code("no2") == 8
-    assert _resolve_pollutant_code(7) == 7
+    assert _aurn_live_resolve_pollutant_code("PM2.5") == 6001
+    assert _aurn_live_resolve_pollutant_code("no2") == 8
+    assert _aurn_live_resolve_pollutant_code("noxasno2") == 9
+    assert _aurn_live_resolve_pollutant_code(7) == 7
 
     with pytest.raises(ValueError, match="Unknown pollutant"):
-        _resolve_pollutant_code("XYZ")
+        _aurn_live_resolve_pollutant_code("XYZ")
 
 
-def test_list_aurn_stations_signature():
-    from normet.io.defra import list_aurn_stations
+def test_ukaq_check_source_accepts_archives_and_aurn_live():
+    from normet.io.ukaq import _check_source
 
-    assert callable(list_aurn_stations)
+    assert _check_source("AURN") == "aurn"
+    assert _check_source("aurn_live") == "aurn_live"
+    with pytest.raises(ValueError, match="Unknown source"):
+        _check_source("nope")
 
 
-def test_fetch_aurn_measurements_signature():
-    from normet.io.defra import fetch_aurn_measurements
+def test_ukaq_split_label():
+    from normet.io.ukaq import _aurn_live_split_label
 
-    assert callable(fetch_aurn_measurements)
+    assert _aurn_live_split_label("Manchester Piccadilly-Nitrogen dioxide (air)") == (
+        "Manchester Piccadilly"
+    )
