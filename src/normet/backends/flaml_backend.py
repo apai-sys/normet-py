@@ -243,8 +243,17 @@ def train_flaml(
         default_cfg.update(model_config)
 
     # Build kwargs for AutoML.fit
+    #
+    # ``max_iter`` caps the search by NUMBER OF TRIALS rather than by wall
+    # clock. It is what a caller needs to make model selection reproducible:
+    # ``time_budget`` is wall-clock, so the same script on the same data can
+    # return a different model depending on how loaded the node was, and the
+    # result carries no sign that the search was cut short. Set
+    # ``time_budget=-1`` alongside it for a purely trial-bounded search;
+    # FLAML stops at whichever limit is reached first when both are given.
     passthrough = {
         "time_budget",
+        "max_iter",
         "metric",
         "estimator_list",
         "task",
@@ -253,7 +262,26 @@ def train_flaml(
         "n_jobs",
         "split_type",
         "n_splits",
+        # Bounds the per-estimator search space (e.g. capping LGBM's
+        # num_leaves, which defaults to a [4, 32768] range) rather than the
+        # search *effort* (time_budget/max_iter). Needed because CFO can
+        # commit to a huge-leaf config early in the trial sequence -- at the
+        # same best_iteration as sites that landed on a tiny model -- so
+        # shrinking the budget does not reliably shrink the result; only
+        # narrowing the space itself does. See flaml.AutoML.fit's own
+        # docstring for the {"estimator": {"param": {"domain": ...}}} shape.
+        "custom_hp",
     }
+    # A key that is neither a default nor forwarded is silently discarded,
+    # which is how a caller ends up believing it has configured something it
+    # has not. Warn instead: the cost is one log line, and the alternative is
+    # a run that looks configured and is not.
+    _ignored = set(model_config or {}) - passthrough - {"save_model", "path", "filename"}
+    if _ignored:
+        log.warning(
+            "FLAML backend ignoring unsupported model_config key(s): %s",
+            ", ".join(sorted(_ignored)),
+        )
     automl_kwargs = {k: default_cfg[k] for k in passthrough if k in default_cfg}
 
     AutoML = _import_flaml_automl()
