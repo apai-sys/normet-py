@@ -7,6 +7,14 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ## [Unreleased]
 
 ### Added
+- **UK air quality adapter** (`normet.io.ukaq`): `list_ukaq_stations` /
+  `fetch_ukaq_measurements` cover all six UK networks (AURN, AQE, SAQN, WAQN,
+  NI, LMAM — around 1500 stations) from the openair `.RData` archives via
+  `source="aurn"`/`"aqe"`/`"saqn"`/`"waqn"`/`"ni"`/`"local"`, whole calendar
+  years, or DEFRA's live SOS API (AURN only, near-real-time rolling window)
+  via `source="aurn_live"` — both behind the same interface and schema
+  (`aurn_live` rows leave `site_type`/`start_date`/`end_date` as `NaN`,
+  which the SOS API does not carry).
 - **Lag-structure diagnostics.** `analyze_lag` (and the `LagDiagnostics`
   result) computes a target's ACF/PACF and the pre-whitened cross-correlation
   (CCF) with a meteorological driver to suggest autoregressive and predictive
@@ -25,6 +33,10 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   `run_back_trajectories` can run when no local meteorology is available.
 
 ### Changed (breaking)
+- **Removed `normet.io.defra`** (`fetch_aurn_measurements`, `list_aurn_stations`,
+  `fetch_aurn_site_codes`, `AURN_POLLUTANT_CODES`) — folded into
+  `normet.io.ukaq` as `source="aurn_live"` instead (see Added, above); the two
+  are complementary data sources, not one superseding the other.
 - **Renamed the `value`/`feature_names`/`na_rm`/`fraction` parameters to
   `target`/`covariates`/`dropna`/`train_fraction` across the entire public
   API**, extending the rename already applied to `prepare_data`/`check_data`/
@@ -46,6 +58,14 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   `[xarray]` extra (and `xarray`/`netCDF4` from `[all]`). ERA5 meteorology is
   now fetched as pre-interpolated single-point time-series via
   `fetch_era5_timeseries`, which needs only `cdsapi` — no `xarray`/`netCDF4`.
+
+### Fixed
+- **FLAML backend accepts `custom_hp`** in `model_config`, to bound an
+  estimator's search space (e.g. LGBM `num_leaves`, default range
+  `[4, 32768]`) rather than only its search effort (`time_budget`/`max_iter`).
+  Needed after an AutoML fit committed to `num_leaves` in the thousands —
+  found at the same `best_iteration` as fits that landed on tiny models, so
+  shrinking the budget alone would not have prevented it.
 
 ### Internal
 - Repaired the pre-commit `mypy` hook (pin `numpy<2.2` so its stubs parse under
