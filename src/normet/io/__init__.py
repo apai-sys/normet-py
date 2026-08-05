@@ -1,11 +1,5 @@
 """I/O adapters for non-tabular data sources."""
 
-from .defra import (
-    AURN_POLLUTANT_CODES,
-    fetch_aurn_measurements,
-    fetch_aurn_site_codes,
-    list_aurn_stations,
-)
 from .eea import EEA_POLLUTANT_CODES, fetch_eea_data
 from .era5 import ERA5_AQ_VARIABLES_DEFAULT, fetch_era5_timeseries
 from .gdas import ARL_GDAS1_BASE_URL, fetch_gdas1, gdas1_filenames
@@ -31,10 +25,6 @@ __all__ = [
     "OPENMETEO_HOURLY_DEFAULT",
     "EEA_POLLUTANT_CODES",
     "fetch_eea_data",
-    "AURN_POLLUTANT_CODES",
-    "fetch_aurn_measurements",
-    "fetch_aurn_site_codes",
-    "list_aurn_stations",
     "UKAQ_SOURCES",
     "fetch_ukaq_measurements",
     "list_ukaq_stations",
