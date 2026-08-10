@@ -274,15 +274,23 @@ def normalise(
 
     from ..utils.cache import config_hash, dataframe_hash, make_memory, model_hash
 
-    key_cols = list(dict.fromkeys([*_cfg.covariates, "value", "date"]))
+    # Every ingredient below is order-canonicalised: the result depends on which
+    # columns and which resampled variables are involved, never on the order they
+    # are listed in. Two places had to be fixed together -- the lists themselves
+    # (hashed via `sorted(...)` in config_hash) *and* the column order of the
+    # frames handed to dataframe_hash, which is order-sensitive. Callers that
+    # reach the same set by different routes -- notably decompose(), whose
+    # resample list is a shrinking sublist of a feature-importance or permutation
+    # order -- otherwise recompute every single time.
+    key_cols = sorted(set(_cfg.covariates) | {"value", "date"})
     df_keyed = process_date(df.copy()).pipe(check_data, _cfg.covariates, "value")
     resample_pool = df_keyed if _cfg.resample_df is None else _cfg.resample_df
-    resample_key_cols = [
+    resample_key_cols = sorted(
         c for c in (_cfg.variables_resample or key_cols) if c in resample_pool.columns
-    ]
+    )
     cache_key = config_hash(
         sorted(_cfg.covariates),
-        _cfg.variables_resample,
+        sorted(_cfg.variables_resample) if _cfg.variables_resample is not None else None,
         _cfg.n_samples,
         _cfg.replace,
         _cfg.aggregate,
