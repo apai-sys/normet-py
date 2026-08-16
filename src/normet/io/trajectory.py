@@ -154,9 +154,9 @@ def _region_mask(region: Any, lon: np.ndarray, lat: np.ndarray) -> np.ndarray:
     """Point-in-region test — a 4-tuple bbox, or a shapely geometry (polygon
     boundaries loaded from GeoJSON via :func:`load_source_regions`)."""
     if (
-        isinstance(region, (tuple, list))
+        isinstance(region, tuple | list)
         and len(region) == 4
-        and all(isinstance(v, (int, float)) for v in region)
+        and all(isinstance(v, int | float) for v in region)
     ):
         xmn, ymn, xmx, ymx = region
         return (lon >= xmn) & (lon <= xmx) & (lat >= ymn) & (lat <= ymx)

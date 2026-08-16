@@ -1,7 +1,6 @@
 import numpy as np
 import pandas as pd
 import pytest
-
 from normet.utils.metrics import Stats, _fac2, _stats_from_arrays, modStats
 
 

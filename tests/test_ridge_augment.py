@@ -7,7 +7,6 @@ equivalence is the entire justification for the optimisation.
 
 import numpy as np
 import pytest
-
 from normet.causal.scm import _ridge_augment
 
 pytest.importorskip("sklearn")

@@ -90,7 +90,6 @@ def test_data_window_network_change_clears_stations(qapp):
     """A station list belongs to one network, so switching must drop it —
     otherwise Fetch would run a code from network A against network B."""
     import pandas as pd
-
     from normet.gui.data_window import DataWindow
 
     win = DataWindow()
@@ -129,7 +128,6 @@ def test_find_stations_aggregates_metadata_per_station(monkeypatch):
     from the network metadata rather than from parsing a timeseries label.
     """
     import pandas as pd
-
     from normet.gui import data_window
 
     meta = pd.DataFrame(
@@ -257,7 +255,6 @@ def test_multiscale_button_gating_and_tab_mapping(qapp):
     """The Multi-scale button needs both a trained model AND Step 2's Y_inf;
     the Multi-scale tab must land at the 'multiscale' results key."""
     import pandas as pd
-
     from normet.gui.main_window import MainWindow
 
     win = MainWindow()

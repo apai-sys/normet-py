@@ -1,7 +1,6 @@
 import numpy as np
 import pandas as pd
 import pytest
-
 from normet.utils.featureeng import LagDiagnostics, analyze_lag
 
 statsmodels = pytest.importorskip("statsmodels")

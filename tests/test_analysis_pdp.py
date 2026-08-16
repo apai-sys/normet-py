@@ -13,12 +13,11 @@ from __future__ import annotations
 import importlib
 import sys
 
+# Import the *module* (not the function) so monkeypatch targets work
+import normet.analysis.pdp  # noqa: F401 — ensures module is in sys.modules
 import numpy as np
 import pandas as pd
 import pytest
-
-# Import the *module* (not the function) so monkeypatch targets work
-import normet.analysis.pdp  # noqa: F401 — ensures module is in sys.modules
 
 _pdp_module = sys.modules["normet.analysis.pdp"]
 

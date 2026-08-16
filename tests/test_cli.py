@@ -13,7 +13,6 @@ needs_click = pytest.mark.skipif(
 @needs_click
 def test_cli_info_runs():
     from click.testing import CliRunner
-
     from normet.cli import _build_cli
 
     runner = CliRunner()
@@ -27,7 +26,6 @@ def test_cli_info_runs():
 @needs_click
 def test_cli_help():
     from click.testing import CliRunner
-
     from normet.cli import _build_cli
 
     runner = CliRunner()

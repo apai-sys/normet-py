@@ -1,7 +1,6 @@
 import numpy as np
 import pandas as pd
 import pytest
-
 from normet.utils.cv import time_series_cv
 
 

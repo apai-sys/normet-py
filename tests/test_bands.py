@@ -2,7 +2,6 @@
 
 import numpy as np
 import pandas as pd
-
 from normet.causal.bands import effect_bands_space, uncertainty_bands
 
 DONORS = ["D1", "D2", "D3", "D4", "D5", "D6"]

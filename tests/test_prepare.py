@@ -1,7 +1,6 @@
 import numpy as np
 import pandas as pd
 import pytest
-
 from normet.utils.prepare import (
     add_date_variables,
     check_data,

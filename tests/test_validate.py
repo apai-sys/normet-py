@@ -2,7 +2,6 @@
 
 import pandas as pd
 import pytest
-
 from normet.exceptions import DataError
 from normet.utils.validate import (
     require_column,

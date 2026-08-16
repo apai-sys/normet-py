@@ -113,7 +113,7 @@ def _apply_conditional_filter(
         elif isinstance(cond, list | tuple | set | pd.Series | np.ndarray):
             mask &= s.isin(list(cond))
         else:
-            mask &= s == cond
+            mask &= s == cond  # type: ignore[unreachable]
     return pool.loc[mask]
 
 

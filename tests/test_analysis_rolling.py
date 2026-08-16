@@ -8,12 +8,11 @@ from __future__ import annotations
 
 import sys
 
+# Import module and get the actual module object from sys.modules
+import normet.analysis.rolling
 import numpy as np
 import pandas as pd
 import pytest
-
-# Import module and get the actual module object from sys.modules
-import normet.analysis.rolling
 from normet.analysis.rolling import rolling
 
 rolling_mod = sys.modules["normet.analysis.rolling"]

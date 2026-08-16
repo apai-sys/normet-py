@@ -7,7 +7,6 @@ import importlib.util
 import numpy as np
 import pandas as pd
 import pytest
-
 from normet.analysis.events import _intervals_from_mask, _to_series, anomaly_scores, detect_events
 
 # ---------------------------------------------------------------------------

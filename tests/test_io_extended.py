@@ -11,7 +11,6 @@ import io
 
 import pandas as pd
 import pytest
-
 from normet.io import eea, era5, openaq
 
 # Ensure optional deps are available, otherwise skip
@@ -255,7 +254,6 @@ def test_fetch_eea_data_mocked(monkeypatch):
 @pytest.mark.skipif(not requests_available, reason="requests not installed")
 def test_list_ukaq_stations_aurn_live_mocked(monkeypatch):
     import requests
-
     from normet.io import ukaq
 
     monkeypatch.setattr(ukaq, "_aurn_live_site_codes", lambda: {"London N. Kensington": "MY1"})
@@ -304,7 +302,6 @@ def test_list_ukaq_stations_aurn_live_mocked(monkeypatch):
 @pytest.mark.skipif(not requests_available, reason="requests not installed")
 def test_list_ukaq_stations_aurn_live_by_pollutant_mocked(monkeypatch):
     import requests
-
     from normet.io import ukaq
 
     monkeypatch.setattr(ukaq, "_aurn_live_site_codes", lambda: {"London N. Kensington": "MY1"})
@@ -339,7 +336,6 @@ def test_list_ukaq_stations_aurn_live_by_pollutant_mocked(monkeypatch):
 @pytest.mark.skipif(not requests_available, reason="requests not installed")
 def test_list_ukaq_stations_aurn_live_all_variables_mocked(monkeypatch):
     import requests
-
     from normet.io import ukaq
 
     monkeypatch.setattr(ukaq, "_aurn_live_site_codes", lambda: {})
@@ -375,7 +371,6 @@ def test_list_ukaq_stations_aurn_live_rejects_site_type():
 @pytest.mark.skipif(not requests_available, reason="requests not installed")
 def test_fetch_ukaq_measurements_aurn_live_mocked(monkeypatch):
     import requests
-
     from normet.io import ukaq
 
     monkeypatch.setattr(ukaq, "_aurn_live_site_codes", lambda: {"London N. Kensington": "MY1"})
@@ -438,7 +433,6 @@ def test_fetch_ukaq_measurements_aurn_live_unknown_code_raises(monkeypatch):
 @pytest.mark.skipif(not requests_available, reason="requests not installed")
 def test_fetch_ukaq_measurements_aurn_live_skips_none_values(monkeypatch):
     import requests
-
     from normet.io import ukaq
 
     monkeypatch.setattr(ukaq, "_aurn_live_site_codes", lambda: {"London N. Kensington": "MY1"})
@@ -489,7 +483,6 @@ _FAKE_NETWORK_INFO_HTML = """
 @pytest.mark.skipif(not requests_available, reason="requests not installed")
 def test_aurn_live_site_codes_mocked(monkeypatch):
     import requests
-
     from normet.io import ukaq
 
     ukaq._aurn_live_site_codes.cache_clear()
@@ -518,7 +511,6 @@ def test_aurn_live_site_codes_mocked(monkeypatch):
 @pytest.mark.skipif(not requests_available, reason="requests not installed")
 def test_aurn_live_site_codes_graceful_on_bad_html(monkeypatch):
     import requests
-
     from normet.io import ukaq
 
     ukaq._aurn_live_site_codes.cache_clear()

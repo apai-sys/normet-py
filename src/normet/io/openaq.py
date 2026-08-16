@@ -158,7 +158,9 @@ def openaq_locations(
     return pd.DataFrame(rows)
 
 
-def _resolve_sensor(loc: int, parameter_id: int, headers: dict[str, str]) -> tuple[int | None, float | None, float | None]:
+def _resolve_sensor(
+    loc: int, parameter_id: int, headers: dict[str, str]
+) -> tuple[int | None, float | None, float | None]:
     """Look up the sensor id (and site lat/lon) for `parameter_id` at `loc`.
 
     OpenAQ v3 has no `/locations/{id}/measurements` endpoint (a 404 in
@@ -225,7 +227,9 @@ def fetch_openaq_measurements(
         loc = int(loc)
         sensor_id, lat, lon = _resolve_sensor(loc, parameter_id, headers)
         if sensor_id is None:
-            log.debug("OpenAQ location %s has no sensor for parameter id %s; skipping.", loc, parameter_id)
+            log.debug(
+                "OpenAQ location %s has no sensor for parameter id %s; skipping.", loc, parameter_id
+            )
             continue
 
         page = 1
@@ -251,8 +255,12 @@ def fetch_openaq_measurements(
                         "parameter": (r.get("parameter") or {}).get("name") or parameter,
                         "value": r.get("value"),
                         "unit": (r.get("parameter") or {}).get("units"),
-                        "lat": coords.get("latitude") if coords.get("latitude") is not None else lat,
-                        "lon": coords.get("longitude") if coords.get("longitude") is not None else lon,
+                        "lat": coords.get("latitude")
+                        if coords.get("latitude") is not None
+                        else lat,
+                        "lon": coords.get("longitude")
+                        if coords.get("longitude") is not None
+                        else lon,
                     }
                 )
             if len(chunk) < page_limit:

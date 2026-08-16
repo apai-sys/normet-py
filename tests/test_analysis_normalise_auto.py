@@ -10,7 +10,6 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
-
 from normet.analysis.normalise import normalise_auto
 from normet.backends import backend_registry
 from normet.exceptions import ConfigError
