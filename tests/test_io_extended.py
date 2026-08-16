@@ -135,6 +135,10 @@ def test_openaq_sensors_mocked(monkeypatch):
 
 @pytest.mark.skipif(not requests_available, reason="requests not installed")
 def test_fetch_openaq_measurements_mocked(monkeypatch):
+    # OpenAQ v3 has no /locations/{id}/measurements endpoint -- measurements
+    # are only served per-sensor. Real calls: (1) GET /locations/{id} to
+    # resolve the pm25 sensor id + site coordinates, (2) paginate
+    # /sensors/{sensor_id}/measurements.
     import requests
 
     call_count = 0
@@ -143,12 +147,28 @@ def test_fetch_openaq_measurements_mocked(monkeypatch):
         nonlocal call_count
         call_count += 1
         if call_count == 1:
+            assert url.endswith("/locations/12345")
+            return MockResponse(
+                json_data={
+                    "results": [
+                        {
+                            "id": 12345,
+                            "coordinates": {"latitude": 51.5, "longitude": -0.1},
+                            "sensors": [
+                                {"id": 888, "parameter": {"id": 2, "name": "pm25"}},
+                            ],
+                        }
+                    ]
+                }
+            )
+        elif call_count == 2:
+            assert url.endswith("/sensors/888/measurements")
             return MockResponse(
                 json_data={
                     "results": [
                         {
                             "period": {"datetimeFrom": {"utc": "2024-01-01T00:00:00Z"}},
-                            "coordinates": {"latitude": 51.5, "longitude": -0.1},
+                            "coordinates": None,
                             "value": 15.0,
                             "parameter": {"name": "pm25", "units": "ug/m3"},
                         }
@@ -156,7 +176,7 @@ def test_fetch_openaq_measurements_mocked(monkeypatch):
                 }
             )
         else:
-            # Empty on second page to terminate loop
+            # Empty on second measurements page to terminate loop
             return MockResponse(json_data={"results": []})
 
     monkeypatch.setattr(requests, "get", mock_get)
@@ -175,6 +195,7 @@ def test_fetch_openaq_measurements_mocked(monkeypatch):
     assert df.loc[0, "parameter"] == "pm25"
     assert df.loc[0, "value"] == 15.0
     assert df.loc[0, "unit"] == "ug/m3"
+    # coordinates come from the resolved location when the measurement itself omits them
     assert df.loc[0, "lat"] == 51.5
     assert df.loc[0, "lon"] == -0.1
 
