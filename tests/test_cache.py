@@ -2,7 +2,6 @@
 
 import numpy as np
 import pandas as pd
-
 from normet.analysis.normalise import normalise
 from normet.backends import backend_registry
 from normet.model.train import train_model

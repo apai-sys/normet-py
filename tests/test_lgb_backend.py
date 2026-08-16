@@ -13,7 +13,6 @@ from unittest.mock import patch
 import numpy as np
 import pandas as pd
 import pytest
-
 from normet.backends.lgb_backend import LgbModel, _LgbBackend, train_lgb
 
 

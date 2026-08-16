@@ -3,7 +3,6 @@
 import numpy as np
 import pandas as pd
 import pytest
-
 from normet.causal import (
     conformal_effect_interval,
     placebo_in_space,

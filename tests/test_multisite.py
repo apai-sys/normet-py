@@ -2,7 +2,6 @@
 
 import pandas as pd
 import pytest
-
 from normet.pipeline.multisite import (
     decompose_multisite,
     do_all_multisite,

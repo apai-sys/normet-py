@@ -14,7 +14,6 @@ matplotlib.use("Agg")
 import numpy as np
 import pandas as pd
 import pytest
-
 from normet.gui import _decomp_plots as DP
 
 

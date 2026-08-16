@@ -105,13 +105,14 @@ def polar_plot(
     if ax is None:
         fig, ax = plt.subplots(subplot_kw={"projection": "polar"}, figsize=(6, 6))
     ax.set_theta_zero_location("N")  # type: ignore[union-attr]
-    ax.set_theta_direction(-1)  # type: ignore[union-attr]
     mesh = ax.pcolormesh(Theta, R, Z, cmap=cmap, shading="auto")
-    cbar = ax.figure.colorbar(mesh, ax=ax, pad=0.1, shrink=0.8)
-    cbar.set_label(f"{statistic}({target})")
+    if ax.figure is not None:
+        cbar = ax.figure.colorbar(mesh, ax=ax, pad=0.1, shrink=0.8)
+        cbar.set_label(f"{statistic}({target})")
     ax.set_title(title or f"{target} by wind direction × speed")
     try:
-        ax.figure.tight_layout()  # type: ignore[union-attr]
+        if ax.figure is not None:
+            ax.figure.tight_layout()  # type: ignore[union-attr]
     except Exception:
         pass
     return ax

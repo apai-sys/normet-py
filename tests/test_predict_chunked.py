@@ -2,7 +2,6 @@
 
 import numpy as np
 import pandas as pd
-
 from normet.model.predict import ml_predict
 
 

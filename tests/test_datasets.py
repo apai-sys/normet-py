@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pandas as pd
-
 from normet import datasets
 from normet.io.trajectory import read_trajectory_tdump
 

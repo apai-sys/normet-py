@@ -11,7 +11,6 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import pytest
-
 from normet.backends import backend_registry
 from normet.model.train import build_model, train_model
 

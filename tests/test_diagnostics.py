@@ -1,7 +1,6 @@
 """Diagnostics for SCM fits."""
 
 import pandas as pd
-
 from normet.causal.diagnostics import loo_weight_stability, scm_diagnostics
 from normet.causal.scm import scm
 

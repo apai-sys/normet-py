@@ -4,7 +4,6 @@ import json
 from pathlib import Path
 
 import pandas as pd
-
 from normet.utils.provenance import NormetRun, load_run, make_run, save_run
 
 
