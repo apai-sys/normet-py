@@ -30,6 +30,34 @@ __all__ = ["fetch_openaq_measurements", "openaq_locations", "openaq_sensors"]
 
 _BASE = "https://api.openaq.org/v3"
 
+# OpenAQ v3 identifies pollutants by numeric `parameters_id`, not by slug.
+# Verified against this package's own mocked test fixtures (parameter id 2 ==
+# "pm25"); other common ids per the OpenAQ v3 /parameters reference.
+_PARAMETER_IDS = {
+    "pm25": 2,
+    "pm10": 1,
+    "o3": 10,
+    "co": 8,
+    "no2": 7,
+    "so2": 9,
+}
+
+
+def _resolve_parameter_id(parameter: str | int) -> int:
+    """Map a pollutant slug (``"pm25"``) or raw numeric id to the OpenAQ v3 id."""
+    if isinstance(parameter, int):
+        return parameter
+    try:
+        return _PARAMETER_IDS[parameter.lower()]
+    except KeyError:
+        try:
+            return int(parameter)
+        except (TypeError, ValueError) as e:
+            raise ValueError(
+                f"Unknown OpenAQ parameter {parameter!r}; pass a known slug "
+                f"({sorted(_PARAMETER_IDS)}) or a numeric parameters_id."
+            ) from e
+
 
 def _resolve_key(api_key: str | None) -> str:
     key = api_key or os.environ.get("OPENAQ_API_KEY")
@@ -89,7 +117,7 @@ def openaq_locations(
     if city:
         params["city"] = city
     if parameter:
-        params["parameters_id"] = parameter
+        params["parameters_id"] = _resolve_parameter_id(parameter)
     if bbox:
         params["bbox"] = ",".join(f"{float(x):.4f}" for x in bbox)
 
@@ -122,10 +150,32 @@ def openaq_locations(
                 "lon": coords.get("longitude"),
                 "parameters": [p for p in params_list if p],
                 "sensors": sensors_parsed,
+                "provider": (r.get("provider") or {}).get("name"),
+                "owner": (r.get("owner") or {}).get("name"),
                 "last_updated": r.get("datetimeLast", {}).get("utc"),
             }
         )
     return pd.DataFrame(rows)
+
+
+def _resolve_sensor(loc: int, parameter_id: int, headers: dict[str, str]) -> tuple[int | None, float | None, float | None]:
+    """Look up the sensor id (and site lat/lon) for `parameter_id` at `loc`.
+
+    OpenAQ v3 has no `/locations/{id}/measurements` endpoint (a 404 in
+    practice) -- measurements are only served per-sensor, via
+    `/sensors/{sensors_id}/measurements`. Each location exposes multiple
+    single-parameter sensors, so the sensor id has to be resolved first.
+    """
+    data = _get(f"{_BASE}/locations/{loc}", {}, headers)
+    results = data.get("results") or []
+    if not results:
+        return None, None, None
+    r = results[0]
+    coords = r.get("coordinates") or {}
+    for s in r.get("sensors") or []:
+        if (s.get("parameter") or {}).get("id") == parameter_id:
+            return s.get("id"), coords.get("latitude"), coords.get("longitude")
+    return None, coords.get("latitude"), coords.get("longitude")
 
 
 def fetch_openaq_measurements(
@@ -145,7 +195,8 @@ def fetch_openaq_measurements(
     location_id : int or iterable of int
         OpenAQ location identifier(s). Use :func:`openaq_locations` to discover.
     parameter : str
-        Pollutant slug (e.g., ``"pm25"``, ``"no2"``, ``"o3"``, ``"so2"``, ``"co"``).
+        Pollutant slug (e.g., ``"pm25"``, ``"no2"``, ``"o3"``, ``"so2"``, ``"co"``)
+        or a raw numeric ``parameters_id``.
     date_from, date_to : str or Timestamp
         Inclusive UTC date range; parseable by :func:`pandas.to_datetime`.
     page_limit : int, default 1000
@@ -158,25 +209,34 @@ def fetch_openaq_measurements(
     pandas.DataFrame
         Columns: ``date`` (UTC), ``site`` (location id), ``parameter``,
         ``value``, ``unit``, ``lat``, ``lon``. Sorted by ``(site, date)``.
+        A location with no sensor for `parameter` is silently skipped (logged
+        at debug level) rather than raising, so a batch pull over many
+        stations does not abort on the first station that lacks the pollutant.
     """
     headers = {"X-API-Key": _resolve_key(api_key)}
     locs = [location_id] if isinstance(location_id, int) else list(location_id)
+    parameter_id = _resolve_parameter_id(parameter)
 
     df_from = pd.to_datetime(date_from, utc=True)
     df_to = pd.to_datetime(date_to, utc=True)
 
     rows: list[dict[str, Any]] = []
     for loc in locs:
+        loc = int(loc)
+        sensor_id, lat, lon = _resolve_sensor(loc, parameter_id, headers)
+        if sensor_id is None:
+            log.debug("OpenAQ location %s has no sensor for parameter id %s; skipping.", loc, parameter_id)
+            continue
+
         page = 1
         while True:
             params = {
                 "datetime_from": df_from.isoformat(),
                 "datetime_to": df_to.isoformat(),
-                "parameters_id": parameter,
                 "limit": int(page_limit),
                 "page": page,
             }
-            data = _get(f"{_BASE}/locations/{int(loc)}/measurements", params, headers)
+            data = _get(f"{_BASE}/sensors/{sensor_id}/measurements", params, headers)
             chunk = data.get("results", []) or []
             if not chunk:
                 break
@@ -191,8 +251,8 @@ def fetch_openaq_measurements(
                         "parameter": (r.get("parameter") or {}).get("name") or parameter,
                         "value": r.get("value"),
                         "unit": (r.get("parameter") or {}).get("units"),
-                        "lat": coords.get("latitude"),
-                        "lon": coords.get("longitude"),
+                        "lat": coords.get("latitude") if coords.get("latitude") is not None else lat,
+                        "lon": coords.get("longitude") if coords.get("longitude") is not None else lon,
                     }
                 )
             if len(chunk) < page_limit:
