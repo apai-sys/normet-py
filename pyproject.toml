@@ -39,7 +39,10 @@ classifiers = [
 # Core dependencies
 dependencies = [
     "numpy>=1.22,<2.0",
-    "pandas>=1.5,<3.0",
+    # 2.0 for `format="mixed"` in to_datetime (see normet.utils._time): on 1.5 a
+    # format inferred from the first value was applied to the rest, silently
+    # coercing anything that did not match to NaT.
+    "pandas>=2.0,<3.0",
     "scipy>=1.10",
     "scikit-learn>=1.1",
     "joblib>=1.2",

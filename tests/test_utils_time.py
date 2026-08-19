@@ -17,13 +17,25 @@ def test_unparseable_values_become_nat_rather_than_raising():
     assert out[0] == pd.Timestamp("2024-01-01")
 
 
-def test_an_unparseable_first_value_does_not_warn():
-    """This is the case that produced the warning, and the case callers handle.
+def test_a_second_format_is_parsed_rather_than_silently_dropped():
+    """The reason this helper exists, and the reason pandas>=2.0 is required.
 
-    pandas can infer nothing from a leading garbage value, so it parses each
-    element with dateutil and says so. The caller checks NaT on the very next
-    line and raises with a message that names the real problem, which makes the
-    notice noise -- but silencing it must not break the parse.
+    Left to itself pd.to_datetime infers a format from the first value and
+    applies it to every other one, so "01/02/2024" after an ISO date became NaT
+    with no error and no warning -- a date column half-destroyed in silence.
+    format="mixed" parses each value on its own terms.
+    """
+    out = to_datetime_coerced(pd.Series(["2024-01-01", "01/02/2024"]))
+    assert out.notna().all()
+    assert out.tolist() == [pd.Timestamp("2024-01-01"), pd.Timestamp("2024-01-02")]
+
+
+def test_an_unparseable_first_value_does_not_warn():
+    """Without format="mixed" pandas announces its per-element fallback here.
+
+    The caller checks NaT on the very next line and raises with a message that
+    names the real problem, so the notice was noise -- and it fired from nine
+    call sites.
     """
     values = pd.Series(["not a date", "2024-01-01", "2024-01-02"])
     with warnings.catch_warnings():
@@ -32,23 +44,9 @@ def test_an_unparseable_first_value_does_not_warn():
     assert out.isna().tolist() == [True, False, False]
 
 
-def test_other_user_warnings_still_get_through():
-    """The filter is scoped to pandas' format message, not to UserWarning at large."""
-    with pytest.warns(UserWarning, match="unrelated"):
-        warnings.warn("an unrelated user warning", UserWarning, stacklevel=1)
-        to_datetime_coerced(pd.Series(["2024-01-01"]))
-
-
-def test_a_format_inferred_from_the_first_value_is_applied_to_the_rest():
-    """Pinning pandas' actual contract, which is sharper than it looks.
-
-    The format comes from the first value and everything that does not match it
-    becomes NaT -- silently, with no warning at all. So "01/02/2024" after an
-    ISO date is dropped rather than parsed. This predates the helper and is not
-    changed by it; the test exists so the behaviour is visible rather than
-    discovered in the field.
-    """
-    out = to_datetime_coerced(pd.Series(["2024-01-01", "01/02/2024"]))
+def test_an_explicit_format_wins():
+    """A caller who knows the format should get strict parsing, not the mixed path."""
+    out = to_datetime_coerced(pd.Series(["2024-01-01", "01/02/2024"]), format="%Y-%m-%d")
     assert out.isna().tolist() == [False, True]
 
 

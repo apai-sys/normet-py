@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import warnings
 from typing import Any
 
 import pandas as pd
@@ -11,26 +10,18 @@ __all__ = ["to_datetime_coerced"]
 
 
 def to_datetime_coerced(values: Any, **kwargs: Any) -> Any:
-    """``pd.to_datetime(values, errors="coerce")`` without the format notice.
+    """Parse mixed-format dates element by element, coercing failures to ``NaT``.
 
-    pandas infers a format from the first value and applies it to the rest,
-    coercing whatever does not match to ``NaT``. When that first value is itself
-    unparseable it cannot infer anything, falls back to parsing each element with
-    dateutil, and emits "Could not infer format, so each element will be parsed
-    individually". That case is the one this package's date-taking entry points
-    are built for -- every caller checks the resulting ``NaT`` values on the next
-    line and reports them -- so the notice is redundant, and redundant at nine
-    call sites.
+    Date columns arrive from CSVs, config files and GUI pickers, so a single
+    format cannot be assumed. Left to itself ``pd.to_datetime`` infers one from
+    the first value and applies it to the rest, so an ISO date followed by
+    ``"01/02/2024"`` silently drops the second value -- no error, no warning,
+    just ``NaT``. ``format="mixed"`` parses each value on its own terms instead,
+    and stays quiet about it: without it pandas emits "Could not infer format,
+    so each element will be parsed individually" whenever the first value is
+    unparseable, which is noise for callers that check ``NaT`` on the next line.
 
-    Only that message is silenced; any other ``UserWarning`` passes through.
-
-    ``format="mixed"`` would tell pandas the same thing directly, but it landed
-    in pandas 2.0 and this package still supports 1.5.
+    An explicit ``format`` in *kwargs* wins.
     """
-    with warnings.catch_warnings():
-        warnings.filterwarnings(
-            "ignore",
-            message="Could not infer format",
-            category=UserWarning,
-        )
-        return pd.to_datetime(values, errors="coerce", **kwargs)
+    kwargs.setdefault("format", "mixed")
+    return pd.to_datetime(values, errors="coerce", **kwargs)
