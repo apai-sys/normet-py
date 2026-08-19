@@ -128,6 +128,12 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   `run_back_trajectories` can run when no local meteorology is available.
 
 ### Changed (breaking)
+- **`pandas>=2.0`** (was `>=1.5`), for `format="mixed"` in
+  `normet.utils._time.to_datetime_coerced`. On 1.5 a format inferred from the
+  first value was applied to every other one, so an ISO date followed by
+  `"01/02/2024"` was coerced to `NaT` -- silently, with no warning at all. Date
+  columns are now parsed value by value, which also removes the need for the
+  warning suppression that entry previously carried.
 - **Removed `normet.io.defra`** (`fetch_aurn_measurements`, `list_aurn_stations`,
   `fetch_aurn_site_codes`, `AURN_POLLUTANT_CODES`) — folded into
   `normet.io.ukaq` as `source="aurn_live"` instead (see Added, above); the two
