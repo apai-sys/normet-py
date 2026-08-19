@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 
 from ..utils._config import DEFAULT_SEED
+from ..utils._time import to_datetime_coerced
 from ..utils.logging import get_logger
 from .run_scm import run_scm
 
@@ -373,7 +374,7 @@ def uncertainty_bands(
 
     # Ensure datetime-like
     if not np.issubdtype(pd.Series(df[date_col]).dtype, np.datetime64):  # type: ignore[arg-type]
-        df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+        df[date_col] = to_datetime_coerced(df[date_col])
     if df[date_col].isna().any():
         raise ValueError("Non-parseable dates found; clean 'date_col' first.")
 

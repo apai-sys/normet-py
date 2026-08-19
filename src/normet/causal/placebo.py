@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
 
+from ..utils._time import to_datetime_coerced
 from ..utils.logging import get_logger
 from .run_scm import run_scm
 
@@ -188,7 +189,7 @@ def placebo_in_time(
 ) -> dict:
     """Placebo-in-time analysis for a synthetic-control backend (SCM or ML-SCM)."""
     d = df.copy()
-    d[date_col] = pd.to_datetime(d[date_col], errors="coerce")
+    d[date_col] = to_datetime_coerced(d[date_col])
     if d[date_col].isna().any():
         raise ValueError("Some rows have invalid dates after coercion.")
     cutoff_dt = pd.to_datetime(cutoff_date)

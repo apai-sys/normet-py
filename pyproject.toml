@@ -127,6 +127,9 @@ testpaths = ["tests"]
 filterwarnings = [
     "ignore::DeprecationWarning:pandas",
     "ignore::FutureWarning:joblib",
+    # arviz announces its own upcoming refactor at import time. Nothing here can
+    # act on it, and it fires for any test that touches the Bayesian SCM path.
+    "ignore::FutureWarning:arviz",
 ]
 
 # ----------------------

@@ -6,6 +6,7 @@ from __future__ import annotations
 import pandas as pd
 
 from ..exceptions import DataError
+from ..utils._time import to_datetime_coerced
 from ..utils.logging import get_logger
 
 log = get_logger(__name__)
@@ -83,7 +84,7 @@ def prepare_panel(
         donor-ratio diagnostics are attached to ``result.attrs``.
     """
     d = df[[date_col, unit_col, outcome_col]].copy()
-    d[date_col] = pd.to_datetime(d[date_col], errors="coerce")
+    d[date_col] = to_datetime_coerced(d[date_col])
     if d[date_col].isna().any():
         raise DataError(f"Some rows have invalid `{date_col}` values after coercion.")
     # Normalize to tz-naive throughout: mixing a tz-aware data column with
