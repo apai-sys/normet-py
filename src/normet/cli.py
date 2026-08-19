@@ -106,10 +106,10 @@ def _build_cli():
     # long after the lightgbm backend was registered. Importing the registry is
     # cheap: both backend modules defer their heavy imports to `require`.
     backend_choice = click.Choice(backend_registry.available)
-    # do-all also accepts the zero-shot backend, which is deliberately absent
-    # from the registry: that contract is train/save/load and Chronos-2 does
-    # none of the three. decompose and cv have no zero-shot counterpart.
-    do_all_backend_choice = click.Choice([*backend_registry.available, CHRONOS_BACKEND])
+    # do-all and decompose also accept the zero-shot backend, which is
+    # deliberately absent from the registry: that contract is train/save/load
+    # and Chronos-2 does none of the three. cv has no zero-shot counterpart.
+    zero_shot_backend_choice = click.Choice([*backend_registry.available, CHRONOS_BACKEND])
 
     @click.group()
     @click.version_option(package_name="normet")
@@ -125,7 +125,7 @@ def _build_cli():
     @click.option(
         "--resample-vars", "resample_vars", help="Comma-separated subset of features to resample."
     )
-    @click.option("--backend", type=do_all_backend_choice, default=None)
+    @click.option("--backend", type=zero_shot_backend_choice, default=None)
     @click.option("--n-samples", "n_samples", type=int, default=None)
     @click.option(
         "--split-method",
@@ -197,7 +197,7 @@ def _build_cli():
     @click.option("--target", required=False)
     @click.option("--covariates", help="Comma-separated predictor columns.")
     @click.option("--method", type=click.Choice(["emission", "meteorology"]), default=None)
-    @click.option("--backend", type=backend_choice, default=None)
+    @click.option("--backend", type=zero_shot_backend_choice, default=None)
     @click.option("--n-samples", "n_samples", type=int, default=None)
     @click.option("--seed", type=int, default=None)
     @click.option("--out", "out_path", type=click.Path(path_type=Path), required=True)

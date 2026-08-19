@@ -16,6 +16,10 @@ import numpy as np
 import pandas as pd
 
 from ..analysis.normalise import normalise
+from ..foundation.estimator import (
+    CHRONOS_BACKEND,
+    resolve_n_samples,
+)
 from ..model.train import build_model
 from ..utils._config import resolve_config
 from ..utils.logging import _progress_str, get_logger
@@ -25,19 +29,6 @@ from ..utils.prepare import prepare_data
 log = get_logger(__name__)
 
 __all__ = ["CHRONOS_BACKEND", "SingleConfig", "UncConfig", "do_all", "do_all_unc"]
-
-#: ``backend`` value that switches :func:`do_all` onto the zero-shot path.
-#:
-#: Deliberately *not* registered in ``normet.backends.backend_registry``: that
-#: registry's contract is train/save/load, and Chronos-2 does none of the three.
-CHRONOS_BACKEND = "chronos-2"
-
-#: Monte-Carlo weather resamples for the zero-shot path.
-#:
-#: The AutoML default of 300 is a tree-ensemble budget. Under Chronos-2 each
-#: sample is a full 2048-context forward pass, so 300 would run for days on a
-#: CPU. Callers who pass ``n_samples`` explicitly get what they asked for.
-CHRONOS_DEFAULT_SAMPLES = 8
 
 
 @dataclass
@@ -68,13 +59,6 @@ class UncConfig(SingleConfig):
 
     n_models: int = 10
     confidence_level: float = 0.95
-
-
-def _resolve_n_samples(n_samples: int | None, backend: str) -> int:
-    """Fill in ``n_samples`` for the backend when the caller left it unset."""
-    if n_samples is not None:
-        return int(n_samples)
-    return CHRONOS_DEFAULT_SAMPLES if backend == CHRONOS_BACKEND else 300
 
 
 def _do_all_zero_shot(
@@ -234,7 +218,7 @@ def do_all(
     if _cfg.target is None:
         raise ValueError("`target` must be provided either directly or via config.")
 
-    _cfg.n_samples = _resolve_n_samples(_cfg.n_samples, _cfg.backend)
+    _cfg.n_samples = resolve_n_samples(_cfg.n_samples, _cfg.backend)
     log.info(
         "Starting do_all | backend=%s | target=%s | n_samples=%d",
         _cfg.backend,

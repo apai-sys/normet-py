@@ -506,16 +506,21 @@ def test_do_all_zero_shot_defaults_to_a_sane_sample_count(chronos2_pipeline):
     Each sample here is a full forward pass, so carrying the AutoML default
     across would run for days. An explicit n_samples must still win.
     """
-    from normet.pipeline.do_all import (
+    from normet.foundation import (
         CHRONOS_BACKEND,
         CHRONOS_DEFAULT_SAMPLES,
-        _resolve_n_samples,
+        resolve_n_samples,
     )
+    from normet.pipeline import CHRONOS_BACKEND as REEXPORTED
 
-    assert _resolve_n_samples(None, "flaml") == 300
-    assert _resolve_n_samples(None, CHRONOS_BACKEND) == CHRONOS_DEFAULT_SAMPLES
-    assert _resolve_n_samples(300, CHRONOS_BACKEND) == 300
-    assert _resolve_n_samples(1, "flaml") == 1
+    # These live in normet.foundation next to the model they describe; the
+    # pipeline re-exports the backend name because that is where callers meet it.
+    assert REEXPORTED == CHRONOS_BACKEND
+
+    assert resolve_n_samples(None, "flaml") == 300
+    assert resolve_n_samples(None, CHRONOS_BACKEND) == CHRONOS_DEFAULT_SAMPLES
+    assert resolve_n_samples(300, CHRONOS_BACKEND) == 300
+    assert resolve_n_samples(1, "flaml") == 1
 
 
 @needs_chronos
@@ -569,3 +574,83 @@ def test_embed_multisite_returns_one_vector_per_site(chronos2_pipeline):
     assert list(table.columns) == ["site", "cluster", "x", "y"]
     assert sorted(table["site"]) == [101, 202, 303]
     assert table["cluster"].nunique() == 2
+
+
+@needs_chronos
+def test_zero_shot_meteorology_decomposition_adds_up(chronos2_pipeline):
+    """Nested de-weathering, one feature fixed at a time -- same shape as decom_met.
+
+    The identity that matters is that the pieces reconstruct the whole: observed
+    minus emi_total is met_total, and met_total minus met_base minus the summed
+    per-feature contributions is met_noise. If the successive differences were
+    misaligned this would not close.
+    """
+    from normet import decompose
+
+    n = 800
+    rng = np.random.default_rng(5)
+    dates = pd.date_range("2024-01-01", periods=n, freq="h")
+    t = np.arange(n)
+    blh = 800 + 400 * np.sin(2 * np.pi * t / 24) + rng.normal(0, 40, n)
+    t2m = 10 + 8 * np.sin(2 * np.pi * t / (24 * 30)) + rng.normal(0, 1, n)
+    pm = np.clip(40 - 0.01 * blh + 0.3 * t2m + rng.normal(0, 1.5, n), 0, None)
+    df = pd.DataFrame({"date": dates, "PM2.5": pm, "t2m": t2m, "blh": blh})
+
+    out = decompose(
+        df,
+        target="PM2.5",
+        method="meteorology",
+        backend="chronos-2",
+        covariates=["t2m", "blh"],
+        n_samples=2,
+        model_config={"context_length": 256, "prediction_length": 48, "device": "cpu"},
+    )
+
+    for col in ("observed", "emi_total", "t2m", "blh", "met_total", "met_base", "met_noise"):
+        assert col in out.columns, col
+    assert len(out) == n
+
+    np.testing.assert_allclose(
+        out["met_total"], out["observed"] - out["emi_total"], rtol=1e-6, atol=1e-6
+    )
+    np.testing.assert_allclose(
+        out["met_noise"],
+        out["met_total"] - (out["met_base"] + out[["t2m", "blh"]].sum(axis=1)),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+
+@needs_chronos
+def test_zero_shot_decomposition_honours_an_explicit_variable_order(chronos2_pipeline):
+    """Without fitted importances the order comes from covariate sensitivity.
+
+    That is a measurement, so it can move between runs; variable_order pins it
+    for results that stay comparable. A wrong set must be rejected rather than
+    silently partially applied.
+    """
+    from normet import decompose
+    from normet.exceptions import ConfigError
+
+    n = 700
+    rng = np.random.default_rng(6)
+    dates = pd.date_range("2024-01-01", periods=n, freq="h")
+    t = np.arange(n)
+    blh = 800 + 400 * np.sin(2 * np.pi * t / 24) + rng.normal(0, 40, n)
+    t2m = 10 + 8 * np.sin(2 * np.pi * t / (24 * 30)) + rng.normal(0, 1, n)
+    pm = np.clip(40 - 0.01 * blh + 0.3 * t2m + rng.normal(0, 1.5, n), 0, None)
+    df = pd.DataFrame({"date": dates, "PM2.5": pm, "t2m": t2m, "blh": blh})
+
+    common = dict(
+        target="PM2.5",
+        method="meteorology",
+        backend="chronos-2",
+        covariates=["t2m", "blh"],
+        n_samples=2,
+        model_config={"context_length": 256, "prediction_length": 48, "device": "cpu"},
+    )
+    out = decompose(df, variable_order=["blh", "t2m"], **common)
+    assert list(out.columns).index("blh") < list(out.columns).index("t2m")
+
+    with pytest.raises(ConfigError, match="variable_order"):
+        decompose(df, variable_order=["blh"], **common)

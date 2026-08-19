@@ -59,8 +59,8 @@ def test_cli_backend_choices_track_the_registry():
 
 
 @needs_click
-def test_only_do_all_offers_the_zero_shot_backend():
-    """chronos-2 is not in the registry, and only do-all has a path for it.
+def test_only_the_commands_with_a_zero_shot_path_offer_that_backend():
+    """chronos-2 is not in the registry, and only some commands have a path for it.
 
     The registry's contract is train/save/load and Chronos-2 does none of the
     three, so it is added to one command's choice list rather than registered.
@@ -77,9 +77,10 @@ def test_only_do_all_offers_the_zero_shot_backend():
         out = runner.invoke(_build_cli(), [cmd, "--help"]).output
         return next(ln for ln in out.splitlines() if "--backend" in ln)
 
-    assert CHRONOS_BACKEND in backend_line("do-all")
-    for cmd in ("decompose", "cv"):
-        assert CHRONOS_BACKEND not in backend_line(cmd), cmd
+    for cmd in ("do-all", "decompose"):
+        assert CHRONOS_BACKEND in backend_line(cmd), cmd
+    # cv trains and scores folds; there is nothing to train zero-shot.
+    assert CHRONOS_BACKEND not in backend_line("cv")
 
 
 @needs_click
