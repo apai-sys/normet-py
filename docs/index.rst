@@ -8,6 +8,8 @@ A Python toolbox for air-quality and environmental time-series analysis with:
 
 - AutoML-driven model training (FLAML).
 - Weather normalisation, including resampling-based and SHAP-based decomposition.
+- Zero-shot de-weathering and counterfactuals with the Chronos-2 time-series
+  foundation model, on the same result schema as the AutoML path.
 - Synthetic-control-style counterfactual modelling (classic SCM, ML-SCM,
   Abadie, DiD, MC-NNM) with conformal and placebo inference.
 - Multi-site batch pipelines, walk-forward cross-validation, and on-disk caching.
@@ -17,6 +19,7 @@ A Python toolbox for air-quality and environmental time-series analysis with:
    :caption: User guide
 
    guide/examples_normalisation
+   guide/examples_foundation
    guide/examples_feature_engineering
    guide/examples_decomposition
    guide/examples_scm_guide

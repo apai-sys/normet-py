@@ -7,6 +7,101 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ## [Unreleased]
 
 ### Added
+- **Chronos-2 foundation estimator** (`normet.foundation`): `Chronos2Estimator`
+  wraps Amazon's Chronos-2 time-series foundation model behind a
+  covariate-conditioned API — `predict_quantiles` (21 native quantile levels),
+  `deweather` (meteorological normalisation by marginalising the covariate
+  channel), `counterfactual` (business-as-usual projection that reports its own
+  pre-intervention hold-out bias), and `covariate_sensitivity` (a diagnostic
+  that shows whether the forecast responds to meteorology at all, rather than
+  quietly autoregressing). Meteorology enters through Chronos-2's
+  `past_covariates`/`future_covariates` channels; Chronos-1/Bolt checkpoints are
+  rejected at construction because they silently drop covariates.
+  Guard rails: `IrregularIndexError` on a non-uniform time index (Chronos-2
+  reads position as time, so dropped hours shift the series against its own
+  calendar covariates) and `InsufficientContextError` on a conditioning window
+  that is mostly missing (Chronos-2 masks NaNs, so an empty context otherwise
+  returns a forecast scaled to nothing). `to_regular_index` and
+  `add_calendar_covariates` prepare a frame for both.
+  Also `ChronosEmbedder` for zero-shot 768-D station embeddings and clustering,
+  likewise on Chronos-2 (`Chronos2Pipeline.embed`) and likewise refusing
+  Chronos-1/Bolt checkpoints — the two families return differently shaped
+  embeddings from different encoders, so vectors from a mix of both cannot be
+  clustered together. Every series is cut or NaN-padded to the same context
+  length before batching: Chronos-2 left-pads a ragged batch, which changes the
+  patch count and shifts a station's pooled embedding depending on which other
+  stations shared the batch (0.30 max abs difference on a 300-point series next
+  to a 512-point one). An all-missing station raises `InsufficientContextError`
+  rather than embedding a masked-out series into a confident-looking vector.
+  Requires the new `foundation` extra: `pip install normet[foundation]`.
+- **Harmonic counterfactual** (`normet.counterfactual`): `HarmonicCounterfactual`
+  estimates a business-as-usual baseline from calendar structure alone --- a
+  168-cell day-of-week x hour-of-day interaction matrix, a linear fleet-renewal
+  trend and 4th-order annual Fourier harmonics, fitted with ridge ---
+  and `evaluate_intervention` reports the impact of a policy step against it
+  together with a pre-intervention validation bias, so a baseline that cannot
+  reproduce the months *before* the intervention says so. On a synthetic series
+  carrying an injected 40% cut it recovers -40.6% with a 0.9% validation bias.
+  Note the p10/p90 band is `bau +/- 1.645 * sigma` from the training residuals:
+  it ignores parameter uncertainty and assumes homoscedastic, serially
+  independent residuals, neither of which holds for hourly air quality, so read
+  it as an indication rather than a calibrated interval.
+- **Physics-informed graph models** (`normet.physics`): `PhysicsGraphBuilder`
+  builds a static k-NN geospatial graph and a dynamic wind-guided directed
+  advection graph over an irregular monitoring network; `build_pi_stgnn` and
+  `build_adr_pde_loss` construct a dual-graph spatio-temporal GNN and an
+  advection-diffusion-reaction mass-conservation loss. Torch is imported lazily,
+  so `import normet.physics` and `PhysicsGraphBuilder` work without it; the
+  neural pieces need the new `physics` extra: `pip install normet[physics]`.
+  `ADR_PDE_Loss` takes `direction="upwind"` (default) or `"outflow"`.
+  `A_wind[i, j]` weights `j` downwind of `i`, so summing over `j` untransposed
+  charges the advection term to the *source* node and leaves a downwind receptor
+  with exactly zero --- fine as an outflow formulation, wrong for the
+  mass-conservation residual at a receptor, which is what `upwind` computes.
+- **Chronos-2 in the GUI.** The Backend combo on the training tab gains a
+  `chronos-2` entry, greyed out with an install hint when the `foundation` extra
+  is absent. Picking it hides the training controls that a zero-shot model has
+  nothing to act on --- time budget, estimator search space, train/test split,
+  seed --- and retitles the button to "Load Chronos-2"; the frame is put on a
+  regular hourly index automatically, and the model tab shows the
+  covariate-sensitivity verdict in place of the parity plot and feature
+  importances that do not exist here. De-weathering runs through
+  `Chronos2Estimator.deweather(schema="normet")`, so the existing plot and
+  report paths apply unchanged; decomposition, rolling windows and PDP stay
+  disabled, as none of them has a Chronos-2 equivalent. The "Samples" count
+  swaps between backends (300 for the AutoML backends, 8 for Chronos-2) because
+  a Monte-Carlo sample is a tree ensemble call in one case and a full
+  2048-context transformer forward pass in the other --- carrying 300 across
+  would make a single normalisation run for days on CPU. The normalisation
+  panel also names how many leading rows `deweather` seeded with the observed
+  values (Chronos-2 has no history to condition on until `context_length` rows
+  have gone by), shades them on the plot and takes the reported
+  mean(normalised - observed) over the projected rows only --- otherwise a short
+  record shows a curve that is mostly a copy of its input and an effect diluted
+  toward zero by rows that could not have differed.
+- **`resolve_device`** (`normet.foundation`) picks CUDA, else Apple Silicon's
+  Metal backend (`mps`), else the CPU, and both `Chronos2Estimator` and
+  `ChronosEmbedder` route through it. An accelerator chosen automatically falls
+  back to the CPU with a warning if the pipeline will not load on it; a device
+  named explicitly does not, so torch's own error surfaces instead of a silent
+  downgrade. `.device` reports where the model actually landed. Exposed as
+  `--device` on `normet deweather` and as a **Device** selector in the GUI.
+- **`normet deweather` CLI command.** Zero-shot meteorological normalisation
+  with Chronos-2 from the command line: rebuilds the time grid, reports the
+  covariate-sensitivity diagnostic (and warns when the model turns out to be
+  autoregressing) before committing, names how many leading rows were seeded
+  rather than projected, and writes the result on `normalise`'s schema. Needs
+  the `foundation` extra. `normet info` now reports `chronos-forecasting`,
+  `torch` and `PySide6` under `optional`, plus a `backends` key.
+- **User guide for the foundation models** (`docs/guide/examples_foundation.md`)
+  and a README section covering when the zero-shot path is the right tool and
+  when it is not.
+- **Foundation results on normet's schema.** `to_normet_frame` renames a
+  foundation-model frame onto the `date`-indexed `observed`/`normalised`/`qNNN`
+  shape `normalise` emits, which is what `normalise_plot` and the HTML report
+  dispatch on. `Chronos2Estimator.deweather(..., schema="normet")` and
+  `CounterfactualResult.to_normet_frame()` apply it directly, so a de-weathered
+  or counterfactual series plots and reports through the existing path.
 - **UK air quality adapter** (`normet.io.ukaq`): `list_ukaq_stations` /
   `fetch_ukaq_measurements` cover all six UK networks (AURN, AQE, SAQN, WAQN,
   NI, LMAM — around 1500 stations) from the openair `.RData` archives via
@@ -60,6 +155,19 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   `fetch_era5_timeseries`, which needs only `cdsapi` — no `xarray`/`netCDF4`.
 
 ### Fixed
+- **Apple Silicon was never used.** Device auto-selection was
+  `"cuda" if torch.cuda.is_available() else "cpu"`, so every Mac ran Chronos-2 on
+  the CPU however capable its GPU. De-weathering spends one full forward pass per
+  Monte-Carlo sample, which made that the difference between minutes and hours.
+- **CLI `--backend` offered only `flaml`.** The choice list on `do-all`,
+  `decompose` and `cv` was a hand-maintained literal that had gone stale long
+  after the `lightgbm` backend was registered, so a backend the library
+  supported was unreachable from the command line. It now comes from
+  `backend_registry.available`, with a test asserting the two agree.
+- **CLI config files could not supply list-valued options.** `covariates:
+  [t2m, blh]` in a YAML config reached `_split_csv` as a list and raised
+  `AttributeError: 'list' object has no attribute 'split'`; only the
+  comma-separated string form worked. Both are accepted now.
 - **FLAML backend accepts `custom_hp`** in `model_config`, to bound an
   estimator's search space (e.g. LGBM `num_leaves`, default range
   `[4, 32768]`) rather than only its search effort (`time_budget`/`max_iter`).

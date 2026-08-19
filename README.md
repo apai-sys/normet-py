@@ -30,6 +30,7 @@
 - [Step-by-step workflow](#step-by-step-workflow)
 - [Decomposition](#decomposition)
 - [Counterfactual modelling (Synthetic Control)](#counterfactual-modelling-synthetic-control)
+- [Zero-shot de-weathering (Chronos-2)](#zero-shot-de-weathering-chronos-2)
 - [Advanced features](#advanced-features)
 - [CLI](#cli)
 - [Desktop GUI](#desktop-gui)
@@ -63,6 +64,8 @@
 | `nm.normalise_plot` / `nm.decomposition_stack` / `nm.scm_dashboard` | Plotting helpers for normalisation, decomposition, and SCM results |
 | `nm.bayesian_scm` / `nm.plot_bayesian_scm` | Bayesian (PyMC) posterior SCM with credible bands — **optional**, needs `pymc` + `arviz` |
 | `nm.scm_diagnostics` / `nm.loo_weight_stability` / `nm.conformal_effect_interval` | SCM fit diagnostics, donor-weight stability, conformal intervals |
+| `nm.Chronos2Estimator` | Zero-shot de-weathering, counterfactuals and quantiles with the Chronos-2 foundation model — **optional**, needs `normet[foundation]` |
+| `nm.ChronosEmbedder` | 768-D station embeddings for clustering sites by dynamics — **optional**, needs `normet[foundation]` |
 | `nm.make_run` / `nm.save_run` / `nm.generate_html_report` | Provenance tracking and auto-generated HTML/Markdown run reports |
 | `nm.make_memory` | On-disk caching for expensive pipelines |
 | `normet.io` | ERA5, EEA, DEFRA, OpenAQ data adapters |
@@ -102,6 +105,12 @@ pip install "normet[data]"
 
 # CLI entry point
 pip install "normet[cli]"
+
+# Chronos-2 foundation model (zero-shot de-weathering, station embeddings)
+pip install "normet[foundation]"
+
+# Physics-informed graph models (PI-STGNN, advection-diffusion-reaction loss)
+pip install "normet[physics]"
 
 # Everything
 pip install "normet[all]"
@@ -313,6 +322,53 @@ nm.plot_uncertainty_bands(boot_bands, cutoff_date=cutoff_date)
 
 ---
 
+## Zero-shot de-weathering (Chronos-2)
+
+`normet[foundation]` wraps Amazon's Chronos-2 time-series foundation model.
+Nothing is trained: the checkpoint conditions on the meteorology through its
+covariate channel and the weather is marginalised out by resampling, as in
+`normalise`. Useful when there is not enough history to train on, when a site
+has just come online, or as a second estimate from a model that never saw the
+target's own record.
+
+```python
+from normet.foundation import Chronos2Estimator, to_regular_index
+
+df = pd.read_csv("my_site.csv", parse_dates=["date"]).set_index("date").sort_index()
+df = to_regular_index(df)          # Chronos-2 reads position as time
+
+met = ["t2m", "blh", "u10", "v10"]
+est = Chronos2Estimator(met_covariates=met)
+
+out = est.deweather(df, "PM2.5", met_features=met, n_samples=8, schema="normet")
+nm.normalise_plot(out, ci_low="q100", ci_high="q900")
+```
+
+`schema="normet"` puts the result on the same `observed`/`normalised`/`qNNN`
+shape `normalise` emits, so the existing plot and HTML-report paths apply
+unchanged. `est.counterfactual(...)` projects a business-as-usual series across
+an intervention and reports its own pre-intervention bias alongside the effect.
+
+Three things decide whether this is the right tool for a given record:
+
+- **The first `context_length` rows are not a result.** The model has no history
+  to condition on until then, so `deweather` seeds them with the observed values
+  and the curves coincide there by construction. Give it years, not months.
+- **Every Monte-Carlo sample is a full forward pass**, so `n_samples` defaults to
+  8 here rather than the AutoML path's 300. `device=None` picks CUDA, else Apple
+  Silicon's Metal backend (`mps`), else the CPU; the CLI takes `--device` and the
+  GUI has a **Device** selector.
+- **`covariate_sensitivity` is the quality gate.** There is no parity plot and no
+  feature importance — nothing was fitted. Shuffle the future weather and see how
+  far the forecast moves; below ~1% the model is autoregressing and its
+  "normalised" series means nothing.
+
+`decompose`, `rolling` and `pdp` have no Chronos-2 equivalent — they are defined
+in terms of a fitted model's response surface. Full guide:
+[docs/guide/examples_foundation.md](docs/guide/examples_foundation.md).
+
+---
+
 ## Advanced features
 
 ### Ensemble uncertainty
@@ -440,6 +496,10 @@ normet decompose --config config.yaml
 # SCM
 normet scm --config config.yaml
 
+# Zero-shot de-weathering with Chronos-2 (needs normet[foundation])
+normet deweather my_site.csv \
+  --target PM2.5 --met-vars t2m,blh,u10,v10 --out normalised.csv
+
 # Show installed version and available backends
 normet info
 ```
@@ -470,7 +530,10 @@ panel (Data → Columns → Train → Normalise → Decompose → Rolling → PD
 results in tabs that activate as each step finishes. Model quality, and every
 other result, is summarised by a traffic-light verdict banner. Step 1 exposes
 the flaml estimator search list, plus "Time variables"/"Met only" one-click
-toggles for the PDP variable list; Step 2 lets you choose exactly which
+toggles for the PDP variable list, and a **Backend** selector — `flaml`,
+`lightgbm`, or `chronos-2` for the zero-shot path, which hides the training
+controls it has nothing to act on and reports a covariate-sensitivity verdict
+in place of the parity plot; Step 2 lets you choose exactly which
 variables are resampled in the Monte-Carlo ("Met only" by default); Step 4's
 Rolling plot shows the overall rolling mean (± spread across overlapping
 windows), and an adjacent **Multi-scale decomposition** panel differences
