@@ -59,6 +59,30 @@ def test_cli_backend_choices_track_the_registry():
 
 
 @needs_click
+def test_only_do_all_offers_the_zero_shot_backend():
+    """chronos-2 is not in the registry, and only do-all has a path for it.
+
+    The registry's contract is train/save/load and Chronos-2 does none of the
+    three, so it is added to one command's choice list rather than registered.
+    decompose and cv have no zero-shot counterpart and must not advertise one.
+    """
+    from click.testing import CliRunner
+
+    from normet.cli import _build_cli
+    from normet.pipeline import CHRONOS_BACKEND
+
+    runner = CliRunner()
+
+    def backend_line(cmd: str) -> str:
+        out = runner.invoke(_build_cli(), [cmd, "--help"]).output
+        return next(ln for ln in out.splitlines() if "--backend" in ln)
+
+    assert CHRONOS_BACKEND in backend_line("do-all")
+    for cmd in ("decompose", "cv"):
+        assert CHRONOS_BACKEND not in backend_line(cmd), cmd
+
+
+@needs_click
 def test_cli_deweather_is_advertised_and_documented():
     from click.testing import CliRunner
 

@@ -132,6 +132,7 @@ from .foundation import (
     IrregularIndexError,
     add_calendar_covariates,
     resolve_device,
+    to_indexed_frame,
     to_normet_frame,
     to_regular_index,
 )
@@ -141,10 +142,12 @@ from .physics import PhysicsGraphBuilder, build_adr_pde_loss, build_pi_stgnn
 from .pipeline import (
     SingleConfig,
     UncConfig,
+    cluster_multisite,
     decompose_multisite,
     do_all,
     do_all_multisite,
     do_all_unc,
+    embed_multisite,
     multisite_apply,
     run_workflow,
 )
@@ -170,6 +173,8 @@ __all__ = [
     "run_workflow",
     "multisite_apply",
     "do_all_multisite",
+    "embed_multisite",
+    "cluster_multisite",
     "decompose_multisite",
     # --- Analysis ---
     "normalise",
@@ -274,6 +279,7 @@ __all__ = [
     "IrregularIndexError",
     "add_calendar_covariates",
     "resolve_device",
+    "to_indexed_frame",
     "to_normet_frame",
     "to_regular_index",
     # --- Counterfactual policy evaluation ---

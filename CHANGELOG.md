@@ -7,6 +7,29 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ## [Unreleased]
 
 ### Added
+- **Zero-shot `do_all`.** `do_all(..., backend="chronos-2")` skips the training
+  step: nothing is fitted, the checkpoint is loaded and the de-weathering runs
+  through `Chronos2Estimator.deweather`. The three-tuple return shape is
+  unchanged, but the model slot holds the loaded estimator, and `model_config`
+  is forwarded to its constructor (`device`, `context_length`,
+  `prediction_length`) since the AutoML search settings have nothing to act on.
+  `n_samples` now defaults to `None` and resolves per backend -- 300 for the
+  AutoML backends, 8 for Chronos-2, where each sample is a full transformer
+  forward pass rather than a tree-ensemble call. An explicit value always wins.
+  `chronos-2` is deliberately *not* registered in `backend_registry`, whose
+  contract is train/save/load; `normet do-all --backend chronos-2` accepts it,
+  while `decompose` and `cv` do not advertise a zero-shot path they lack.
+- **`embed_multisite` / `cluster_multisite`** (`normet.pipeline`) connect
+  `ChronosEmbedder` to the multi-site drivers. `embed_stations` wants one column
+  per site while multi-site frames here are long-format, so the two had no
+  meeting point; these pivot the frame, embed every site in one batched pass and
+  return `{site: 768-D vector}` keyed by the caller's own site values. 
+  `cluster_multisite` adds KMeans over a 2-D projection and returns one row per
+  site (`cluster`, `x`, `y`), for grouping stations by how they behave rather
+  than by where they are.
+- **`to_indexed_frame`** (`normet.foundation`) puts a `prepare_data`-shaped
+  frame on the gap-free DatetimeIndex Chronos-2 needs -- moved out of the GUI so
+  `do_all` and the window share one implementation.
 - **Chronos-2 foundation estimator** (`normet.foundation`): `Chronos2Estimator`
   wraps Amazon's Chronos-2 time-series foundation model behind a
   covariate-conditioned API — `predict_quantiles` (21 native quantile levels),

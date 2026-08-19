@@ -53,26 +53,10 @@ def chronos_availability() -> tuple[bool, str]:
 
 
 def to_indexed_frame(df_prep: pd.DataFrame) -> pd.DataFrame:
-    """Turn normet's ``date``-column frame into the gap-free DatetimeIndex Chronos-2 needs.
+    """Re-exported from :mod:`normet.foundation` so the window has one import site."""
+    from normet.foundation import to_indexed_frame as _to_indexed_frame
 
-    Chronos-2 reads position as time, so a frame whose rows skip missing hours
-    is read as if those hours never happened and the series slides against its
-    own calendar covariates. ``prepare_data`` drops incomplete rows, which is
-    exactly that situation, so the grid is rebuilt here and the gaps left as
-    NaN for the model to mask.
-    """
-    from normet.foundation import to_regular_index
-
-    out = df_prep.copy()
-    if "date" in out.columns:
-        out = out.set_index("date")
-    if not isinstance(out.index, pd.DatetimeIndex):
-        out.index = pd.to_datetime(out.index)
-    out = out.sort_index()
-    # `set` is prepare_data's train/test label; it means nothing zero-shot and
-    # would otherwise be picked up as a covariate.
-    out = out.drop(columns=[c for c in ("set",) if c in out.columns])
-    return to_regular_index(out)
+    return _to_indexed_frame(df_prep)
 
 
 def load_estimator(

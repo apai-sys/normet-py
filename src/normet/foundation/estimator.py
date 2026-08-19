@@ -138,6 +138,30 @@ def to_regular_index(df: pd.DataFrame, freq: str = "h") -> pd.DataFrame:
     return out
 
 
+def to_indexed_frame(df: pd.DataFrame, freq: str = "h") -> pd.DataFrame:
+    """Put a normet-shaped frame on the gap-free DatetimeIndex Chronos-2 needs.
+
+    :func:`normet.prepare_data` returns a ``date`` column, a ``value`` target and
+    a ``set`` label, and it *drops* rows with missing covariates. Chronos-2 reads
+    position as time, so those dropped hours are read as if they never happened
+    and the series slides against its own calendar covariates. This moves ``date``
+    to the index, rebuilds the grid via :func:`to_regular_index` so the holes come
+    back as NaN for the model to mask, and drops ``set`` -- a train/test label
+    means nothing zero-shot and would otherwise be picked up as a covariate.
+
+    Safe to call on a frame that is already indexed; only the pieces that apply
+    are done.
+    """
+    out = df.copy()
+    if "date" in out.columns:
+        out = out.set_index("date")
+    if not isinstance(out.index, pd.DatetimeIndex):
+        out.index = pd.to_datetime(out.index)
+    out = out.sort_index()
+    out = out.drop(columns=[c for c in ("set",) if c in out.columns])
+    return to_regular_index(out, freq=freq)
+
+
 def add_calendar_covariates(df: pd.DataFrame) -> pd.DataFrame:
     """Return ``df`` with the six cyclical calendar covariates appended.
 

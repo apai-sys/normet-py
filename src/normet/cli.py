@@ -99,12 +99,17 @@ def _build_cli():
     click = require("click", hint="pip install click")
 
     from .backends import backend_registry
+    from .pipeline import CHRONOS_BACKEND
 
     # The registry is the single source of truth for what --backend accepts;
     # the literal that used to sit here had gone stale and offered only flaml
     # long after the lightgbm backend was registered. Importing the registry is
     # cheap: both backend modules defer their heavy imports to `require`.
     backend_choice = click.Choice(backend_registry.available)
+    # do-all also accepts the zero-shot backend, which is deliberately absent
+    # from the registry: that contract is train/save/load and Chronos-2 does
+    # none of the three. decompose and cv have no zero-shot counterpart.
+    do_all_backend_choice = click.Choice([*backend_registry.available, CHRONOS_BACKEND])
 
     @click.group()
     @click.version_option(package_name="normet")
@@ -120,7 +125,7 @@ def _build_cli():
     @click.option(
         "--resample-vars", "resample_vars", help="Comma-separated subset of features to resample."
     )
-    @click.option("--backend", type=backend_choice, default=None)
+    @click.option("--backend", type=do_all_backend_choice, default=None)
     @click.option("--n-samples", "n_samples", type=int, default=None)
     @click.option(
         "--split-method",

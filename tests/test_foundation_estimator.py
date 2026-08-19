@@ -453,3 +453,119 @@ def test_auto_selected_device_falls_back_to_the_cpu_but_an_explicit_one_does_not
         assert calls == ["mps"]
     finally:
         monkey.undo()
+
+
+@needs_chronos
+def test_do_all_runs_the_zero_shot_path_and_returns_the_estimator(chronos2_pipeline):
+    """`do_all` keeps its three-tuple shape but skips the middle step entirely.
+
+    The AutoML path is prepare -> train -> normalise. Nothing is fitted here, so
+    the model slot holds the loaded estimator instead of a trained model, and
+    model_config carries the constructor settings the search parameters would
+    have carried.
+    """
+    from normet import do_all
+    from normet.foundation import Chronos2Estimator
+
+    n = 900
+    rng = np.random.default_rng(3)
+    dates = pd.date_range("2024-01-01", periods=n, freq="h")
+    t = np.arange(n)
+    blh = 800 + 400 * np.sin(2 * np.pi * t / 24) + rng.normal(0, 40, n)
+    t2m = 10 + 8 * np.sin(2 * np.pi * t / (24 * 30)) + rng.normal(0, 1, n)
+    pm = np.clip(20 - 0.01 * blh + 0.2 * (t2m - t2m.mean()) ** 2 + rng.normal(0, 2, n), 0, None)
+    df = pd.DataFrame({"date": dates, "PM2.5": pm, "t2m": t2m, "blh": blh})
+
+    out, model, df_prep = do_all(
+        df,
+        target="PM2.5",
+        backend="chronos-2",
+        covariates=["t2m", "blh"],
+        variables_resample=["t2m", "blh"],
+        n_samples=2,
+        model_config={"context_length": 512, "prediction_length": 48, "device": "cpu"},
+    )
+
+    assert isinstance(model, Chronos2Estimator)
+    assert model.context_length == 512 and model.device == "cpu"
+    # Same schema as normalise, so the existing plot and report paths apply.
+    assert {"observed", "normalised"} <= set(out.columns)
+    assert out.index.name == "date"
+    assert len(out) == n
+    assert out["normalised"].notna().all()
+    # The leading context is seeded with observations, and the tail is not.
+    assert np.allclose(out["normalised"][:512], out["observed"][:512])
+    assert not np.allclose(out["normalised"][512:], out["observed"][512:])
+    assert "set" in df_prep.columns
+
+
+@needs_chronos
+def test_do_all_zero_shot_defaults_to_a_sane_sample_count(chronos2_pipeline):
+    """300 Monte-Carlo samples is a tree-ensemble budget, not a transformer one.
+
+    Each sample here is a full forward pass, so carrying the AutoML default
+    across would run for days. An explicit n_samples must still win.
+    """
+    from normet.pipeline.do_all import (
+        CHRONOS_BACKEND,
+        CHRONOS_DEFAULT_SAMPLES,
+        _resolve_n_samples,
+    )
+
+    assert _resolve_n_samples(None, "flaml") == 300
+    assert _resolve_n_samples(None, CHRONOS_BACKEND) == CHRONOS_DEFAULT_SAMPLES
+    assert _resolve_n_samples(300, CHRONOS_BACKEND) == 300
+    assert _resolve_n_samples(1, "flaml") == 1
+
+
+@needs_chronos
+def test_do_all_zero_shot_needs_meteorological_covariates():
+    """Without covariates the run is a plain forecast wearing the wrong name.
+
+    This must fail before the ~500 MB checkpoint download, not after it.
+    """
+    from normet import do_all
+
+    df = pd.DataFrame(
+        {"date": pd.date_range("2024-01-01", periods=48, freq="h"), "PM2.5": range(48)}
+    )
+    with pytest.raises(ValueError, match="meteorological covariates"):
+        do_all(df, target="PM2.5", backend="chronos-2", covariates=[])
+
+
+@needs_chronos
+def test_embed_multisite_returns_one_vector_per_site(chronos2_pipeline):
+    """The long-to-wide pivot is what connects multi-site frames to the embedder.
+
+    Site keys must come back as the caller's own values, not stringified, so the
+    result joins against their frame directly.
+    """
+    from normet import cluster_multisite, embed_multisite
+
+    n = 400
+    rng = np.random.default_rng(11)
+    dates = pd.date_range("2024-01-01", periods=n, freq="h")
+    t = np.arange(n)
+    frames = []
+    for site, period in ((101, 24), (202, 12), (303, 168)):
+        frames.append(
+            pd.DataFrame(
+                {
+                    "date": dates,
+                    "site": site,
+                    "PM2.5": 20 + 6 * np.sin(2 * np.pi * t / period) + rng.normal(0, 0.5, n),
+                }
+            )
+        )
+    df = pd.concat(frames, ignore_index=True)
+
+    vectors = embed_multisite(df, "site", "PM2.5", context_length=256, device="cpu")
+    assert set(vectors) == {101, 202, 303}
+    assert all(v.shape == (768,) for v in vectors.values())
+    # Sites with different dynamics must not collapse onto the same vector.
+    assert not np.allclose(vectors[101], vectors[303])
+
+    table = cluster_multisite(df, "site", "PM2.5", n_clusters=2, context_length=256, device="cpu")
+    assert list(table.columns) == ["site", "cluster", "x", "y"]
+    assert sorted(table["site"]) == [101, 202, 303]
+    assert table["cluster"].nunique() == 2

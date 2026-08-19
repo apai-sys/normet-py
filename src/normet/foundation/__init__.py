@@ -8,6 +8,7 @@ from .estimator import (
     IrregularIndexError,
     add_calendar_covariates,
     resolve_device,
+    to_indexed_frame,
     to_normet_frame,
     to_regular_index,
 )
@@ -20,6 +21,7 @@ __all__ = [
     "InsufficientContextError",
     "IrregularIndexError",
     "resolve_device",
+    "to_indexed_frame",
     "to_normet_frame",
     "to_regular_index",
 ]
