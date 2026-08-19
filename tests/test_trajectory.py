@@ -7,6 +7,7 @@ import os
 import numpy as np
 import pandas as pd
 import pytest
+
 from normet.io import trajectory as tj
 
 # A minimal but format-correct HYSPLIT tdump: 1 met grid, 1 backward trajectory,

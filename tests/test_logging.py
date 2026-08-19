@@ -2,6 +2,7 @@ import logging
 import time
 
 import pytest
+
 from normet.utils.logging import _progress_str, enable_default_logging, get_logger
 
 

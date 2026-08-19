@@ -7,6 +7,7 @@ matplotlib.use("Agg")
 import numpy as np
 import pandas as pd
 import pytest
+
 from normet.plotting import decomposition_stack, pdp_grid, polar_plot, scm_dashboard
 
 

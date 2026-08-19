@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+
 from normet.causal.placebo import placebo_in_space, placebo_in_time
 
 CUTOFF = "2023-05-01"

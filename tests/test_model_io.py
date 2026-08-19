@@ -7,6 +7,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+
 from normet.backends import backend_registry
 from normet.model.io import load_model, save_model
 

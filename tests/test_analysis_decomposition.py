@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import sys
 
-import normet.analysis.decomposition
 import numpy as np
 import pandas as pd
 import pytest
+
+import normet.analysis.decomposition
 from normet.analysis.decomposition import _effective_cores, decom_emi, decom_met, decompose
 
 # Import module and get the actual module objects from sys.modules

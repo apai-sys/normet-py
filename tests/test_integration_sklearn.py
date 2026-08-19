@@ -12,10 +12,11 @@ from typing import Any, Optional
 import numpy as np
 import pandas as pd
 import pytest
+from sklearn.ensemble import RandomForestRegressor
+
 from normet import normalise
 from normet.backends import backend_registry
 from normet.model.train import build_model, train_model
-from sklearn.ensemble import RandomForestRegressor
 
 # ---------------------------------------------------------------------------
 # Sklearn backend
