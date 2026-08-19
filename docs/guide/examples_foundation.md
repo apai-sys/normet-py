@@ -83,6 +83,27 @@ import normet as nm
 nm.normalise_plot(out, ci_low="q100", ci_high="q900")
 ```
 
+## The one-call pipeline
+
+`do_all` takes the same backend switch, and keeps its three-tuple shape:
+
+```python
+out, estimator, df_prep = nm.do_all(
+    df, target="PM2.5", backend="chronos-2",
+    covariates=["t2m", "blh", "u10", "v10"],
+    variables_resample=["t2m", "blh", "u10", "v10"],
+)
+```
+
+Nothing is trained, so the model slot holds the loaded estimator rather than a
+fitted model -- which is what you need for further projections or the
+diagnostic below. `split_method` and `train_fraction` have nothing to act on;
+`model_config` is forwarded to the estimator's constructor instead, which is
+where `device`, `context_length` and `prediction_length` belong.
+
+`n_samples` defaults to 8 here rather than the AutoML path's 300, since each
+sample is a full forward pass. An explicit value always wins.
+
 ## Check that the model reacts to weather at all
 
 There is no parity plot and no feature importance here — nothing was fitted and
@@ -199,6 +220,27 @@ and read as "no trend" rather than "not separable", which is why the call is
 refused rather than served. And no attribution method fixes it: integrated
 gradients over the covariate channel would faithfully report near-zero for the
 calendar inputs, because near-zero is the truth about how the model uses them.
+
+## Grouping sites by how they behave
+
+`embed_multisite` reads each site's series through the encoder and returns the
+768-D vector describing its dynamics. It exists because the shapes did not
+meet: `ChronosEmbedder.embed_stations` wants one column per site, while
+multi-site frames in this package are long-format.
+
+```python
+vectors = nm.embed_multisite(df, site_col="site", target="PM2.5")
+# {site: 768-D array}, keyed by your own site values
+
+table = nm.cluster_multisite(df, site_col="site", target="PM2.5", n_clusters=4)
+# one row per site: site, cluster, x, y
+```
+
+Sites are embedded in a single batched pass, and every series is cut or
+NaN-padded to the same context length first -- otherwise a site's vector shifts
+depending on which other sites shared its batch. The 2-D coordinates come from
+UMAP where `umap-learn` is installed and PCA otherwise, so they are for looking
+at, not for measuring distances in.
 
 ## Limits
 
