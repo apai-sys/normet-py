@@ -349,6 +349,21 @@ shape `normalise` emits, so the existing plot and HTML-report paths apply
 unchanged. `est.counterfactual(...)` projects a business-as-usual series across
 an intervention and reports its own pre-intervention bias alongside the effect.
 
+The pipelines take the same backend switch:
+
+```python
+out, estimator, df_prep = nm.do_all(df, target="PM2.5", backend="chronos-2",
+                                    covariates=met, variables_resample=met)
+
+# Meteorological decomposition works; method="emission" is refused, because the
+# trend rides in the target's own history rather than the covariate channel.
+parts = nm.decompose(df, target="PM2.5", method="meteorology",
+                     backend="chronos-2", covariates=met)
+
+# Group stations by how they behave rather than by where they are.
+table = nm.cluster_multisite(df, site_col="site", target="PM2.5", n_clusters=4)
+```
+
 Three things decide whether this is the right tool for a given record:
 
 - **The first `context_length` rows are not a result.** The model has no history
