@@ -7,6 +7,29 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ## [Unreleased]
 
 ### Added
+- **Zero-shot meteorological decomposition.**
+  `decompose(method="meteorology", backend="chronos-2")` fixes one meteorological
+  feature at a time and takes successive differences, structurally identical to
+  `decom_met` with `deweather` in place of `normalise`. Without fitted
+  importances the order comes from each feature's individual covariate
+  sensitivity; `variable_order` pins it.
+
+  `method="emission"` is refused on this backend rather than served. That
+  decomposition isolates trend, seasonal, weekly and diurnal components by
+  resampling `date_unix` / `day_julian` / `weekday` / `hour`, which works because
+  an AutoML model sees them as ordinary features. Chronos-2 conditions on the
+  target's own history and `deweather` never resamples history, so a repeating
+  calendar signal survives every draw. Measured with the calendar encoders
+  supplied as ordinary covariates -- the most favourable setting -- covariate
+  sensitivity came to 0.53% for a time index, 0.75% weekly, 1.50% diurnal and
+  2.47% for all six together, against 4.78-10.72% for meteorology in the same
+  runs. The diurnal signal was the largest injected component of all (amplitude
+  15 against a meteorological scale of 10 and a series SD of 18.5), so
+  attribution runs opposite to signal size: meteorology is irregular and must be
+  read from the covariate channel, while calendar cycles repeat and can be read
+  from history. Components would come back near zero and read as "no trend"
+  rather than "not separable". `normet decompose --backend chronos-2` accepts the
+  backend; `cv` still does not, having nothing to train.
 - **Zero-shot `do_all`.** `do_all(..., backend="chronos-2")` skips the training
   step: nothing is fitted, the checkpoint is loaded and the de-weathering runs
   through `Chronos2Estimator.deweather`. The three-tuple return shape is

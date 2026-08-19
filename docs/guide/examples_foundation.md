@@ -155,6 +155,51 @@ That is not cosmetic: Chronos-2 left-pads a ragged batch, which changes the
 patch count and shifts a station's pooled embedding depending on which other
 stations happened to share its batch.
 
+## Decomposition
+
+`decompose(method="meteorology", backend="chronos-2")` works: it fixes one
+meteorological feature at a time and takes successive differences, exactly as
+the AutoML path does, with `deweather` in place of `normalise`. Without fitted
+importances the feature order comes from each one's individual covariate
+sensitivity; pass `variable_order` to pin it.
+
+```python
+out = nm.decompose(
+    df, target="PM2.5", method="meteorology", backend="chronos-2",
+    covariates=["t2m", "blh", "u10", "v10"],
+)
+# observed, emi_total, t2m, blh, u10, v10, met_total, met_base, met_noise
+```
+
+`method="emission"` is refused, and the reason is worth stating because it is
+not a missing feature. That decomposition isolates trend, seasonal, weekly and
+diurnal components by resampling `date_unix` / `day_julian` / `weekday` /
+`hour`. Chronos-2 conditions on the target's own history, and `deweather` never
+resamples history, so a repeating calendar signal survives every draw -- the
+model reads it off the past and takes nothing from the covariate.
+
+Measured on synthetic series, with the calendar encoders supplied as ordinary
+covariates (the most favourable setting), by covariate sensitivity:
+
+| Covariate | Sensitivity | Meteorology, same run |
+|---|---|---|
+| Time index (trend) | 0.53% | 10.72% |
+| Weekly (`dow_sin/cos`) | 0.75% | 4.78% |
+| Diurnal (`hour_sin/cos`) | 1.50% | 4.78% |
+| All six calendar encoders | 2.47% | 4.78% |
+
+The diurnal signal was the *largest* injected component in that run -- amplitude
+15 against a meteorological scale of 10 and a series standard deviation of 18.5
+-- and still drew the weaker response. Attribution runs opposite to signal size,
+because meteorology is irregular and must be read from the covariate channel
+while calendar cycles repeat and can be read from history.
+
+Two consequences. A trend component recovered this way would come back near zero
+and read as "no trend" rather than "not separable", which is why the call is
+refused rather than served. And no attribution method fixes it: integrated
+gradients over the covariate channel would faithfully report near-zero for the
+calendar inputs, because near-zero is the truth about how the model uses them.
+
 ## Limits
 
 `decompose`, `rolling` and `pdp` have no Chronos-2 equivalent — they are defined

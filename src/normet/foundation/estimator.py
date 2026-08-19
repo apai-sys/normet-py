@@ -30,6 +30,25 @@ log = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "amazon/chronos-2"
 
+#: ``backend`` value that switches the pipelines onto the zero-shot path.
+#:
+#: Deliberately *not* registered in ``normet.backends.backend_registry``: that
+#: registry's contract is train/save/load, and Chronos-2 does none of the three.
+CHRONOS_BACKEND = "chronos-2"
+
+#: Monte-Carlo weather resamples for the zero-shot path.
+#:
+#: The AutoML default of 300 is a tree-ensemble budget. Here each sample is a
+#: full context-length forward pass, so 300 would run for days on a CPU.
+CHRONOS_DEFAULT_SAMPLES = 8
+
+
+def resolve_n_samples(n_samples: int | None, backend: str | None) -> int:
+    """Fill in the Monte-Carlo sample count for *backend* when left unset."""
+    if n_samples is not None:
+        return int(n_samples)
+    return CHRONOS_DEFAULT_SAMPLES if backend == CHRONOS_BACKEND else 300
+
 
 def _import_foundation() -> tuple[Any, Any]:
     """Return ``(torch, Chronos2Pipeline)`` or explain which extra is missing."""
