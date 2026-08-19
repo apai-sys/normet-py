@@ -77,3 +77,18 @@ def _has(pkg: str) -> bool:
 
 needs_flaml = pytest.mark.skipif(not _has("flaml"), reason="flaml not installed")
 needs_lgb = pytest.mark.skipif(not _has("lightgbm"), reason="lightgbm not installed")
+
+
+@pytest.fixture(scope="session")
+def chronos2_pipeline():
+    """Load ``amazon/chronos-2`` once for the whole session.
+
+    Both foundation test modules hit the real checkpoint; re-reading ~500 MB of
+    weights per module dominates runtime on a shared filesystem. The pipeline is
+    stateless across calls, so sharing it is safe.
+    """
+    from chronos import Chronos2Pipeline
+
+    from normet.foundation.estimator import DEFAULT_MODEL
+
+    return Chronos2Pipeline.from_pretrained(DEFAULT_MODEL, device_map="cpu")
