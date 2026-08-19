@@ -155,6 +155,15 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   `fetch_era5_timeseries`, which needs only `cdsapi` — no `xarray`/`netCDF4`.
 
 ### Fixed
+- **Warning noise in the test suite.** Nine call sites parsed user-supplied date
+  columns with `pd.to_datetime(..., errors="coerce")` and no format. When the
+  first value is unparseable pandas cannot infer one, falls back to per-element
+  dateutil parsing and says so -- which is exactly the path these callers are
+  built for, since each checks the resulting `NaT` values on the next line.
+  They now share `normet.utils._time.to_datetime_coerced`, which silences that
+  one message (and only that one). arviz's import-time `FutureWarning` about its
+  own upcoming refactor is filtered in `pyproject.toml` alongside the existing
+  pandas and joblib entries.
 - **Apple Silicon was never used.** Device auto-selection was
   `"cuda" if torch.cuda.is_available() else "cpu"`, so every Mac ran Chronos-2 on
   the CPU however capable its GPU. De-weathering spends one full forward pass per

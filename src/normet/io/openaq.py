@@ -21,6 +21,7 @@ from typing import Any
 
 import pandas as pd
 
+from ..utils._time import to_datetime_coerced
 from ..utils.logging import get_logger
 from ._http import get_json
 
@@ -269,7 +270,7 @@ def fetch_openaq_measurements(
 
     out = pd.DataFrame(rows)
     if not out.empty:
-        out["date"] = pd.to_datetime(out["date"], utc=True, errors="coerce")
+        out["date"] = to_datetime_coerced(out["date"], utc=True)
         out = out.sort_values(["site", "date"]).reset_index(drop=True)
     return out
 

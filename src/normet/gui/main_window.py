@@ -50,6 +50,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from normet.utils._time import to_datetime_coerced
+
 from . import _chronos, _settings
 from ._widgets import (
     CanvasTab,
@@ -740,7 +742,7 @@ class MainWindow(QMainWindow):
                 "(Analysis → Synthetic Control).",
             )
             return
-        df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+        df[date_col] = to_datetime_coerced(df[date_col])
         df = df.rename(columns={date_col: "date"})
 
         self._ingest(df, os.path.basename(path))
@@ -1862,7 +1864,7 @@ class MainWindow(QMainWindow):
     def ingest_dataframe(self, df: pd.DataFrame, label: str) -> None:
         """Load an in-memory table (e.g. from the Data Studio) as the dataset."""
         df = df.copy()
-        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        df["date"] = to_datetime_coerced(df["date"])
         self._ingest(df, label)
 
     # ---------------------------------------------------------- Transport Studio
