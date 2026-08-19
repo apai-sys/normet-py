@@ -5,6 +5,7 @@ import importlib.util
 import numpy as np
 import pandas as pd
 import pytest
+
 from normet.report import generate_html
 from normet.utils.provenance import make_run
 
@@ -117,6 +118,7 @@ def test_generate_html_for_bayesian_scm(tmp_path):
 def test_cli_report_to_markdown(tmp_path):
     import joblib
     from click.testing import CliRunner
+
     from normet.cli import _build_cli
 
     dates = pd.date_range("2024-01-01", periods=20, freq="D")

@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
+
 from normet.analysis.normalise import (
     _apply_conditional_filter,
     _format_quantile_name,

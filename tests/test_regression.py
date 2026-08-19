@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
+
 from normet.utils.cv import time_series_cv
 from normet.utils.metrics import _DEFAULT_STATS, _fac2, _stats_from_arrays, modStats
 from normet.utils.prepare import check_data, prepare_data, process_date, split_into_sets

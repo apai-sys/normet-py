@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import pytest
+
 from normet.utils.featureeng import (
     add_lag_features,
     add_rolling_features,

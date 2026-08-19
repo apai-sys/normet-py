@@ -1,6 +1,7 @@
 """Unit tests for the shared HTTP retry helper — no real network access."""
 
 import pytest
+
 from normet.io import _http
 
 

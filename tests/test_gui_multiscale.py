@@ -7,10 +7,11 @@ same convention used by test_analysis_decomposition.py for `normalise`.
 
 from __future__ import annotations
 
-import normet
 import numpy as np
 import pandas as pd
 import pytest
+
+import normet
 from normet.gui import _multiscale as ms
 
 

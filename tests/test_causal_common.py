@@ -3,6 +3,7 @@
 import numpy as np
 import pandas as pd
 import pytest
+
 from normet.causal._common import pivot_panel, solve_simplex_weights
 
 
