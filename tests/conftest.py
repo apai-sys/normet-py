@@ -9,6 +9,22 @@ import pandas as pd
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _close_figures():
+    """Release every matplotlib figure a test leaves behind.
+
+    pyplot keeps each figure it creates alive until something closes it, and
+    normet's plotting helpers hand back an Axes or a Figure for the caller to
+    own. Across a full run that accumulated past matplotlib's 20-figure alarm
+    and reported it as a RuntimeWarning against whichever test happened to
+    cross the threshold -- a number that moves whenever tests are reordered.
+    """
+    yield
+    import matplotlib.pyplot as plt
+
+    plt.close("all")
+
+
 @pytest.fixture(scope="session")
 def rng() -> np.random.Generator:
     return np.random.default_rng(20240101)
