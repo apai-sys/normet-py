@@ -1,25 +1,22 @@
-# Roadmap to 1.0
+# Roadmap
 
-`normet` is currently at version **0.4.x**. The path to 1.0 is about
-*hardening* — not adding more features — and committing to API stability for
-downstream users.
+`normet` is at version **1.0.0**. 1.0 was about *hardening* rather than adding
+features, and it commits the project to API stability for downstream users.
 
 ## What 1.0 means
 
-When we cut `1.0.0`:
-
 - **Public API is stable.** Anything exported from the top-level `normet`
-  package will follow [Semantic Versioning](https://semver.org). Breaking
-  changes require a major version bump and a deprecation window of at least
-  one minor release.
+  package follows [Semantic Versioning](https://semver.org). Breaking changes
+  require a major version bump and a deprecation window of at least one minor
+  release.
 - **Internal modules** (anything imported via `normet._something` or
   `normet.subpkg.module.private_helper`) are explicitly *not* part of the
   contract.
-- **Optional dependencies** stay optional; importing `normet` itself will
-  never require any of `flaml`, `lightgbm`, `xarray`, `dask`, `click`,
-  `pyyaml`, `cdsapi`, `pymc`.
+- **Optional dependencies** stay optional; importing `normet` itself will never
+  require any of `flaml`, `lightgbm`, `xarray`, `dask`, `click`, `pyyaml`,
+  `cdsapi`, `pymc`, `torch`, `chronos-forecasting`, `PySide6`.
 
-## Pre-1.0 milestones
+## Shipped
 
 | Status | Item |
 |:------:|------|
@@ -35,13 +32,24 @@ When we cut `1.0.0`:
 | ✅ | Plotting suite (polar / PDP grid / decomposition / SCM dashboard) |
 | ✅ | HTML / Markdown report generator |
 | ✅ | Bayesian SCM + event detection |
-| ⏳ | mypy strict on the public surface (currently lenient) |
-| ⏳ | Test coverage ≥ 80% (currently 70% threshold) |
-| ⏳ | A v1.0 deprecation policy in writing |
+| ✅ | Qt desktop GUI (`normet-gui`) with packaged installers |
+| ✅ | Chronos-2 foundation model: zero-shot de-weathering, counterfactuals, station embeddings |
+| ✅ | Physics-informed graph models (PI-STGNN, advection-diffusion-reaction loss) |
 
-## Deprecation policy (proposed)
+## Open
 
-Starting at 1.0:
+These were listed as 1.0 gates and 1.0 shipped without them, so they are now
+ordinary follow-up work rather than release blockers.
+
+| Status | Item |
+|:------:|------|
+| ⏳ | mypy strict on the public surface (currently lenient, but clean) |
+| ⏳ | Test coverage ≥ 80% (currently 78%, with the CI gate at 70%) |
+| ⏳ | Ratify the deprecation policy below |
+| ⏳ | A zero-shot path through `do_all` / `pipeline`, which is shaped as train → normalise and so has nothing for Chronos-2 to train; `normet deweather` covers this from the CLI in the meantime |
+| ⏳ | Connect `ChronosEmbedder.embed_stations` to `normet.multisite` — the 768-D station vectors and the multi-site pipeline currently have no meeting point |
+
+## Deprecation policy (proposed, not yet ratified)
 
 - A symbol marked for removal will:
   1. Emit a `DeprecationWarning` for at least one minor release.
@@ -49,7 +57,11 @@ Starting at 1.0:
   3. Have a replacement linked from the warning message.
 - Symbols are only removed in a major release.
 
-## Out of scope for 1.0
+This is still the *proposed* wording rather than a commitment in force: 1.0
+shipped before it was ratified, so nothing has yet been deprecated under it.
 
-- A GUI / Streamlit dashboard — community-contributed examples welcome but
-  not part of the library proper.
+## Out of scope
+
+- A Streamlit or web dashboard. The desktop GUI covers the no-code workflow;
+  a hosted equivalent is a separate project, and community-contributed
+  examples are welcome but not part of the library proper.
