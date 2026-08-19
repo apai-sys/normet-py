@@ -155,6 +155,13 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   `fetch_era5_timeseries`, which needs only `cdsapi` — no `xarray`/`netCDF4`.
 
 ### Fixed
+- **`generate_html_report` retained every figure it drew.** The report builds
+  its own plot, serialises it to an inline PNG and has no further use for it,
+  but pyplot keeps each figure alive until closed -- so generating a report per
+  site in a loop accumulated them all. `_auto_plot` also orphaned its figure
+  when the plotting call raised, since the figure is created first and the
+  handler returned `None`. Both are closed now. Figures passed in through
+  `extra_plots` belong to the caller and are deliberately left open.
 - **Warning noise in the test suite.** Nine call sites parsed user-supplied date
   columns with `pd.to_datetime(..., errors="coerce")` and no format. When the
   first value is unparseable pandas cannot infer one, falls back to per-element
@@ -163,7 +170,9 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   They now share `normet.utils._time.to_datetime_coerced`, which silences that
   one message (and only that one). arviz's import-time `FutureWarning` about its
   own upcoming refactor is filtered in `pyproject.toml` alongside the existing
-  pandas and joblib entries.
+  pandas and joblib entries. Tests now close their figures after each case, so
+  matplotlib's 20-figure alarm no longer fires against whichever test happens to
+  cross the threshold -- a target that moved whenever tests were reordered.
 - **Apple Silicon was never used.** Device auto-selection was
   `"cuda" if torch.cuda.is_available() else "cpu"`, so every Mac ran Chronos-2 on
   the CPU however capable its GPU. De-weathering spends one full forward pass per
