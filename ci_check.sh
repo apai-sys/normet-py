@@ -11,7 +11,14 @@ set -uo pipefail
 module purge; unset LD_LIBRARY_PATH PYTHONPATH PYTHONHOME
 module load apps/binapps/anaconda3/2024.10
 export PYTHONNOUSERSITE=1 PYTHONUNBUFFERED=1
-export LD_LIBRARY_PATH="/usr/lib64:/lib64:${LD_LIBRARY_PATH:-}"
+# Deliberately leave LD_LIBRARY_PATH unset (module purge above clears it).
+# /usr/lib64 and /lib64 are already in the system ld.so.cache, so naming
+# them here buys nothing -- and it breaks PySide6: LD_LIBRARY_PATH outranks
+# a library's DT_RUNPATH, so the loader picks the system Qt 6.6 libs over
+# the ones PySide6 bundles under site-packages/PySide6/Qt/lib, and
+# /usr/lib64/libQt6DBus.so.6 then fails against the bundled libQt6Core
+# with: version `Qt_6.6_PRIVATE_API' not found. That took out all 11
+# tests/test_gui_smoke.py tests at collection time.
 source activate normet
 # ~/.local/bin (pip --user installs of ruff/pytest/mypy) sits ahead of the
 # conda env in this login shell's PATH, silently shadowing the env's own
