@@ -224,6 +224,20 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   `fetch_era5_timeseries`, which needs only `cdsapi` — no `xarray`/`netCDF4`.
 
 ### Fixed
+- **`cluster_embeddings` crashed on a handful of sites.** The UMAP branch
+  hard-coded `n_neighbors=15` and caught only `ImportError`, so three stations
+  raised `TypeError: Cannot use scipy.linalg.eigh for sparse A with k >= N` out
+  of UMAP's spectral initialisation, which asks for `n_components + 1`
+  eigenvectors of an N x N graph. It only ever surfaced where umap-learn was
+  installed -- the CPU test environment has no umap, takes the PCA fallback and
+  never saw it; a GPU run in an environment that does have it did.
+
+  `n_neighbors` is now clamped below N, `N <= 3` takes PCA directly, and *any*
+  UMAP failure degrades to PCA with a warning rather than propagating: a 2-D
+  projection is a diagnostic view, and a plainer view beats no result.
+  `n_clusters` above the number of embeddings is clamped too, since asking for
+  four regimes across three stations is a thing callers do, and a single
+  embedding comes back padded to `(1, 2)` so the `(x, y)` contract holds.
 - **`generate_html_report` retained every figure it drew.** The report builds
   its own plot, serialises it to an inline PNG and has no further use for it,
   but pyplot keeps each figure alive until closed -- so generating a report per

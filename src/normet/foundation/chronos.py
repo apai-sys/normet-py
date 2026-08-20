@@ -281,21 +281,63 @@ class ChronosEmbedder:
         else:
             mat = np.asarray(embeddings)
 
+        n = len(mat)
+        if n == 0:
+            return np.zeros((0, 2), dtype=float), np.zeros(0, dtype=int)
+
+        coords_2d = _reduce_to_2d(mat, random_state)
+
+        k = min(int(n_clusters), n)
+        if k != n_clusters:
+            log.warning(
+                "n_clusters=%d exceeds the %d embeddings on hand; clustering into %d.",
+                n_clusters,
+                n,
+                k,
+            )
+        kmeans = KMeans(n_clusters=k, random_state=random_state, n_init=10)
+        labels = kmeans.fit_predict(mat)
+
+        return coords_2d, labels
+
+
+def _reduce_to_2d(mat: np.ndarray, random_state: int) -> np.ndarray:
+    """Project embeddings onto two dimensions, preferring UMAP but not needing it.
+
+    UMAP's spectral initialisation asks scipy for ``n_components + 1`` eigenvectors
+    of an N x N graph, and ``eigsh`` refuses outright once ``k >= N``; ``n_neighbors``
+    likewise has to stay below N. A three-site frame is an ordinary thing to want
+    clustered, so small N takes the PCA path instead of raising -- the previous
+    code hard-coded ``n_neighbors=15`` and caught only ``ImportError``, so three
+    sites crashed with a scipy ``TypeError`` wherever umap-learn happened to be
+    installed.
+
+    Any other UMAP failure also degrades to PCA rather than propagating: a 2-D
+    projection is a diagnostic view, and no view is a worse outcome than a
+    slightly plainer one.
+    """
+    n = len(mat)
+    if n > 3:  # spectral init needs N > n_components + 1
         try:
             import umap
 
             reducer = umap.UMAP(
-                n_components=2, n_neighbors=15, min_dist=0.1, random_state=random_state
+                n_components=2,
+                n_neighbors=min(15, n - 1),
+                min_dist=0.1,
+                random_state=random_state,
             )
-            coords_2d = reducer.fit_transform(mat)
+            return np.asarray(reducer.fit_transform(mat))
         except ImportError:
-            from sklearn.decomposition import PCA
-
             log.warning("umap-learn not found; falling back to 2D PCA.")
-            reducer = PCA(n_components=2, random_state=random_state)
-            coords_2d = reducer.fit_transform(mat)
+        except Exception:
+            log.warning("UMAP failed on %d embeddings; falling back to 2D PCA.", n, exc_info=True)
 
-        kmeans = KMeans(n_clusters=n_clusters, random_state=random_state, n_init=10)
-        labels = kmeans.fit_predict(mat)
+    from sklearn.decomposition import PCA
 
-        return coords_2d, labels
+    coords = np.asarray(
+        PCA(n_components=min(2, n, mat.shape[1]), random_state=random_state).fit_transform(mat)
+    )
+    if coords.shape[1] < 2:  # a single embedding has no second component to report
+        coords = np.hstack([coords, np.zeros((n, 2 - coords.shape[1]))])
+    return coords
