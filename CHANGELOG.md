@@ -7,6 +7,23 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ## [Unreleased]
 
 ### Added
+- **Batched Chronos-2 forward passes.** `Chronos2Estimator` gained a
+  `batch_size` (default 32): `deweather` now sends its Monte-Carlo draws to the
+  model in batches instead of one per call, and `predict` batches its rolling
+  blocks, which are independent because each conditions on observed history
+  rather than on the previous block's output. `counterfactual` is unchanged --
+  it rolls forward on its own median and cannot be batched.
+
+  Measured on an L40S at a 512 h context and 48 h horizon this is worth ~3x from
+  eight draws upward (0.10 s to 0.03 s at 8; 1.67 s to 0.55 s at 128). On a
+  single-threaded CPU it is worth nothing (0.96-1.02x across 2-16 draws): the
+  samples there are compute-bound, not dispatch-bound. Results are unchanged --
+  `predict` is deterministic, and batching only reorders float32 accumulation
+  (~1e-5).
+
+  `n_samples` defaults are deliberately *not* device-dependent, so the same
+  script and seed give the same answer on a laptop and on a cluster; the GPU
+  headroom is documented instead, for callers to spend by hand.
 - **Zero-shot meteorological decomposition.**
   `decompose(method="meteorology", backend="chronos-2")` fixes one meteorological
   feature at a time and takes successive differences, structurally identical to
