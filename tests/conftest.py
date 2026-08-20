@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 
 import numpy as np
 import pandas as pd
@@ -96,7 +97,20 @@ needs_lgb = pytest.mark.skipif(not _has("lightgbm"), reason="lightgbm not instal
 
 
 @pytest.fixture(scope="session")
-def chronos2_pipeline():
+def chronos_device() -> str:
+    """Where the foundation tests put the checkpoint.
+
+    The CPU by default, so the suite runs anywhere and gives the same numbers on
+    every machine. ``NORMET_TEST_DEVICE=cuda`` re-runs the same tests on a GPU,
+    which is worth doing after touching the shared forward pass: batching sends
+    several inputs through one call, and a device can disagree with the CPU
+    about a batched op in a way no CPU-only run would ever show.
+    """
+    return os.environ.get("NORMET_TEST_DEVICE", "cpu")
+
+
+@pytest.fixture(scope="session")
+def chronos2_pipeline(chronos_device):
     """Load ``amazon/chronos-2`` once for the whole session.
 
     Both foundation test modules hit the real checkpoint; re-reading ~500 MB of
@@ -107,4 +121,4 @@ def chronos2_pipeline():
 
     from normet.foundation.estimator import DEFAULT_MODEL
 
-    return Chronos2Pipeline.from_pretrained(DEFAULT_MODEL, device_map="cpu")
+    return Chronos2Pipeline.from_pretrained(DEFAULT_MODEL, device_map=chronos_device)

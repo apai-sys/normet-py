@@ -46,12 +46,12 @@ def loaded_pipeline(chronos2_pipeline):
 
 
 @pytest.fixture
-def make_estimator(loaded_pipeline):
+def make_estimator(loaded_pipeline, chronos_device):
     """Build estimators that reuse the session-loaded pipeline."""
     pipeline, quantiles = loaded_pipeline
 
     def _factory(**kwargs) -> Chronos2Estimator:
-        kwargs.setdefault("device", "cpu")
+        kwargs.setdefault("device", chronos_device)
         est = Chronos2Estimator(**kwargs)
         est._pipeline = pipeline
         est._quantiles = quantiles

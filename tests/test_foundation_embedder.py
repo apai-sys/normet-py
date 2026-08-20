@@ -41,9 +41,9 @@ CONTEXT = 256
 
 
 @pytest.fixture
-def embedder(chronos2_pipeline) -> ChronosEmbedder:
+def embedder(chronos2_pipeline, chronos_device) -> ChronosEmbedder:
     """Embedder wired to the session-loaded pipeline."""
-    emb = ChronosEmbedder(device="cpu")
+    emb = ChronosEmbedder(device=chronos_device)
     emb._pipeline = chronos2_pipeline
     return emb
 
@@ -116,6 +116,33 @@ def test_cluster_embeddings_returns_coords_and_labels():
     assert coords.shape == (20, 2)
     assert labels.shape == (20,)
     assert set(np.unique(labels)) == {0, 1}
+
+
+def test_cluster_embeddings_survives_a_handful_of_sites():
+    """Three sites must cluster, not crash.
+
+    UMAP's spectral init asks scipy for ``n_components + 1`` eigenvectors of an
+    N x N graph and ``eigsh`` refuses once ``k >= N``, so a three-row matrix used
+    to raise a ``TypeError`` -- which the ``except ImportError`` around the UMAP
+    import did not catch. It only ever surfaced where umap-learn was installed,
+    which is why the CPU test environment never saw it.
+
+    ``n_clusters`` above the number of embeddings is clamped for the same reason:
+    asking for four regimes across three stations is a thing users do.
+    """
+    rng = np.random.default_rng(0)
+    mat = rng.normal(0, 1, (3, 8))
+    coords, labels = ChronosEmbedder.cluster_embeddings(mat, n_clusters=4)
+    assert coords.shape == (3, 2)
+    assert labels.shape == (3,)
+    assert len(set(labels)) <= 3
+
+
+def test_cluster_embeddings_handles_a_single_site():
+    """One embedding has no second component; the caller still gets an (x, y)."""
+    coords, labels = ChronosEmbedder.cluster_embeddings(np.ones((1, 8)), n_clusters=4)
+    assert coords.shape == (1, 2)
+    assert labels.shape == (1,)
 
 
 def test_continuous_gradients_track_a_known_slope():
