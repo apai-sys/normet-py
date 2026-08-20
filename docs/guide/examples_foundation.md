@@ -51,6 +51,20 @@ rather than a silent downgrade. The estimator's `.device` attribute always
 reports where it actually landed. The CLI exposes this as `--device` and the
 desktop GUI as a **Device** selector next to the backend.
 
+The Monte-Carlo draws go to the model in batches of `batch_size` (default 32)
+rather than one at a time. Measured on an L40S at a 512 h context and a 48 h
+horizon, that is worth about 3x from eight draws upward; on a single-threaded
+CPU it is worth nothing, because the samples are compute-bound rather than
+dispatch-bound. The numbers are the same either way — `predict` is
+deterministic, and batching only reorders float32 accumulation (~1e-5). Lower
+`batch_size` if a long context and many covariates exhaust the device's memory.
+
+Because the default is fixed rather than device-dependent, `n_samples` is worth
+raising by hand on a GPU: the same L40S runs 128 batched draws in 0.55 s against
+0.10 s for eight, so more of the Monte-Carlo error is cheap to buy. It is left
+to you rather than chosen automatically so that the same script and seed give
+the same answer on a laptop and on a cluster.
+
 ## De-weathering
 
 ```python

@@ -88,6 +88,13 @@ def test_default_model_is_chronos_two():
     assert Chronos2Estimator().model_name == "amazon/chronos-2"
 
 
+def test_batch_size_cannot_be_zero():
+    """A zero or negative batch would make the chunking loop skip every draw."""
+    assert Chronos2Estimator(batch_size=0).batch_size == 1
+    assert Chronos2Estimator(batch_size=-4).batch_size == 1
+    assert Chronos2Estimator().batch_size == 32
+
+
 def test_calendar_covariates_are_cyclical(met_frame):
     for col in ("hour_sin", "hour_cos", "dow_sin", "dow_cos", "doy_sin", "doy_cos"):
         assert col in met_frame
@@ -224,6 +231,47 @@ def test_deweather_returns_expectation_over_resampled_weather(met_frame, make_es
     assert np.isfinite(out["dew_p50"]).all()
     # the seeded context region is passed through unchanged
     assert out["dew_p50"].iloc[:512].to_numpy() == pytest.approx(small["value"].to_numpy()[:512])
+
+
+@needs_chronos
+def test_batching_draws_does_not_change_the_answer(met_frame, make_estimator):
+    """Draws sent together must give what draws sent one at a time give.
+
+    Batching buys ~3x on a GPU and nothing on a single-threaded CPU, which is
+    compute-bound rather than dispatch-bound; it is therefore only worth having
+    if it leaves the numbers alone. It does: ``predict`` is deterministic, and
+    the draws for a given ``random_state`` are taken in the same order whichever
+    way they are sent, so the two runs differ only by float32 accumulation order.
+
+    ``batch_size=3`` against ``n_samples=4`` also exercises a ragged final chunk.
+    """
+    small = met_frame.iloc[:800]
+    kwargs = {"met_features": ["ws", "blh"], "n_samples": 4, "random_state": 0}
+    one_at_a_time = make_estimator(context_length=512, prediction_length=96, batch_size=1)
+    batched = make_estimator(context_length=512, prediction_length=96, batch_size=3)
+    a = one_at_a_time.deweather(small, "value", **kwargs)["dew_p50"].to_numpy()
+    b = batched.deweather(small, "value", **kwargs)["dew_p50"].to_numpy()
+    assert a == pytest.approx(b, rel=1e-4)
+
+
+@needs_chronos
+def test_predict_batches_blocks_without_changing_them(met_frame, make_estimator):
+    """``predict`` rolls over independent blocks, so batching them is safe.
+
+    Each block conditions on observed history rather than on the previous
+    block's output. The frame length here leaves a short final block, which has
+    to leave the batch because a batch shares one horizon.
+    """
+    frame = met_frame.iloc[:700]  # 512 context + 48 + a 44 h tail
+    one_at_a_time = make_estimator(context_length=512, prediction_length=48, batch_size=1)
+    batched = make_estimator(context_length=512, prediction_length=48, batch_size=8)
+    one_at_a_time.target_col = batched.target_col = "value"
+    a = one_at_a_time.predict(frame)
+    b = batched.predict(frame)
+    assert len(a) == len(frame)
+    assert np.isfinite(a).all()
+    assert a[:512] == pytest.approx(frame["value"].to_numpy()[:512])  # seeded head
+    assert a == pytest.approx(b, rel=1e-4)
 
 
 def test_empty_context_is_refused_not_silently_projected(met_frame):
