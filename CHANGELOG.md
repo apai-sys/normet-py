@@ -268,6 +268,13 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   shrinking the budget alone would not have prevented it.
 
 ### Internal
+- **The deprecation policy is in force**, no longer proposed wording. It covers
+  the top-level public API: a symbol marked for removal warns for at least one
+  minor release, says so in its docstring and here, names its replacement, and
+  is only removed in a major release. A symbol that has never appeared in a
+  release is explicitly *not* covered -- no downstream code can depend on it
+  yet, so a warning cycle would protect nobody and would ship the mistake
+  instead of fixing it. See `docs/roadmap.md`.
 - Repaired the pre-commit `mypy` hook (pin `numpy<2.2` so its stubs parse under
   the Python 3.10 target; migrate the pytest hook to the `pre-push` stage) and
   cleared the type errors it then surfaced across `model/train`,
