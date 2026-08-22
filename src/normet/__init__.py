@@ -142,7 +142,6 @@ from .physics import PhysicsGraphBuilder, build_adr_pde_loss, build_pi_stgnn
 from .pipeline import (
     SingleConfig,
     UncConfig,
-    cluster_multisite,
     decompose_multisite,
     do_all,
     do_all_multisite,
@@ -174,7 +173,6 @@ __all__ = [
     "multisite_apply",
     "do_all_multisite",
     "embed_multisite",
-    "cluster_multisite",
     "decompose_multisite",
     # --- Analysis ---
     "normalise",

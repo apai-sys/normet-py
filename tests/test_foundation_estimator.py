@@ -593,7 +593,7 @@ def test_embed_multisite_returns_one_vector_per_site(chronos2_pipeline):
     Site keys must come back as the caller's own values, not stringified, so the
     result joins against their frame directly.
     """
-    from normet import cluster_multisite, embed_multisite
+    from normet import embed_multisite
 
     n = 400
     rng = np.random.default_rng(11)
@@ -617,11 +617,6 @@ def test_embed_multisite_returns_one_vector_per_site(chronos2_pipeline):
     assert all(v.shape == (768,) for v in vectors.values())
     # Sites with different dynamics must not collapse onto the same vector.
     assert not np.allclose(vectors[101], vectors[303])
-
-    table = cluster_multisite(df, "site", "PM2.5", n_clusters=2, context_length=256, device="cpu")
-    assert list(table.columns) == ["site", "cluster", "x", "y"]
-    assert sorted(table["site"]) == [101, 202, 303]
-    assert table["cluster"].nunique() == 2
 
 
 @needs_chronos
