@@ -268,6 +268,14 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   shrinking the budget alone would not have prevented it.
 
 ### Internal
+- **Tests for `prepare_panel` and `scm_all`**, which were public API with no
+  coverage at all (11% and 29% of their statements). Both are about what they
+  refuse rather than what they compute: `prepare_panel` screens a ragged panel
+  before `scm()`'s ridge fit, which drops any date where *any* unit is missing,
+  so a few sparse donors can collapse the sample to nothing without raising --
+  and the two silent-empty-result traps its comments name (tz-aware input
+  against tz-naive bounds, sub-daily input on a daily grid) now have
+  regressions. `scm_all` must lose one failed unit and not the batch.
 - **The deprecation policy is in force**, no longer proposed wording. It covers
   the top-level public API: a symbol marked for removal warns for at least one
   minor release, says so in its docstring and here, names its replacement, and
