@@ -14,7 +14,6 @@ import os
 from collections.abc import Callable
 from typing import Any
 
-import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
 
@@ -27,7 +26,6 @@ __all__ = [
     "do_all_multisite",
     "decompose_multisite",
     "embed_multisite",
-    "cluster_multisite",
 ]
 
 
@@ -318,45 +316,3 @@ def embed_multisite(
     # the result joins against their frame without a string round trip.
     originals = {str(site): site for site in wide.columns}
     return {originals.get(name, name): vec for name, vec in by_name.items()}
-
-
-def cluster_multisite(
-    df: pd.DataFrame,
-    site_col: str,
-    target: str,
-    *,
-    n_clusters: int = 4,
-    random_state: int = 42,
-    **embed_kwargs: Any,
-) -> pd.DataFrame:
-    """Group sites into behavioural regimes from their Chronos-2 embeddings.
-
-    Returns one row per site with its cluster label and 2-D projection
-    coordinates (UMAP where ``umap-learn`` is installed, PCA otherwise), ready
-    to merge onto a station table or plot directly.
-
-    Returns
-    -------
-    pandas.DataFrame
-        Columns ``site_col``, ``cluster``, ``x``, ``y``, ordered by site.
-    """
-    from ..foundation import ChronosEmbedder
-
-    vectors = embed_multisite(df, site_col, target, **embed_kwargs)
-    if not vectors:
-        raise ValueError("no sites could be embedded")
-
-    sites = list(vectors)
-    matrix = np.vstack([vectors[s] for s in sites])
-    n_clusters = min(n_clusters, len(sites))
-    coords, labels = ChronosEmbedder.cluster_embeddings(
-        matrix, n_clusters=n_clusters, random_state=random_state
-    )
-    return pd.DataFrame(
-        {
-            site_col: sites,
-            "cluster": np.asarray(labels).astype(int),
-            "x": np.asarray(coords)[:, 0],
-            "y": np.asarray(coords)[:, 1],
-        }
-    )

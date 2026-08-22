@@ -171,18 +171,14 @@ projected.
 ## Station embeddings
 
 `ChronosEmbedder` turns each station's series into a 768-D vector from the same
-encoder, for clustering sites by dynamics rather than by geography:
+encoder, describing how a site behaves rather than where it is:
 
 ```python
-import numpy as np
-
 from normet.foundation import ChronosEmbedder
 
 emb = ChronosEmbedder()
 vectors = emb.embed_stations({"LN1": s1, "MAN3": s2, "BIR2": s3})
-coords, labels = ChronosEmbedder.cluster_embeddings(
-    np.vstack(list(vectors.values())), n_clusters=3
-)
+# {"LN1": 768-D array, ...} -- cluster, correlate or project them as you like
 ```
 
 Every series is cut or NaN-padded to the same context length before batching.
@@ -245,16 +241,16 @@ multi-site frames in this package are long-format.
 ```python
 vectors = nm.embed_multisite(df, site_col="site", target="PM2.5")
 # {site: 768-D array}, keyed by your own site values
-
-table = nm.cluster_multisite(df, site_col="site", target="PM2.5", n_clusters=4)
-# one row per site: site, cluster, x, y
 ```
 
 Sites are embedded in a single batched pass, and every series is cut or
 NaN-padded to the same context length first -- otherwise a site's vector shifts
-depending on which other sites shared its batch. The 2-D coordinates come from
-UMAP where `umap-learn` is installed and PCA otherwise, so they are for looking
-at, not for measuring distances in.
+depending on which other sites shared its batch.
+
+Grouping sites from those vectors is left to you. KMeans, hierarchical
+clustering or a plain correlation matrix are each a few lines of scikit-learn,
+and the choices that matter -- the metric, the number of groups, whether to
+normalise first -- are yours rather than this package's to make.
 
 ## Limits
 

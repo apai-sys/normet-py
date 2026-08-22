@@ -59,14 +59,19 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   `chronos-2` is deliberately *not* registered in `backend_registry`, whose
   contract is train/save/load; `normet do-all --backend chronos-2` accepts it,
   while `decompose` and `cv` do not advertise a zero-shot path they lack.
-- **`embed_multisite` / `cluster_multisite`** (`normet.pipeline`) connect
-  `ChronosEmbedder` to the multi-site drivers. `embed_stations` wants one column
-  per site while multi-site frames here are long-format, so the two had no
-  meeting point; these pivot the frame, embed every site in one batched pass and
-  return `{site: 768-D vector}` keyed by the caller's own site values. 
-  `cluster_multisite` adds KMeans over a 2-D projection and returns one row per
-  site (`cluster`, `x`, `y`), for grouping stations by how they behave rather
-  than by where they are.
+- **`embed_multisite`** (`normet.pipeline`) connects `ChronosEmbedder` to the
+  multi-site drivers. `embed_stations` wants one column per site while
+  multi-site frames here are long-format, so the two had no meeting point; this
+  pivots the frame, embeds every site in one batched pass and returns
+  `{site: 768-D vector}` keyed by the caller's own site values.
+
+  What to do with those vectors is left to the caller. A `cluster_multisite`
+  wrapper (KMeans plus a 2-D projection) was written and then cut before
+  release: nothing in the package consumed its labels, and it fixed choices that
+  belong to whoever is doing the analysis -- the metric (Euclidean KMeans on
+  un-normalised 768-D embeddings is one opinion among several), the number of
+  groups, and how to select it. Those are a few lines of scikit-learn to write
+  and a poor thing to inherit as an API.
 - **`to_indexed_frame`** (`normet.foundation`) puts a `prepare_data`-shaped
   frame on the gap-free DatetimeIndex Chronos-2 needs -- moved out of the GUI so
   `do_all` and the window share one implementation.
@@ -86,11 +91,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   that is mostly missing (Chronos-2 masks NaNs, so an empty context otherwise
   returns a forecast scaled to nothing). `to_regular_index` and
   `add_calendar_covariates` prepare a frame for both.
-  Also `ChronosEmbedder` for zero-shot 768-D station embeddings and clustering,
-  likewise on Chronos-2 (`Chronos2Pipeline.embed`) and likewise refusing
+  Also `ChronosEmbedder` for zero-shot 768-D station embeddings, likewise on
+  Chronos-2 (`Chronos2Pipeline.embed`) and likewise refusing
   Chronos-1/Bolt checkpoints — the two families return differently shaped
   embeddings from different encoders, so vectors from a mix of both cannot be
-  clustered together. Every series is cut or NaN-padded to the same context
+  compared. Every series is cut or NaN-padded to the same context
   length before batching: Chronos-2 left-pads a ragged batch, which changes the
   patch count and shifts a station's pooled embedding depending on which other
   stations shared the batch (0.30 max abs difference on a 300-point series next
@@ -224,20 +229,6 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   `fetch_era5_timeseries`, which needs only `cdsapi` — no `xarray`/`netCDF4`.
 
 ### Fixed
-- **`cluster_embeddings` crashed on a handful of sites.** The UMAP branch
-  hard-coded `n_neighbors=15` and caught only `ImportError`, so three stations
-  raised `TypeError: Cannot use scipy.linalg.eigh for sparse A with k >= N` out
-  of UMAP's spectral initialisation, which asks for `n_components + 1`
-  eigenvectors of an N x N graph. It only ever surfaced where umap-learn was
-  installed -- the CPU test environment has no umap, takes the PCA fallback and
-  never saw it; a GPU run in an environment that does have it did.
-
-  `n_neighbors` is now clamped below N, `N <= 3` takes PCA directly, and *any*
-  UMAP failure degrades to PCA with a warning rather than propagating: a 2-D
-  projection is a diagnostic view, and a plainer view beats no result.
-  `n_clusters` above the number of embeddings is clamped too, since asking for
-  four regimes across three stations is a thing callers do, and a single
-  embedding comes back padded to `(1, 2)` so the `(x, y)` contract holds.
 - **`generate_html_report` retained every figure it drew.** The report builds
   its own plot, serialises it to an inline PNG and has no further use for it,
   but pyplot keeps each figure alive until closed -- so generating a report per

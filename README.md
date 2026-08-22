@@ -65,7 +65,7 @@
 | `nm.bayesian_scm` / `nm.plot_bayesian_scm` | Bayesian (PyMC) posterior SCM with credible bands — **optional**, needs `pymc` + `arviz` |
 | `nm.scm_diagnostics` / `nm.loo_weight_stability` / `nm.conformal_effect_interval` | SCM fit diagnostics, donor-weight stability, conformal intervals |
 | `nm.Chronos2Estimator` | Zero-shot de-weathering, counterfactuals and quantiles with the Chronos-2 foundation model — **optional**, needs `normet[foundation]` |
-| `nm.ChronosEmbedder` | 768-D station embeddings for clustering sites by dynamics — **optional**, needs `normet[foundation]` |
+| `nm.ChronosEmbedder` | 768-D station embeddings describing each site's dynamics — **optional**, needs `normet[foundation]` |
 | `nm.make_run` / `nm.save_run` / `nm.generate_html_report` | Provenance tracking and auto-generated HTML/Markdown run reports |
 | `nm.make_memory` | On-disk caching for expensive pipelines |
 | `normet.io` | ERA5, EEA, DEFRA, OpenAQ data adapters |
@@ -360,8 +360,8 @@ out, estimator, df_prep = nm.do_all(df, target="PM2.5", backend="chronos-2",
 parts = nm.decompose(df, target="PM2.5", method="meteorology",
                      backend="chronos-2", covariates=met)
 
-# Group stations by how they behave rather than by where they are.
-table = nm.cluster_multisite(df, site_col="site", target="PM2.5", n_clusters=4)
+# One 768-D vector per site, describing how it behaves rather than where it is.
+vectors = nm.embed_multisite(df, site_col="site", target="PM2.5")
 ```
 
 Three things decide whether this is the right tool for a given record:

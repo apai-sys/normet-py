@@ -36,7 +36,7 @@ features, and it commits the project to API stability for downstream users.
 | ✅ | Chronos-2 foundation model: zero-shot de-weathering, counterfactuals, station embeddings |
 | ✅ | Physics-informed graph models (PI-STGNN, advection-diffusion-reaction loss) |
 | ✅ | Zero-shot paths through `do_all` and `decompose(method="meteorology")` |
-| ✅ | `embed_multisite` / `cluster_multisite`: station embeddings meet the multi-site drivers |
+| ✅ | `embed_multisite`: station embeddings meet the multi-site drivers |
 
 ## Open
 

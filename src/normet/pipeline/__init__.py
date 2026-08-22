@@ -4,7 +4,6 @@ from ..analysis.rolling import RollingConfig
 from .do_all import CHRONOS_BACKEND, SingleConfig, UncConfig, do_all, do_all_unc
 from .interface import run_workflow
 from .multisite import (
-    cluster_multisite,
     decompose_multisite,
     do_all_multisite,
     embed_multisite,
@@ -20,7 +19,6 @@ __all__ = [
     "do_all_multisite",
     "decompose_multisite",
     "embed_multisite",
-    "cluster_multisite",
     "SingleConfig",
     "UncConfig",
     "RollingConfig",
