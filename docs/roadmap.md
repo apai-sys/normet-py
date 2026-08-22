@@ -47,22 +47,28 @@ ordinary follow-up work rather than release blockers.
 |:------:|------|
 | ⏳ | mypy strict on the public surface (currently lenient, but clean) |
 | ⏳ | Test coverage ≥ 80% (currently 78.7%, with the CI gate at 70%) |
-| ⏳ | Ratify the deprecation policy below |
 | ⏳ | Fine-tuning via `Chronos2Pipeline.fit` (full or LoRA). Everything here is zero-shot; adapting the checkpoint to a site's own record is the largest unused capability, and the one plausible route to making the model attend to calendar covariates it currently ignores |
 | ⏳ | `cross_learning=True` for joint multi-site prediction — the upstream docs say it helps most where individual series have little history, which is exactly a newly commissioned station, but also that it does not always help and must be tested per use case |
 | ⏳ | Multivariate targets: several species at one site, or neighbouring stations as variates, which is where `normet.physics`'s graphs would meet the foundation model |
 | ⏳ | Categorical covariates (site type, wind sector), which Chronos-2 encodes natively and normet currently has to one-hot |
 
-## Deprecation policy (proposed, not yet ratified)
+## Deprecation policy
+
+In force. It covers the public API as defined under *What 1.0 means* above --
+anything exported from the top-level `normet` package -- and nothing else.
 
 - A symbol marked for removal will:
   1. Emit a `DeprecationWarning` for at least one minor release.
   2. Be documented as deprecated in the docstring and CHANGELOG.
   3. Have a replacement linked from the warning message.
 - Symbols are only removed in a major release.
+- A symbol that has never appeared in a release is not covered and may be
+  changed or withdrawn outright: no downstream code can yet depend on it, so a
+  warning cycle would protect nobody and would ship the mistake instead of
+  fixing it. `cluster_multisite` was withdrawn on those grounds before it ever
+  reached a release.
 
-This is still the *proposed* wording rather than a commitment in force: 1.0
-shipped before it was ratified, so nothing has yet been deprecated under it.
+Nothing has been deprecated under this policy so far, so no removal is due.
 
 ## Out of scope
 
