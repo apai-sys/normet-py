@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import os
+from typing import Any
 
 import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
 
+from ..utils._time import to_datetime_coerced
 from ..utils.logging import get_logger
 from .run_scm import run_scm
 
@@ -34,7 +36,7 @@ def placebo_in_space(
     scm_backend: str = "scm",
     post_agg: str = "mean",  # {'mean','sum'}
     n_cores: int | None = None,
-    **kwargs,
+    **kwargs: Any,
 ) -> dict:
     """Placebo-in-space analysis for a synthetic-control backend (SCM or ML-SCM).
 
@@ -160,7 +162,9 @@ def placebo_in_space(
             obs_stat = float(df_true["effect"][post_mask].mean())
             plc_stats = placebo_mat[post_mask].mean(axis=0, skipna=True)
 
-        p_value = (np.sum(np.abs(plc_stats.values) >= np.abs(obs_stat)) + 1) / (len(plc_stats) + 1)
+        p_value = (np.sum(np.abs(plc_stats.to_numpy(dtype=float)) >= np.abs(obs_stat)) + 1) / (
+            len(plc_stats) + 1
+        )
 
     return {
         "treated": df_true,
@@ -184,11 +188,11 @@ def placebo_in_time(
     min_pre_period: int = 30,
     placebo_every: int = 7,
     n_cores: int | None = None,
-    **kwargs,
+    **kwargs: Any,
 ) -> dict:
     """Placebo-in-time analysis for a synthetic-control backend (SCM or ML-SCM)."""
     d = df.copy()
-    d[date_col] = pd.to_datetime(d[date_col], errors="coerce")
+    d[date_col] = to_datetime_coerced(d[date_col])
     if d[date_col].isna().any():
         raise ValueError("Some rows have invalid dates after coercion.")
     cutoff_dt = pd.to_datetime(cutoff_date)
@@ -251,7 +255,9 @@ def placebo_in_time(
             "placebo_stats": pd.Series(dtype=float),
         }
 
-    def _one_placebo(pc_date: pd.Timestamp):
+    def _one_placebo(
+        pc_date: pd.Timestamp,
+    ) -> tuple[pd.Timestamp, pd.DataFrame, float] | None:
         try:
             syn_pc = run_scm(
                 df=d,

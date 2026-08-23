@@ -1,6 +1,8 @@
 # src/normet/causal/__init__.py
 """Synthetic-control / counterfactual estimators, diagnostics, and inference."""
 
+from typing import Any
+
 # --- Core methods ------------------------------------------------------------
 from .scm import scm
 
@@ -13,7 +15,7 @@ except Exception as _e:
     _HAS_MLSCM = False
     _MLSCM_IMPORT_ERR = _e
 
-    def mlscm(*args, **kwargs):  # type: ignore[misc]
+    def mlscm(*args: Any, **kwargs: Any) -> Any:  # type: ignore[misc]
         """Raise ``ImportError`` because mlscm's optional dependencies are unavailable."""
         raise ImportError(
             "mlscm is unavailable because its optional dependencies failed to import. "
@@ -45,7 +47,7 @@ except Exception as _bay_err:
     _HAS_BAYESIAN = False
     _BAYESIAN_ERR = _bay_err
 
-    def bayesian_scm(*args, **kwargs):  # type: ignore[misc]
+    def bayesian_scm(*args: Any, **kwargs: Any) -> Any:  # type: ignore[misc]
         """Raise ``ImportError`` because ``pymc``/``arviz`` are not installed."""
         raise ImportError(
             f"bayesian_scm requires pymc + arviz. Original error: {_BAYESIAN_ERR}. "

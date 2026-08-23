@@ -80,7 +80,9 @@ class NormaliseConfig:
     """
 
 
-def _resolve_normalise_config(config: NormaliseConfig | None = None, **kwargs) -> NormaliseConfig:
+def _resolve_normalise_config(
+    config: NormaliseConfig | None = None, **kwargs: Any
+) -> NormaliseConfig:
     return resolve_config(NormaliseConfig, config, **kwargs)
 
 
@@ -113,7 +115,7 @@ def _apply_conditional_filter(
         elif isinstance(cond, list | tuple | set | pd.Series | np.ndarray):
             mask &= s.isin(list(cond))
         else:
-            mask &= s == cond  # type: ignore[unreachable]
+            mask &= s == cond
     return pool.loc[mask]
 
 
@@ -173,7 +175,7 @@ def normalise(
     *,
     config: NormaliseConfig | None = None,
     covariates: list[str] | None = None,
-    **kwargs,
+    **kwargs: Any,
 ) -> pd.DataFrame:
     """
     Normalise a time series using a trained model and Monte Carlo resampling.
@@ -515,7 +517,7 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
             df_out = gb[["observed", "normalised"]].mean()
             if _cfg.return_quantiles:
                 q_arr = sorted({float(q) for q in _cfg.return_quantiles})
-                q_df = gb["normalised"].quantile(q_arr).unstack(level=-1)  # type: ignore[arg-type]
+                q_df = gb["normalised"].quantile(np.asarray(q_arr)).unstack(level=-1)
                 q_df.columns = pd.Index([_format_quantile_name(float(q)) for q in q_df.columns])
                 df_out = df_out.join(q_df, how="left")
         else:
@@ -568,7 +570,7 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
             df_out = gb[["observed", "normalised"]].mean()
             if _cfg.return_quantiles:
                 q_arr = sorted({float(q) for q in _cfg.return_quantiles})
-                q_df = gb["normalised"].quantile(q_arr).unstack(level=-1)  # type: ignore[arg-type]
+                q_df = gb["normalised"].quantile(np.asarray(q_arr)).unstack(level=-1)
                 q_df.columns = pd.Index([_format_quantile_name(float(q)) for q in q_df.columns])
                 df_out = df_out.join(q_df, how="left")
         else:
@@ -600,7 +602,7 @@ def normalise_auto(
     seed: int = 7_654_321,
     verbose: bool = True,
     return_history: bool = False,
-    **normalise_kwargs,
+    **normalise_kwargs: Any,
 ) -> dict:
     """Run meteorological normalisation in batches until the result converges.
 

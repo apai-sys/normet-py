@@ -5,6 +5,7 @@ import importlib.util
 import numpy as np
 import pandas as pd
 import pytest
+
 from normet.report import generate_html
 from normet.utils.provenance import make_run
 
@@ -117,6 +118,7 @@ def test_generate_html_for_bayesian_scm(tmp_path):
 def test_cli_report_to_markdown(tmp_path):
     import joblib
     from click.testing import CliRunner
+
     from normet.cli import _build_cli
 
     dates = pd.date_range("2024-01-01", periods=20, freq="D")
@@ -149,3 +151,35 @@ def test_cli_report_to_markdown(tmp_path):
     assert res_md.exit_code == 0
     assert md_out.exists()
     assert "Result Preview" in md_out.read_text()
+
+
+def test_generate_html_does_not_retain_the_figures_it_creates(tmp_path):
+    """A report generated per site in a loop must not accumulate figures.
+
+    generate_html builds its own plot, serialises it to an inline PNG and has
+    no further use for it, but pyplot keeps every figure alive until closed.
+    Figures handed in through extra_plots belong to the caller and must survive.
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import pandas as pd
+
+    from normet import generate_html_report, make_run
+
+    idx = pd.date_range("2024-01-01", periods=48, freq="h")
+    res = pd.DataFrame(
+        {"observed": np.linspace(10, 20, 48), "normalised": np.linspace(11, 19, 48)}, index=idx
+    )
+    run = make_run(result=res, model=None, df_prep=None, df=None, kind="normalise", config={})
+
+    plt.close("all")
+    caller_fig, ax = plt.subplots()
+    ax.plot([0, 1], [0, 1])
+    before = len(plt.get_fignums())
+
+    for i in range(5):
+        generate_html_report(run, tmp_path / f"r{i}.html", extra_plots=[caller_fig])
+
+    assert len(plt.get_fignums()) == before, "generate_html retained a figure it created"
+    assert caller_fig.number in plt.get_fignums(), "a caller-owned figure was closed"
+    plt.close("all")

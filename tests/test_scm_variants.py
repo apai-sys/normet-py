@@ -2,6 +2,7 @@
 
 import pandas as pd
 import pytest
+
 from normet.causal import run_scm
 from normet.causal.variants import did_baseline, scm_abadie, scm_mcnnm, scm_robust
 

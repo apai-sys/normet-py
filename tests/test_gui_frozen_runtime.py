@@ -18,6 +18,7 @@ import sys
 
 import joblib.parallel
 import pytest
+
 from normet.gui.app import _configure_frozen_runtime
 
 

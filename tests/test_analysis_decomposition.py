@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import sys
 
-import normet.analysis.decomposition
 import numpy as np
 import pandas as pd
 import pytest
+
+import normet.analysis.decomposition
 from normet.analysis.decomposition import _effective_cores, decom_emi, decom_met, decompose
 
 # Import module and get the actual module objects from sys.modules
@@ -180,4 +181,59 @@ def test_decompose_shap_removed(decomp_df):
             target="value",
             covariates=["ws", "wd"],
             backend="flaml",
+        )
+
+
+def test_emission_decomposition_is_refused_on_the_zero_shot_backend():
+    """Chronos-2 cannot separate the trend, and a near-zero component would lie.
+
+    decom_emi isolates the calendar components by resampling date_unix and
+    friends, which works because an AutoML model sees them as ordinary features.
+    Chronos-2 conditions on the target's own history and deweather() never
+    resamples history, so the trend survives every draw. Measured on a series
+    carrying an injected 20 ug/m3 trend, a time-index covariate recovered 0.7%
+    of it -- 0.53% covariate sensitivity against 10.72% for meteorology in the
+    same run. Returning components near zero would read as "no trend" rather
+    than "not separable", so the call is refused instead.
+
+    No model or extra is needed: the refusal must come before any of that.
+    """
+    import pandas as pd
+    import pytest
+
+    from normet import decompose
+    from normet.exceptions import ConfigError
+
+    df = pd.DataFrame(
+        {
+            "date": pd.date_range("2024-01-01", periods=48, freq="h"),
+            "PM2.5": range(48),
+            "t2m": 10.0,
+        }
+    )
+    with pytest.raises(ConfigError, match="not available on the chronos-2 backend"):
+        decompose(df, target="PM2.5", method="emission", backend="chronos-2", covariates=["t2m"])
+
+
+def test_zero_shot_meteorology_decomposition_needs_meteorological_covariates():
+    """Time variables are exactly what this backend cannot decompose by."""
+    import pandas as pd
+    import pytest
+
+    from normet import decompose
+    from normet.exceptions import ConfigError
+
+    df = pd.DataFrame(
+        {
+            "date": pd.date_range("2024-01-01", periods=48, freq="h"),
+            "PM2.5": range(48),
+        }
+    )
+    with pytest.raises(ConfigError, match="needs meteorological covariates"):
+        decompose(
+            df,
+            target="PM2.5",
+            method="meteorology",
+            backend="chronos-2",
+            covariates=["hour", "weekday"],
         )

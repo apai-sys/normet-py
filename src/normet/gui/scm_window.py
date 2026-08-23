@@ -46,6 +46,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from normet.utils._time import to_datetime_coerced
+
 from ._widgets import (
     CanvasTab,
     NoWheelComboBox,
@@ -459,7 +461,7 @@ class SCMWindow(QMainWindow):
             self._rebuild_donors()
 
             if date_col in self.df.columns:
-                dates = pd.to_datetime(self.df[date_col], errors="coerce").dropna()
+                dates = to_datetime_coerced(self.df[date_col]).dropna()
                 if len(dates):
                     lo, hi = dates.min(), dates.max()
                     self.cutoff_edit.setDateRange(
@@ -522,7 +524,7 @@ class SCMWindow(QMainWindow):
         import matplotlib.pyplot as plt
 
         d = self.df[[date_col, unit_col, outcome]].copy()
-        d[date_col] = pd.to_datetime(d[date_col], errors="coerce")
+        d[date_col] = to_datetime_coerced(d[date_col])
         d = d.dropna(subset=[date_col])
         try:
             wide = d.pivot_table(index=date_col, columns=unit_col, values=outcome, aggfunc="mean")
@@ -589,7 +591,7 @@ class SCMWindow(QMainWindow):
             return None
         cutoff = self.cutoff_edit.date().toString("yyyy-MM-dd")
         d = self.df[[date_col, unit_col, outcome]].copy()
-        d[date_col] = pd.to_datetime(d[date_col], errors="coerce")
+        d[date_col] = to_datetime_coerced(d[date_col])
         d = d.dropna(subset=[date_col])
         d[unit_col] = d[unit_col].astype(str)
         return {

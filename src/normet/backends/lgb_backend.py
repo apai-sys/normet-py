@@ -33,7 +33,7 @@ _DEFAULT_CONFIG: dict[str, Any] = {
 }
 
 
-def _import_lightgbm():
+def _import_lightgbm() -> Any:
     """Dynamically import lightgbm."""
     lgb = require("lightgbm", hint="pip install lightgbm")
     return lgb

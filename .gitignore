@@ -154,6 +154,9 @@ docs/_build/
 notebooks/*.log
 notebooks/*.sbatch
 
-# HPC CI-check job logs (ci_check.sh itself is kept, tracked)
+# HPC job logs and sbatch wrappers. ci_check.sh itself is kept and tracked --
+# it is the reference CI recipe; the run_*.sh wrappers under scripts/ are not,
+# because they hard-code this cluster's paths, conda envs and partitions.
 ci_check_*.out
 ci_check_*.err
+logs/

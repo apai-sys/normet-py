@@ -6,6 +6,7 @@ Subcommands wrap the most common library entry points:
 
 - ``normet do-all <input.csv> ...``
 - ``normet decompose <input.csv> ...``
+- ``normet deweather <input.csv> ...``
 - ``normet scm <panel.csv> ...``
 - ``normet cv <input.csv> ...``
 - ``normet info``
@@ -60,10 +61,18 @@ def _save_table(df: pd.DataFrame, path: Path) -> None:
         raise ValueError(f"Unsupported output format: {suffix}")
 
 
-def _split_csv(s: str | None) -> list[str] | None:
+def _split_csv(s: Any) -> list[str] | None:
+    """Normalise a comma-separated flag or an already-parsed YAML list.
+
+    Both feed the same option: ``--covariates t2m,blh`` arrives as a string,
+    while ``covariates: [t2m, blh]`` in a config file arrives as a list and used
+    to hit ``AttributeError: 'list' object has no attribute 'split'``.
+    """
     if not s:
         return None
-    return [x.strip() for x in s.split(",") if x.strip()]
+    if isinstance(s, str):
+        return [x.strip() for x in s.split(",") if x.strip()]
+    return [str(x).strip() for x in s if str(x).strip()]
 
 
 def _load_yaml(path: Path | None) -> dict[str, Any]:
@@ -72,6 +81,24 @@ def _load_yaml(path: Path | None) -> dict[str, Any]:
     yaml = require("yaml", hint="pip install pyyaml")
     with open(path) as f:
         return yaml.safe_load(f) or {}
+
+
+def _cfg_float(cfg: dict[str, Any], key: str, default: float) -> float:
+    """Read a float option, falling back to ``default`` when absent or None.
+
+    The obvious spelling, ``cfg.get(k) if cfg.get(k) is not None else d``, reads
+    the dict twice; a type checker only sees the second read and so cannot tell
+    the None branch is already excluded. Reading once also lets the value be
+    coerced, which matters because a YAML config can hand over ``"0.75"``.
+    """
+    value = cfg.get(key)
+    return default if value is None else float(value)
+
+
+def _cfg_int(cfg: dict[str, Any], key: str, default: int) -> int:
+    """Read an integer option. See :func:`_cfg_float`."""
+    value = cfg.get(key)
+    return default if value is None else int(value)
 
 
 def _merge_cli_over_yaml(yaml_cfg: dict[str, Any], cli_args: dict[str, Any]) -> dict[str, Any]:
@@ -86,12 +113,25 @@ def _merge_cli_over_yaml(yaml_cfg: dict[str, Any], cli_args: dict[str, Any]) -> 
 # ---------- CLI ----------
 
 
-def _build_cli():
+def _build_cli() -> Any:
     click = require("click", hint="pip install click")
+
+    from .backends import backend_registry
+    from .pipeline import CHRONOS_BACKEND
+
+    # The registry is the single source of truth for what --backend accepts;
+    # the literal that used to sit here had gone stale and offered only flaml
+    # long after the lightgbm backend was registered. Importing the registry is
+    # cheap: both backend modules defer their heavy imports to `require`.
+    backend_choice = click.Choice(backend_registry.available)
+    # do-all and decompose also accept the zero-shot backend, which is
+    # deliberately absent from the registry: that contract is train/save/load
+    # and Chronos-2 does none of the three. cv has no zero-shot counterpart.
+    zero_shot_backend_choice = click.Choice([*backend_registry.available, CHRONOS_BACKEND])
 
     @click.group()
     @click.version_option(package_name="normet")
-    def cli():
+    def cli() -> None:
         """Command-line interface for the normet modelling toolbox."""
         enable_default_logging("INFO")
 
@@ -103,7 +143,7 @@ def _build_cli():
     @click.option(
         "--resample-vars", "resample_vars", help="Comma-separated subset of features to resample."
     )
-    @click.option("--backend", type=click.Choice(["flaml"]), default=None)
+    @click.option("--backend", type=zero_shot_backend_choice, default=None)
     @click.option("--n-samples", "n_samples", type=int, default=None)
     @click.option(
         "--split-method",
@@ -133,7 +173,7 @@ def _build_cli():
         type=click.Path(exists=True, path_type=Path),
         help="YAML config that supplies any of the above options.",
     )
-    def do_all_cmd(input, **opts):
+    def do_all_cmd(input: Path, **opts: Any) -> None:
         from . import do_all, make_run, save_run
 
         cfg = _merge_cli_over_yaml(_load_yaml(opts.pop("config_path", None)), opts)
@@ -147,10 +187,8 @@ def _build_cli():
             backend=cfg.get("backend") or "flaml",
             n_samples=cfg.get("n_samples") or 300,
             split_method=cfg.get("split_method") or "random",
-            train_fraction=cfg.get("train_fraction")
-            if cfg.get("train_fraction") is not None
-            else 0.75,
-            seed=cfg.get("seed") if cfg.get("seed") is not None else 7_654_321,
+            train_fraction=_cfg_float(cfg, "train_fraction", 0.75),
+            seed=_cfg_int(cfg, "seed", 7_654_321),
             verbose=True,
         )
         _save_table(out.reset_index(), Path(cfg["out_path"]))
@@ -175,12 +213,12 @@ def _build_cli():
     @click.option("--target", required=False)
     @click.option("--covariates", help="Comma-separated predictor columns.")
     @click.option("--method", type=click.Choice(["emission", "meteorology"]), default=None)
-    @click.option("--backend", type=click.Choice(["flaml"]), default=None)
+    @click.option("--backend", type=zero_shot_backend_choice, default=None)
     @click.option("--n-samples", "n_samples", type=int, default=None)
     @click.option("--seed", type=int, default=None)
     @click.option("--out", "out_path", type=click.Path(path_type=Path), required=True)
     @click.option("--config", "config_path", type=click.Path(exists=True, path_type=Path))
-    def decompose_cmd(input, **opts):
+    def decompose_cmd(input: Path, **opts: Any) -> None:
         from . import decompose
 
         cfg = _merge_cli_over_yaml(_load_yaml(opts.pop("config_path", None)), opts)
@@ -193,11 +231,153 @@ def _build_cli():
             covariates=_split_csv(cfg.get("covariates")),
             backend=cfg.get("backend") or "flaml",
             n_samples=cfg.get("n_samples") or 300,
-            seed=cfg.get("seed") if cfg.get("seed") is not None else 7_654_321,
+            seed=_cfg_int(cfg, "seed", 7_654_321),
             verbose=True,
         )
         _save_table(out.reset_index(), Path(cfg["out_path"]))
         click.echo(f"[decompose] wrote {cfg['out_path']}")
+
+    # ---- deweather (zero-shot, Chronos-2) ----
+    @cli.command("deweather")
+    @click.argument("input", type=click.Path(exists=True, path_type=Path))
+    @click.option("--target", required=False, help="Target column name (e.g. PM2.5).")
+    @click.option(
+        "--met-vars",
+        "met_vars",
+        help="Comma-separated meteorological columns to condition on and marginalise over.",
+    )
+    @click.option("--date-col", "date_col", default=None, help="Timestamp column. Default: date.")
+    @click.option(
+        "--n-samples",
+        "n_samples",
+        type=int,
+        default=None,
+        help="Monte-Carlo weather resamples. Each one is a full forward pass. Default: 8.",
+    )
+    @click.option(
+        "--quantiles",
+        default=None,
+        help="Comma-separated levels, e.g. 0.1,0.5,0.9. Default: 0.1,0.5,0.9.",
+    )
+    @click.option(
+        "--device",
+        default=None,
+        help="torch device: cpu, cuda, mps. Default: cuda, else mps, else cpu.",
+    )
+    @click.option("--context-length", "context_length", type=int, default=None)
+    @click.option("--prediction-length", "prediction_length", type=int, default=None)
+    @click.option("--seed", type=int, default=None)
+    @click.option("--out", "out_path", type=click.Path(path_type=Path), required=True)
+    @click.option("--config", "config_path", type=click.Path(exists=True, path_type=Path))
+    def deweather_cmd(input: Path, **opts: Any) -> None:
+        """Zero-shot meteorological normalisation with Chronos-2.
+
+        Nothing is trained: the checkpoint conditions on the meteorology through
+        its covariate channel and the weather is marginalised out by resampling,
+        as in ``normalise``. Needs the ``foundation`` extra.
+        """
+        import numpy as np
+
+        from .foundation import Chronos2Estimator, to_regular_index
+
+        cfg = _merge_cli_over_yaml(_load_yaml(opts.pop("config_path", None)), opts)
+        df = _load_table(input)
+
+        target = cfg["target"]
+        met = _split_csv(cfg.get("met_vars"))
+        if not met:
+            raise click.UsageError(
+                "--met-vars is required: Chronos-2 conditions on meteorology through its "
+                "covariate channel, and with none supplied the run is a plain forecast "
+                "rather than a de-weathering."
+            )
+        date_col = cfg.get("date_col") or "date"
+        if date_col in df.columns:
+            df = df.set_index(pd.to_datetime(df[date_col])).drop(columns=[date_col])
+        elif not isinstance(df.index, pd.DatetimeIndex):
+            raise click.UsageError(
+                f"no {date_col!r} column and the index is not datetime; pass --date-col"
+            )
+        df = df.sort_index()
+        # Chronos-2 reads position as time, so a frame with dropped hours slides
+        # against its own calendar covariates. Rebuild the grid and leave the
+        # holes as NaN for the model to mask.
+        before = len(df)
+        df = to_regular_index(df[[target, *met]])
+        if len(df) != before:
+            click.echo(f"[deweather] re-inserted {len(df) - before} missing timestamps as NaN")
+
+        quantiles = (
+            tuple(float(x) for x in _split_csv(cfg.get("quantiles")) or [])
+            if cfg.get("quantiles")
+            else (0.1, 0.5, 0.9)
+        )
+        est = Chronos2Estimator(
+            met_covariates=met,
+            device=cfg.get("device"),
+            context_length=cfg.get("context_length") or 2048,
+            prediction_length=cfg.get("prediction_length") or 168,
+        )
+        click.echo(f"[deweather] loading {est.model_name} (first run downloads ~500 MB)…")
+        est._load_pipeline()
+        click.echo(f"[deweather] ready on {est.device}")
+
+        seed = _cfg_int(cfg, "seed", 7_654_321)
+        horizon = est.prediction_length
+        if len(df) > est.context_length + horizon:
+            shift = est.covariate_sensitivity(
+                df,
+                target,
+                anchor=df.index[-horizon],
+                horizon=horizon,
+                met_features=met,
+                random_state=seed,
+            )
+            # The honest quality gate: if shuffling the future weather barely
+            # moves the forecast, the model is autoregressing and the
+            # "normalised" series below means nothing.
+            click.echo(
+                f"[deweather] covariate sensitivity: shuffling the meteorology moves the "
+                f"median by {shift['mean_abs_shift']:.3f} "
+                f"({shift['pct_of_prediction']:.2f}% of the prediction)"
+            )
+            if shift["pct_of_prediction"] < 1.0:
+                click.echo(
+                    "[deweather] WARNING: no meaningful meteorological response — the model "
+                    "is autoregressing. Check the --met-vars columns before using this output.",
+                    err=True,
+                )
+        else:
+            click.echo(
+                f"[deweather] WARNING: only {len(df)} rows; need more than "
+                f"{est.context_length + horizon} to run the sensitivity check",
+                err=True,
+            )
+
+        out = est.deweather(
+            df,
+            target,
+            met_features=met,
+            n_samples=cfg.get("n_samples") or 8,
+            quantiles=quantiles,
+            random_state=seed,
+            schema="normet",
+        )
+        out.index.name = "date"
+        # The leading context_length rows are seeded with the observed values --
+        # Chronos-2 has no history to condition on until then, so the two series
+        # coincide there by construction rather than by result.
+        seeded = min(est.context_length, len(out))
+        click.echo(
+            f"[deweather] first {seeded:,} of {len(out):,} rows are seeded with the observed "
+            f"values ({100.0 * seeded / len(out):.0f}%); the normalisation starts after them"
+        )
+        tail = out.iloc[seeded:]
+        if len(tail):
+            delta = float(np.mean(tail["normalised"] - tail["observed"]))
+            click.echo(f"[deweather] mean(normalised - observed) over the rest = {delta:+.3f}")
+        _save_table(out.reset_index(), Path(cfg["out_path"]))
+        click.echo(f"[deweather] wrote {cfg['out_path']}")
 
     # ---- scm ----
     @cli.command("scm")
@@ -216,7 +396,7 @@ def _build_cli():
     )
     @click.option("--out", "out_path", type=click.Path(path_type=Path), required=True)
     @click.option("--config", "config_path", type=click.Path(exists=True, path_type=Path))
-    def scm_cmd(input, **opts):
+    def scm_cmd(input: Path, **opts: Any) -> None:
         from . import run_scm
 
         cfg = _merge_cli_over_yaml(_load_yaml(opts.pop("config_path", None)), opts)
@@ -242,10 +422,10 @@ def _build_cli():
     @click.option("--covariates", required=False, help="Comma-separated predictor columns.")
     @click.option("--n-splits", "n_splits", type=int, default=None)
     @click.option("--gap", type=int, default=None)
-    @click.option("--backend", type=click.Choice(["flaml"]), default=None)
+    @click.option("--backend", type=backend_choice, default=None)
     @click.option("--out", "out_path", type=click.Path(path_type=Path), required=True)
     @click.option("--config", "config_path", type=click.Path(exists=True, path_type=Path))
-    def cv_cmd(input, **opts):
+    def cv_cmd(input: Path, **opts: Any) -> None:
         from . import cv_score, prepare_data
 
         cfg = _merge_cli_over_yaml(_load_yaml(opts.pop("config_path", None)), opts)
@@ -281,7 +461,7 @@ def _build_cli():
         help="Output HTML or Markdown file path (.html or .md).",
     )
     @click.option("--title", default=None, help="Custom report title.")
-    def report_cmd(run_path, out_path, title):
+    def report_cmd(run_path: Path, out_path: Path, title: str | None) -> None:
         from . import load_run
         from .report import generate_html, report_to_markdown
 
@@ -295,7 +475,7 @@ def _build_cli():
 
     # ---- info ----
     @cli.command("info")
-    def info_cmd():
+    def info_cmd() -> None:
         import importlib.metadata as md
 
         def _v(pkg: str) -> str:
@@ -323,7 +503,13 @@ def _build_cli():
                         "cdsapi": _v("cdsapi"),
                         "dask": _v("dask"),
                         "click": _v("click"),
+                        # `normet deweather` and normet.foundation need these two;
+                        # torch alone also unlocks normet.physics.
+                        "chronos-forecasting": _v("chronos-forecasting"),
+                        "torch": _v("torch"),
+                        "PySide6": _v("PySide6"),
                     },
+                    "backends": backend_registry.available,
                 },
                 indent=2,
             )
@@ -332,7 +518,7 @@ def _build_cli():
     return cli
 
 
-def main():  # entry point
+def main() -> None:  # entry point
     """Run the ``normet`` console-script entry point."""
     cli = _build_cli()
     cli(standalone_mode=True)
