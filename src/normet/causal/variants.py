@@ -120,7 +120,7 @@ def did_baseline(
     cutoff_ts = pd.to_datetime(cutoff_date)
     pre = panel[panel.index < cutoff_ts]
 
-    treated_pre_mean = float(np.nanmean(pre[treated_unit].to_numpy()))
+    treated_pre_mean = float(np.nanmean(pre[treated_unit].to_numpy(dtype=float)))
     donor_pre_mean = float(np.nanmean(pre[donors].to_numpy()))
     donor_mean_t = panel[donors].mean(axis=1)
 

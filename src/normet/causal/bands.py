@@ -373,7 +373,9 @@ def uncertainty_bands(
     df = df.copy()
 
     # Ensure datetime-like
-    if not np.issubdtype(pd.Series(df[date_col]).dtype, np.datetime64):
+    # is_datetime64_dtype, not ..._any_dtype: the numpy check this replaces was
+    # False for a tz-aware column, so those still go through to_datetime_coerced.
+    if not pd.api.types.is_datetime64_dtype(df[date_col]):
         df[date_col] = to_datetime_coerced(df[date_col])
     if df[date_col].isna().any():
         raise ValueError("Non-parseable dates found; clean 'date_col' first.")

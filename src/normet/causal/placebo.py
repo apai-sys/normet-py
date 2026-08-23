@@ -162,7 +162,9 @@ def placebo_in_space(
             obs_stat = float(df_true["effect"][post_mask].mean())
             plc_stats = placebo_mat[post_mask].mean(axis=0, skipna=True)
 
-        p_value = (np.sum(np.abs(plc_stats.values) >= np.abs(obs_stat)) + 1) / (len(plc_stats) + 1)
+        p_value = (np.sum(np.abs(plc_stats.to_numpy(dtype=float)) >= np.abs(obs_stat)) + 1) / (
+            len(plc_stats) + 1
+        )
 
     return {
         "treated": df_true,

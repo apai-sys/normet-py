@@ -255,7 +255,8 @@ def _wide_by_site(df: pd.DataFrame, site_col: str, target: str, date_col: str) -
         work = work.set_index(date_col)
     if not isinstance(work.index, pd.DatetimeIndex):
         work.index = pd.to_datetime(work.index)
-    wide = work.pivot_table(index=work.index, columns=site_col, values=target, aggfunc="mean")
+    work.index.name = work.index.name or date_col
+    wide = work.pivot_table(index=work.index.name, columns=site_col, values=target, aggfunc="mean")
     return wide.sort_index()
 
 
