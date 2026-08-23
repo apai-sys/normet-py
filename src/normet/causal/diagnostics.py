@@ -162,7 +162,7 @@ def loo_weight_stability(
     treated_unit: str,
     cutoff_date: str,
     donors: list[str],
-    **scm_kwargs,
+    **scm_kwargs: Any,
 ) -> pd.DataFrame:
     """
     Leave-one-donor-out weight stability for classic SCM.

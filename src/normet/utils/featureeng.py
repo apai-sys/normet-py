@@ -327,7 +327,7 @@ class LagDiagnostics:
             lines.append(f"  peak driver-leading lag: {self.peak_lag}")
         return "\n".join(lines)
 
-    def plot(self, ax: Any = None):  # pragma: no cover - visual helper
+    def plot(self, ax: Any = None) -> Any:  # pragma: no cover - visual helper
         """Stem-plot the ACF, PACF and (if present) CCF with significance bands.
 
         Requires matplotlib. Returns the array of axes.
@@ -340,7 +340,7 @@ class LagDiagnostics:
             axes = np.atleast_1d(ax)
         axes = np.atleast_1d(axes)
 
-        def _stem(a, frame, title):
+        def _stem(a: Any, frame: pd.DataFrame, title: str) -> None:
             a.stem(frame["lag"].to_numpy(), frame["value"].to_numpy(), basefmt=" ")
             a.axhline(0.0, color="0.5", lw=0.8)
             a.axhline(self.band, color="crimson", ls="--", lw=0.8)

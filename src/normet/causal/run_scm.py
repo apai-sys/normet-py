@@ -27,7 +27,7 @@ def run_scm(
     cutoff_date: str,
     donors: list[str] | None,
     scm_backend: str = "scm",
-    **kwargs,
+    **kwargs: Any,
 ) -> pd.DataFrame:
     """Validate inputs and dispatch to the selected synthetic-control backend.
 

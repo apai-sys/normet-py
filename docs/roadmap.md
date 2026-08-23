@@ -37,6 +37,8 @@ features, and it commits the project to API stability for downstream users.
 | ✅ | Physics-informed graph models (PI-STGNN, advection-diffusion-reaction loss) |
 | ✅ | Zero-shot paths through `do_all` and `decompose(method="meteorology")` |
 | ✅ | `embed_multisite`: station embeddings meet the multi-site drivers |
+| ✅ | mypy strict on the public surface (`warn_return_any` and `disallow_any_generics` deliberately off; `disallow_untyped_decorators` off for `normet.cli` alone -- see CHANGELOG for why) |
+| ✅ | Test coverage ≥ 80% (80% measured; the CI gate stays at 70% so an unlucky branch does not block a merge) |
 
 ## Open
 
@@ -45,8 +47,6 @@ ordinary follow-up work rather than release blockers.
 
 | Status | Item |
 |:------:|------|
-| ⏳ | mypy strict on the public surface (currently lenient, but clean) |
-| ⏳ | Test coverage ≥ 80% (currently 78.7%, with the CI gate at 70%) |
 | ⏳ | Fine-tuning via `Chronos2Pipeline.fit` (full or LoRA). Everything here is zero-shot; adapting the checkpoint to a site's own record is the largest unused capability, and the one plausible route to making the model attend to calendar covariates it currently ignores |
 | ⏳ | `cross_learning=True` for joint multi-site prediction — the upstream docs say it helps most where individual series have little history, which is exactly a newly commissioned station, but also that it does not always help and must be tested per use case |
 | ⏳ | Multivariate targets: several species at one site, or neighbouring stations as variates, which is where `normet.physics`'s graphs would meet the foundation model |

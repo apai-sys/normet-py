@@ -77,7 +77,7 @@ class DecomposeConfig:
     resample-and-predict over ``n_samples`` draws. Off by default."""
 
 
-def _resolve_config(config: DecomposeConfig | None = None, **kwargs) -> DecomposeConfig:
+def _resolve_config(config: DecomposeConfig | None = None, **kwargs: Any) -> DecomposeConfig:
     return resolve_config(DecomposeConfig, config, **kwargs)
 
 
@@ -117,7 +117,7 @@ def decompose(
     *,
     config: DecomposeConfig | None = None,
     method: str = "emission",
-    **kwargs,
+    **kwargs: Any,
 ) -> pd.DataFrame:
     """
     High-level wrapper for time series decomposition.
@@ -331,7 +331,7 @@ def decom_emi(
     model: object | None = None,
     *,
     config: DecomposeConfig | None = None,
-    **kwargs,
+    **kwargs: Any,
 ) -> pd.DataFrame:
     """
     Emission-based decomposition via leave-one-out normalisation.
@@ -562,7 +562,7 @@ def decom_met(
     model: object | None = None,
     *,
     config: DecomposeConfig | None = None,
-    **kwargs,
+    **kwargs: Any,
 ) -> pd.DataFrame:
     """
     Meteorological decomposition via leave-one-out normalisation.

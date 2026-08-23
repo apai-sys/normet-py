@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -35,7 +36,7 @@ def placebo_in_space(
     scm_backend: str = "scm",
     post_agg: str = "mean",  # {'mean','sum'}
     n_cores: int | None = None,
-    **kwargs,
+    **kwargs: Any,
 ) -> dict:
     """Placebo-in-space analysis for a synthetic-control backend (SCM or ML-SCM).
 
@@ -185,7 +186,7 @@ def placebo_in_time(
     min_pre_period: int = 30,
     placebo_every: int = 7,
     n_cores: int | None = None,
-    **kwargs,
+    **kwargs: Any,
 ) -> dict:
     """Placebo-in-time analysis for a synthetic-control backend (SCM or ML-SCM)."""
     d = df.copy()
@@ -252,7 +253,9 @@ def placebo_in_time(
             "placebo_stats": pd.Series(dtype=float),
         }
 
-    def _one_placebo(pc_date: pd.Timestamp):
+    def _one_placebo(
+        pc_date: pd.Timestamp,
+    ) -> tuple[pd.Timestamp, pd.DataFrame, float] | None:
         try:
             syn_pc = run_scm(
                 df=d,
