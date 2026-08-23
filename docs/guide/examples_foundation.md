@@ -252,6 +252,104 @@ clustering or a plain correlation matrix are each a few lines of scikit-learn,
 and the choices that matter -- the metric, the number of groups, whether to
 normalise first -- are yours rather than this package's to make.
 
+## Several species at one site
+
+Chronos-2 takes a 2-D target and attends across the variates, so the species
+measured at one site can be forecast as one task rather than several:
+
+```python
+out = est.predict_quantiles_multivariate(
+    df, ["no2", "nox", "pm25"], anchor="2023-06-01", horizon=48
+)
+out["no2"]  # q0.1 / q0.5 / q0.9, indexed by forecast timestamp
+```
+
+What this buys over looping is the cross-variate structure -- NO2 and NOx at
+the same kerbside rise and fall together, and a joint call can use one to
+inform the other. The variates must share an index and a horizon. Covariates
+are shared across them, because meteorology is a property of the site rather
+than of the species.
+
+Neighbouring stations can be variates too, once they are columns of one frame.
+That is the point where `normet.physics`'s graphs and the foundation model meet:
+the graph says which stations are neighbours, and the variate stack is how you
+tell the model to read them together.
+
+## Several sites at once
+
+Sites that do not share an index -- different records, different lengths -- are
+separate tasks rather than variates, and go through a different call:
+
+```python
+frames = {"MY1": my1_df, "KC1": kc1_df, "HORS": hors_df}
+out = est.predict_quantiles_multisite(frames, "no2", anchor="2023-06-01")
+out["MY1"]
+```
+
+`cross_learning=True` (the default here) lets the model treat the batch as one
+group and carry structure between the sites. Upstream reports it helps most
+where an individual series has little history, which is exactly a newly
+commissioned station sitting next to twenty established ones.
+
+It is not free. Upstream is explicit that cross-learning does not always help
+and must be tested per use case, and because the sharing happens *within a
+batch*, the answer for a site depends on which other sites were in the call and
+on `batch_size`. Pass `cross_learning=False` to get the per-site loop back --
+it agrees with calling `predict_quantiles` on each frame to within float32
+rounding, which the test suite pins.
+
+## Categorical covariates
+
+Site type, wind sector, a road-class label: Chronos-2 encodes these itself, so
+hand them over as strings rather than one-hotting first.
+
+```python
+df["site_type"] = "kerbside"     # object dtype, not one-hot
+df["wind_sector"] = pd.cut(df["wd"], bins=8).astype(str)
+
+est.predict_quantiles(df, "no2", anchor="2023-06-01",
+                      covariates=["ws", "blh", "site_type", "wind_sector"])
+```
+
+Anything pandas does not call numeric is treated as a category. Upstream
+target-encodes it against the observed target and maps the forecast window onto
+the categories seen in the past, so a level that appears only in the future is
+handled as unseen rather than silently renumbering the rest. Missing values get
+their own category -- a station with no recorded site type is a fact about the
+station, not a value to impute.
+
+One caveat: target encoding is only defined against a single target, so on the
+multivariate path above upstream falls back to ordinal encoding. The covariate
+still reaches the model, just less informatively.
+
+## Fine-tuning
+
+Everything above is zero-shot. `finetune` is the one call that trains, and it
+is deliberately not `fit` -- `fit` sits on the sklearn-shaped path that
+`do_all` walks, where a call costs nothing and is made freely, and silently
+turning that into a thousand optimiser steps would be a trap.
+
+```python
+tuned = est.finetune(df, "no2", mode="lora", num_steps=1000)
+tuned.predict_quantiles(df, "no2", anchor="2023-06-01")
+est.predict_quantiles(df, "no2", anchor="2023-06-01")   # still pretrained
+```
+
+A *new* estimator comes back; the original keeps its pretrained weights, so a
+fine-tune can be compared against the baseline it came from without reloading
+half a gigabyte.
+
+`mode="lora"` (the default) trains low-rank adapters and needs `peft`:
+`pip install "normet[finetune]"`. If `peft` is missing, `finetune` raises rather
+than proceeding -- upstream's own behaviour is to warn and silently do full
+fine-tuning instead, which updates every one of 119M parameters and is a
+different and far more expensive thing than what was asked for.
+
+`mode="full"` updates every parameter. LoRA is the default because a single
+station's record is small next to the model, which is the setting full
+fine-tuning overfits. Whether either helps on your data is a question for your
+data; the package supplies the path, not the promise.
+
 ## Limits
 
 `decompose`, `rolling` and `pdp` have no Chronos-2 equivalent — they are defined

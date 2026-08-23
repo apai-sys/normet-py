@@ -7,6 +7,53 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ## [Unreleased]
 
 ### Added
+- **Fine-tuning: `Chronos2Estimator.finetune`.** Adapts the checkpoint to one
+  site's own record and returns a *new* estimator, leaving the original on the
+  pretrained weights so the two can be compared without reloading. LoRA is the
+  default, because a single station's record is small next to 119M parameters,
+  which is the setting full fine-tuning overfits; `mode="full"` is there for
+  when it is not.
+
+  Deliberately not `fit`. `fit` sits on the sklearn-shaped path that `do_all`
+  walks, where a call costs nothing and is made freely -- silently turning that
+  into a thousand optimiser steps on a GPU would be a trap, so it still trains
+  nothing and a test pins that. Covariates are prepared through upstream's
+  `from_list_of_dicts` with `known_covariates_names` set, because normet's
+  covariates are meteorology, which is known across the forecast window; a run
+  that trained them as past-only would adapt the model to a problem the package
+  never poses. `mode="lora"` without `peft` installed raises rather than
+  proceeding: upstream warns and silently falls back to full fine-tuning, which
+  is a different and far more expensive thing than what was asked for. New
+  `finetune` extra.
+- **Multivariate targets: `predict_quantiles_multivariate`.** Chronos-2 takes a
+  2-D target and attends across the variates, so the species measured at one
+  site -- or a site and its neighbours, once they are columns of one frame --
+  are forecast as one task rather than several. Returns one frame per target.
+  The variates must share an index and a horizon; covariates are shared across
+  them, being properties of the site rather than of the species. Upstream's
+  target encoding of categoricals is only defined against a single target, so
+  this path falls back to ordinal encoding -- documented rather than hidden.
+- **Joint multi-site prediction: `predict_quantiles_multisite`.** Sites that do
+  not share an index are separate tasks, not variates, and each keeps its own
+  frame and history. `cross_learning=True` puts the batch in one group so the
+  model may carry structure between them, which upstream reports helps most
+  where an individual series has little history -- a newly commissioned station
+  next to twenty established ones.
+
+  Because the sharing is a *batch* property, results depend on `batch_size` and
+  on which sites shared the call; both facts are in the docstring rather than
+  left to be discovered. `cross_learning=False` reproduces the per-site loop to
+  within float32 rounding, which the suite pins against `predict_quantiles`.
+- **Categorical covariates, encoded natively.** Site type, wind sector, road
+  class: anything pandas does not call numeric is now passed through as a
+  category instead of being dropped by the numeric-dtype filter. Chronos-2
+  target-encodes it against the observed target and maps the forecast window
+  onto the categories seen in the past, so a level appearing only in the future
+  is treated as unseen rather than silently renumbering the rest. One-hotting
+  first would spend a covariate slot per level and discard the ordering the
+  encoder recovers. Missing values are not imputed -- upstream gives NaN its own
+  category, and a station with no recorded site type is a fact about the
+  station.
 - **Batched Chronos-2 forward passes.** `Chronos2Estimator` gained a
   `batch_size` (default 32): `deweather` now sends its Monte-Carlo draws to the
   model in batches instead of one per call, and `predict` batches its rolling
@@ -268,6 +315,22 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   shrinking the budget alone would not have prevented it.
 
 ### Internal
+- **The type-checking stack is pinned, and `warn_unused_ignores` is off.** The
+  strict posture below went red on CI with thirteen errors that did not
+  reproduce locally; the same tree under a second (numpy, pandas-stubs) pairing
+  gave fourteen, sharing only four with CI's thirteen. The error set is a
+  function of the stub and numpy versions rather than of the code, so
+  `pandas-stubs` is now pinned exactly and that flag is off -- an ignore that is
+  load-bearing under one pairing is "unused" under the next, and the package
+  supports pandas>=2.0 and numpy across a major version boundary.
+
+  Most of what the disagreement surfaced was worth fixing anyway:
+  `DatetimeIndex.view(int64)` (deprecated in pandas 2.2+) became `astype`,
+  several `to_numpy()` calls gained `dtype=float` so a datetime index could not
+  leak into the inferred element type, `GroupBy.quantile` is passed an array
+  rather than a list, `np.issubdtype` -- which cannot read an `ExtensionDtype`
+  at all -- became `pd.api.types.is_datetime64_dtype`, and `pivot_table` is
+  given a key instead of an `Index` object.
 - **mypy runs in a strict posture.** The package ships `py.typed`, so a missing
   annotation is a missing promise; `pyproject.toml` now turns on the `--strict`
   set rather than the handful of flags it had before, and the 66 errors that
