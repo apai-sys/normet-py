@@ -39,18 +39,22 @@ features, and it commits the project to API stability for downstream users.
 | ✅ | `embed_multisite`: station embeddings meet the multi-site drivers |
 | ✅ | mypy strict on the public surface (`warn_return_any` and `disallow_any_generics` deliberately off; `disallow_untyped_decorators` off for `normet.cli` alone -- see CHANGELOG for why) |
 | ✅ | Test coverage ≥ 80% (80% measured; the CI gate stays at 70% so an unlucky branch does not block a merge) |
+| ✅ | Fine-tuning via `Chronos2Estimator.finetune` (LoRA or full). Deliberately not `fit`, which stays free so `do_all` cannot start a training run by accident |
+| ✅ | `cross_learning=True` for joint multi-site prediction (`predict_quantiles_multisite`) |
+| ✅ | Multivariate targets (`predict_quantiles_multivariate`): several species at one site, or neighbouring stations as variates |
+| ✅ | Categorical covariates encoded natively, no one-hotting |
 
 ## Open
 
-These were listed as 1.0 gates and 1.0 shipped without them, so they are now
-ordinary follow-up work rather than release blockers.
+Nothing. The items listed as 1.0 gates -- and the Chronos-2 capabilities that
+followed them -- are all shipped; see the table above.
 
-| Status | Item |
-|:------:|------|
-| ⏳ | Fine-tuning via `Chronos2Pipeline.fit` (full or LoRA). Everything here is zero-shot; adapting the checkpoint to a site's own record is the largest unused capability, and the one plausible route to making the model attend to calendar covariates it currently ignores |
-| ⏳ | `cross_learning=True` for joint multi-site prediction — the upstream docs say it helps most where individual series have little history, which is exactly a newly commissioned station, but also that it does not always help and must be tested per use case |
-| ⏳ | Multivariate targets: several species at one site, or neighbouring stations as variates, which is where `normet.physics`'s graphs would meet the foundation model |
-| ⏳ | Categorical covariates (site type, wind sector), which Chronos-2 encodes natively and normet currently has to one-hot |
+What is deliberately *not* a roadmap item: whether fine-tuning, cross-learning
+or a multivariate stack improves a given analysis. Each is a question about a
+particular record, and upstream is explicit that cross-learning in particular
+does not always help and must be tested per use case. The package supplies the
+paths and the means to compare them; choosing between them is the analyst's
+call, not a feature to be shipped.
 
 ## Deprecation policy
 

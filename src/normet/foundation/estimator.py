@@ -18,9 +18,11 @@ call is a forecast, not a de-weathering, and this class refuses to pretend other
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -201,6 +203,30 @@ def add_calendar_covariates(df: pd.DataFrame) -> pd.DataFrame:
     for name, fn in _CALENDAR_ENCODERS.items():
         out[name] = fn(out.index).astype(np.float32)
     return out
+
+
+def _is_categorical(s: pd.Series) -> bool:
+    """True for a covariate Chronos-2 should encode as a category rather than a number.
+
+    Anything pandas does not call numeric -- ``object``, ``category``,
+    ``string`` -- is a category. Booleans fall on the numeric side, which is
+    what we want: they already carry the ordering an encoder would have to
+    rediscover, and upstream reads them as numeric too.
+    """
+    return not pd.api.types.is_numeric_dtype(s)
+
+
+def _as_category_values(s: pd.Series) -> np.ndarray:
+    """Categorical covariate values as an object array, NaN preserved.
+
+    ``preprocess._stack_covariate`` concatenates these across the batch and asks
+    numpy whether the result is numeric; an object array of strings is what makes
+    it choose ``category`` dtype. Categories are not fixed here on purpose --
+    upstream derives them from the past window and maps the future onto them, so
+    a level that appears only in the forecast window is handled as unseen rather
+    than silently renumbering the rest.
+    """
+    return np.asarray(s.astype(object).to_numpy(), dtype=object)
 
 
 def _qname(q: float) -> str:
@@ -414,7 +440,9 @@ class Chronos2Estimator:
     def _q_index(self, q: float) -> int:
         return int(np.argmin(np.abs(self.quantile_levels - q)))
 
-    def _resolve_covariates(self, df: pd.DataFrame, target: str) -> list[str]:
+    def _resolve_covariates(self, df: pd.DataFrame, target: str | Sequence[str]) -> list[str]:
+        """Covariate columns for ``target``, which may name several variates."""
+        targets = {target} if isinstance(target, str) else set(target)
         if self.met_covariates is not None:
             missing = [c for c in self.met_covariates if c not in df.columns]
             if missing:
@@ -424,9 +452,9 @@ class Chronos2Estimator:
             cols = [
                 c
                 for c in df.columns
-                if c != target
-                and pd.api.types.is_numeric_dtype(df[c])
+                if c not in targets
                 and c not in _CALENDAR_ENCODERS
+                and (pd.api.types.is_numeric_dtype(df[c]) or _is_categorical(df[c]))
             ]
         if self.use_calendar:
             cols = cols + [c for c in _CALENDAR_ENCODERS if c in df.columns]
@@ -447,11 +475,38 @@ class Chronos2Estimator:
         future: pd.DataFrame,
         cols: Sequence[str],
     ) -> dict[str, Any]:
-        fills = {c: float(np.nanmean(past[c])) if np.isfinite(past[c]).any() else 0.0 for c in cols}
+        """One ``predict`` input dict: numeric covariates cleaned, categoricals left alone.
+
+        Chronos-2 encodes categorical covariates itself -- ``predict`` routes a
+        list of dicts through ``preprocess.from_list_of_dicts``, which reads a
+        non-numeric column as a pandas ``category``, target-encodes it against
+        the observed target, and maps the future values onto the categories seen
+        in the past. Handing it an object array is therefore the whole
+        integration; one-hotting first would spend a covariate slot per level and
+        throw away the ordering the encoder recovers.
+
+        NaN is passed through rather than filled, because the encoder gives it
+        its own category slot -- a station with no recorded site type is a fact
+        about the station, not a value to impute.
+        """
+        numeric = [c for c in cols if not _is_categorical(past[c])]
+        categorical = [c for c in cols if _is_categorical(past[c])]
+        fills = {
+            c: float(np.nanmean(past[c])) if np.isfinite(past[c]).any() else 0.0 for c in numeric
+        }
+        past_cov: dict[str, np.ndarray] = {
+            c: self._clean(past[c].to_numpy(), fills[c]) for c in numeric
+        }
+        future_cov: dict[str, np.ndarray] = {
+            c: self._clean(future[c].to_numpy(), fills[c]) for c in numeric
+        }
+        for c in categorical:
+            past_cov[c] = _as_category_values(past[c])
+            future_cov[c] = _as_category_values(future[c])
         return {
             "target": np.asarray(target_hist, dtype=np.float32),
-            "past_covariates": {c: self._clean(past[c].to_numpy(), fills[c]) for c in cols},
-            "future_covariates": {c: self._clean(future[c].to_numpy(), fills[c]) for c in cols},
+            "past_covariates": past_cov,
+            "future_covariates": future_cov,
         }
 
     @staticmethod
@@ -523,18 +578,45 @@ class Chronos2Estimator:
 
         Returns ``(len(items), n_quantiles, horizon)``.
         """
+        inputs = []
+        for hist, past, future in items:
+            self._check_context(hist)
+            inputs.append(self._make_input(hist, past, future, cols))
+        raw = self._predict_raw(inputs, horizon)
+        if len(raw) != len(items):
+            raise RuntimeError(f"pipeline returned {len(raw)} forecasts for {len(items)} inputs")
+        return np.stack([block[0] for block in raw])
+
+    def _predict_raw(
+        self,
+        inputs: Sequence[dict[str, Any]],
+        horizon: int,
+        cross_learning: bool = False,
+    ) -> list[np.ndarray]:
+        """Every ``pipeline.predict`` call in this class goes through here.
+
+        Returns one array per input, each ``(n_variates, n_quantiles, horizon)``
+        -- the shape Chronos-2 emits, kept whole so the multivariate paths can
+        read variates past the first.
+
+        ``cross_learning`` puts every task in a batch into one group, so the
+        model may share information across them. Two consequences follow from
+        it being a *batch* property, and both are the caller's to manage:
+        results depend on :attr:`batch_size`, and only tasks that land in the
+        same chunk actually see each other. Upstream reports a group size of
+        about 100 in the Chronos-2 technical report; far above that the group
+        drifts from what the model saw in pretraining.
+        """
         pipe = self._load_pipeline()
-        blocks: list[np.ndarray] = []
-        for s in range(0, len(items), self.batch_size):
-            inputs = []
-            for hist, past, future in items[s : s + self.batch_size]:
-                self._check_context(hist)
-                inputs.append(self._make_input(hist, past, future, cols))
-            out = pipe.predict(inputs, prediction_length=horizon)
-            blocks.extend(np.asarray(o)[0] for o in out)
-        if len(blocks) != len(items):
-            raise RuntimeError(f"pipeline returned {len(blocks)} forecasts for {len(items)} inputs")
-        return np.stack(blocks)
+        out: list[np.ndarray] = []
+        for s in range(0, len(inputs), self.batch_size):
+            preds = pipe.predict(
+                list(inputs[s : s + self.batch_size]),
+                prediction_length=horizon,
+                cross_learning=cross_learning,
+            )
+            out.extend(np.asarray(pred) for pred in preds)
+        return out
 
     # ------------------------------------------------------------ public API
 
@@ -593,6 +675,360 @@ class Chronos2Estimator:
         return pd.DataFrame(
             {f"q{q}": block[self._q_index(q)] for q in quantiles},
             index=future.index,
+        )
+
+    def _window(
+        self, df: pd.DataFrame, anchor: pd.Timestamp, horizon: int
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """Context and forecast windows around ``anchor``, sized by this estimator."""
+        past = df.loc[df.index < anchor].iloc[-self.context_length :]
+        future = df.loc[df.index >= anchor].iloc[:horizon]
+        if past.empty or future.empty:
+            raise ValueError("anchor leaves no context or no forecast window")
+        return past, future
+
+    def _quantile_frame(
+        self, block: np.ndarray, index: pd.Index, quantiles: Sequence[float]
+    ) -> pd.DataFrame:
+        """One variate's ``(n_quantiles, horizon)`` block as a labelled frame."""
+        return pd.DataFrame({f"q{q}": block[self._q_index(q)] for q in quantiles}, index=index)
+
+    def predict_quantiles_multivariate(
+        self,
+        df: pd.DataFrame,
+        targets: Sequence[str],
+        anchor: pd.Timestamp | str,
+        horizon: int | None = None,
+        quantiles: Sequence[float] = (0.1, 0.5, 0.9),
+        covariates: Sequence[str] | None = None,
+    ) -> dict[str, pd.DataFrame]:
+        """Forecast several target series that share a frame, as one joint task.
+
+        Chronos-2 accepts a 2-D target of shape ``(n_variates, history)`` and
+        attends across the variates, so the species measured at one site --
+        or a site and its neighbours, once they are columns of one frame --
+        are predicted together rather than one at a time. What this buys over
+        looping is the cross-variate structure: NO2 and NOx at the same kerbside
+        rise and fall together, and a joint call can use one to inform the other.
+
+        The variates must share an index and a horizon, which is the same
+        requirement :meth:`predict_quantiles` places on a single series.
+        Covariates are shared across the variates -- they are properties of the
+        site and its weather, not of the species.
+
+        One upstream detail worth knowing: target encoding of categorical
+        covariates is only defined against a single target, so on this path
+        upstream falls back to ordinal encoding. A categorical covariate still
+        reaches the model; it is simply encoded less informatively than it would
+        be in a univariate call.
+
+        Parameters
+        ----------
+        df : pandas.DataFrame
+            Datetime-indexed frame holding every column in ``targets`` and the
+            covariates.
+        targets : sequence of str
+            Target column names, in the order the variates should be stacked.
+        anchor : Timestamp or str
+            Forecast origin, as in :meth:`predict_quantiles`.
+        horizon : int, optional
+            Hours to predict. Defaults to :attr:`prediction_length`.
+        quantiles : sequence of float
+            Levels to return. Snapped to the nearest natively emitted level.
+        covariates : sequence of str, optional
+            Overrides the resolved covariate set for this call.
+
+        Returns
+        -------
+        dict of str to pandas.DataFrame
+            One frame per target, keyed by column name, each shaped like the
+            return of :meth:`predict_quantiles`.
+        """
+        targets = list(targets)
+        if len(targets) < 2:
+            raise ValueError(
+                "predict_quantiles_multivariate needs at least two targets; "
+                "use predict_quantiles for a single series"
+            )
+        missing = [t for t in targets if t not in df.columns]
+        if missing:
+            raise KeyError(f"target columns absent from frame: {missing}")
+
+        self._check_index(df.index)
+        at = pd.Timestamp(anchor)
+        horizon = int(horizon or self.prediction_length)
+        cols = list(covariates) if covariates is not None else self._resolve_covariates(df, targets)
+        past, future = self._window(df, at, horizon)
+
+        stacked = np.stack([past[t].to_numpy(dtype=np.float32) for t in targets])
+        for row in stacked:
+            self._check_context(row)
+        item = self._make_input(stacked, past, future, cols)
+
+        block = self._predict_raw([item], horizon)[0]
+        if block.shape[0] != len(targets):
+            raise RuntimeError(
+                f"pipeline returned {block.shape[0]} variates for {len(targets)} targets"
+            )
+        return {
+            name: self._quantile_frame(block[i], future.index, quantiles)
+            for i, name in enumerate(targets)
+        }
+
+    def predict_quantiles_multisite(
+        self,
+        frames: Mapping[str, pd.DataFrame],
+        target: str,
+        anchor: pd.Timestamp | str,
+        horizon: int | None = None,
+        quantiles: Sequence[float] = (0.1, 0.5, 0.9),
+        covariates: Sequence[str] | None = None,
+        cross_learning: bool = True,
+    ) -> dict[str, pd.DataFrame]:
+        """Forecast the same target at several sites in one call.
+
+        Each site keeps its own frame, its own history and its own covariates --
+        they are separate tasks, not variates of one task, so their records may
+        differ in length and need not be aligned. What ``cross_learning=True``
+        adds is that the model treats the batch as one group and may carry
+        structure between the sites: upstream reports it helps most where an
+        individual series has little history, which is exactly a newly
+        commissioned station sitting next to twenty established ones.
+
+        It is not a free improvement. Upstream is explicit that cross-learning
+        does not always help and has to be tested per use case, and because the
+        sharing happens within a batch, the answer for a site depends on which
+        other sites were in the call and on :attr:`batch_size`. That is why it
+        is a parameter and why ``cross_learning=False`` -- which reproduces a
+        per-site loop, up to batching -- is one keyword away.
+
+        Parameters
+        ----------
+        frames : mapping of str to pandas.DataFrame
+            One datetime-indexed frame per site, keyed by site name.
+        target : str
+            Target column name, the same in every frame.
+        anchor : Timestamp or str
+            Forecast origin, applied to every site.
+        horizon : int, optional
+            Hours to predict. Defaults to :attr:`prediction_length`.
+        quantiles : sequence of float
+            Levels to return. Snapped to the nearest natively emitted level.
+        covariates : sequence of str, optional
+            Overrides the resolved covariate set. Resolved once from the first
+            frame otherwise, because the batch shares one covariate schema.
+        cross_learning : bool, default True
+            Whether the sites are predicted jointly.
+
+        Returns
+        -------
+        dict of str to pandas.DataFrame
+            One frame per site, keyed as ``frames`` was.
+        """
+        if not frames:
+            raise ValueError("frames is empty; nothing to forecast")
+        names = list(frames)
+        at = pd.Timestamp(anchor)
+        horizon = int(horizon or self.prediction_length)
+
+        first = frames[names[0]]
+        cols = (
+            list(covariates) if covariates is not None else self._resolve_covariates(first, target)
+        )
+
+        items: list[dict[str, Any]] = []
+        indices: list[pd.Index] = []
+        for name in names:
+            df = frames[name]
+            if target not in df.columns:
+                raise KeyError(f"site {name!r} has no column {target!r}")
+            self._check_index(df.index)
+            past, future = self._window(df, at, horizon)
+            missing = [c for c in cols if c not in df.columns]
+            if missing:
+                raise KeyError(f"site {name!r} is missing covariates {missing}")
+            hist = past[target].to_numpy(dtype=np.float32)
+            self._check_context(hist)
+            items.append(self._make_input(hist, past, future, cols))
+            indices.append(future.index)
+
+        raw = self._predict_raw(items, horizon, cross_learning=cross_learning)
+        if len(raw) != len(names):
+            raise RuntimeError(f"pipeline returned {len(raw)} forecasts for {len(names)} sites")
+        return {
+            name: self._quantile_frame(raw[i][0], indices[i], quantiles)
+            for i, name in enumerate(names)
+        }
+
+    def finetune(
+        self,
+        df: pd.DataFrame,
+        target: str,
+        *,
+        mode: str = "lora",
+        prediction_length: int | None = None,
+        covariates: Sequence[str] | None = None,
+        validation_df: pd.DataFrame | None = None,
+        learning_rate: float | None = None,
+        num_steps: int = 1000,
+        batch_size: int = 32,
+        output_dir: str | Path | None = None,
+        lora_config: Mapping[str, Any] | None = None,
+        **trainer_kwargs: Any,
+    ) -> Chronos2Estimator:
+        """Adapt the checkpoint to one site's own record and return a new estimator.
+
+        Everything else in this class is zero-shot: the pretrained weights are
+        read and never written. This is the one method that trains, and it is
+        deliberately not :meth:`fit`. ``fit`` is on the sklearn-shaped path that
+        :func:`normet.do_all` walks, where a call costs nothing and is made
+        freely; silently turning that into a thousand optimiser steps on a GPU
+        would be a trap. Fine-tuning is something you ask for by name.
+
+        The estimator returned is a new one wrapping a fine-tuned copy of the
+        pipeline -- ``self`` is left on the pretrained weights, so a fine-tune
+        can be compared against the baseline it came from without reloading.
+
+        Parameters
+        ----------
+        df : pandas.DataFrame
+            Datetime-indexed frame holding ``target`` and the covariates. The
+            whole record is handed over as one series; the trainer samples its
+            own windows from it, so no windowing is needed here.
+        target : str
+            Target column name.
+        mode : {"lora", "full"}, default "lora"
+            ``"lora"`` trains low-rank adapters and leaves the base weights
+            alone; ``"full"`` updates every parameter. LoRA is the default
+            because a single station's record is small next to a 119M-parameter
+            model, which is the setting full fine-tuning overfits.
+        prediction_length : int, optional
+            Horizon to fine-tune for. Defaults to :attr:`prediction_length`, so
+            the adapted model is trained for the horizon it will be asked about.
+        covariates : sequence of str, optional
+            Overrides the resolved covariate set.
+        validation_df : pandas.DataFrame, optional
+            Held-out frame for model selection. Same columns as ``df``.
+        learning_rate : float, optional
+            Defaults to upstream's recommendation for the mode: 1e-5 for LoRA,
+            1e-6 for full.
+        num_steps : int, default 1000
+            Optimiser steps.
+        batch_size : int, default 32
+            Series per step, counting covariates. Upstream's default is 256,
+            lowered here because normet's inputs carry a covariate per
+            meteorological variable and the effective batch is correspondingly
+            larger.
+        output_dir : path-like, optional
+            Where the HuggingFace ``Trainer`` writes checkpoints.
+        lora_config : mapping, optional
+            Overrides for ``peft.LoraConfig``. Ignored when ``mode="full"``.
+        **trainer_kwargs
+            Forwarded to ``TrainingArguments``.
+
+        Returns
+        -------
+        Chronos2Estimator
+            A new estimator holding the fine-tuned pipeline, configured
+            identically to this one.
+
+        Raises
+        ------
+        ImportError
+            If ``mode="lora"`` and ``peft`` is not installed. Upstream warns and
+            silently falls back to full fine-tuning in that case, which is a
+            different and far more expensive thing than what was asked for.
+        """
+        if mode not in ("lora", "full"):
+            raise ValueError(f"mode must be 'lora' or 'full', got {mode!r}")
+        if target not in df.columns:
+            raise KeyError(f"target column absent from frame: {target!r}")
+        if mode == "lora" and importlib.util.find_spec("peft") is None:
+            raise ImportError(
+                "mode='lora' requires peft. Install it with `pip install peft`, or "
+                "pass mode='full' if you meant to update every parameter."
+            )
+
+        horizon = int(prediction_length or self.prediction_length)
+        cols = list(covariates) if covariates is not None else self._resolve_covariates(df, target)
+        self._check_index(df.index)
+
+        inputs = self._training_inputs(df, target, cols, horizon)
+        validation = (
+            self._training_inputs(validation_df, target, cols, horizon)
+            if validation_df is not None
+            else None
+        )
+
+        if learning_rate is None:
+            learning_rate = 1e-5 if mode == "lora" else 1e-6
+
+        log.info(
+            "Fine-tuning %s (%s) on %d rows for horizon %d, %d steps at lr %g",
+            self.model_name,
+            mode,
+            len(df),
+            horizon,
+            num_steps,
+            learning_rate,
+        )
+        pipe = self._load_pipeline()
+        tuned = pipe.fit(
+            inputs,
+            prediction_length=horizon,
+            validation_inputs=validation,
+            finetune_mode=mode,
+            lora_config=dict(lora_config) if lora_config is not None else None,
+            context_length=self.context_length,
+            learning_rate=learning_rate,
+            num_steps=num_steps,
+            batch_size=batch_size,
+            output_dir=output_dir,
+            **trainer_kwargs,
+        )
+
+        out = Chronos2Estimator(
+            model_name=self.model_name,
+            prediction_length=self.prediction_length,
+            context_length=self.context_length,
+            met_covariates=cols,
+            use_calendar=self.use_calendar,
+            device=self.device,
+            batch_size=self.batch_size,
+            min_context_coverage=self.min_context_coverage,
+        )
+        out._pipeline = tuned
+        out._quantiles = np.asarray(tuned.quantiles, dtype=float)
+        out.target_col = target
+        out.feature_cols = list(cols)
+        return out
+
+    def _training_inputs(
+        self, df: pd.DataFrame, target: str, cols: Sequence[str], horizon: int
+    ) -> list[Any]:
+        """Prepare one series for ``Chronos2Pipeline.fit``.
+
+        Built through upstream's ``from_list_of_dicts`` rather than handed over
+        as a plain dict, because only that route takes
+        ``known_covariates_names``. It matters: normet's covariates are
+        meteorology, which is known across the forecast window -- that is what
+        makes de-weathering possible at all -- and a training run that treated
+        them as past-only would adapt the model to a problem it will never be
+        asked to solve.
+        """
+        from chronos.chronos2 import preprocess
+
+        past = {
+            c: _as_category_values(df[c]) if _is_categorical(df[c]) else df[c].to_numpy(np.float32)
+            for c in cols
+        }
+        item = {"target": df[target].to_numpy(np.float32), "past_covariates": past}
+        return list(
+            preprocess.from_list_of_dicts(
+                [item],
+                prediction_length=horizon,
+                known_covariates_names=list(cols),
+            )
         )
 
     def predict(self, X: pd.DataFrame) -> np.ndarray:
