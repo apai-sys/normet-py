@@ -278,7 +278,7 @@ def add_date_variables(df: pd.DataFrame) -> pd.DataFrame:
     if dt.tz is not None:
         dt = dt.tz_convert("UTC").tz_localize(None)
 
-    out.loc[:, "date_unix"] = dt.view(np.int64) // 10**9  # type: ignore[attr-defined]
+    out.loc[:, "date_unix"] = dt.view(np.int64) // 10**9
     out.loc[:, "day_julian"] = dt.dayofyear
     out["weekday"] = pd.Categorical(dt.weekday + 1)
     out.loc[:, "hour"] = dt.hour

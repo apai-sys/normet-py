@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+from typing import Any
 
 import pandas as pd
 from joblib import Parallel, delayed
@@ -26,7 +27,7 @@ def scm_all(
     cutoff_date: str,
     scm_backend: str = "scm",
     n_cores: int | None = None,
-    **kwargs,
+    **kwargs: Any,
 ) -> pd.DataFrame:
     """
     Run synthetic-control for many candidate treated units (in parallel).

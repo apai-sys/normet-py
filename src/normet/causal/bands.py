@@ -278,7 +278,7 @@ def uncertainty_bands(
     time_block_days: int | None = None,
     ci_level: float = 0.95,
     n_cores: int | None = None,
-    **kwargs,
+    **kwargs: Any,
 ) -> dict:
     """Construct uncertainty bands for synthetic-control treatment effects.
 
@@ -373,7 +373,7 @@ def uncertainty_bands(
     df = df.copy()
 
     # Ensure datetime-like
-    if not np.issubdtype(pd.Series(df[date_col]).dtype, np.datetime64):  # type: ignore[arg-type]
+    if not np.issubdtype(pd.Series(df[date_col]).dtype, np.datetime64):
         df[date_col] = to_datetime_coerced(df[date_col])
     if df[date_col].isna().any():
         raise ValueError("Non-parseable dates found; clean 'date_col' first.")
@@ -482,7 +482,7 @@ def uncertainty_bands(
     elif method.lower() == "jackknife":
         n = len(base_donors)
 
-        def _one_jackknife(d: str):
+        def _one_jackknife(d: str) -> pd.Series | None:
             donors_jk = [u for u in base_donors if u != d]
             try:
                 out_jk = run_scm(
@@ -536,8 +536,8 @@ def plot_effect_with_bands(
     bands_df: pd.DataFrame,
     cutoff_date: object | None = None,
     title: str = "Effect with Placebo Bands",
-    ax=None,
-):
+    ax: Any = None,
+) -> Any:
     """
     Plot treated effect with placebo-based uncertainty bands.
 
@@ -613,8 +613,8 @@ def plot_uncertainty_bands(
     out: dict,
     cutoff_date: object | None = None,
     title: str = "SCM Effect with Uncertainty Bands",
-    ax=None,
-):
+    ax: Any = None,
+) -> Any:
     """
     Plot synthetic-control treatment effects with uncertainty bands.
 

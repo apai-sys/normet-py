@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import fields, replace
-from typing import TypeVar
+from typing import Any, TypeVar
 
 T = TypeVar("T")
 
@@ -11,7 +11,7 @@ T = TypeVar("T")
 DEFAULT_SEED = 7654321
 
 
-def resolve_config(cls: type[T], config: T | None = None, **kwargs) -> T:
+def resolve_config(cls: type[T], config: T | None = None, **kwargs: Any) -> T:
     """Build a dataclass config from an optional instance and keyword overrides.
 
     Unknown kwargs emit a UserWarning; None-valued kwargs do not override an

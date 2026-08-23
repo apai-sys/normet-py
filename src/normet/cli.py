@@ -83,6 +83,24 @@ def _load_yaml(path: Path | None) -> dict[str, Any]:
         return yaml.safe_load(f) or {}
 
 
+def _cfg_float(cfg: dict[str, Any], key: str, default: float) -> float:
+    """Read a float option, falling back to ``default`` when absent or None.
+
+    The obvious spelling, ``cfg.get(k) if cfg.get(k) is not None else d``, reads
+    the dict twice; a type checker only sees the second read and so cannot tell
+    the None branch is already excluded. Reading once also lets the value be
+    coerced, which matters because a YAML config can hand over ``"0.75"``.
+    """
+    value = cfg.get(key)
+    return default if value is None else float(value)
+
+
+def _cfg_int(cfg: dict[str, Any], key: str, default: int) -> int:
+    """Read an integer option. See :func:`_cfg_float`."""
+    value = cfg.get(key)
+    return default if value is None else int(value)
+
+
 def _merge_cli_over_yaml(yaml_cfg: dict[str, Any], cli_args: dict[str, Any]) -> dict[str, Any]:
     """CLI args win; None values fall back to YAML."""
     out = dict(yaml_cfg)
@@ -95,7 +113,7 @@ def _merge_cli_over_yaml(yaml_cfg: dict[str, Any], cli_args: dict[str, Any]) -> 
 # ---------- CLI ----------
 
 
-def _build_cli():
+def _build_cli() -> Any:
     click = require("click", hint="pip install click")
 
     from .backends import backend_registry
@@ -113,7 +131,7 @@ def _build_cli():
 
     @click.group()
     @click.version_option(package_name="normet")
-    def cli():
+    def cli() -> None:
         """Command-line interface for the normet modelling toolbox."""
         enable_default_logging("INFO")
 
@@ -155,7 +173,7 @@ def _build_cli():
         type=click.Path(exists=True, path_type=Path),
         help="YAML config that supplies any of the above options.",
     )
-    def do_all_cmd(input, **opts):
+    def do_all_cmd(input: Path, **opts: Any) -> None:
         from . import do_all, make_run, save_run
 
         cfg = _merge_cli_over_yaml(_load_yaml(opts.pop("config_path", None)), opts)
@@ -169,10 +187,8 @@ def _build_cli():
             backend=cfg.get("backend") or "flaml",
             n_samples=cfg.get("n_samples") or 300,
             split_method=cfg.get("split_method") or "random",
-            train_fraction=cfg.get("train_fraction")
-            if cfg.get("train_fraction") is not None
-            else 0.75,
-            seed=cfg.get("seed") if cfg.get("seed") is not None else 7_654_321,
+            train_fraction=_cfg_float(cfg, "train_fraction", 0.75),
+            seed=_cfg_int(cfg, "seed", 7_654_321),
             verbose=True,
         )
         _save_table(out.reset_index(), Path(cfg["out_path"]))
@@ -202,7 +218,7 @@ def _build_cli():
     @click.option("--seed", type=int, default=None)
     @click.option("--out", "out_path", type=click.Path(path_type=Path), required=True)
     @click.option("--config", "config_path", type=click.Path(exists=True, path_type=Path))
-    def decompose_cmd(input, **opts):
+    def decompose_cmd(input: Path, **opts: Any) -> None:
         from . import decompose
 
         cfg = _merge_cli_over_yaml(_load_yaml(opts.pop("config_path", None)), opts)
@@ -215,7 +231,7 @@ def _build_cli():
             covariates=_split_csv(cfg.get("covariates")),
             backend=cfg.get("backend") or "flaml",
             n_samples=cfg.get("n_samples") or 300,
-            seed=cfg.get("seed") if cfg.get("seed") is not None else 7_654_321,
+            seed=_cfg_int(cfg, "seed", 7_654_321),
             verbose=True,
         )
         _save_table(out.reset_index(), Path(cfg["out_path"]))
@@ -253,7 +269,7 @@ def _build_cli():
     @click.option("--seed", type=int, default=None)
     @click.option("--out", "out_path", type=click.Path(path_type=Path), required=True)
     @click.option("--config", "config_path", type=click.Path(exists=True, path_type=Path))
-    def deweather_cmd(input, **opts):
+    def deweather_cmd(input: Path, **opts: Any) -> None:
         """Zero-shot meteorological normalisation with Chronos-2.
 
         Nothing is trained: the checkpoint conditions on the meteorology through
@@ -306,7 +322,7 @@ def _build_cli():
         est._load_pipeline()
         click.echo(f"[deweather] ready on {est.device}")
 
-        seed = cfg.get("seed") if cfg.get("seed") is not None else 7_654_321
+        seed = _cfg_int(cfg, "seed", 7_654_321)
         horizon = est.prediction_length
         if len(df) > est.context_length + horizon:
             shift = est.covariate_sensitivity(
@@ -380,7 +396,7 @@ def _build_cli():
     )
     @click.option("--out", "out_path", type=click.Path(path_type=Path), required=True)
     @click.option("--config", "config_path", type=click.Path(exists=True, path_type=Path))
-    def scm_cmd(input, **opts):
+    def scm_cmd(input: Path, **opts: Any) -> None:
         from . import run_scm
 
         cfg = _merge_cli_over_yaml(_load_yaml(opts.pop("config_path", None)), opts)
@@ -409,7 +425,7 @@ def _build_cli():
     @click.option("--backend", type=backend_choice, default=None)
     @click.option("--out", "out_path", type=click.Path(path_type=Path), required=True)
     @click.option("--config", "config_path", type=click.Path(exists=True, path_type=Path))
-    def cv_cmd(input, **opts):
+    def cv_cmd(input: Path, **opts: Any) -> None:
         from . import cv_score, prepare_data
 
         cfg = _merge_cli_over_yaml(_load_yaml(opts.pop("config_path", None)), opts)
@@ -445,7 +461,7 @@ def _build_cli():
         help="Output HTML or Markdown file path (.html or .md).",
     )
     @click.option("--title", default=None, help="Custom report title.")
-    def report_cmd(run_path, out_path, title):
+    def report_cmd(run_path: Path, out_path: Path, title: str | None) -> None:
         from . import load_run
         from .report import generate_html, report_to_markdown
 
@@ -459,7 +475,7 @@ def _build_cli():
 
     # ---- info ----
     @cli.command("info")
-    def info_cmd():
+    def info_cmd() -> None:
         import importlib.metadata as md
 
         def _v(pkg: str) -> str:
@@ -502,7 +518,7 @@ def _build_cli():
     return cli
 
 
-def main():  # entry point
+def main() -> None:  # entry point
     """Run the ``normet`` console-script entry point."""
     cli = _build_cli()
     cli(standalone_mode=True)

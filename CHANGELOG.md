@@ -268,6 +268,34 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   shrinking the budget alone would not have prevented it.
 
 ### Internal
+- **mypy runs in a strict posture.** The package ships `py.typed`, so a missing
+  annotation is a missing promise; `pyproject.toml` now turns on the `--strict`
+  set rather than the handful of flags it had before, and the 66 errors that
+  surfaced are cleared. Most were mechanical: 25 unannotated `**kwargs`,
+  inner helper functions (`_first_attr`, `_stem`, `_one_placebo`,
+  `_one_jackknife`, `fit_ridge`), the `_import_lightgbm` / `_import_flaml_automl`
+  shims, and seven `type: ignore` comments that had outlived the pandas and
+  numpy stub versions they were written against.
+
+  Two flags are deliberately off, for the same reason. `warn_return_any` has
+  ~100 hits and `disallow_any_generics` ~94, almost all of them a pandas or
+  numpy call that upstream itself types as `Any`, or an `np.ndarray` written
+  without its dtype parameters. Satisfying them means a `cast()` around nearly
+  every DataFrame operation and `npt.NDArray[np.float64]` spelled out across
+  ~40 files -- casts that assert rather than check, silencing the checker
+  without telling anyone whether the dtype is what we claim.
+  `disallow_untyped_decorators` is off for `normet.cli` alone: `click` is an
+  optional dependency reached through `require()`, so it is an `Any`-typed
+  local and all 56 `@click.option` decorators read as untyped. The flag is
+  asking for something that pattern cannot give; it stays on everywhere else.
+
+  The rest of `--strict` earns its place. It is what flagged
+  `cfg.get(k) if cfg.get(k) is not None else default` in the CLI, which reads
+  the dict twice -- harmless at runtime, but the second read is the one a
+  checker sees, so the `None` branch it appears to exclude is still in the
+  type. Replaced by `_cfg_float` / `_cfg_int`, which read once and coerce, so
+  a YAML config supplying `"0.75"` or `"7654321"` now works where it used to
+  reach `do_all` as a string.
 - **Tests for `prepare_panel` and `scm_all`**, which were public API with no
   coverage at all (11% and 29% of their statements). Both are about what they
   refuse rather than what they compute: `prepare_panel` screens a ragged panel
@@ -275,7 +303,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   so a few sparse donors can collapse the sample to nothing without raising --
   and the two silent-empty-result traps its comments name (tz-aware input
   against tz-naive bounds, sub-daily input on a daily grid) now have
-  regressions. `scm_all` must lose one failed unit and not the batch.
+  regressions. `scm_all` must lose one failed unit and not the batch. Total coverage
+  crosses the 80% mark it had been short of (78.7% to 80%, 493 tests).
 - **The deprecation policy is in force**, no longer proposed wording. It covers
   the top-level public API: a symbol marked for removal warns for at least one
   minor release, says so in its docstring and here, names its replacement, and

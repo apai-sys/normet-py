@@ -27,7 +27,7 @@ log = get_logger(__name__)
 __all__ = ["generate_html", "report_to_markdown"]
 
 
-def _fig_to_b64(fig) -> str:
+def _fig_to_b64(fig: Any) -> str:
     """Serialise a matplotlib Figure to an inline data URI."""
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=110, bbox_inches="tight")

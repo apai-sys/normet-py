@@ -41,7 +41,7 @@ def multisite_apply(
     n_cores: int | None = None,
     site_kwarg: str | None = None,
     keep_index: bool = True,
-    **kwargs,
+    **kwargs: Any,
 ) -> pd.DataFrame:
     """
     Run ``func(df=site_df, **kwargs)`` for each unique site and concatenate results.
@@ -116,7 +116,7 @@ def do_all_multisite(
     backend: str = "flaml",
     n_cores: int | None = None,
     return_models: bool = False,
-    **do_all_kwargs,
+    **do_all_kwargs: Any,
 ) -> Any:
     """
     Run :func:`normet.do_all` independently per site.
@@ -196,7 +196,7 @@ def decompose_multisite(
     covariates: list[str] | None = None,
     backend: str = "flaml",
     n_cores: int | None = None,
-    **decompose_kwargs,
+    **decompose_kwargs: Any,
 ) -> pd.DataFrame:
     """
     Run :func:`normet.decompose` independently per site.

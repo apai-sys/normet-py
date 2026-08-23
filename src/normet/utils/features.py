@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 
 from ..utils.logging import get_logger
@@ -10,7 +12,7 @@ from ..utils.logging import get_logger
 log = get_logger(__name__)
 
 
-def extract_features(model, importance_ascending: bool = False) -> list[str]:
+def extract_features(model: Any, importance_ascending: bool = False) -> list[str]:
     """
     Extract and sort feature names from an AutoML model.
 
@@ -71,7 +73,7 @@ def extract_features(model, importance_ascending: bool = False) -> list[str]:
             # Probe a few plausible objects for attrs
             candidates = [model, est, getattr(est, "estimator", None)]
 
-            def _first_attr(obj, names):
+            def _first_attr(obj: Any, names: tuple[str, ...]) -> Any:
                 for n in names:
                     if obj is not None and hasattr(obj, n):
                         return getattr(obj, n)
