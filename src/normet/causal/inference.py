@@ -89,7 +89,7 @@ def conformal_effect_interval(
         raise ValueError("No post-period observations.")
 
     att = float(post.mean())
-    all_vals = eff.to_numpy()
+    all_vals = eff.to_numpy(dtype=float)
     n_total = len(all_vals)
     if n_total <= n_post:
         raise ValueError("Need pre-period observations to build a null distribution.")
@@ -157,8 +157,8 @@ def rmspe_ratio_test(
         post = eff_series[eff_series.index.to_series() >= cutoff_ts].dropna()
         if pre.empty or post.empty:
             return np.nan
-        pre_rmspe = float(np.sqrt(np.mean(pre.to_numpy() ** 2)))
-        post_rmspe = float(np.sqrt(np.mean(post.to_numpy() ** 2)))
+        pre_rmspe = float(np.sqrt(np.mean(pre.to_numpy(dtype=float) ** 2)))
+        post_rmspe = float(np.sqrt(np.mean(post.to_numpy(dtype=float) ** 2)))
         return post_rmspe / pre_rmspe if pre_rmspe > 0 else np.nan
 
     treated_df = placebo_space_out["treated"]

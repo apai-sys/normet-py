@@ -517,7 +517,7 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
             df_out = gb[["observed", "normalised"]].mean()
             if _cfg.return_quantiles:
                 q_arr = sorted({float(q) for q in _cfg.return_quantiles})
-                q_df = gb["normalised"].quantile(q_arr).unstack(level=-1)  # type: ignore[arg-type]
+                q_df = gb["normalised"].quantile(np.asarray(q_arr)).unstack(level=-1)
                 q_df.columns = pd.Index([_format_quantile_name(float(q)) for q in q_df.columns])
                 df_out = df_out.join(q_df, how="left")
         else:
@@ -570,7 +570,7 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
             df_out = gb[["observed", "normalised"]].mean()
             if _cfg.return_quantiles:
                 q_arr = sorted({float(q) for q in _cfg.return_quantiles})
-                q_df = gb["normalised"].quantile(q_arr).unstack(level=-1)
+                q_df = gb["normalised"].quantile(np.asarray(q_arr)).unstack(level=-1)
                 q_df.columns = pd.Index([_format_quantile_name(float(q)) for q in q_df.columns])
                 df_out = df_out.join(q_df, how="left")
         else:

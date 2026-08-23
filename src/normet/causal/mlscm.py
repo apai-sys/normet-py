@@ -247,8 +247,8 @@ def mlscm(
     )
 
     # Predict synthetic
-    synth_all = ml_predict(model, panel_safe[donors_safe])
-    synth_all = pd.Series(synth_all, index=panel_safe.index, name="synthetic")
+    synth_values = ml_predict(model, panel_safe[donors_safe])
+    synth_all = pd.Series(synth_values, index=panel_safe.index, name="synthetic")
 
     # Output
     out = pd.DataFrame(

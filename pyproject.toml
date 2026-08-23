@@ -74,7 +74,12 @@ dev = [
     "ruff>=0.4",
     "mypy>=1.6",
     "pre-commit>=3.0",
-    "pandas-stubs",
+    # Pinned, not floated. mypy's answer here is a function of the pandas-stubs
+    # and numpy versions as much as of the code: the same tree reports 13 errors
+    # under one pairing and 14 under another, with only four in common. Floating
+    # the stubs means CI disagrees with every contributor's laptop about what
+    # "clean" is. Bump this deliberately, with the diff that follows it.
+    "pandas-stubs==2.3.2.250926",
     "types-PyYAML",
 ]
 # Everything optional except dev/docs tooling.
@@ -203,9 +208,17 @@ check_untyped_defs = true
 no_implicit_optional = true
 strict_equality = true
 extra_checks = true
-warn_unused_ignores = true
 warn_return_any = false
 disallow_any_generics = false
+# Off for the same reason as the two above, arrived at the hard way. The set of
+# `type: ignore` comments this tree needs is a function of the pandas-stubs and
+# numpy versions, not of the code: an ignore that is load-bearing under one
+# pairing is "unused" under the next, and the package supports pandas>=2.0 and
+# numpy across a major version boundary. Turning this on made CI red for lines
+# that were clean locally and vice versa. The stubs are pinned above so mypy has
+# one contract to check; this flag stays off so a stub bump does not turn every
+# ignore in the tree into an error at once.
+warn_unused_ignores = false
 
 # Optional deps are lazy-imported; tell mypy not to choke if they're absent.
 [[tool.mypy.overrides]]
