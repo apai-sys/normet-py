@@ -62,6 +62,11 @@ geo = ["shapely>=2.0", "pyshp>=2.3"]
 stats = ["statsmodels>=0.14"]
 # Chronos-2 time-series foundation model (normet.foundation).
 foundation = ["chronos-forecasting>=2.3", "torch>=2.0"]
+# Fine-tuning the checkpoint (Chronos2Estimator.finetune). `accelerate` is what
+# the HuggingFace Trainer needs to run at all; `peft` is only for mode="lora",
+# and finetune refuses that mode outright when it is absent rather than letting
+# upstream fall back to full fine-tuning behind the caller's back.
+finetune = ["chronos-forecasting>=2.3", "torch>=2.0", "accelerate>=0.26", "peft>=0.10"]
 # Physics-informed graph models (normet.physics). PhysicsGraphBuilder is pure
 # numpy; only build_pi_stgnn / build_adr_pde_loss need torch, and they import it
 # lazily, so `import normet.physics` still works without this extra.
@@ -100,6 +105,8 @@ all = [
     "pyshp>=2.3",
     "chronos-forecasting>=2.3",
     "torch>=2.0",
+    "accelerate>=0.26",
+    "peft>=0.10",
 ]
 
 [project.scripts]
@@ -131,6 +138,9 @@ include = ["normet*"]
 minversion = "7.0"
 addopts = "-ra -q"
 testpaths = ["tests"]
+markers = [
+    "slow: hits the real checkpoint with an optimiser step; minutes, not seconds",
+]
 filterwarnings = [
     "ignore::DeprecationWarning:pandas",
     "ignore::FutureWarning:joblib",

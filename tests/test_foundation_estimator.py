@@ -697,3 +697,378 @@ def test_zero_shot_decomposition_honours_an_explicit_variable_order(chronos2_pip
 
     with pytest.raises(ConfigError, match="variable_order"):
         decompose(df, variable_order=["blh"], **common)
+
+
+# --------------------------------------------------- categorical covariates
+
+
+@pytest.fixture
+def categorical_frame() -> pd.DataFrame:
+    """Hourly frame whose level is set by a categorical regime, not a number.
+
+    ``regime`` is the only thing that separates the two levels: it is a string,
+    so a numeric-only covariate path drops it and the forecast falls back to the
+    pooled mean. The numeric column ``ws`` is deliberately uninformative here so
+    the test cannot pass by reading it instead.
+    """
+    rng = np.random.default_rng(7)
+    idx = pd.date_range("2020-01-01", periods=1200, freq="h")
+    regime = np.where((np.arange(len(idx)) // 24) % 2 == 0, "calm", "windy")
+    level = np.where(regime == "calm", 70.0, 20.0)
+    ws = 2.0 + np.abs(rng.normal(2.0, 1.0, len(idx)))
+    value = level + rng.normal(0, 1.5, len(idx))
+    return pd.DataFrame({"value": value, "ws": ws, "regime": regime}, index=idx)
+
+
+def test_is_categorical_splits_on_pandas_numeric(categorical_frame):
+    from normet.foundation.estimator import _is_categorical
+
+    assert _is_categorical(categorical_frame["regime"])
+    assert _is_categorical(categorical_frame["regime"].astype("category"))
+    assert not _is_categorical(categorical_frame["ws"])
+    assert not _is_categorical(categorical_frame["value"])
+    # booleans read as numeric, which is what we want: the ordering is already there
+    assert not _is_categorical(pd.Series([True, False, True]))
+
+
+def test_categorical_covariate_survives_resolution(categorical_frame):
+    """A string column used to be dropped by the numeric-dtype filter."""
+    est = Chronos2Estimator(use_calendar=False)
+    cols = est._resolve_covariates(categorical_frame, "value")
+    assert "regime" in cols
+    assert "ws" in cols
+
+
+def test_categorical_reaches_the_input_dict_unconverted(categorical_frame):
+    """Numerics are float32; categoricals stay object so upstream reads them as categories."""
+    est = Chronos2Estimator(use_calendar=False)
+    past = categorical_frame.iloc[:100]
+    future = categorical_frame.iloc[100:124]
+    item = est._make_input(past["value"].to_numpy(), past, future, ["ws", "regime"])
+
+    assert item["past_covariates"]["ws"].dtype == np.float32
+    assert item["past_covariates"]["regime"].dtype == object
+    assert set(item["past_covariates"]["regime"]) <= {"calm", "windy"}
+    assert item["future_covariates"]["regime"].shape == (24,)
+
+
+def test_categorical_missing_values_are_not_imputed(categorical_frame):
+    """NaN gets its own category upstream, so filling it here would invent a level."""
+    frame = categorical_frame.copy()
+    frame.loc[frame.index[:10], "regime"] = np.nan
+    est = Chronos2Estimator(use_calendar=False)
+    past = frame.iloc[:100]
+    item = est._make_input(past["value"].to_numpy(), past, frame.iloc[100:124], ["regime"])
+
+    values = item["past_covariates"]["regime"]
+    assert pd.isna(pd.Series(values)).sum() == 10
+
+
+@needs_chronos
+def test_categorical_covariate_moves_the_forecast(make_estimator, categorical_frame):
+    """The regime label must change the forecast, or it never reached the model.
+
+    Two calls over the same history, differing only in the future value of
+    ``regime``. If the label is being dropped the two forecasts are identical;
+    if it is encoded, the one told "calm" must sit above the one told "windy",
+    because that is the only thing separating a level of 70 from a level of 20.
+    """
+    est = make_estimator(context_length=512, prediction_length=24, use_calendar=False)
+    anchor = categorical_frame.index[1000]
+
+    calm = categorical_frame.copy()
+    calm.loc[calm.index >= anchor, "regime"] = "calm"
+    windy = categorical_frame.copy()
+    windy.loc[windy.index >= anchor, "regime"] = "windy"
+
+    common = dict(target="value", anchor=anchor, horizon=24, quantiles=(0.5,))
+    q_calm = est.predict_quantiles(calm, covariates=["regime"], **common)["q0.5"]
+    q_windy = est.predict_quantiles(windy, covariates=["regime"], **common)["q0.5"]
+
+    assert not np.allclose(q_calm.to_numpy(), q_windy.to_numpy())
+    assert q_calm.mean() > q_windy.mean()
+
+
+# ------------------------------------------- multivariate / multisite joint
+
+
+@pytest.fixture
+def two_species_frame() -> pd.DataFrame:
+    """One site, two species at very different levels, sharing a diurnal driver.
+
+    The levels are far apart (~70 and ~20) on purpose: it is what makes a
+    transposed variate visible. A joint call that returns the variates in the
+    wrong order would otherwise pass every structural assertion.
+    """
+    rng = np.random.default_rng(11)
+    idx = pd.date_range("2020-01-01", periods=1200, freq="h")
+    driver = np.sin(2 * np.pi * np.arange(len(idx)) / 24.0)
+    ws = 2.0 + np.abs(rng.normal(2.0, 1.0, len(idx)))
+    no2 = 70.0 + 8.0 * driver + rng.normal(0, 1.5, len(idx))
+    nox = 20.0 + 3.0 * driver + rng.normal(0, 1.0, len(idx))
+    return pd.DataFrame({"no2": no2, "nox": nox, "ws": ws}, index=idx)
+
+
+@pytest.fixture
+def site_frames(two_species_frame) -> dict[str, pd.DataFrame]:
+    """Three sites holding the same target at levels 70 / 45 / 20."""
+    rng = np.random.default_rng(3)
+    idx = two_species_frame.index
+    frames = {}
+    for name, level in (("kerbside", 70.0), ("urban", 45.0), ("rural", 20.0)):
+        driver = np.sin(2 * np.pi * np.arange(len(idx)) / 24.0)
+        frames[name] = pd.DataFrame(
+            {
+                "no2": level + 6.0 * driver + rng.normal(0, 1.5, len(idx)),
+                "ws": 2.0 + np.abs(rng.normal(2.0, 1.0, len(idx))),
+            },
+            index=idx,
+        )
+    return frames
+
+
+def test_multivariate_refuses_a_single_target(two_species_frame):
+    """One variate is not a joint task; the univariate method is the honest route."""
+    est = Chronos2Estimator(use_calendar=False)
+    with pytest.raises(ValueError, match="at least two targets"):
+        est.predict_quantiles_multivariate(
+            two_species_frame, ["no2"], anchor=two_species_frame.index[1000]
+        )
+
+
+def test_multivariate_refuses_an_absent_target(two_species_frame):
+    est = Chronos2Estimator(use_calendar=False)
+    with pytest.raises(KeyError, match="target columns absent"):
+        est.predict_quantiles_multivariate(
+            two_species_frame, ["no2", "pm25"], anchor=two_species_frame.index[1000]
+        )
+
+
+def test_multivariate_excludes_every_target_from_the_covariates(two_species_frame):
+    """A target must not also be fed in as a covariate of itself."""
+    est = Chronos2Estimator(use_calendar=False)
+    cols = est._resolve_covariates(two_species_frame, ["no2", "nox"])
+    assert cols == ["ws"]
+
+
+def test_multisite_refuses_empty_input():
+    est = Chronos2Estimator(use_calendar=False)
+    with pytest.raises(ValueError, match="nothing to forecast"):
+        est.predict_quantiles_multisite({}, "no2", anchor="2020-01-01")
+
+
+def test_multisite_refuses_a_site_without_the_target(site_frames):
+    est = Chronos2Estimator(use_calendar=False)
+    frames = dict(site_frames)
+    frames["broken"] = frames["urban"].drop(columns=["no2"])
+    with pytest.raises(KeyError, match="has no column"):
+        est.predict_quantiles_multisite(
+            frames, "no2", anchor=site_frames["urban"].index[1000], horizon=6
+        )
+
+
+def test_multisite_refuses_a_site_missing_a_covariate(site_frames):
+    """The batch shares one covariate schema, so a ragged site is an error, not a gap."""
+    est = Chronos2Estimator(use_calendar=False)
+    frames = dict(site_frames)
+    frames["broken"] = frames["urban"].drop(columns=["ws"])
+    with pytest.raises(KeyError, match="missing covariates"):
+        est.predict_quantiles_multisite(
+            frames, "no2", anchor=site_frames["urban"].index[1000], horizon=6
+        )
+
+
+@needs_chronos
+def test_multivariate_returns_one_frame_per_variate_in_order(make_estimator, two_species_frame):
+    """Each variate must come back at its own level, not its neighbour's."""
+    est = make_estimator(context_length=512, prediction_length=24, use_calendar=False)
+    out = est.predict_quantiles_multivariate(
+        two_species_frame,
+        ["no2", "nox"],
+        anchor=two_species_frame.index[1000],
+        horizon=24,
+        quantiles=(0.1, 0.5, 0.9),
+    )
+
+    assert set(out) == {"no2", "nox"}
+    for name, frame in out.items():
+        assert list(frame.columns) == ["q0.1", "q0.5", "q0.9"]
+        assert len(frame) == 24
+        assert np.isfinite(frame.to_numpy()).all()
+    # levels are ~70 and ~20; a transposition would swap these
+    assert out["no2"]["q0.5"].mean() > 45.0
+    assert out["nox"]["q0.5"].mean() < 45.0
+
+
+@needs_chronos
+def test_multivariate_quantiles_are_ordered(make_estimator, two_species_frame):
+    est = make_estimator(context_length=512, prediction_length=24, use_calendar=False)
+    out = est.predict_quantiles_multivariate(
+        two_species_frame, ["no2", "nox"], anchor=two_species_frame.index[1000], horizon=12
+    )
+    for frame in out.values():
+        assert (frame["q0.1"] <= frame["q0.5"] + 1e-6).all()
+        assert (frame["q0.5"] <= frame["q0.9"] + 1e-6).all()
+
+
+@needs_chronos
+@pytest.mark.parametrize("cross_learning", [True, False])
+def test_multisite_keeps_each_site_at_its_own_level(make_estimator, site_frames, cross_learning):
+    """Sharing across the batch must not pull the sites onto a common level.
+
+    This is the failure cross-learning could plausibly cause, so it is asserted
+    in both modes: kerbside sits near 70 and rural near 20, and if the joint
+    call blurred them together the gap would collapse.
+    """
+    est = make_estimator(context_length=512, prediction_length=24, use_calendar=False)
+    out = est.predict_quantiles_multisite(
+        site_frames,
+        "no2",
+        anchor=site_frames["urban"].index[1000],
+        horizon=24,
+        cross_learning=cross_learning,
+    )
+
+    assert list(out) == list(site_frames)
+    for frame in out.values():
+        assert len(frame) == 24
+        assert np.isfinite(frame.to_numpy()).all()
+    assert out["kerbside"]["q0.5"].mean() > out["urban"]["q0.5"].mean()
+    assert out["urban"]["q0.5"].mean() > out["rural"]["q0.5"].mean()
+
+
+@needs_chronos
+def test_multisite_without_cross_learning_matches_the_per_site_loop(make_estimator, site_frames):
+    """``cross_learning=False`` is batching, nothing more, so it must agree with a loop."""
+    est = make_estimator(context_length=512, prediction_length=24, use_calendar=False)
+    anchor = site_frames["urban"].index[1000]
+    joint = est.predict_quantiles_multisite(
+        site_frames, "no2", anchor=anchor, horizon=12, cross_learning=False
+    )
+    for name, frame in site_frames.items():
+        alone = est.predict_quantiles(frame, "no2", anchor=anchor, horizon=12)
+        np.testing.assert_allclose(joint[name].to_numpy(), alone.to_numpy(), rtol=1e-4, atol=1e-4)
+
+
+@needs_chronos
+def test_cross_learning_actually_changes_the_answer(make_estimator, site_frames):
+    """If the flag were not reaching the pipeline, both modes would be identical."""
+    est = make_estimator(context_length=512, prediction_length=24, use_calendar=False)
+    anchor = site_frames["urban"].index[1000]
+    common = dict(target="no2", anchor=anchor, horizon=12)
+    shared = est.predict_quantiles_multisite(site_frames, cross_learning=True, **common)
+    apart = est.predict_quantiles_multisite(site_frames, cross_learning=False, **common)
+    assert any(
+        not np.allclose(shared[name].to_numpy(), apart[name].to_numpy()) for name in site_frames
+    )
+
+
+# --------------------------------------------------------------- fine-tuning
+
+
+def test_fit_still_trains_nothing(met_frame):
+    """The sklearn-shaped path must stay free; fine-tuning is asked for by name.
+
+    ``do_all`` calls ``fit`` as a matter of course. If that ever started
+    optimising, a routine call would silently become a GPU job.
+    """
+    est = Chronos2Estimator()
+    same = est.fit(met_frame[["ws", "blh"]], met_frame["value"])
+    assert same is est
+    assert est._pipeline is None
+    assert est.target_col == "value"
+    assert est.feature_cols == ["ws", "blh"]
+
+
+def test_finetune_rejects_an_unknown_mode(met_frame):
+    est = Chronos2Estimator()
+    with pytest.raises(ValueError, match="mode must be"):
+        est.finetune(met_frame, "value", mode="adapter")
+
+
+def test_finetune_rejects_an_absent_target(met_frame):
+    est = Chronos2Estimator()
+    with pytest.raises(KeyError, match="target column absent"):
+        est.finetune(met_frame, "pm25", mode="full")
+
+
+@pytest.mark.skipif(_has("peft"), reason="peft installed, so lora is available")
+def test_lora_refuses_rather_than_falling_back_to_full(met_frame):
+    """Upstream warns and silently does full fine-tuning instead. That is not the ask.
+
+    Full fine-tuning updates every one of 119M parameters where LoRA would have
+    trained adapters; treating them as interchangeable hides both the cost and
+    the overfitting risk.
+    """
+    est = Chronos2Estimator()
+    with pytest.raises(ImportError, match="requires peft"):
+        est.finetune(met_frame, "value", mode="lora")
+
+
+@needs_chronos
+def test_training_inputs_keep_covariates_known_into_the_future(met_frame):
+    """Meteorology is known across the forecast window; training must say so.
+
+    A run that prepared the covariates as past-only would adapt the model to a
+    problem normet never poses -- de-weathering exists precisely because the
+    weather over the counterfactual window is available.
+    """
+    est = Chronos2Estimator(context_length=256, use_calendar=False)
+    prepared = est._training_inputs(met_frame, "value", ["ws", "blh"], horizon=24)
+
+    assert len(prepared) == 1
+    item = prepared[0]
+    assert item["n_targets"] == 1
+    assert item["n_covariates"] == 2
+    assert item["n_future_covariates"] == 2
+    assert item["future_covariates"].shape[-1] == 24
+
+
+@needs_chronos
+def test_training_inputs_accept_a_categorical_covariate(categorical_frame):
+    est = Chronos2Estimator(use_calendar=False)
+    prepared = est._training_inputs(categorical_frame, "value", ["ws", "regime"], horizon=12)
+    assert prepared[0]["n_covariates"] == 2
+    assert np.isfinite(prepared[0]["context"].numpy()).any()
+
+
+@needs_chronos
+@pytest.mark.slow
+def test_full_finetune_returns_a_new_estimator_on_tuned_weights(
+    make_estimator, met_frame, tmp_path
+):
+    """Two optimiser steps: enough to prove the path, not to claim an improvement.
+
+    What is asserted is the contract -- a *new* estimator comes back, the
+    original keeps its pretrained pipeline, and the tuned one still forecasts.
+    Whether fine-tuning helps is a question about data, not about this wiring.
+    """
+    est = make_estimator(context_length=256, prediction_length=24, use_calendar=False)
+    before = est._pipeline
+
+    tuned = est.finetune(
+        met_frame.iloc[:600],
+        "value",
+        mode="full",
+        prediction_length=24,
+        covariates=["ws", "blh"],
+        num_steps=2,
+        batch_size=1,
+        learning_rate=1e-6,
+        # Upstream defaults this to chronos-2-finetuned/<timestamp> in the
+        # working directory, which for a test run is the repository.
+        output_dir=tmp_path,
+        report_to=[],
+    )
+
+    assert tuned is not est
+    assert est._pipeline is before, "the original must keep its pretrained weights"
+    assert tuned._pipeline is not before
+    assert tuned.target_col == "value"
+    assert tuned.feature_cols == ["ws", "blh"]
+
+    out = tuned.predict_quantiles(
+        met_frame.iloc[:700], "value", anchor=met_frame.index[600], horizon=12
+    )
+    assert len(out) == 12
+    assert np.isfinite(out.to_numpy()).all()
