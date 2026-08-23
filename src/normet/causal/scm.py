@@ -234,7 +234,9 @@ def scm(
 
     n_donors = len(donors)
 
-    def fit_ridge(y_donors: np.ndarray, Xd: np.ndarray, Xt: np.ndarray):
+    def fit_ridge(
+        y_donors: np.ndarray, Xd: np.ndarray, Xt: np.ndarray
+    ) -> tuple[float, float, np.ndarray]:
         """Fit RidgeCV (donor outcomes y at time t) ~ Xd; predict for treated Xt and donors Xd."""
         mask = np.isfinite(y_donors)
         if mask.sum() < 3:

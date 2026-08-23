@@ -2,6 +2,7 @@
 
 import pandas as pd
 import pytest
+
 from normet.pipeline.multisite import (
     decompose_multisite,
     do_all_multisite,
@@ -138,3 +139,44 @@ def test_decompose_multisite_raises_on_missing_col(synthetic_aq):
             backend="flaml",
             n_cores=1,
         )
+
+
+def test_wide_by_site_pivots_a_long_frame_onto_a_shared_time_axis():
+    """The long-to-wide pivot is the whole bridge to ChronosEmbedder.
+
+    embed_stations wants one column per site; multi-site frames in this package
+    are long, which is why the two never met. No model or extra is needed to
+    check the reshape itself.
+    """
+    import numpy as np
+    import pandas as pd
+
+    from normet.pipeline.multisite import _wide_by_site
+
+    dates = pd.date_range("2024-01-01", periods=6, freq="h")
+    df = pd.DataFrame(
+        {
+            "date": list(dates[:6]) + list(dates[:4]),
+            "site": ["A"] * 6 + ["B"] * 4,
+            "PM2.5": list(range(6)) + list(range(10, 14)),
+        }
+    )
+
+    wide = _wide_by_site(df, "site", "PM2.5", "date")
+    assert list(wide.columns) == ["A", "B"]
+    assert wide.index.equals(dates)
+    assert wide["A"].tolist() == [0, 1, 2, 3, 4, 5]
+    # B is short: the missing hours must be NaN holes, not a shifted series.
+    assert wide["B"].tolist()[:4] == [10, 11, 12, 13]
+    assert np.isnan(wide["B"].tolist()[4:]).all()
+
+
+def test_wide_by_site_rejects_a_missing_column():
+    import pandas as pd
+    import pytest
+
+    from normet.pipeline.multisite import _wide_by_site
+
+    df = pd.DataFrame({"date": pd.date_range("2024-01-01", periods=3, freq="h"), "site": "A"})
+    with pytest.raises(ValueError, match="PM2.5"):
+        _wide_by_site(df, "site", "PM2.5", "date")

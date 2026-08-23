@@ -120,7 +120,7 @@ def enable_default_logging(
     handler: logging.Handler
     if prefer_rich:
         try:
-            from rich.logging import RichHandler  # type: ignore
+            from rich.logging import RichHandler
 
             handler = RichHandler(rich_tracebacks=True, markup=True)
         except Exception:

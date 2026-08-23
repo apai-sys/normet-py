@@ -3,10 +3,27 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 
 import numpy as np
 import pandas as pd
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _close_figures():
+    """Release every matplotlib figure a test leaves behind.
+
+    pyplot keeps each figure it creates alive until something closes it, and
+    normet's plotting helpers hand back an Axes or a Figure for the caller to
+    own. Across a full run that accumulated past matplotlib's 20-figure alarm
+    and reported it as a RuntimeWarning against whichever test happened to
+    cross the threshold -- a number that moves whenever tests are reordered.
+    """
+    yield
+    import matplotlib.pyplot as plt
+
+    plt.close("all")
 
 
 @pytest.fixture(scope="session")
@@ -77,3 +94,31 @@ def _has(pkg: str) -> bool:
 
 needs_flaml = pytest.mark.skipif(not _has("flaml"), reason="flaml not installed")
 needs_lgb = pytest.mark.skipif(not _has("lightgbm"), reason="lightgbm not installed")
+
+
+@pytest.fixture(scope="session")
+def chronos_device() -> str:
+    """Where the foundation tests put the checkpoint.
+
+    The CPU by default, so the suite runs anywhere and gives the same numbers on
+    every machine. ``NORMET_TEST_DEVICE=cuda`` re-runs the same tests on a GPU,
+    which is worth doing after touching the shared forward pass: batching sends
+    several inputs through one call, and a device can disagree with the CPU
+    about a batched op in a way no CPU-only run would ever show.
+    """
+    return os.environ.get("NORMET_TEST_DEVICE", "cpu")
+
+
+@pytest.fixture(scope="session")
+def chronos2_pipeline(chronos_device):
+    """Load ``amazon/chronos-2`` once for the whole session.
+
+    Both foundation test modules hit the real checkpoint; re-reading ~500 MB of
+    weights per module dominates runtime on a shared filesystem. The pipeline is
+    stateless across calls, so sharing it is safe.
+    """
+    from chronos import Chronos2Pipeline
+
+    from normet.foundation.estimator import DEFAULT_MODEL
+
+    return Chronos2Pipeline.from_pretrained(DEFAULT_MODEL, device_map=chronos_device)

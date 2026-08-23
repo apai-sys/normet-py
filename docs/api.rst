@@ -13,6 +13,9 @@ The main sub-packages are also documented individually below.
    normet.analysis
    normet.causal
    normet.model
+   normet.foundation
+   normet.counterfactual
+   normet.physics
    normet.plotting
    normet.utils
    normet.io

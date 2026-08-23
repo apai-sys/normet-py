@@ -50,7 +50,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import _settings
+from normet.utils._time import to_datetime_coerced
+
+from . import _chronos, _settings
 from ._widgets import (
     CanvasTab,
     NoWheelComboBox,
@@ -281,21 +283,31 @@ class MainWindow(QMainWindow):
         form = QFormLayout(train_box)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.backend_combo = NoWheelComboBox()
-        self.backend_combo.addItems(["flaml", "lightgbm"])
+        self.backend_combo.addItems(["flaml", "lightgbm", _chronos.BACKEND])
         self.backend_combo.setToolTip(
-            "flaml = AutoML search (uses the time budget below).\nlightgbm = LightGBM with random hyperparameter search."
+            "flaml = AutoML search (uses the time budget below).\n"
+            "lightgbm = LightGBM with random hyperparameter search.\n"
+            "chronos-2 = zero-shot foundation model; nothing is trained."
         )
+        chronos_ok, chronos_why = _chronos.chronos_availability()
+        if not chronos_ok:
+            # Grey the option out rather than letting the pick raise ImportError.
+            item = self.backend_combo.model().item(2)
+            item.setEnabled(False)
+            item.setToolTip(chronos_why)
         self.backend_combo.currentTextChanged.connect(self._train_backend_changed)
         form.addRow("Backend", self.backend_combo)
         self.split_combo = NoWheelComboBox()
         self.split_combo.addItems(["random", "ts", "month_ts", "season_ts"])
         self.split_combo.setToolTip("How the train/test split is drawn.")
-        form.addRow("Split method", self.split_combo)
+        self._split_label = QLabel("Split method")
+        form.addRow(self._split_label, self.split_combo)
         self.train_fraction_spin = NoWheelDoubleSpinBox()
         self.train_fraction_spin.setRange(0.1, 0.95)
         self.train_fraction_spin.setSingleStep(0.05)
         self.train_fraction_spin.setValue(0.75)
-        form.addRow("Training fraction", self.train_fraction_spin)
+        self._train_fraction_label = QLabel("Training fraction")
+        form.addRow(self._train_fraction_label, self.train_fraction_spin)
         self.budget_spin = NoWheelSpinBox()
         self.budget_spin.setRange(5, 36_000)
         self.budget_spin.setValue(60)
@@ -304,6 +316,10 @@ class MainWindow(QMainWindow):
         self._budget_label = QLabel("Time budget")
         self._budget_values = {"flaml": 60, "lightgbm": 20}
         self._prev_backend = "flaml"
+        # Parked value for the "Samples" spin box on the other side of the
+        # chronos-2 divide; see _train_backend_changed.
+        self._norm_samples_parked = _chronos.DEFAULT_SAMPLES
+        self._norm_samples_is_chronos = False
         form.addRow(self._budget_label, self.budget_spin)
         # flaml only: which AutoML estimators to search over.
         self.estimator_list = QListWidget()
@@ -332,7 +348,28 @@ class MainWindow(QMainWindow):
         self.seed_spin = NoWheelSpinBox()
         self.seed_spin.setRange(0, 2_147_483_647)
         self.seed_spin.setValue(7_654_321)
-        form.addRow("Seed", self.seed_spin)
+        self._seed_label = QLabel("Seed")
+        form.addRow(self._seed_label, self.seed_spin)
+        self._chronos_hint = hint_label(
+            "Chronos-2 is zero-shot — nothing is trained, so there is no budget, "
+            "search space or train/test split. The first run downloads about "
+            "500 MB of weights. Meteorology enters through the model's covariate "
+            "channel; the ticked features below are what it sees."
+        )
+        self._chronos_hint.setVisible(False)
+        form.addRow(self._chronos_hint)
+        self._device_label = QLabel("Device")
+        self.device_combo = NoWheelComboBox()
+        self.device_combo.addItems(["auto", "cpu", "cuda", "mps"])
+        self.device_combo.setToolTip(
+            "Where Chronos-2 runs.\n"
+            "auto: CUDA, else Apple Silicon (mps), else CPU.\n"
+            "Every Monte-Carlo sample is a full forward pass, so this is the "
+            "difference between minutes and hours."
+        )
+        self._device_label.setVisible(False)
+        self.device_combo.setVisible(False)
+        form.addRow(self._device_label, self.device_combo)
         self.train_button = run_button(
             "▶  Train model",
             "Prepare the data and train the machine-learning model.\nEverything below needs a trained model.",
@@ -705,7 +742,7 @@ class MainWindow(QMainWindow):
                 "(Analysis → Synthetic Control).",
             )
             return
-        df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+        df[date_col] = to_datetime_coerced(df[date_col])
         df = df.rename(columns={date_col: "date"})
 
         self._ingest(df, os.path.basename(path))
@@ -767,7 +804,41 @@ class MainWindow(QMainWindow):
 
     def _train_backend_changed(self, backend: str) -> None:
         """The budget row means seconds for flaml, search trials for LightGBM;
-        the estimator checklist only applies to flaml's AutoML search."""
+        the estimator checklist only applies to flaml's AutoML search.
+
+        Chronos-2 is zero-shot, so the whole training-control block — budget,
+        estimator search space, train/test split, seed — has nothing to act on
+        and is hidden rather than left to imply it does something.
+        """
+        is_chronos = backend == _chronos.BACKEND
+        for label, widget in (
+            (self._budget_label, self.budget_spin),
+            (self._estimator_label, self.estimator_list),
+            (self._split_label, self.split_combo),
+            (self._train_fraction_label, self.train_fraction_spin),
+            (self._seed_label, self.seed_spin),
+        ):
+            label.setVisible(not is_chronos)
+            widget.setVisible(not is_chronos)
+        self._chronos_hint.setVisible(is_chronos)
+        self._device_label.setVisible(is_chronos)
+        self.device_combo.setVisible(is_chronos)
+        self.train_button.setText("▶  Load Chronos-2" if is_chronos else "▶  Train model")
+        # A Monte-Carlo sample is a tree ensemble call under flaml/LightGBM and a
+        # 2048-context transformer forward pass under Chronos-2, so the sensible
+        # count differs by nearly two orders of magnitude. Swap the value when the
+        # backend crosses that divide, parking the other side's so a user who set
+        # it deliberately gets it back on the way over.
+        if is_chronos != self._norm_samples_is_chronos:
+            self._norm_samples_parked, restored = (
+                self.norm_samples.value(),
+                self._norm_samples_parked,
+            )
+            self.norm_samples.setValue(restored)
+            self._norm_samples_is_chronos = is_chronos
+        if is_chronos:
+            return
+
         self._budget_values[self._prev_backend] = self.budget_spin.value()
         self._prev_backend = backend
         if backend == "flaml":
@@ -954,7 +1025,12 @@ class MainWindow(QMainWindow):
                 item.setCheckState(
                     Qt.CheckState.Checked if item.text() in nvars else Qt.CheckState.Unchecked
                 )
-        self.norm_samples.setValue(c.get("norm_samples", 300))
+        # An explicit saved count wins; the fallback follows the restored backend,
+        # so a config written before chronos-2 existed does not push 300 forward
+        # passes onto it.
+        self.norm_samples.setValue(
+            c.get("norm_samples", _chronos.DEFAULT_SAMPLES if self._is_chronos() else 300)
+        )
         self.norm_cores.setValue(c.get("norm_cores", 0))
         self.norm_quantiles.setChecked(c.get("norm_quantiles", False))
         self.decom_method.setCurrentText(c.get("decom_method", "emission"))
@@ -1099,6 +1175,15 @@ class MainWindow(QMainWindow):
             tip = "Train a model first (Step 1)."
             for b in (self.norm_button, self.decom_button, self.roll_button, self.pdp_button):
                 b.setToolTip(tip)
+        elif self._is_chronos():
+            # Decomposition, rolling and PDP all call ml_predict() on a fitted
+            # scikit-learn-style estimator. Chronos-2 forecasts autoregressively
+            # from a context window instead, so there is nothing for them to
+            # call; only the de-weathering path applies.
+            tip = "Not available for chronos-2 — use flaml or lightgbm for this step."
+            for b in (self.decom_button, self.roll_button, self.pdp_button):
+                b.setEnabled(False)
+                b.setToolTip(tip)
         self.ms_button.setEnabled(not busy and has_model and has_y_inf)
         self.ms_button.setToolTip(
             self._ms_button_tip
@@ -1165,6 +1250,9 @@ class MainWindow(QMainWindow):
         target = self.target_combo.currentText()
         features = self._selected_features()
         backend = self.backend_combo.currentText()
+        if backend == _chronos.BACKEND:
+            self._run_load_chronos(target, features)
+            return
         if backend == "flaml":
             model_config = {
                 "time_budget": self.budget_spin.value(),
@@ -1194,6 +1282,98 @@ class MainWindow(QMainWindow):
             verbose=True,
         )
 
+    def _run_load_chronos(self, target: str, features: list[str]) -> None:
+        """Bring up the zero-shot estimator instead of training one.
+
+        The checkpoint load pulls ~500 MB on a cold cache, so it goes through
+        the same worker thread every other long task uses.
+        """
+        met = [f for f in features if f not in TIME_VARS]
+        if not met:
+            QMessageBox.information(
+                self,
+                "No covariates",
+                "Chronos-2 conditions on meteorology through its covariate channel. "
+                "Tick at least one meteorological feature — without any, the run is a "
+                "plain forecast, not a de-weathering.",
+            )
+            return
+        self._pending_features = features
+        self.statusBar().showMessage("Loading Chronos-2 — first run downloads the checkpoint…")
+        self.runner.submit(
+            f"load ({_chronos.BACKEND})",
+            _chronos.load_estimator,
+            self._train_done,
+            self._show_error,
+            self.df_raw,
+            target,
+            features,
+            met,
+            self._selected_device(),
+        )
+
+    def _selected_device(self) -> str | None:
+        """``None`` means let :func:`normet.foundation.resolve_device` choose."""
+        choice = self.device_combo.currentText()
+        return None if choice == "auto" else choice
+
+    def _is_chronos(self) -> bool:
+        return self.backend_combo.currentText() == _chronos.BACKEND
+
+    def _render_chronos_model_tab(self) -> None:
+        """Report what the checkpoint is and whether it actually reacts to weather.
+
+        There is no parity plot or feature importance to show: nothing was
+        fitted and there is no held-out set. The covariate-sensitivity
+        diagnostic answers the question those plots exist to answer — is this
+        model's output driven by meteorology, or is it autoregressing?
+        """
+        import matplotlib.pyplot as plt
+
+        est = self.model
+        met = [f for f in self.trained_features if f not in TIME_VARS]
+        try:
+            shift = _chronos.sensitivity(est, self.df_prep, met)
+            verdict = _chronos.verdict_for(shift)
+            header = ["Diagnostic", "Value"]
+            rows = [
+                ["Mean absolute median shift", f"{shift['mean_abs_shift']:.3f}"],
+                ["Max absolute median shift", f"{shift['max_abs_shift']:.3f}"],
+                ["As % of prediction", f"{shift['pct_of_prediction']:.2f}%"],
+            ]
+        except Exception as exc:
+            log.exception("Chronos-2 covariate sensitivity failed")
+            verdict = ("warn", f"Could not run the covariate-sensitivity check: {exc}")
+            header, rows = None, None
+
+        fig, ax = plt.subplots(figsize=(11, 4.2))
+        ax.text(
+            0.5,
+            0.5,
+            "Chronos-2 is zero-shot — no training curve,\n"
+            "no held-out parity plot, no feature importance.\n\n"
+            "The table reports how far the forecast moves when the\n"
+            "future meteorology is shuffled.",
+            ha="center",
+            va="center",
+            fontsize=10,
+        )
+        ax.axis("off")
+        fig.tight_layout()
+
+        self.tab_model.show_result(
+            fig,
+            verdict=verdict,
+            lines=[
+                f"Checkpoint: {est.model_name}   |   device: {est.device}   |   "
+                f"context: {est.context_length} h   |   horizon: {est.prediction_length} h",
+                f"Covariates: {len(met)} met + 6 calendar   |   rows: {len(self.df_prep):,}",
+            ],
+            header=header,
+            rows=rows,
+        )
+        self._log_history("load", f"chronos-2 on {est.device}")
+
     def _train_done(self, result: tuple[pd.DataFrame, object]) -> None:
         self.df_prep, self.model = result
         self.trained_features = list(self._pending_features)
@@ -1212,7 +1392,10 @@ class MainWindow(QMainWindow):
             self.trained_features + list(TIME_VARS),
             met or set(self.trained_features),
         )
-        self._render_model_tab()
+        if self._is_chronos():
+            self._render_chronos_model_tab()
+        else:
+            self._render_model_tab()
         self._sync_enabled()
         self.tabs.setCurrentWidget(self.tab_model)
         self.statusBar().showMessage(
@@ -1341,6 +1524,20 @@ class MainWindow(QMainWindow):
                 "(usually the meteorological ones).",
             )
             return
+        if self._is_chronos():
+            self.runner.submit(
+                "de-weather (chronos-2)",
+                _chronos.deweather,
+                self._normalise_done,
+                self._show_error,
+                self.model,
+                self.df_prep,
+                [v for v in resample_vars if v not in TIME_VARS],
+                self.norm_quantiles.isChecked(),
+                self.norm_samples.value(),
+            )
+            return
+
         from normet import normalise
 
         quantiles = (0.05, 0.25, 0.75, 0.95) if self.norm_quantiles.isChecked() else None
@@ -1371,15 +1568,50 @@ class MainWindow(QMainWindow):
             ylabel=self.target_combo.currentText(),
             title=f"Meteorologically normalised {self.target_combo.currentText()}",
         )
-        delta = result["normalised"].mean() - result["observed"].mean()
+        # Chronos-2 has no history to condition on for the first context_length
+        # rows, so deweather() seeds them with the observed values: normalised
+        # equals observed there by construction, not by result. Averaging across
+        # them drags the reported effect toward zero, and on a record not much
+        # longer than the context that is most of the series -- so say how many
+        # rows are seeded and take the mean over the rest.
+        seeded = min(int(self.model.context_length), len(result)) if self._is_chronos() else 0
+        projected = result.iloc[seeded:]
+        if seeded:
+            fig.axvspan(
+                result.index[0],
+                result.index[seeded - 1],
+                color="0.85",
+                zorder=0,
+                label="seeded (= observed)",
+            )
+            fig.legend(loc="best", fontsize=8)
         n_rv = len(self._selected_norm_vars())
-        self.tab_norm.show_result(
-            fig,
-            lines=[
+        lines = []
+        if len(projected):
+            delta = projected["normalised"].mean() - projected["observed"].mean()
+            lines.append(
                 f"{len(result):,} timestamps, {self.norm_samples.value()} Monte-Carlo samples, "
                 f"{n_rv} resampled variables   |   mean(normalised − observed) = {delta:+.2f}"
-            ],
-        )
+            )
+        else:
+            lines.append(
+                f"{len(result):,} timestamps, {self.norm_samples.value()} Monte-Carlo samples, "
+                f"{n_rv} resampled variables"
+            )
+        if seeded:
+            pct = 100.0 * seeded / len(result)
+            lines.append(
+                f"⚠ The first {seeded:,} rows ({pct:.0f}% of the record) are seeded with the "
+                f"observed values — Chronos-2 needs that much history before it can project, "
+                f"so the curves coincide there by construction."
+                + (
+                    f" The mean above is over the remaining {len(projected):,} rows."
+                    if len(projected)
+                    else " Nothing was projected: load a record longer than "
+                    f"{self.model.context_length:,} rows."
+                )
+            )
+        self.tab_norm.show_result(fig, lines=lines)
         self._sync_enabled()
         self.tabs.setCurrentWidget(self.tab_norm)
         self.statusBar().showMessage(
@@ -1632,7 +1864,7 @@ class MainWindow(QMainWindow):
     def ingest_dataframe(self, df: pd.DataFrame, label: str) -> None:
         """Load an in-memory table (e.g. from the Data Studio) as the dataset."""
         df = df.copy()
-        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        df["date"] = to_datetime_coerced(df["date"])
         self._ingest(df, label)
 
     # ---------------------------------------------------------- Transport Studio

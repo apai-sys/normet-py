@@ -27,7 +27,7 @@ log = get_logger(__name__)
 __all__ = ["generate_html", "report_to_markdown"]
 
 
-def _fig_to_b64(fig) -> str:
+def _fig_to_b64(fig: Any) -> str:
     """Serialise a matplotlib Figure to an inline data URI."""
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=110, bbox_inches="tight")
@@ -138,6 +138,11 @@ def _auto_plot(run: NormetRun) -> Any:
             ax.grid(axis="y", alpha=0.2)
     except Exception as e:
         log.debug("auto_plot failed: %s", e)
+        # The figure was created before the call that raised, so nothing else
+        # holds a reference to it and pyplot's registry would keep it alive for
+        # the life of the process.
+        if fig is not None:
+            plt.close(fig)
         return None
 
     return fig
@@ -249,7 +254,19 @@ def generate_html(
     fig = _auto_plot(run)
     plot_block_parts = []
     if fig is not None:
-        plot_block_parts.append(f'<img class="nm-plot" src="{_fig_to_b64(fig)}" alt="auto plot">')
+        try:
+            plot_block_parts.append(
+                f'<img class="nm-plot" src="{_fig_to_b64(fig)}" alt="auto plot">'
+            )
+        finally:
+            # This figure was made here and has served its purpose as a PNG.
+            # pyplot keeps every figure it creates alive until closed, so a
+            # report generated per site in a loop otherwise accumulates them
+            # all. Figures passed in through extra_plots belong to the caller
+            # and are deliberately left alone.
+            import matplotlib.pyplot as plt
+
+            plt.close(fig)
     for extra in extra_plots or []:
         try:
             plot_block_parts.append(

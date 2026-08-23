@@ -16,6 +16,10 @@ import numpy as np
 import pandas as pd
 
 from ..analysis.normalise import normalise
+from ..foundation.estimator import (
+    CHRONOS_BACKEND,
+    resolve_n_samples,
+)
 from ..model.train import build_model
 from ..utils._config import resolve_config
 from ..utils.logging import _progress_str, get_logger
@@ -24,7 +28,7 @@ from ..utils.prepare import prepare_data
 
 log = get_logger(__name__)
 
-__all__ = ["SingleConfig", "UncConfig", "do_all", "do_all_unc"]
+__all__ = ["CHRONOS_BACKEND", "SingleConfig", "UncConfig", "do_all", "do_all_unc"]
 
 
 @dataclass
@@ -38,7 +42,9 @@ class SingleConfig:
     split_method: str = "random"
     train_fraction: float = 0.75
     model_config: dict[str, Any] | None = None
-    n_samples: int = 300
+    #: ``None`` resolves per backend: 300 for the AutoML backends, 8 for
+    #: Chronos-2, where each sample is a full transformer forward pass.
+    n_samples: int | None = None
     aggregate: bool = True
     seed: int = 7_654_321
     n_cores: int | None = None
@@ -53,6 +59,73 @@ class UncConfig(SingleConfig):
 
     n_models: int = 10
     confidence_level: float = 0.95
+
+
+def _do_all_zero_shot(
+    df: pd.DataFrame, cfg: SingleConfig
+) -> tuple[pd.DataFrame, object, pd.DataFrame]:
+    """The Chronos-2 branch of :func:`do_all`: prepare -> load -> de-weather.
+
+    The AutoML path is prepare -> train -> normalise, and the middle step has no
+    counterpart here: nothing is fitted, so there is no held-out set, no model
+    to persist and no feature importance. What is returned in the model slot is
+    the loaded :class:`~normet.foundation.Chronos2Estimator`, which is what the
+    caller needs to run further projections or the covariate-sensitivity check.
+
+    ``split_method``, ``train_fraction`` and ``model_config``'s search settings
+    have nothing to act on. Rather than ignore ``model_config`` entirely, its
+    keys are passed to the estimator's constructor, which is where ``device``,
+    ``context_length`` and ``prediction_length`` belong.
+    """
+    from ..foundation import Chronos2Estimator, to_indexed_frame
+
+    covariates = list(cfg.covariates or [])
+    met = list(cfg.variables_resample) if cfg.variables_resample else covariates
+    if not met:
+        raise ValueError(
+            "the chronos-2 backend needs meteorological covariates to condition on: "
+            "pass variables_resample (or covariates), otherwise the run is a plain "
+            "forecast rather than a de-weathering"
+        )
+
+    df_prep = prepare_data(
+        df,
+        target=cfg.target,
+        covariates=covariates,
+        split_method=cfg.split_method,
+        train_fraction=cfg.train_fraction,
+        seed=cfg.seed,
+    )
+    indexed = to_indexed_frame(df_prep)
+
+    estimator = Chronos2Estimator(met_covariates=met, **(cfg.model_config or {}))
+    estimator._load_pipeline()
+    log.info(
+        "Chronos-2 ready on %s | context=%d | horizon=%d",
+        estimator.device,
+        estimator.context_length,
+        estimator.prediction_length,
+    )
+    estimator._check_index(indexed.index)
+
+    out = estimator.deweather(
+        indexed,
+        "value",
+        met_features=met,
+        n_samples=cast(int, cfg.n_samples),
+        random_state=cfg.seed,
+        schema="normet",
+    )
+    out.index.name = "date"
+
+    seeded = min(estimator.context_length, len(out))
+    log.info(
+        "do_all finished: %d timestamps, of which the first %d are seeded with the "
+        "observed values (Chronos-2 has no history to condition on until then)",
+        len(out),
+        seeded,
+    )
+    return out, estimator, df_prep
 
 
 def _resolve_single_config(config: SingleConfig | None = None, **kwargs: Any) -> SingleConfig:
@@ -74,7 +147,7 @@ def do_all(
     split_method: str = "random",
     train_fraction: float = 0.75,
     model_config: dict[str, Any] | None = None,
-    n_samples: int = 300,
+    n_samples: int | None = None,
     seed: int = 7_654_321,
     n_cores: int | None = None,
     resample_df: pd.DataFrame | None = None,
@@ -84,6 +157,16 @@ def do_all(
     **kwargs: Any,
 ) -> tuple[pd.DataFrame, object, pd.DataFrame]:
     r"""Run the standard pipeline: prepare → build_model → normalise.
+
+    With ``backend="chronos-2"`` the middle step is skipped: nothing is trained,
+    the Chronos-2 checkpoint is loaded instead and the de-weathering runs through
+    :meth:`~normet.foundation.Chronos2Estimator.deweather`. The return shape is
+    unchanged, but the model slot holds the loaded estimator, ``split_method`` /
+    ``train_fraction`` have nothing to act on, and ``model_config`` is forwarded
+    to the estimator's constructor (``device``, ``context_length``,
+    ``prediction_length``). Note that the first ``context_length`` rows of the
+    result are the observed values: the model has no history to condition on
+    until then. Needs the ``foundation`` extra.
 
     Parameters
     ----------
@@ -135,6 +218,7 @@ def do_all(
     if _cfg.target is None:
         raise ValueError("`target` must be provided either directly or via config.")
 
+    _cfg.n_samples = resolve_n_samples(_cfg.n_samples, _cfg.backend)
     log.info(
         "Starting do_all | backend=%s | target=%s | n_samples=%d",
         _cfg.backend,
@@ -144,6 +228,9 @@ def do_all(
 
     if _cfg.covariates is None:
         raise ValueError("covariates must be provided")
+
+    if _cfg.backend == CHRONOS_BACKEND:
+        return _do_all_zero_shot(df, _cfg)
     df_prep = prepare_data(
         df,
         target=_cfg.target,
@@ -202,7 +289,7 @@ def do_all_unc(
     split_method: str = "random",
     train_fraction: float = 0.75,
     model_config: dict[str, Any] | None = None,
-    n_samples: int = 300,
+    n_samples: int | None = None,
     n_models: int = 10,
     confidence_level: float = 0.95,
     seed: int = 7_654_321,

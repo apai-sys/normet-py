@@ -119,6 +119,26 @@ from .causal import (
     scm_robust,
     uncertainty_bands,
 )
+
+# --- Counterfactual policy evaluation ---
+from .counterfactual import HarmonicCounterfactual, HarmonicCounterfactualResult
+
+# --- Foundation Models (Chronos) ---
+from .foundation import (
+    Chronos2Estimator,
+    ChronosEmbedder,
+    CounterfactualResult,
+    InsufficientContextError,
+    IrregularIndexError,
+    add_calendar_covariates,
+    resolve_device,
+    to_indexed_frame,
+    to_normet_frame,
+    to_regular_index,
+)
+
+# --- Physics-informed graph models ---
+from .physics import PhysicsGraphBuilder, build_adr_pde_loss, build_pi_stgnn
 from .pipeline import (
     SingleConfig,
     UncConfig,
@@ -126,6 +146,7 @@ from .pipeline import (
     do_all,
     do_all_multisite,
     do_all_unc,
+    embed_multisite,
     multisite_apply,
     run_workflow,
 )
@@ -151,6 +172,7 @@ __all__ = [
     "run_workflow",
     "multisite_apply",
     "do_all_multisite",
+    "embed_multisite",
     "decompose_multisite",
     # --- Analysis ---
     "normalise",
@@ -247,6 +269,24 @@ __all__ = [
     "normalise_plot",
     "plot_bayesian_scm",
     "time_series_plot",
+    # --- Foundation Models (Chronos) ---
+    "ChronosEmbedder",
+    "Chronos2Estimator",
+    "CounterfactualResult",
+    "InsufficientContextError",
+    "IrregularIndexError",
+    "add_calendar_covariates",
+    "resolve_device",
+    "to_indexed_frame",
+    "to_normet_frame",
+    "to_regular_index",
+    # --- Counterfactual policy evaluation ---
+    "HarmonicCounterfactual",
+    "HarmonicCounterfactualResult",
+    # --- Physics-informed graph models ---
+    "PhysicsGraphBuilder",
+    "build_pi_stgnn",
+    "build_adr_pde_loss",
     # --- Reporting ---
     "generate_html_report",
     "report_to_markdown",

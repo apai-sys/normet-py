@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from importlib.resources import files
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
@@ -34,7 +35,7 @@ __all__ = [
 ]
 
 
-def _read(name: str, **kwargs) -> pd.DataFrame:
+def _read(name: str, **kwargs: Any) -> pd.DataFrame:
     with files("normet.data").joinpath(f"{name}.csv.gz").open("rb") as fh:
         return pd.read_csv(fh, compression="gzip", parse_dates=["date"], **kwargs)
 

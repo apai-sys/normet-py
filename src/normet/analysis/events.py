@@ -185,7 +185,7 @@ def detect_events(
     threshold = 0.0 if method == "isolation" else float(k)
 
     mask = (arr > threshold) & np.isfinite(arr)
-    events = _intervals_from_mask(pd.DatetimeIndex(score.index), mask, arr)  # type: ignore[arg-type]
+    events = _intervals_from_mask(pd.DatetimeIndex(score.index), mask, arr)
     if events.empty:
         return events
     return events[events["n"] >= int(min_length)].reset_index(drop=True)

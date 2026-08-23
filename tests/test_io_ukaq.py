@@ -8,6 +8,7 @@ frame assembly, filtering and joining, which is what these exercise.
 import numpy as np
 import pandas as pd
 import pytest
+
 from normet.io import ukaq
 from normet.io.ukaq import (
     UKAQ_SOURCES,

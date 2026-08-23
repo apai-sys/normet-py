@@ -22,14 +22,14 @@ __all__ = [
 ]
 
 
-def _import_flaml_automl():
+def _import_flaml_automl() -> Any:
     """Dynamically import FLAML's AutoML class."""
     AutoML = require("flaml.automl:AutoML", hint="pip install flaml")
     return AutoML
 
 
 def save_flaml(
-    model,
+    model: Any,
     path: str | Path = ".",
     filename: str = "automl.joblib",
 ) -> str:

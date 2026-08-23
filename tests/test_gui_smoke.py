@@ -90,6 +90,7 @@ def test_data_window_network_change_clears_stations(qapp):
     """A station list belongs to one network, so switching must drop it —
     otherwise Fetch would run a code from network A against network B."""
     import pandas as pd
+
     from normet.gui.data_window import DataWindow
 
     win = DataWindow()
@@ -128,6 +129,7 @@ def test_find_stations_aggregates_metadata_per_station(monkeypatch):
     from the network metadata rather than from parsing a timeseries label.
     """
     import pandas as pd
+
     from normet.gui import data_window
 
     meta = pd.DataFrame(
@@ -255,6 +257,7 @@ def test_multiscale_button_gating_and_tab_mapping(qapp):
     """The Multi-scale button needs both a trained model AND Step 2's Y_inf;
     the Multi-scale tab must land at the 'multiscale' results key."""
     import pandas as pd
+
     from normet.gui.main_window import MainWindow
 
     win = MainWindow()
@@ -319,5 +322,200 @@ def test_scm_window_example_design(qapp):
         assert not win.placebo_space_btn.isEnabled()
         win.backend_combo.setCurrentText("scm")
         assert win.placebo_space_btn.isEnabled()
+    finally:
+        win.close()
+
+
+def test_chronos_backend_hides_the_training_controls(qapp):
+    """Chronos-2 is zero-shot, so budget / search space / split must disappear.
+
+    Leaving them visible would imply the run honours them; it does not.
+    """
+    from normet.gui import _chronos
+    from normet.gui.main_window import MainWindow
+
+    win = MainWindow()
+    try:
+        win.load_example()
+        assert win.backend_combo.currentText() == "flaml"
+        assert win.budget_spin.isVisibleTo(win)
+        assert win.split_combo.isVisibleTo(win)
+
+        win.backend_combo.setCurrentText(_chronos.BACKEND)
+        for widget in (
+            win.budget_spin,
+            win.estimator_list,
+            win.split_combo,
+            win.train_fraction_spin,
+            win.seed_spin,
+        ):
+            assert not widget.isVisibleTo(win)
+        assert win._chronos_hint.isVisibleTo(win)
+        assert "Chronos-2" in win.train_button.text()
+
+        # ...and come back when an AutoML backend is picked again.
+        win.backend_combo.setCurrentText("lightgbm")
+        assert win.budget_spin.isVisibleTo(win)
+        assert win.split_combo.isVisibleTo(win)
+        assert not win._chronos_hint.isVisibleTo(win)
+        assert "Train model" in win.train_button.text()
+    finally:
+        win.close()
+
+
+def test_chronos_backend_swaps_the_monte_carlo_sample_count(qapp):
+    """300 samples is right for a tree ensemble and ruinous for a transformer.
+
+    Each sample is one 2048-context forward pass under Chronos-2, so carrying the
+    AutoML default across would turn "Normalise" into a multi-day run. The value
+    the user set on the other side has to survive the round trip.
+    """
+    from normet.gui import _chronos
+    from normet.gui.main_window import MainWindow
+
+    win = MainWindow()
+    try:
+        win.load_example()
+        assert win.norm_samples.value() == 300
+
+        win.backend_combo.setCurrentText(_chronos.BACKEND)
+        assert win.norm_samples.value() == _chronos.DEFAULT_SAMPLES
+
+        # A count chosen while on chronos-2 is kept while on chronos-2...
+        win.norm_samples.setValue(4)
+        win.backend_combo.setCurrentText("lightgbm")
+        assert win.norm_samples.value() == 300
+        win.backend_combo.setCurrentText(_chronos.BACKEND)
+        assert win.norm_samples.value() == 4
+    finally:
+        win.close()
+
+
+def test_chronos_normalise_panel_declares_the_seeded_rows(qapp):
+    """The first context_length rows are observed values, not a result.
+
+    ``deweather`` seeds them because Chronos-2 has no history to condition on
+    yet, so the two curves coincide there by construction. Left unsaid, a short
+    record produces a plot that is mostly a copy of the input and a mean effect
+    diluted toward zero by rows that could never have differed.
+    """
+    import types
+
+    import numpy as np
+    import pandas as pd
+
+    from normet.gui import _chronos
+    from normet.gui.main_window import MainWindow
+
+    n, ctx = 300, 200
+    idx = pd.date_range("2024-01-01", periods=n, freq="h")
+    observed = pd.Series(np.linspace(10.0, 20.0, n), index=idx)
+    result = pd.DataFrame({"observed": observed, "normalised": observed.copy()}, index=idx)
+    result.index.name = "date"
+    # Only the projected tail differs -- a clean +4.0 there, 0.0 over the seed.
+    result.iloc[ctx:, result.columns.get_loc("normalised")] += 4.0
+
+    win = MainWindow()
+    try:
+        win.load_example()
+        win.backend_combo.setCurrentText(_chronos.BACKEND)
+        win.model = types.SimpleNamespace(context_length=ctx)
+        win._normalise_done(result)
+
+        from PySide6.QtWidgets import QLabel
+
+        text = " ".join(" ".join(lbl.text() for lbl in win.tab_norm.findChildren(QLabel)).split())
+        assert f"first {ctx:,} rows" in text.lower(), text
+        assert "67%" in text, text
+        # Averaged over the whole frame this would be +2.67; over the tail it is +4.
+        assert "+4.00" in text, text
+    finally:
+        win.close()
+
+
+def test_chronos_option_is_greyed_out_without_the_extra(qapp):
+    """The combo entry must be disabled, not raise ImportError when picked."""
+    import importlib.util
+
+    from normet.gui import _chronos
+    from normet.gui.main_window import MainWindow
+
+    have_extra = all(importlib.util.find_spec(p) is not None for p in ("chronos", "torch"))
+    win = MainWindow()
+    try:
+        index = win.backend_combo.findText(_chronos.BACKEND)
+        assert index >= 0
+        item = win.backend_combo.model().item(index)
+        assert item.isEnabled() is have_extra
+        if not have_extra:
+            assert "foundation" in item.toolTip()
+    finally:
+        win.close()
+
+
+def test_chronos_load_requires_a_met_covariate(qapp, monkeypatch):
+    """Without covariates a Chronos-2 run is a forecast, not a de-weathering."""
+    from normet.gui import _chronos
+    from normet.gui.main_window import MainWindow
+
+    win = MainWindow()
+    try:
+        win.load_example()
+        win.backend_combo.setCurrentText(_chronos.BACKEND)
+
+        shown: list[str] = []
+        monkeypatch.setattr(
+            "normet.gui.main_window.QMessageBox.information",
+            lambda *a, **k: shown.append(a[1] if len(a) > 1 else ""),
+        )
+        submitted: list[str] = []
+        monkeypatch.setattr(win.runner, "submit", lambda name, *a, **k: submitted.append(name))
+
+        # Only time features ticked -> no meteorology for the covariate channel.
+        monkeypatch.setattr(win, "_selected_features", lambda: list(_time_vars()))
+        win._run_train()
+
+        assert shown and "No covariates" in shown[0]
+        assert not submitted
+    finally:
+        win.close()
+
+
+def _time_vars() -> tuple[str, ...]:
+    from normet.gui.main_window import TIME_VARS
+
+    return TIME_VARS
+
+
+def test_chronos_backend_exposes_a_device_selector(qapp):
+    """CPU works everywhere but is slow; a Mac needs mps and a workstation cuda.
+
+    The selector only means anything for the zero-shot backend, so it appears
+    with it and not before.
+    """
+    from normet.gui import _chronos
+    from normet.gui.main_window import MainWindow
+
+    win = MainWindow()
+    try:
+        win.load_example()
+        assert not win.device_combo.isVisibleTo(win)
+
+        win.backend_combo.setCurrentText(_chronos.BACKEND)
+        assert win.device_combo.isVisibleTo(win)
+        assert [win.device_combo.itemText(i) for i in range(win.device_combo.count())] == [
+            "auto",
+            "cpu",
+            "cuda",
+            "mps",
+        ]
+
+        # "auto" must reach the estimator as None, not as the string "auto".
+        assert win._selected_device() is None
+        win.device_combo.setCurrentText("mps")
+        assert win._selected_device() == "mps"
+
+        win.backend_combo.setCurrentText("flaml")
+        assert not win.device_combo.isVisibleTo(win)
     finally:
         win.close()

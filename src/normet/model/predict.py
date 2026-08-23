@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import pandas as pd
 
@@ -15,7 +17,7 @@ log = get_logger(__name__)
 
 
 def ml_predict(
-    model,
+    model: Any,
     newdata: pd.DataFrame,
     *,
     chunk_size: int | None = None,
@@ -99,11 +101,11 @@ def ml_predict(
 
 
 def ml_predict_dask(
-    model,
-    ddf,
+    model: Any,
+    ddf: Any,
     *,
     chunk_size: int | None = None,
-):
+) -> Any:
     """
     Predict over a :class:`dask.dataframe.DataFrame` lazily.
 

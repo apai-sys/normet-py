@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 
 from ..exceptions import ConfigError, DataError, ModelError
+from ..foundation.estimator import CHRONOS_BACKEND, resolve_n_samples
 from ..model.train import build_model
 from ..utils._config import DEFAULT_SEED, resolve_config
 from ..utils.features import extract_features
@@ -46,7 +47,9 @@ class DecomposeConfig:
     split_method: str = "random"
     train_fraction: float = 0.75
     model_config: dict[str, Any] | None = None
-    n_samples: int = 300
+    #: ``None`` resolves per backend: 300 for the AutoML backends, 8 for
+    #: Chronos-2, where each sample is a full transformer forward pass.
+    n_samples: int | None = None
     seed: int = DEFAULT_SEED
     n_cores: int | None = None
     memory_save: bool = False
@@ -74,7 +77,7 @@ class DecomposeConfig:
     resample-and-predict over ``n_samples`` draws. Off by default."""
 
 
-def _resolve_config(config: DecomposeConfig | None = None, **kwargs) -> DecomposeConfig:
+def _resolve_config(config: DecomposeConfig | None = None, **kwargs: Any) -> DecomposeConfig:
     return resolve_config(DecomposeConfig, config, **kwargs)
 
 
@@ -114,7 +117,7 @@ def decompose(
     *,
     config: DecomposeConfig | None = None,
     method: str = "emission",
-    **kwargs,
+    **kwargs: Any,
 ) -> pd.DataFrame:
     """
     High-level wrapper for time series decomposition.
@@ -147,6 +150,9 @@ def decompose(
     ...                    n_samples=2)  # doctest: +SKIP
     """
     _cfg = _resolve_config(config=config, method=method, **kwargs)
+    # n_samples is None-by-default so it can follow the backend; the AutoML
+    # paths below hand it straight to normalise(), which needs a number.
+    _cfg.n_samples = resolve_n_samples(_cfg.n_samples, _cfg.backend)
 
     if df is None:
         raise DataError("`df` must be provided.")
@@ -156,6 +162,27 @@ def decompose(
         raise ConfigError("Either `model` or `covariates` must be provided.")
     if model is None and _cfg.backend is None:
         raise ConfigError("When training a model, `backend` must be specified.")
+
+    if _cfg.backend == CHRONOS_BACKEND:
+        if _cfg.method == "emission":
+            raise ConfigError(
+                "method='emission' is not available on the chronos-2 backend. The "
+                "emission decomposition isolates the calendar components by resampling "
+                "date_unix / day_julian / weekday / hour, which works because an AutoML "
+                "model sees them as ordinary features. Chronos-2 conditions on the "
+                "target's own history and deweather() never resamples history, so a "
+                "repeating calendar signal survives every draw -- the model reads it off "
+                "the past and takes nothing from the covariate. Measured covariate "
+                "sensitivity, calendar encoders supplied as ordinary covariates: "
+                "trend 0.53%, weekly 0.75%, diurnal 1.50%, all six together 2.47%, "
+                "against 4.78-10.72% for meteorology in the same runs -- and the diurnal "
+                "signal was the largest injected component of all, so attribution runs "
+                "opposite to signal size. The components would come back near zero and "
+                "read as 'no trend' rather than 'not separable'. Use "
+                "method='meteorology', or an AutoML backend."
+            )
+        if _cfg.method == "meteorology":
+            return _decom_met_zero_shot(df=df, model=model, cfg=_cfg)
 
     if _cfg.method == "emission":
         return decom_emi(df=df, model=model, config=_cfg)
@@ -169,12 +196,142 @@ def decompose(
     )
 
 
+def _decom_met_zero_shot(
+    df: pd.DataFrame, model: object | None, cfg: DecomposeConfig
+) -> pd.DataFrame:
+    """Meteorological decomposition on Chronos-2, one nested de-weathering per feature.
+
+    Structurally identical to :func:`decom_met`: start with every meteorological
+    feature resampled, fix them one at a time, and take successive differences.
+    Only the inner call changes -- :meth:`Chronos2Estimator.deweather` in place
+    of :func:`normalise` -- because both answer the same question, "what would
+    this series be with these covariates averaged over".
+
+    Ordering is the one real difference. :func:`decom_met` ranks features by
+    fitted importance, which does not exist here. ``variable_order`` is used when
+    given; otherwise features are ranked by their individual covariate
+    sensitivity, which is the zero-shot analogue: how far the forecast moves when
+    that one feature is shuffled. Ranking needs more rows than
+    ``context_length + prediction_length``; below that the covariate order is
+    kept as given and a warning is logged, since an arbitrary order still yields
+    a valid decomposition, only a less interpretable one.
+    """
+    from ..foundation import Chronos2Estimator, to_indexed_frame
+
+    if cfg.target is None:
+        raise DataError("`target` must be provided.")
+    work = df.copy()
+    if "date" not in work.columns:
+        work = process_date(work)
+    work = work[work["date"].notna()].sort_values("date").reset_index(drop=True)
+    if cfg.target not in work.columns:
+        raise DataError(f"`df` does not contain the target column '{cfg.target}'.")
+    observed = work[cfg.target].to_numpy()
+    if cfg.target != "value":
+        work = work.rename(columns={cfg.target: "value"})
+
+    time_var_set = {"hour", "weekday", "day_julian", "date_unix"}
+    met = [c for c in (cfg.covariates or []) if c not in time_var_set and c in work.columns]
+    if not met:
+        raise ConfigError(
+            "the chronos-2 backend needs meteorological covariates to decompose: "
+            "pass covariates, excluding the time variables it cannot use"
+        )
+
+    indexed = to_indexed_frame(work)
+    est = model if isinstance(model, Chronos2Estimator) else None
+    if est is None:
+        est = Chronos2Estimator(met_covariates=met, **(cfg.model_config or {}))
+        est._load_pipeline()
+    est._check_index(indexed.index)
+
+    if cfg.variable_order is not None:
+        requested = list(cfg.variable_order)
+        if set(requested) != set(met):
+            raise ConfigError(
+                "`variable_order` must be exactly the meteorological features, in any "
+                f"order. Missing: {sorted(set(met) - set(requested))}. "
+                f"Not in the model: {sorted(set(requested) - set(met))}."
+            )
+        met = requested
+    else:
+        met = _rank_by_sensitivity(est, indexed, met, cfg)
+
+    n_samples = resolve_n_samples(cfg.n_samples, CHRONOS_BACKEND)
+    result = pd.DataFrame({"observed": observed}, index=pd.DatetimeIndex(work["date"]))
+    result.index.name = "date"
+
+    decomp_order = ["emi_total", *met]
+    resample_vars = met[:]
+    tmp: dict[str, np.ndarray] = {}
+    start = time.time()
+    for i, var_to_fix in enumerate(decomp_order, start=1):
+        if var_to_fix != "emi_total":
+            resample_vars = [v for v in resample_vars if v != var_to_fix]
+        _log_decomposition_progress(cfg.verbose, start, i, len(decomp_order), var_to_fix)
+        out = est.deweather(
+            indexed,
+            "value",
+            met_features=resample_vars,
+            n_samples=n_samples,
+            quantiles=(0.5,),
+            random_state=cfg.seed,
+            schema="normet",
+        )
+        tmp[var_to_fix] = out["normalised"].reindex(result.index).to_numpy()
+
+    result["emi_total"] = tmp["emi_total"]
+    prev = "emi_total"
+    for feat in met:
+        result[feat] = tmp[feat] - tmp[prev]
+        prev = feat
+
+    result["met_total"] = result["observed"] - result["emi_total"]
+    result["met_base"] = float(result["met_total"].mean())
+    contrib_sum = result[met].sum(axis=1) if met else 0.0
+    result["met_noise"] = result["met_total"] - (result["met_base"] + contrib_sum)
+    return result
+
+
+def _rank_by_sensitivity(
+    est: Any, indexed: pd.DataFrame, met: list[str], cfg: DecomposeConfig
+) -> list[str]:
+    """Order meteorological features by how far each one alone moves the forecast."""
+    horizon = est.prediction_length
+    if len(indexed) <= est.context_length + horizon:
+        log.warning(
+            "only %d rows: need more than %d to rank features by covariate sensitivity, "
+            "so the given covariate order is kept. Pass variable_order to pin it explicitly.",
+            len(indexed),
+            est.context_length + horizon,
+        )
+        return met
+    anchor = indexed.index[-horizon]
+    scores: dict[str, float] = {}
+    for feat in met:
+        shift = est.covariate_sensitivity(
+            indexed,
+            "value",
+            anchor=anchor,
+            horizon=horizon,
+            met_features=[feat],
+            random_state=cfg.seed,
+        )
+        scores[feat] = float(shift["mean_abs_shift"])
+    ordered = sorted(met, key=lambda f: scores[f], reverse=not cfg.importance_ascending)
+    (log.info if cfg.verbose else log.debug)(
+        "covariate sensitivity ranking: %s",
+        ", ".join(f"{f}={scores[f]:.3f}" for f in ordered),
+    )
+    return ordered
+
+
 def decom_emi(
     df: pd.DataFrame,
     model: object | None = None,
     *,
     config: DecomposeConfig | None = None,
-    **kwargs,
+    **kwargs: Any,
 ) -> pd.DataFrame:
     """
     Emission-based decomposition via leave-one-out normalisation.
@@ -236,6 +393,9 @@ def decom_emi(
         Decomposition results.
     """
     _cfg = _resolve_config(config=config, **kwargs)
+    # n_samples is None-by-default so it can follow the backend; the AutoML
+    # paths below hand it straight to normalise(), which needs a number.
+    _cfg.n_samples = resolve_n_samples(_cfg.n_samples, _cfg.backend)
 
     if df is None:
         raise DataError("`df` must be provided.")
@@ -402,7 +562,7 @@ def decom_met(
     model: object | None = None,
     *,
     config: DecomposeConfig | None = None,
-    **kwargs,
+    **kwargs: Any,
 ) -> pd.DataFrame:
     """
     Meteorological decomposition via leave-one-out normalisation.
@@ -447,6 +607,9 @@ def decom_met(
         If ``normalise`` does not return an ``aggregate`` column.
     """
     _cfg = _resolve_config(config=config, **kwargs)
+    # n_samples is None-by-default so it can follow the backend; the AutoML
+    # paths below hand it straight to normalise(), which needs a number.
+    _cfg.n_samples = resolve_n_samples(_cfg.n_samples, _cfg.backend)
 
     if df is None:
         raise DataError("`df` must be provided.")
