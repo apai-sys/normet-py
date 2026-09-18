@@ -1,6 +1,6 @@
 ; Inno Setup script for the Windows normet installer.
 ; Compiled in CI by: ISCC.exe packaging\windows\installer.iss
-; Expects PyInstaller output at dist\normet\ (onedir, built from
+; Expects PyInstaller output at dist\Normet\ (onedir, built from
 ; packaging\normet_gui.spec).
 
 ; Version is injected by CI from pyproject.toml via ISCC /DAppVersion=…

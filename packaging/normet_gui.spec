@@ -45,9 +45,10 @@ hiddenimports += collect_submodules("matplotlib.backends")
 datas = [(os.path.join(SPECPATH, "assets", "normet.png"), "packaging/assets")]  # noqa: F821
 binaries = []
 # flaml/lightgbm are optional AutoML backends but normal enough to ship by
-# default (xgboost is one of flaml's estimator_list choices); shapely/pyshp
-# back Transport Studio's GeoJSON/Shapefile source-region loading.
-for pkg in ("flaml", "lightgbm", "shapely"):
+# default. xgboost is not optional once flaml is: flaml.automl imports it at
+# module level and silently drops AutoML if that fails. shapely/pyshp back
+# Transport Studio's GeoJSON/Shapefile source-region loading.
+for pkg in ("flaml", "lightgbm", "xgboost", "shapely"):
     d, b, h = collect_all(pkg)
     datas += d
     binaries += b
