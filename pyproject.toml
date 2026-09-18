@@ -51,7 +51,10 @@ dependencies = [
 
 # Optional dependencies: user can choose one AutoML backend
 [project.optional-dependencies]
-flaml = ["flaml>=2.1"]
+# The [automl] extra, not bare flaml: flaml.automl.model imports xgboost at
+# module level, and flaml.automl's __init__ swallows that ImportError, so
+# without it `flaml.automl.AutoML` simply does not exist.
+flaml = ["flaml[automl]>=2.1"]
 lgb = ["lightgbm>=4.0"]
 
 dask = ["dask[dataframe]>=2023.1"]
@@ -89,7 +92,7 @@ dev = [
 ]
 # Everything optional except dev/docs tooling.
 all = [
-    "flaml>=2.1",
+    "flaml[automl]>=2.1",
     "lightgbm>=4.0",
     "dask[dataframe]>=2023.1",
     "requests>=2.31",
