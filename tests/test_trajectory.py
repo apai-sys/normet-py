@@ -65,6 +65,46 @@ def test_trajectory_features(tmp_path):
     assert f["traj_resid_sw_box"] == 1 / 3
 
 
+def test_trajectory_quality_columns(tmp_path):
+    df = tj.read_trajectory_tdump(_write(tmp_path))
+    f = tj.trajectory_features(df)
+
+    # The fixture reaches back exactly 2 h over 3 endpoints.
+    assert f["traj_n_endpoints"] == 3
+    assert f["traj_age_max_h"] == 2.0
+    # Default (min_hours=None) keeps a short trajectory's geometry intact.
+    assert np.isfinite(f["traj_dist_km"])
+
+
+def test_min_hours_nulls_truncated_trajectory(tmp_path):
+    df = tj.read_trajectory_tdump(_write(tmp_path))
+    box = {"sw_box": (-3.0, 50.5, -1.5, 51.5)}
+
+    # Reach (2 h) satisfies min_hours=2 -> untouched.
+    ok = tj.trajectory_features(df, source_regions=box, min_hours=2)
+    assert np.isfinite(ok["traj_dist_km"]) and ok["traj_resid_sw_box"] == 1 / 3
+
+    # Asking for 72 h of a 2 h trajectory: every feature NaN except the quality
+    # columns, which stay so the truncation is visible rather than silent.
+    short = tj.trajectory_features(df, source_regions=box, min_hours=72)
+    assert short["traj_n_endpoints"] == 3 and short["traj_age_max_h"] == 2.0
+    nulled = {k for k in short if k not in ("traj_n_endpoints", "traj_age_max_h")}
+    assert nulled and all(np.isnan(short[k]) for k in nulled)
+    # Same columns either way, so a frame built from a mix stays rectangular.
+    assert set(short) == set(ok)
+
+
+def test_build_trajectory_features_warns_on_truncated(tmp_path, caplog):
+    _write(tmp_path, "tdump_a")
+
+    with caplog.at_level("WARNING"):
+        out = tj.build_trajectory_features(str(tmp_path / "tdump_*"), min_hours=72)
+
+    assert out["traj_dist_km"].isna().all()
+    assert out["traj_age_max_h"].iloc[0] == 2.0
+    assert any("truncated" in r.message for r in caplog.records)
+
+
 def test_build_trajectory_features(tmp_path):
     _write(tmp_path, "tdump_a")
     _write(tmp_path, "tdump_b")  # same receptor time -> deduplicated
