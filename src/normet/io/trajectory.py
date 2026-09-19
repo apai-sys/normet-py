@@ -62,6 +62,7 @@ import numpy as np
 import pandas as pd
 
 from ..utils.logging import get_logger
+from .gdas import _gdas1_file_range
 
 log = get_logger(__name__)
 
@@ -415,6 +416,39 @@ def build_trajectory_features(
     return out
 
 
+# GDAS1 is 3-hourly. A receptor time between a weekly file's last record and the
+# next file's first one needs *both* to interpolate: probed against hyts_std with
+# two adjacent daily ARL files, a start time in that gap (23:30, 23:59) failed
+# with only the earlier file and ran with both. A strict "does the file's span
+# overlap the window" test drops the next file there, so the window is widened by
+# one record interval on each side.
+_MET_RECORD_PAD_H = 3.0
+
+
+def _filter_met_files(
+    paths: list[str],
+    window_start: pd.Timestamp,
+    window_end: pd.Timestamp,
+    *,
+    pad_h: float = _MET_RECORD_PAD_H,
+) -> list[str]:
+    """Keep the ARL files whose span overlaps ``[window_start, window_end]``.
+
+    The span comes from the GDAS1 filename (:func:`_gdas1_file_range`). A file whose
+    name does not follow that convention is always kept -- its dates are unknown,
+    so dropping it could silently truncate the trajectory. The window is widened
+    by ``pad_h`` on each side (see ``_MET_RECORD_PAD_H``).
+    """
+    pad = pd.Timedelta(hours=pad_h)
+    lo, hi = window_start - pad, window_end + pad
+    kept = []
+    for p in paths:
+        span = _gdas1_file_range(p)
+        if span is None or (span[1] >= lo and span[0] <= hi):
+            kept.append(p)
+    return kept
+
+
 def _control_text(
     time: pd.Timestamp,
     lat: float,
@@ -518,7 +552,11 @@ def run_back_trajectories(
     met_files : str or iterable of str
         ARL-format meteorology file(s). They must collectively cover the full
         backward window (``hours_back`` before each receptor time), or the
-        trajectory truncates where the data runs out.
+        trajectory truncates where the data runs out. Each run is handed only
+        the files that can touch its window: GDAS1 weekly files
+        (``gdas1.<mmm><yy>.w<N>``) are selected by the dates in their name,
+        widened by one 3-hourly record either side; any file with another name
+        is always passed, and if none overlap, all of them are.
     hysplit_exec : str or Path
         Path to the ``hyts_std`` executable (e.g. ``~/hysplit-5.4.2/exec/hyts_std``).
     height_m : float, default 500.0
@@ -593,6 +631,10 @@ def run_back_trajectories(
     for t in times:
         ts = pd.Timestamp(t)
         name = "tdump_" + ts.strftime("%Y%m%d%H")
+        # Hand hyts_std only the files this run can touch: a multi-year archive is
+        # hundreds of weekly files, and every one would otherwise be listed in --
+        # and opened by -- each of the thousands of runs.
+        run_mets = _filter_met_files(mets, ts - pd.Timedelta(hours=abs(hours_back)), ts)
         (work / "CONTROL").write_text(
             _control_text(
                 ts,
@@ -600,7 +642,7 @@ def run_back_trajectories(
                 lon,
                 height_m,
                 hours_back,
-                mets,
+                run_mets or mets,
                 name,
                 top_of_model=top_of_model,
                 vert_motion=vert_motion,

@@ -25,6 +25,18 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   gain survives the blocked split (+0.07 with the backward join) but is smaller
   than the random-split, nearest-join figures of sections 2-3 suggest. Those
   sections are left as the paper's reproduction.
+- **`run_back_trajectories` passes each run only the met files it can touch.**
+  It used to list every file in `met_files` in every `CONTROL`, so a multi-year
+  GDAS1 archive (hundreds of weekly files) was handed to, and opened by, each of
+  thousands of runs. GDAS1 files (`gdas1.<mmm><yy>.w<N>`) are now selected from
+  the dates in their names against the run's `[receptor - hours_back, receptor]`
+  window; files with any other name are always kept, and if nothing overlaps all
+  are passed so `hyts_std` reports the coverage problem itself (ported from
+  `normet-r`). The window is widened by one 3-hourly record on each side: probed
+  against `hyts_std` with two adjacent daily ARL files, a start time between one
+  file's last record and the next file's first (23:30, 23:59) failed with only
+  the earlier file and ran with both, so a strict overlap test would break
+  hourly receptors in the last hours of every weekly file.
 - **Trajectory docs.** The `normet.io.trajectory` docstring now shows the
   backward-aligned join (`merge_asof(direction="backward")`) instead of
   `ffill(limit=8)`, which was longer than a 6-hourly release interval, and
