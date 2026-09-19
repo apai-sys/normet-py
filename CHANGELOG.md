@@ -7,6 +7,28 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ## [Unreleased]
 
 ### Added
+- **Trajectory quality columns and `min_hours`.** `trajectory_features` /
+  `build_trajectory_features` / `run_back_trajectories` now emit
+  `traj_n_endpoints` and `traj_age_max_h`, and take `min_hours`. A trajectory
+  that HYSPLIT ended early (met files ran out, or it left the domain) used to
+  be indistinguishable from a legitimately short-range one: its `dist_km`
+  shrank and its residence fractions were taken over fewer points, with no
+  flag. `min_hours` sets every feature except the two quality columns to NaN for
+  such rows; it is opt-in, so existing frames only gain two columns.
+  `run_back_trajectories` warns about truncated runs either way.
+- **Notebook 04, section 4: a leakage-safe check.** A 6-hourly trajectory
+  carried onto an hourly panel is piecewise constant, so under a random split a
+  tree model uses it as a time fingerprint: on the bundled MY1 case a
+  trajectory-only model scores test R^2 0.84 (random) vs 0.46 (`month_ts`),
+  against 0.79 / 0.46 for local meteorology. The new section crosses
+  {nearest, backward} join with {random, `month_ts`} split. The transport-aware
+  gain survives the blocked split (+0.07 with the backward join) but is smaller
+  than the random-split, nearest-join figures of sections 2-3 suggest. Those
+  sections are left as the paper's reproduction.
+- **Trajectory docs.** The `normet.io.trajectory` docstring now shows the
+  backward-aligned join (`merge_asof(direction="backward")`) instead of
+  `ffill(limit=8)`, which was longer than a 6-hourly release interval, and
+  documents the random-split caveat.
 - **Fine-tuning: `Chronos2Estimator.finetune`.** Adapts the checkpoint to one
   site's own record and returns a *new* estimator, leaving the original on the
   pretrained weights so the two can be compared without reloading. LoRA is the
