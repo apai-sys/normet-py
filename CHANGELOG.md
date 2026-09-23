@@ -7,6 +7,36 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ## [Unreleased]
 
 ### Added
+- **`decom_met`: feature groups and Shapley attribution.** `groups=` attributes
+  the meteorological features in named groups -- e.g. `{"local": met_cols,
+  "transport": traj_cols}` -- with one result column per group, and
+  `attribution="shapley"` averages each feature's or group's marginal effect
+  over every order it could be fixed in, instead of fixing them one at a time.
+  The sequential split depends on the order: on the bundled MY1 transport case
+  the summed trajectory contribution had a standard deviation between 4.2 and
+  5.6 ug/m3 depending only on the order, and the top-ranked feature -- which
+  sets the default order -- changed between refits. Shapley values are exact
+  (all `2**k` coalitions, up to 10 features or groups -- four normalisations
+  for two groups) or, with `n_permutations=`, sampled in antithetic pairs;
+  every coalition is normalised once and with the
+  same seed, and the contributions add up exactly to `prediction - emi_total`
+  whichever way they are split. Groups default to Shapley; without groups the
+  default stays sequential, and those results are unchanged to the bit. The
+  chronos-2 path (`decompose(backend="chronos-2")`) takes the same options.
+- **`normalise`: `resample_pools=` draws chosen variables from their own pool.**
+  A pool's columns name the variables drawn from it -- whole rows at a time,
+  independently of `resample_df` and of the other pools. With a single pool
+  every contribution is measured against the *average* conditions in it, so a
+  transport term is an anomaly with a mean near zero; `{"transport":
+  clean_hours[traj_cols]}` measures transport against a reference air mass
+  instead. Each pool has its own random stream, fixed by its name, so a
+  variable's draws do not move when other variables are fixed and
+  `decom_met`'s differences stay paired. Without pools the draws are unchanged,
+  and results are bit-identical on every execution path.
+- **`decom_met` / `decom_emi` forward `resample_df`, `resample_pools` and
+  `conditional_on`** to every `normalise` call. `decom_met` previously passed
+  `resample_df=None` whatever it was given, unlike normet-R's
+  `nm_decom_met`. The chronos-2 path refuses all three rather than ignore them.
 - **Fine-tuning: `Chronos2Estimator.finetune`.** Adapts the checkpoint to one
   site's own record and returns a *new* estimator, leaving the original on the
   pretrained weights so the two can be compared without reloading. LoRA is the
@@ -276,6 +306,22 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   `fetch_era5_timeseries`, which needs only `cdsapi` — no `xarray`/`netCDF4`.
 
 ### Fixed
+- **`decom_met(df, model=None)` crashed on a missing target** with "All arrays
+  must be of the same length": the observed series was taken from the input,
+  while the model trained on the fly -- and so the frame being decomposed --
+  had dropped the rows with a missing target. It is now taken from the frame
+  actually decomposed. Affected the CLI `decompose --method meteorology` on any
+  table with gaps.
+- **A feature listed twice in `decom_met`'s `variable_order` was credited with
+  exactly zero.** The set-equality check let the duplicate through, the second
+  pass overwrote the feature's column with `0`, and its effect moved into
+  `met_noise` (measured: contribution sd 0.0 instead of 3.0, `met_noise` sd 3.2
+  instead of 0.5). Duplicates are now refused.
+- **Decomposition docs described a leave-one-out scheme.** Both decompositions
+  fix variables cumulatively, so each component is conditional on those fixed
+  before it; the docstrings, GUI tooltip and user guide now say so, and
+  `met_noise` is documented as what it is -- the model residual shifted by
+  `met_base` -- rather than a meteorological term.
 - **`generate_html_report` retained every figure it drew.** The report builds
   its own plot, serialises it to an inline PNG and has no further use for it,
   but pyplot keeps each figure alive until closed -- so generating a report per

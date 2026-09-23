@@ -699,6 +699,47 @@ def test_zero_shot_decomposition_honours_an_explicit_variable_order(chronos2_pip
         decompose(df, variable_order=["blh"], **common)
 
 
+@needs_chronos
+def test_zero_shot_decomposition_takes_groups_and_shapley(chronos2_pipeline):
+    """The zero-shot path shares decom_met's attribution machinery.
+
+    Shapley over two features and Shapley over two one-feature groups evaluate
+    the same four coalitions with the same seed, so they must agree exactly; and
+    the Shapley split must still add up to the prediction minus emi_total.
+    """
+    from normet import decompose
+
+    n = 700
+    rng = np.random.default_rng(8)
+    dates = pd.date_range("2024-01-01", periods=n, freq="h")
+    t = np.arange(n)
+    blh = 800 + 400 * np.sin(2 * np.pi * t / 24) + rng.normal(0, 40, n)
+    t2m = 10 + 8 * np.sin(2 * np.pi * t / (24 * 30)) + rng.normal(0, 1, n)
+    pm = np.clip(40 - 0.01 * blh + 0.3 * t2m + rng.normal(0, 1.5, n), 0, None)
+    df = pd.DataFrame({"date": dates, "PM2.5": pm, "t2m": t2m, "blh": blh})
+
+    common = dict(
+        target="PM2.5",
+        method="meteorology",
+        backend="chronos-2",
+        covariates=["t2m", "blh"],
+        n_samples=2,
+        model_config={"context_length": 256, "prediction_length": 48, "device": "cpu"},
+    )
+    per_feature = decompose(df, attribution="shapley", **common)
+    grouped = decompose(df, groups={"temperature": ["t2m"], "mixing": ["blh"]}, **common)
+
+    np.testing.assert_allclose(grouped["temperature"], per_feature["t2m"], rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(grouped["mixing"], per_feature["blh"], rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(grouped["emi_total"], per_feature["emi_total"], rtol=1e-6)
+    np.testing.assert_allclose(
+        grouped["met_noise"],
+        grouped["met_total"] - grouped["met_base"] - grouped[["temperature", "mixing"]].sum(axis=1),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+
 # --------------------------------------------------- categorical covariates
 
 
