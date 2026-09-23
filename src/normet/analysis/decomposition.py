@@ -211,6 +211,32 @@ def _players_from_groups(groups: Mapping[str, Sequence[str]], features: list[str
     return players
 
 
+def _attribution_method(cfg: DecomposeConfig) -> str:
+    """Resolve and validate the attribution options that do not depend on the
+    model's features, so a bad call fails before a model is trained or loaded."""
+    method = cfg.attribution or ("shapley" if cfg.groups is not None else "sequential")
+    if method not in ("sequential", "shapley"):
+        raise ConfigError(
+            f"`attribution` must be 'sequential' or 'shapley', got {cfg.attribution!r}."
+        )
+    if cfg.n_permutations is not None:
+        if method != "shapley":
+            raise ConfigError("`n_permutations` only applies to attribution='shapley'.")
+        if int(cfg.n_permutations) < 1:
+            raise ConfigError(f"`n_permutations` must be at least 1, got {cfg.n_permutations}.")
+    if cfg.groups is not None and cfg.variable_order is not None:
+        raise ConfigError(
+            "`variable_order` orders single features; with `groups` the groups are the "
+            "units, taken in the order they are listed."
+        )
+    if cfg.groups is None and cfg.variable_order is not None and method == "shapley":
+        raise ConfigError(
+            "`variable_order` has no effect with attribution='shapley', which averages "
+            "over every order."
+        )
+    return method
+
+
 def _attribution_plan(
     features: list[str],
     cfg: DecomposeConfig,
@@ -222,30 +248,10 @@ def _attribution_plan(
     ``default_order`` is only consulted for a sequential run over single
     features without ``variable_order``: the one case that needs a ranking.
     """
-    method = cfg.attribution or ("shapley" if cfg.groups is not None else "sequential")
-    if method not in ("sequential", "shapley"):
-        raise ConfigError(
-            f"`attribution` must be 'sequential' or 'shapley', got {cfg.attribution!r}."
-        )
-    if cfg.n_permutations is not None:
-        if method != "shapley":
-            raise ConfigError("`n_permutations` only applies to attribution='shapley'.")
-        if int(cfg.n_permutations) < 1:
-            raise ConfigError(f"`n_permutations` must be at least 1, got {cfg.n_permutations}.")
-
+    method = _attribution_method(cfg)
     if cfg.groups is not None:
-        if cfg.variable_order is not None:
-            raise ConfigError(
-                "`variable_order` orders single features; with `groups` the groups are the "
-                "units, taken in the order they are listed."
-            )
         players = _players_from_groups(cfg.groups, features)
     elif cfg.variable_order is not None:
-        if method == "shapley":
-            raise ConfigError(
-                "`variable_order` has no effect with attribution='shapley', which averages "
-                "over every order."
-            )
         requested = [str(f) for f in cfg.variable_order]
         if set(requested) != set(features):
             raise ConfigError(
@@ -497,6 +503,7 @@ def _decom_met_zero_shot(
             f"{', '.join(refused)} not available on the chronos-2 backend: "
             "Chronos2Estimator.deweather draws the weather from the frame it is given."
         )
+    _attribution_method(cfg)  # before any weights are loaded
     work = df.copy()
     if "date" not in work.columns:
         work = process_date(work)
@@ -923,6 +930,7 @@ def decom_met(
         raise ConfigError("Either `model` or `covariates` must be provided.")
     if model is None and _cfg.backend is None:
         raise ConfigError("When training a model, `backend` must be specified.")
+    _attribution_method(_cfg)  # before any model is trained
 
     df = df.copy()
     if "date" not in df.columns:

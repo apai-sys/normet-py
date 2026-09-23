@@ -243,6 +243,35 @@ def test_inconsistent_options_are_refused(calls, kwargs, match):
     assert not calls  # refused before any normalisation
 
 
+def test_bad_options_fail_before_a_model_is_trained(calls, monkeypatch):
+    trained: list[int] = []
+
+    def fake_build_model(df, **kwargs):
+        trained.append(1)
+        return df, _model()
+
+    monkeypatch.setattr(dmod, "build_model", fake_build_model)
+    with pytest.raises(ConfigError, match="'sequential' or 'shapley'"):
+        decom_met(
+            _frame(), None, covariates=FEATS, backend="lightgbm", n_samples=2, attribution="x"
+        )
+    assert not trained and not calls
+
+
+def test_zero_shot_backend_checks_options_before_loading_weights():
+    df = _frame().rename(columns={"value": "PM2.5"})
+    with pytest.raises(ConfigError, match="no effect"):
+        decompose(
+            df,
+            target="PM2.5",
+            method="meteorology",
+            backend="chronos-2",
+            covariates=["a", "b"],
+            attribution="shapley",
+            variable_order=["a", "b"],
+        )
+
+
 def test_exact_shapley_over_too_many_features_is_refused(calls):
     feats = [f"f{i}" for i in range(11)]
     df = _frame().assign(**{f: 1.0 for f in feats})
