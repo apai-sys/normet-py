@@ -37,6 +37,14 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   file's last record and the next file's first (23:30, 23:59) failed with only
   the earlier file and ran with both, so a strict overlap test would break
   hourly receptors in the last hours of every weekly file.
+- **`build_trajectory_features` warns when source regions overlap.** An
+  endpoint inside several regions counts towards each, so overlapping regions'
+  residence fractions add up to more than 1 and are not shares of the
+  trajectory -- in the bundled MY1 features they sum past 1 for 52% of
+  trajectories, which nothing flagged. The warning names the overlapping pairs
+  (boxes, and polygons via shapely); regions that only touch do not count. A
+  bounding box given as numpy scalars (e.g. `np.float32`) used to fall through
+  to the polygon path and crash; it is now read as a box.
 - **Trajectory docs.** The `normet.io.trajectory` docstring now shows the
   backward-aligned join (`merge_asof(direction="backward")`) instead of
   `ffill(limit=8)`, which was longer than a 6-hourly release interval, and

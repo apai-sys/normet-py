@@ -105,6 +105,54 @@ def test_build_trajectory_features_warns_on_truncated(tmp_path, caplog):
     assert any("truncated" in r.message for r in caplog.records)
 
 
+def test_overlapping_regions_are_detected():
+    regions = {
+        "west": (-10.0, 50.0, 0.0, 55.0),
+        "east": (-2.0, 50.0, 5.0, 55.0),  # shares -2..0 with west
+        "north": (-10.0, 55.0, 0.0, 60.0),  # only touches west along lat 55
+        "far": (20.0, 30.0, 25.0, 35.0),
+    }
+    assert tj._overlapping_regions(regions) == [("west", "east")]
+
+
+def test_overlap_check_handles_polygons_and_numpy_boxes():
+    from shapely.geometry import Polygon
+
+    tri = Polygon([(-5.0, 50.0), (5.0, 50.0), (0.0, 58.0)])
+    regions = {
+        "tri": tri,
+        "box32": tuple(np.float32(v) for v in (-1.0, 51.0, 1.0, 52.0)),  # inside the triangle
+        "away": (20.0, 30.0, 25.0, 35.0),
+    }
+    assert tj._overlapping_regions(regions) == [("tri", "box32")]
+
+
+def test_float32_box_gives_the_same_residence_as_a_float_box(tmp_path):
+    # A box of numpy scalars used to fall through to the shapely path and crash.
+    df = tj.read_trajectory_tdump(_write(tmp_path))
+    box = (-3.0, 50.5, -1.5, 51.5)
+    f64 = tj.trajectory_features(df, source_regions={"b": box})
+    f32 = tj.trajectory_features(df, source_regions={"b": tuple(np.float32(v) for v in box)})
+    assert f32["traj_resid_b"] == f64["traj_resid_b"] == 1 / 3
+
+
+def test_build_trajectory_features_warns_on_overlapping_regions(tmp_path, caplog):
+    _write(tmp_path, "tdump_a")
+    with caplog.at_level("WARNING"):
+        tj.build_trajectory_features(
+            str(tmp_path / "tdump_*"),
+            source_regions={"uk": (-6.0, 50.0, 2.0, 56.0), "sw": (-3.0, 50.5, -1.5, 51.5)},
+        )
+    assert any("overlap (uk & sw)" in r.getMessage() for r in caplog.records)
+
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        tj.build_trajectory_features(
+            str(tmp_path / "tdump_*"), source_regions={"sw": (-3.0, 50.5, -1.5, 51.5)}
+        )
+    assert not [r for r in caplog.records if "overlap" in r.getMessage()]
+
+
 def test_build_trajectory_features(tmp_path):
     _write(tmp_path, "tdump_a")
     _write(tmp_path, "tdump_b")  # same receptor time -> deduplicated
