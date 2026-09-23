@@ -49,6 +49,7 @@ such rows into NaN instead.
 
 from __future__ import annotations
 
+import numbers
 import os
 import shutil
 import subprocess
@@ -177,19 +178,45 @@ def _bearing_deg(lat0: float, lon0: float, lat1: float, lon1: float) -> float:
     return float((np.degrees(np.arctan2(y, x)) + 360) % 360)
 
 
+def _is_bbox(region: Any) -> bool:
+    """A ``(lon_min, lat_min, lon_max, lat_max)`` box, numpy scalars included."""
+    return (
+        isinstance(region, tuple | list)
+        and len(region) == 4
+        and all(isinstance(v, numbers.Real) and not isinstance(v, bool) for v in region)
+    )
+
+
 def _region_mask(region: Any, lon: np.ndarray, lat: np.ndarray) -> np.ndarray:
     """Point-in-region test — a 4-tuple bbox, or a shapely geometry (polygon
     boundaries loaded from GeoJSON via :func:`load_source_regions`)."""
-    if (
-        isinstance(region, tuple | list)
-        and len(region) == 4
-        and all(isinstance(v, int | float) for v in region)
-    ):
-        xmn, ymn, xmx, ymx = region
+    if _is_bbox(region):
+        xmn, ymn, xmx, ymx = (float(v) for v in region)
         return (lon >= xmn) & (lon <= xmx) & (lat >= ymn) & (lat <= ymx)
     from shapely import contains_xy
 
     return contains_xy(region, lon, lat)
+
+
+def _overlapping_regions(source_regions: Mapping[str, Any]) -> list[tuple[str, str]]:
+    """Pairs of source regions that share area; regions that only touch do not."""
+    items = list(source_regions.items())
+    pairs: list[tuple[str, str]] = []
+    for i, (name_a, a) in enumerate(items):
+        for name_b, b in items[i + 1 :]:
+            if _is_bbox(a) and _is_bbox(b):
+                ax0, ay0, ax1, ay1 = (float(v) for v in a)
+                bx0, by0, bx1, by1 = (float(v) for v in b)
+                shared = ax0 < bx1 and bx0 < ax1 and ay0 < by1 and by0 < ay1
+            else:
+                from shapely.geometry import box
+
+                ga = box(*(float(v) for v in a)) if _is_bbox(a) else a
+                gb = box(*(float(v) for v in b)) if _is_bbox(b) else b
+                shared = ga.intersection(gb).area > 0
+            if shared:
+                pairs.append((str(name_a), str(name_b)))
+    return pairs
 
 
 def _load_regions_geojson(path: Path) -> dict[str, Any]:
@@ -277,6 +304,9 @@ def trajectory_features(
         polygon/multipolygon (e.g. from :func:`load_source_regions`)
         for exact point-in-polygon residence time. For each, the fraction of
         trajectory time spent inside is returned as ``{prefix}resid_{name}``.
+        An endpoint inside several overlapping regions counts towards each, so
+        the fractions are only shares of the trajectory when the regions do not
+        overlap; :func:`build_trajectory_features` warns when they do.
     prefix : str, default ``"traj_"``
         Prefix for every feature name.
     min_hours : float, optional
@@ -379,6 +409,14 @@ def build_trajectory_features(
     paths = sorted(glob(tdumps)) if isinstance(tdumps, str) else [str(p) for p in tdumps]
     if not paths:
         raise ValueError(f"No tdump files matched: {tdumps!r}")
+    overlaps = _overlapping_regions(source_regions) if source_regions else []
+    if overlaps:
+        log.warning(
+            "Source regions overlap (%s): an endpoint in a shared area counts towards each "
+            "of them, so their residence fractions can add up to more than 1 and are not "
+            "shares of the trajectory.",
+            ", ".join(f"{a} & {b}" for a, b in overlaps),
+        )
 
     rows: list[dict[str, Any]] = []
     for p in paths:
