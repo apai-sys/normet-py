@@ -78,6 +78,26 @@ class NormaliseConfig:
     is fingerprinted via :func:`normet.utils.cache.model_hash`, so a re-fit
     model (even with identical config) correctly invalidates the cache.
     """
+    resample_pools: Mapping[str, pd.DataFrame] | None = None
+    """Extra pools that some of the resampled variables are drawn from instead
+    of ``resample_df``, as ``{name: DataFrame}``.
+
+    A pool's columns name the variables it serves: every variable in
+    ``variables_resample`` that is a column of the pool is drawn from it, whole
+    rows at a time (so the pool's variables keep their joint structure), and
+    independently of ``resample_df`` and of the other pools. Variables no pool
+    claims are drawn from ``resample_df`` as usual; a variable may be a column
+    of at most one pool. The names are labels only.
+
+    Without pools every resampled variable comes from one pool, so the result
+    is the expectation over the *average* conditions in it -- with trajectory
+    features among the variables, over the average air mass. A separate pool
+    sets a reference instead: ``{"transport": clean_hours[traj_cols]}`` draws
+    the trajectory features from clean-air-mass hours only while the local
+    weather is still drawn from the whole record.
+
+    ``conditional_on`` filters ``resample_df`` only; filter a pool yourself.
+    """
 
 
 def _resolve_normalise_config(
@@ -119,12 +139,92 @@ def _apply_conditional_filter(
     return pool.loc[mask]
 
 
+def _split_across_pools(
+    variables_resample: Sequence[str],
+    resample_df: pd.DataFrame,
+    resample_pools: Mapping[str, pd.DataFrame] | None,
+) -> list[tuple[int, list[str], pd.DataFrame]]:
+    """Assign each resampled variable to the pool it is drawn from.
+
+    Returns ``(stream, columns, pool)`` triples. Stream 0 is ``resample_df`` and
+    serves every variable no extra pool claims; the extra pools follow in name
+    order as streams 1, 2, ... A pool's stream is fixed by its name, not by
+    which of its variables a given call resamples, so a variable's draws do not
+    move when other variables are fixed -- the differences :func:`decom_met`
+    takes between calls stay common-random-number differences.
+    """
+    if resample_pools is None:
+        resample_pools = {}
+    if not isinstance(resample_pools, Mapping):
+        raise ConfigError("`resample_pools` must be a mapping of name -> DataFrame.")
+    claimed: dict[str, str] = {}
+    extra: list[tuple[int, list[str], pd.DataFrame]] = []
+    for stream, name in enumerate(sorted(resample_pools, key=str), start=1):
+        pool = resample_pools[name]
+        if not isinstance(pool, pd.DataFrame):
+            raise ConfigError(
+                f"resample pool {name!r} must be a DataFrame, got {type(pool).__name__}."
+            )
+        cols = [c for c in variables_resample if c in pool.columns]
+        if not cols:
+            continue
+        if len(pool) == 0:
+            raise DataError(f"resample pool {name!r} has no rows to draw from.")
+        for c in cols:
+            if c in claimed:
+                raise ConfigError(
+                    f"variable {c!r} is a column of two resample pools ({claimed[c]!r} and "
+                    f"{name!r}); each variable is drawn from exactly one pool."
+                )
+            claimed[c] = name
+        extra.append((stream, cols, pool))
+    base = [c for c in variables_resample if c not in claimed]
+    return ([(0, base, resample_df)] if base else []) + extra
+
+
+def _draw_rows(stream: int, seed: int, n_pool: int, n_rows: int, replace: bool) -> np.ndarray:
+    """Row indices into one pool for one Monte Carlo draw.
+
+    Stream 0 keeps the generator :func:`normalise` has always used, so results
+    without extra pools are unchanged; stream k > 0 gets an independent
+    generator derived from the same seed.
+    """
+    rng = np.random.default_rng(seed if stream == 0 else [seed, stream])
+    return rng.choice(n_pool, size=n_rows, replace=replace)
+
+
+def _stacked_columns(
+    df: pd.DataFrame,
+    draws: Sequence[tuple[int, list[str], np.ndarray]],
+    seeds: Sequence[int] | np.ndarray,
+    replace: bool,
+) -> dict[str, np.ndarray]:
+    """Columns of ``len(seeds)`` resampled copies of ``df``, stacked copy after copy.
+
+    ``draws`` holds ``(stream, columns, values)`` with ``values`` the pool's
+    ``columns`` as one array, so each copy takes whole pool rows.
+    """
+    n_rows = len(df)
+    drawn: dict[str, np.ndarray] = {}
+    for stream, cols, values in draws:
+        idx = np.empty((len(seeds), n_rows), dtype=np.int64)
+        for i, s in enumerate(seeds):
+            idx[i] = _draw_rows(stream, int(s), len(values), n_rows, replace)
+        picked = values[idx.ravel()]
+        for j, c in enumerate(cols):
+            drawn[c] = picked[:, j]
+    return {
+        c: drawn[c] if c in drawn else np.tile(df[c].to_numpy(), len(seeds)) for c in df.columns
+    }
+
+
 def generate_resampled(
     df: pd.DataFrame,
     variables_resample: list[str],
     replace: bool,
     seed: int,
     resample_df: pd.DataFrame,
+    resample_pools: Mapping[str, pd.DataFrame] | None = None,
 ) -> pd.DataFrame:
     """Generate a resampled copy of the dataset.
 
@@ -144,7 +244,10 @@ def generate_resampled(
         Random seed for reproducibility of the resampling.
     resample_df : pandas.DataFrame
         Pool of data used to resample the specified predictors. Must contain
-        all columns listed in ``variables_resample``.
+        every column of ``variables_resample`` that no ``resample_pools`` pool
+        serves.
+    resample_pools : mapping of str to pandas.DataFrame, optional
+        Extra pools; see :attr:`NormaliseConfig.resample_pools`.
 
     Returns
     -------
@@ -153,18 +256,18 @@ def generate_resampled(
           - specified ``variables_resample`` columns replaced by resampled values,
           - a new column ``seed`` indicating the resampling seed used.
     """
-    missing = [c for c in variables_resample if c not in resample_df.columns]
+    draws = _split_across_pools(variables_resample, resample_df, resample_pools)
+    base = draws[0][1] if draws and draws[0][0] == 0 else []
+    missing = [c for c in base if c not in resample_df.columns]
     if missing:
         raise ValueError(f"`resample_df` is missing columns: {missing}")
 
-    pool = (
-        resample_df[variables_resample]
-        .sample(n=len(df), replace=replace, random_state=seed)
-        .reset_index(drop=True)
-    )
-
     out = df.copy(deep=False).reset_index(drop=True)
-    out.loc[:, variables_resample] = pool.to_numpy()
+    for stream, cols, pool in draws:
+        # Stream 0 keeps the historical random_state=seed; see _draw_rows.
+        state = seed if stream == 0 else np.random.default_rng([seed, stream])
+        picked = pool[cols].sample(n=len(df), replace=replace, random_state=state)
+        out.loc[:, cols] = picked.to_numpy()
     out.loc[:, "seed"] = seed
     return out
 
@@ -290,7 +393,17 @@ def normalise(
     resample_key_cols = sorted(
         c for c in (_cfg.variables_resample or key_cols) if c in resample_pool.columns
     )
+    # Extra pools join the key only when given, so keys of runs without them --
+    # and the caches already on disk -- are unchanged. A pool can only serve
+    # covariates, so those are the columns worth hashing.
+    covariate_set = set(_cfg.covariates)
+    pool_keys = [
+        (str(name), dataframe_hash(pool[sorted(c for c in pool.columns if c in covariate_set)]))
+        for name, pool in sorted((_cfg.resample_pools or {}).items(), key=lambda kv: str(kv[0]))
+        if isinstance(pool, pd.DataFrame)
+    ]
     cache_key = config_hash(
+        *([pool_keys] if pool_keys else []),
         sorted(_cfg.covariates),
         sorted(_cfg.variables_resample) if _cfg.variables_resample is not None else None,
         _cfg.n_samples,
@@ -346,9 +459,22 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
             "conditional_on filter: %d → %d rows in resample pool.", before, len(resample_df)
         )
 
-    missing = [c for c in variables_resample if c not in resample_df.columns]
+    for name, pool in (_cfg.resample_pools or {}).items():
+        # A pool none of whose columns is a covariate can never serve anything:
+        # almost certainly a misspelt or wrongly subset frame, which would
+        # otherwise be ignored in silence.
+        if isinstance(pool, pd.DataFrame) and not set(pool.columns) & set(_cfg.covariates):
+            raise ConfigError(
+                f"resample pool {name!r} has no covariate among its columns "
+                f"({list(pool.columns)[:6]}); a pool's columns name the variables drawn from it."
+            )
+    draws = _split_across_pools(variables_resample, resample_df, _cfg.resample_pools)
+    base_cols = draws[0][1] if draws and draws[0][0] == 0 else []
+    missing = [c for c in base_cols if c not in resample_df.columns]
     if missing:
         raise DataError(f"`resample_df` is missing columns required for resampling: {missing}")
+    # Each pool's served columns as one array, built once for every draw.
+    draw_arrays = [(stream, cols, pool[cols].to_numpy()) for stream, cols, pool in draws]
 
     n_cores_eff = max(1, _cfg.n_cores if _cfg.n_cores is not None else (os.cpu_count() or 2) - 1)
 
@@ -393,7 +519,12 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
     def process_one(seed_i: int) -> pd.DataFrame | None:
         try:
             df_resampled = generate_resampled(
-                df, variables_resample, _cfg.replace, int(seed_i), resample_df
+                df,
+                variables_resample,
+                _cfg.replace,
+                int(seed_i),
+                resample_df,
+                resample_pools=_cfg.resample_pools,
             )
             preds = ml_predict(model, df_resampled)
             return pd.DataFrame(
@@ -415,8 +546,6 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
         import gc
 
         n_rows = len(df)
-        pool_arr = resample_df[variables_resample].to_numpy()
-        resample_pos = {c: i for i, c in enumerate(variables_resample)}
         obs_arr = df["value"].to_numpy()
         dates_arr = df["date"].to_numpy()
 
@@ -437,23 +566,8 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
         for b_idx, batch_seeds in enumerate(seeds_batched):
             b_size = len(batch_seeds)
 
-            # Generate indices for this batch (one row of indices per seed)
-            batch_idx = np.empty((b_size, n_rows), dtype=np.int64)
-            for k, s_val in enumerate(batch_seeds):
-                rng_s = np.random.default_rng(int(s_val))
-                batch_idx[k] = rng_s.choice(len(resample_df), size=n_rows, replace=_cfg.replace)
-
-            # Gather resampled pool values for the batch
-            flat_idx = batch_idx.flatten()  # shape (b_size × n_rows,)
-            batch_data = pool_arr[flat_idx]  # shape (b_size × n_rows, n_resample_vars)
-
             # Build prediction DataFrame without materialising the full n_samples × n_rows frame
-            df_batch_dict: dict[str, np.ndarray] = {}
-            for c in df.columns:
-                if c in resample_pos:
-                    df_batch_dict[c] = batch_data[:, resample_pos[c]]
-                else:
-                    df_batch_dict[c] = np.tile(df[c].to_numpy(), b_size)
+            df_batch_dict = _stacked_columns(df, draw_arrays, batch_seeds, _cfg.replace)
             df_batch = pd.DataFrame(df_batch_dict)
 
             batch_preds = ml_predict(model, df_batch)  # shape (b_size × n_rows,)
@@ -464,7 +578,7 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
             sum_obs += np.tile(obs_arr, b_size).reshape(b_size, n_rows).sum(axis=0)
             n_completed += b_size
 
-            del batch_idx, flat_idx, batch_data, df_batch_dict, df_batch
+            del df_batch_dict, df_batch
             del batch_preds, batch_preds_2d
             gc.collect()
 
@@ -528,29 +642,9 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
     # ── Vectorised path: default, O(n_samples × n_rows) ───────────────────
     else:
         n_rows = len(df)
-        n_pool = len(resample_df)
 
-        # Generate all indices with numpy (fast PRNG, per-seed reproducibility).
-        indices_np = np.empty((_cfg.n_samples, n_rows), dtype=np.int64)
-        for i, s_val in enumerate(random_seeds):
-            rng_s = np.random.default_rng(int(s_val))
-            indices_np[i] = rng_s.choice(n_pool, size=n_rows, replace=_cfg.replace)
-
-        indices_flat = indices_np.flatten()
-        pool_arr = resample_df[variables_resample].to_numpy()
-        resampled_data = pool_arr[indices_flat]
-
-        # Pre-build column → position map to avoid O(n) list.index() per column.
-        resample_pos = {c: i for i, c in enumerate(variables_resample)}
-
-        df_all_dict = {}
-        for c in df.columns:
-            if c in resample_pos:
-                df_all_dict[c] = resampled_data[:, resample_pos[c]]
-            else:
-                df_all_dict[c] = np.tile(df[c].to_numpy(), _cfg.n_samples)
-
-        df_all = pd.DataFrame(df_all_dict)
+        # All draws at once with numpy (fast PRNG, per-seed reproducibility).
+        df_all = pd.DataFrame(_stacked_columns(df, draw_arrays, random_seeds, _cfg.replace))
         df_all["seed"] = np.repeat(random_seeds, n_rows)
 
         preds = ml_predict(model, df_all)

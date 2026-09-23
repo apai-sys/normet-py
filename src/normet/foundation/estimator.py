@@ -384,8 +384,12 @@ class Chronos2Estimator:
         Minimum fraction of the conditioning window that must carry observed
         target values. Chronos-2 masks missing values rather than failing, so a
         station whose record is empty across the context returns a plausible-looking
-        forecast scaled to nothing; below this fraction an
-        :class:`InsufficientContextError` is raised instead.
+        forecast scaled to nothing. Below this fraction the single-anchor methods
+        (:meth:`predict_quantiles`, :meth:`covariate_sensitivity`,
+        :meth:`counterfactual`) raise :class:`InsufficientContextError`, while the
+        rolling ones (:meth:`predict`, :meth:`deweather`) leave that block NaN
+        with a warning and raise only if no block qualifies -- so a long record
+        gap no longer calls for lowering this to 0, which lets every gap through.
     """
 
     def __init__(
@@ -533,6 +537,11 @@ class Chronos2Estimator:
                 "normet.foundation.estimator.to_regular_index first."
             )
 
+    @staticmethod
+    def _context_coverage(target_hist: np.ndarray) -> float:
+        """Fraction of a conditioning window that carries an observed target."""
+        return float(np.isfinite(target_hist).mean()) if len(target_hist) else 0.0
+
     def _check_context(self, target_hist: np.ndarray) -> None:
         """Refuse to project from a context that is mostly missing.
 
@@ -543,13 +552,48 @@ class Chronos2Estimator:
         0.25 ug/m3 against an observed 26 ug/m3, i.e. an apparent +10,000%
         "effect". Silence is the dangerous failure here, so it is made loud.
         """
-        finite = float(np.isfinite(target_hist).mean()) if len(target_hist) else 0.0
+        finite = self._context_coverage(target_hist)
         if finite < self.min_context_coverage:
             raise InsufficientContextError(
                 f"context target is only {100 * finite:.1f}% finite "
                 f"(minimum {100 * self.min_context_coverage:.0f}%); "
                 "projecting from it would return a forecast scaled to missing data"
             )
+
+    def _blocks_without_context(
+        self, target: np.ndarray, spans: Sequence[tuple[int, int]], what: str
+    ) -> set[tuple[int, int]]:
+        """The rolling blocks whose context is too sparse to project from.
+
+        :meth:`predict` and :meth:`deweather` leave these blocks NaN instead of
+        refusing the whole call: one long record gap used to abort a multi-year
+        run, and the only way through was ``min_context_coverage=0`` -- which let
+        every gap through as a forecast scaled to nothing. Each skipped block is
+        counted in a warning; if none can be projected the call still refuses.
+        """
+        skipped = {
+            (s, e)
+            for s, e in spans
+            if self._context_coverage(target[max(0, s - self.context_length) : s])
+            < self.min_context_coverage
+        }
+        if skipped and len(skipped) == len(spans):
+            raise InsufficientContextError(
+                f"no {what} block has {100 * self.min_context_coverage:.0f}% of its "
+                f"{self.context_length}-h context observed; nothing can be projected"
+            )
+        if skipped:
+            log.warning(
+                "%d of %d %s blocks (%d rows) have less than %.0f%% of their %d-h context "
+                "observed and are left NaN rather than projected from missing data.",
+                len(skipped),
+                len(spans),
+                what,
+                sum(e - s for s, e in skipped),
+                100 * self.min_context_coverage,
+                self.context_length,
+            )
+        return skipped
 
     def _forecast_block(
         self,
@@ -1038,7 +1082,9 @@ class Chronos2Estimator:
         tree backend. ``X`` must be datetime-indexed and carry the target column
         recorded by :meth:`fit` (or named ``value``); the first
         :attr:`context_length` rows are seeded with the observed values, as they
-        have no history to condition on.
+        have no history to condition on. A block whose context has less than
+        :attr:`min_context_coverage` of its target observed is left NaN (with a
+        warning); :class:`InsufficientContextError` only if no block qualifies.
 
         Returns
         -------
@@ -1060,6 +1106,10 @@ class Chronos2Estimator:
         # the last one can be short, and a batch has to share one horizon, so it
         # is sent on its own.
         spans = [(s, min(s + step, len(X))) for s in range(self.context_length, len(X), step)]
+        skipped = self._blocks_without_context(obs, spans, "prediction")
+        for s, e in skipped:
+            out[s:e] = np.nan
+        spans = [sp for sp in spans if sp not in skipped]
         full = [sp for sp in spans if sp[1] - sp[0] == step]
         short = [sp for sp in spans if sp[1] - sp[0] != step]
         for group in (full, short):
@@ -1101,6 +1151,19 @@ class Chronos2Estimator:
         quantifies how much of a given configuration's prediction is driven by
         meteorology rather than by that anchoring.
 
+        The quantile columns are easy to misread: ``dew_pNN`` is the average,
+        over the resampled weather, of the model's own ``NN``-th *predictive*
+        quantile. They carry the forecast's uncertainty averaged over weather --
+        not the spread of the de-weathered estimate across draws, and not a
+        confidence band for ``dew_p50``.
+
+        The first :attr:`context_length` rows are seeded with the observed
+        values, which have no history to condition on. A later block whose
+        context has less than :attr:`min_context_coverage` of its target
+        observed -- a long record gap -- is left NaN with a warning rather than
+        projected from missing data; :class:`InsufficientContextError` is
+        raised only if no block qualifies.
+
         Parameters
         ----------
         schema : {"chronos", "normet"}, default ``"chronos"``
@@ -1134,8 +1197,16 @@ class Chronos2Estimator:
             acc[q][seeded] = df[target].to_numpy()[seeded]
 
         step = self.prediction_length
-        for s in range(self.context_length, len(df), step):
-            e = min(s + step, len(df))
+        spans = [(s, min(s + step, len(df))) for s in range(self.context_length, len(df), step)]
+        # Decided from the observed target alone, which every draw shares, so every
+        # call on the same frame skips the same blocks and draws the same weather
+        # for the rest -- decompositions differencing two calls stay paired.
+        skipped = self._blocks_without_context(df[target].to_numpy(), spans, "de-weathering")
+        for s, e in spans:
+            if (s, e) in skipped:
+                for q in quantiles:
+                    acc[q][s:e] = np.nan
+                continue
             past = df.iloc[max(0, s - self.context_length) : s]
             future = df.iloc[s:e]
             hist = past[target].to_numpy()
