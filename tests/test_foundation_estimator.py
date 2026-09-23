@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from normet.analysis.decomposition import DecomposeConfig, _rank_by_sensitivity
 from normet.foundation import (
     Chronos2Estimator,
     CounterfactualResult,
@@ -404,6 +405,59 @@ def test_zero_shot_decomposition_survives_a_long_gap():
         (res["met_base"] + res["met_noise"] + res["wind"] + res["mixing"])[ok],
         res["met_total"][ok],
     )
+
+
+def test_zero_shot_ranking_survives_a_gap_at_the_end_of_the_record():
+    """The sequential order is ranked from one forecast, which was anchored at the
+    record's end and so refused a trailing outage that deweather skips."""
+    from normet import decompose
+
+    df = _gappy_frame(gap=(330, 400)).reset_index().rename(columns={"index": "date"})
+    df["blh"] = 500.0 + np.arange(len(df))
+    res = decompose(
+        df,
+        _stub_estimator(),
+        target="value",
+        method="meteorology",
+        backend="chronos-2",
+        covariates=["ws", "blh"],
+        n_samples=2,
+    )
+
+    expected = _nan_rows(df["value"].to_numpy(), _sparse_blocks(df["value"].to_numpy()))
+    np.testing.assert_array_equal(res["emi_total"].isna().to_numpy(), expected)
+    ok = ~expected & res["observed"].notna().to_numpy()
+    np.testing.assert_allclose(
+        (res["met_base"] + res["met_noise"] + res["ws"] + res["blh"])[ok], res["met_total"][ok]
+    )
+
+
+def test_ranking_anchors_at_the_last_context_the_model_accepts():
+    est = _stub_estimator()
+    anchors: list[pd.Timestamp] = []
+
+    def sensitivity(frame, target, anchor, **kwargs):
+        anchors.append(pd.Timestamp(anchor))
+        return {"mean_abs_shift": 1.0}
+
+    est.covariate_sensitivity = sensitivity  # type: ignore[method-assign]
+    df = _gappy_frame(gap=(336, 400))
+    _rank_by_sensitivity(est, df, ["ws"], DecomposeConfig())
+
+    # The context [i - 48, i) holds 384 - i observed rows: 25% of 48 up to i = 372.
+    assert anchors == [df.index[372]]
+
+
+def test_ranking_keeps_the_given_order_when_no_context_is_observed(caplog):
+    est = _stub_estimator()
+    est.covariate_sensitivity = lambda *a, **k: pytest.fail("ranked from missing data")  # type: ignore[method-assign]
+    df = _gappy_frame(gap=(1, 400)).assign(blh=1.0)
+
+    with caplog.at_level("WARNING"):
+        order = _rank_by_sensitivity(est, df, ["ws", "blh"], DecomposeConfig())
+
+    assert order == ["ws", "blh"]
+    assert any("given covariate order is kept" in r.getMessage() for r in caplog.records)
 
 
 @needs_chronos

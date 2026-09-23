@@ -99,6 +99,22 @@ def test_a_pooled_variable_draws_do_not_move_when_others_are_fixed():
     np.testing.assert_array_equal(b_both, b_alone)
 
 
+def test_a_pool_draws_do_not_depend_on_the_other_pools():
+    """A pool's stream comes from its name, so adding a pool that sorts before
+    it does not move its draws."""
+    _, b_one = _draws(
+        _run(variables_resample=["a", "b"], resample_pools={"clean": CLEAN}, aggregate=False)
+    )
+    _, b_two = _draws(
+        _run(
+            variables_resample=["a", "b"],
+            resample_pools={"a-pool": pd.DataFrame({"a": [100.0, 200.0]}), "clean": CLEAN},
+            aggregate=False,
+        )
+    )
+    np.testing.assert_array_equal(b_one, b_two)
+
+
 def test_a_pool_whose_variables_are_all_fixed_is_ignored():
     fixed = _run(variables_resample=["a"], resample_pools={"clean": CLEAN})
     plain = _run(variables_resample=["a"])
@@ -153,6 +169,16 @@ def test_conditional_on_filters_the_record_not_the_pools():
 def test_bad_pools_are_refused(pools, error, match):
     with pytest.raises(error, match=match):
         _run(variables_resample=["a", "b"], resample_pools=pools)
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_pools_must_be_a_mapping(tmp_path, cached):
+    with pytest.raises(ConfigError, match="mapping of name -> DataFrame"):
+        _run(
+            variables_resample=["a", "b"],
+            resample_pools=[("clean", CLEAN)],
+            cache=str(tmp_path) if cached else None,
+        )
 
 
 def test_cache_tells_pools_apart(tmp_path):

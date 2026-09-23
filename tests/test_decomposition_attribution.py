@@ -227,12 +227,15 @@ def test_decompose_forwards_groups(calls):
         ({"groups": {"g": ["a", "b", "c", "hour"]}}, "time variable"),
         ({"groups": {"g": ["a", "b"], "met_total": ["c"]}}, "clashes"),
         ({"groups": {"g": ["a", "b", "c"], "h": []}}, "empty"),
+        ({"groups": {"g": ["a", "b", "c"], "h": None}}, "group 'h' must be"),
         ({"groups": {}}, "non-empty mapping"),
         ({"groups": {"g": ["a", "b", "c"]}, "variable_order": ["a", "b", "c"]}, "groups"),
         ({"attribution": "shapley", "variable_order": ["a", "b", "c"]}, "no effect"),
         ({"n_permutations": 4}, "only applies"),
         ({"attribution": "shapley", "n_permutations": 0}, "at least 1"),
+        ({"attribution": "shapley", "n_permutations": 2.5}, "whole number"),
         ({"attribution": "banzhaf"}, "'sequential' or 'shapley'"),
+        ({"attribution": ""}, "'sequential' or 'shapley'"),
         ({"variable_order": ["a", "b", "b", "c"]}, "more than once"),
         ({"variable_order": ["a", "b"]}, "variable_order"),
     ],
@@ -287,6 +290,9 @@ def test_decom_emi_refuses_the_met_only_options(calls):
         decom_emi(_frame(), _model(), n_samples=2, groups={"g": ["a", "b", "c"]})
     with pytest.raises(ConfigError, match="decom_met"):
         decom_emi(_frame(), _model(), n_samples=2, attribution="shapley")
+    with pytest.raises(ConfigError, match="decom_met"):
+        decom_emi(_frame(), _model(), n_samples=2, attribution="sequential")
+    assert not calls
 
 
 # ---------------------------------------------------------- forwarded options

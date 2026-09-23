@@ -8,6 +8,7 @@ Provides :func:`normalise` (resample-and-predict) and :func:`normalise_auto`
 from __future__ import annotations
 
 import os
+import zlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -147,11 +148,11 @@ def _split_across_pools(
     """Assign each resampled variable to the pool it is drawn from.
 
     Returns ``(stream, columns, pool)`` triples. Stream 0 is ``resample_df`` and
-    serves every variable no extra pool claims; the extra pools follow in name
-    order as streams 1, 2, ... A pool's stream is fixed by its name, not by
-    which of its variables a given call resamples, so a variable's draws do not
-    move when other variables are fixed -- the differences :func:`decom_met`
-    takes between calls stay common-random-number differences.
+    serves every variable no extra pool claims; an extra pool's stream is a
+    hash of its name. So a variable's draws do not move when other variables
+    are fixed -- the differences :func:`decom_met` takes between calls stay
+    common-random-number differences -- nor when other pools are added,
+    dropped or renamed.
     """
     if resample_pools is None:
         resample_pools = {}
@@ -159,7 +160,7 @@ def _split_across_pools(
         raise ConfigError("`resample_pools` must be a mapping of name -> DataFrame.")
     claimed: dict[str, str] = {}
     extra: list[tuple[int, list[str], pd.DataFrame]] = []
-    for stream, name in enumerate(sorted(resample_pools, key=str), start=1):
+    for name in sorted(resample_pools, key=str):
         pool = resample_pools[name]
         if not isinstance(pool, pd.DataFrame):
             raise ConfigError(
@@ -177,7 +178,8 @@ def _split_across_pools(
                     f"{name!r}); each variable is drawn from exactly one pool."
                 )
             claimed[c] = name
-        extra.append((stream, cols, pool))
+        # crc32, not hash(): the stream must not change between processes.
+        extra.append((zlib.crc32(str(name).encode("utf-8")) or 1, cols, pool))
     base = [c for c in variables_resample if c not in claimed]
     return ([(0, base, resample_df)] if base else []) + extra
 
@@ -344,6 +346,8 @@ def normalise(
     if covariates is not None:
         kwargs.setdefault("covariates", covariates)
     _cfg = _resolve_normalise_config(config=config, **kwargs)
+    if _cfg.resample_pools is not None and not isinstance(_cfg.resample_pools, Mapping):
+        raise ConfigError("`resample_pools` must be a mapping of name -> DataFrame.")
 
     if _cfg.covariates is None:
         if model is None:
