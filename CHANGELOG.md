@@ -7,6 +7,45 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ## [Unreleased]
 
 ### Added
+- **`decom_met`: feature groups and Shapley attribution.** `groups=` attributes
+  the meteorological features in named groups -- e.g. `{"local": met_cols,
+  "transport": traj_cols}` -- with one result column per group, and
+  `attribution="shapley"` averages each feature's or group's marginal effect
+  over every order it could be fixed in, instead of fixing them one at a time.
+  The sequential split depends on the order: on the bundled MY1 transport case
+  the summed trajectory contribution had a standard deviation between 4.2 and
+  5.6 ug/m3 depending only on the order, and the top-ranked feature -- which
+  sets the default order -- changed between refits. Shapley values are exact
+  (all `2**k` coalitions, up to 10 features or groups -- four normalisations
+  for two groups) or, with `n_permutations=`, sampled in antithetic pairs;
+  every coalition is normalised once and with the
+  same seed, and the contributions add up exactly to `prediction - emi_total`
+  whichever way they are split. Groups default to Shapley; without groups the
+  default stays sequential, and those results are unchanged to the bit. The
+  chronos-2 path (`decompose(backend="chronos-2")`) takes the same options.
+- **`normalise`: `resample_pools=` draws chosen variables from their own pool.**
+  A pool's columns name the variables drawn from it -- whole rows at a time,
+  independently of `resample_df` and of the other pools. With a single pool
+  every contribution is measured against the *average* conditions in it, so a
+  transport term is an anomaly with a mean near zero; `{"transport":
+  clean_hours[traj_cols]}` measures transport against a reference air mass
+  instead. Each pool has its own random stream, derived from its name, so a
+  variable's draws do not move when other variables are fixed -- `decom_met`'s
+  differences stay paired -- nor when other pools are added or renamed.
+  Without pools the draws are unchanged, and results are bit-identical on
+  every execution path.
+- **Notebook 05: transport vs local attribution.** On the bundled MY1 case:
+  one transport-aware model scored on a blocked split, the grouped Shapley
+  split into `local` and `transport`, the two fixed orders it averages, the
+  two-model difference of notebook 04 for comparison (correlation 0.59 with
+  the grouped transport term, 40% of its amplitude), and a clean-Atlantic
+  reference pool that turns the transport anomaly (mean -0.03 ug/m3) into a
+  contribution (mean +2.70 ug/m3). Notebook 04 stays as the paper's
+  reproduction.
+- **`decom_met` / `decom_emi` forward `resample_df`, `resample_pools` and
+  `conditional_on`** to every `normalise` call. `decom_met` previously passed
+  `resample_df=None` whatever it was given, unlike normet-R's
+  `nm_decom_met`. The chronos-2 path refuses all three rather than ignore them.
 - **Trajectory quality columns and `min_hours`.** `trajectory_features` /
   `build_trajectory_features` / `run_back_trajectories` now emit
   `traj_n_endpoints` and `traj_age_max_h`, and take `min_hours`. A trajectory
@@ -318,6 +357,48 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   `fetch_era5_timeseries`, which needs only `cdsapi` — no `xarray`/`netCDF4`.
 
 ### Fixed
+- **Lag analysis silently skipped pre-whitening on statsmodels 0.15.** The
+  AR fit passed `old_names=False`, which statsmodels 0.15 removed, so the
+  pre-whitening step raised, was caught, and fell back to the raw
+  cross-correlation -- the spurious-peak problem pre-whitening exists to
+  remove -- with only a log warning. It also turned CI red on every Python
+  version (`test_prewhitened_ccf_recovers_true_lag`). The argument is dropped;
+  its default had been False since before 0.14, so older statsmodels behave
+  as before.
+- **One long record gap aborted a whole Chronos-2 run, and the workaround
+  corrupted it.** `Chronos2Estimator.deweather` and `.predict` refused the
+  entire call as soon as a single block's context had less than
+  `min_context_coverage` of its target observed, so a multi-year run with one
+  outage could not complete. The only way through was
+  `min_context_coverage=0`, which let every gap through as a forecast scaled to
+  nothing: in a 16-year, three-site run, 71% of the hours inside week-long gaps
+  at one site came back with a de-weathered level below 0.5 ug/m3, with no
+  warning. The rolling paths now leave just those blocks NaN, log how many
+  blocks and rows were skipped, and raise only if no block has enough context.
+  The single-anchor methods (`predict_quantiles`, `covariate_sensitivity`,
+  `counterfactual`) still refuse. Runs that used to succeed are unchanged to
+  the bit. Also on `decompose(backend="chronos-2")`, where every coalition
+  skips the same blocks, and whose default sequential order is now ranked from
+  the latest context the model accepts rather than from the record's end,
+  which a trailing outage made refuse. The `deweather` docstring now says what
+  `dew_pNN` is: the model's predictive quantile averaged over the resampled
+  weather, not a confidence band for `dew_p50`.
+- **`decom_met(df, model=None)` crashed on a missing target** with "All arrays
+  must be of the same length": the observed series was taken from the input,
+  while the model trained on the fly -- and so the frame being decomposed --
+  had dropped the rows with a missing target. It is now taken from the frame
+  actually decomposed. Affected the CLI `decompose --method meteorology` on any
+  table with gaps.
+- **A feature listed twice in `decom_met`'s `variable_order` was credited with
+  exactly zero.** The set-equality check let the duplicate through, the second
+  pass overwrote the feature's column with `0`, and its effect moved into
+  `met_noise` (measured: contribution sd 0.0 instead of 3.0, `met_noise` sd 3.2
+  instead of 0.5). Duplicates are now refused.
+- **Decomposition docs described a leave-one-out scheme.** Both decompositions
+  fix variables cumulatively, so each component is conditional on those fixed
+  before it; the docstrings, GUI tooltip and user guide now say so, and
+  `met_noise` is documented as what it is -- the model residual shifted by
+  `met_base` -- rather than a meteorological term.
 - **`generate_html_report` retained every figure it drew.** The report builds
   its own plot, serialises it to an inline PNG and has no further use for it,
   but pyplot keeps each figure alive until closed -- so generating a report per
