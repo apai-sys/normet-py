@@ -203,7 +203,7 @@ def decomposition_stack(
     """
     Stacked-area visualisation of a decomposition output.
 
-    Suitable for the leave-one-out
+    Suitable for the nested-normalisation
     decompositions in :mod:`normet.analysis.decomposition`.
 
     Parameters

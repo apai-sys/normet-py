@@ -7,9 +7,12 @@ Provides :func:`decompose` (and the convenience wrappers :func:`decom_emi`,
 
 from __future__ import annotations
 
+import numbers
 import os
 import time
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from math import factorial
 from pathlib import Path
 from typing import Any
 
@@ -75,6 +78,53 @@ class DecomposeConfig:
     call in the decomposition loop -- ``decom_emi``/``decom_met`` call
     ``normalise`` once per fixed variable, each a full Monte Carlo
     resample-and-predict over ``n_samples`` draws. Off by default."""
+    groups: Mapping[str, Sequence[str]] | None = None
+    """:func:`decom_met` only. Attribute the meteorological features in named
+    groups rather than one by one, e.g. ``{"local": met_cols, "transport":
+    traj_cols}``; the result then has one contribution column per group. Every
+    non-time model feature must be in exactly one group. A group is fixed and
+    resampled as a unit, so its column is the effect of the group as a whole,
+    interactions among its members included."""
+    attribution: str | None = None
+    """:func:`decom_met` only. How ``prediction - emi_total`` is split among the
+    features or groups:
+
+    - ``"sequential"``: fix them one at a time -- in ``variable_order``, else
+      fitted-importance order, or in the order ``groups`` lists them -- and
+      report each step's change. ``k + 1`` normalisations for ``k`` features or
+      groups, but the split depends on the order.
+    - ``"shapley"``: average each one's marginal effect over every order (its
+      Shapley value), so no order is privileged; see ``n_permutations``.
+
+    ``None`` (default) means ``"shapley"`` when ``groups`` is given, otherwise
+    ``"sequential"`` -- the historical behaviour."""
+    n_permutations: int | None = None
+    """``attribution="shapley"`` only. ``None`` (default): exact Shapley values
+    from all ``2**k`` coalitions of the ``k`` features or groups, allowed up to
+    ``k = 10``. An integer: an estimate from that many random orders, drawn in
+    antithetic pairs (an order and its reverse, so odd values round up); when
+    that would evaluate as many coalitions as the exact values need, the exact
+    values are computed instead. Either way the contributions add up exactly
+    to ``prediction - emi_total``."""
+    resample_df: pd.DataFrame | None = None
+    """Pool the resampled variables are drawn from (default: ``df`` itself),
+    forwarded to every :func:`normalise` call. Not on the chronos-2 backend."""
+    resample_pools: Mapping[str, pd.DataFrame] | None = None
+    """Extra pools some variables are drawn from instead, forwarded to every
+    :func:`normalise` call -- see :attr:`NormaliseConfig.resample_pools`. Not
+    on the chronos-2 backend."""
+    conditional_on: Mapping[str, Any] | None = None
+    """Filter on the ``resample_df`` pool, forwarded to every :func:`normalise`
+    call. Not on the chronos-2 backend."""
+
+
+_TIME_VARS = ("date_unix", "day_julian", "weekday", "hour")
+# decom_met's own result columns, which a group may not be named after.
+_MET_RESULT_COLUMNS = frozenset(
+    {"date", "observed", "emi_total", "met_total", "met_base", "met_noise"}
+)
+# Exact Shapley values need 2**k normalisations for k features or groups.
+_SHAPLEY_EXACT_MAX = 10
 
 
 def _resolve_config(config: DecomposeConfig | None = None, **kwargs: Any) -> DecomposeConfig:
@@ -109,6 +159,242 @@ def _log_decomposition_progress(
         var_to_fix,
         eta_str,
     )
+
+
+# A "player" is one unit decom_met attributes to: (result column name, features),
+# fixed at observed values or resampled as a whole.
+_Player = tuple[str, list[str]]
+
+
+def _players_from_groups(groups: Mapping[str, Sequence[str]], features: list[str]) -> list[_Player]:
+    """Validate ``groups`` against the model's meteorological features."""
+    if not isinstance(groups, Mapping) or not groups:
+        raise ConfigError("`groups` must be a non-empty mapping of group name -> features.")
+    feature_set = set(features)
+    owner: dict[str, str] = {}
+    players: list[_Player] = []
+    for name, members in groups.items():
+        if not isinstance(name, str) or not name:
+            raise ConfigError(f"group names must be non-empty strings, got {name!r}.")
+        if name in _MET_RESULT_COLUMNS:
+            raise ConfigError(
+                f"group name {name!r} clashes with a result column; rename the group."
+            )
+        if isinstance(members, str):
+            feats = [members]
+        elif isinstance(members, Iterable):
+            feats = [str(f) for f in members]
+        else:
+            raise ConfigError(
+                f"group {name!r} must be a feature name or a list of feature names, "
+                f"got {type(members).__name__}."
+            )
+        if not feats:
+            raise ConfigError(f"group {name!r} is empty.")
+        for f in feats:
+            if f in _TIME_VARS:
+                raise ConfigError(
+                    f"group {name!r} lists the time variable {f!r}; decom_met holds the time "
+                    "variables at their observed values and does not attribute them."
+                )
+            if f not in feature_set:
+                raise ConfigError(
+                    f"group {name!r} lists {f!r}, which is not a meteorological (non-time) "
+                    f"feature of the model. Features: {features}."
+                )
+            if f in owner:
+                where = (
+                    f"twice in group {name!r}"
+                    if owner[f] == name
+                    else (f"in two groups ({owner[f]!r} and {name!r})")
+                )
+                raise ConfigError(f"feature {f!r} is listed {where}.")
+            owner[f] = name
+        players.append((name, feats))
+    unassigned = [f for f in features if f not in owner]
+    if unassigned:
+        raise ConfigError(
+            "every meteorological (non-time) model feature must be in exactly one group; "
+            f"not in any: {unassigned}."
+        )
+    return players
+
+
+def _attribution_method(cfg: DecomposeConfig) -> str:
+    """Resolve and validate the attribution options that do not depend on the
+    model's features, so a bad call fails before a model is trained or loaded."""
+    method = (
+        cfg.attribution
+        if cfg.attribution is not None
+        else ("shapley" if cfg.groups is not None else "sequential")
+    )
+    if method not in ("sequential", "shapley"):
+        raise ConfigError(
+            f"`attribution` must be 'sequential' or 'shapley', got {cfg.attribution!r}."
+        )
+    if cfg.n_permutations is not None:
+        n: object = cfg.n_permutations  # annotated int, but nothing enforces it
+        if method != "shapley":
+            raise ConfigError("`n_permutations` only applies to attribution='shapley'.")
+        if isinstance(n, bool) or not isinstance(n, numbers.Integral):
+            raise ConfigError(f"`n_permutations` must be a whole number, got {n!r}.")
+        if n < 1:
+            raise ConfigError(f"`n_permutations` must be at least 1, got {n}.")
+    if cfg.groups is not None and cfg.variable_order is not None:
+        raise ConfigError(
+            "`variable_order` orders single features; with `groups` the groups are the "
+            "units, taken in the order they are listed."
+        )
+    if cfg.groups is None and cfg.variable_order is not None and method == "shapley":
+        raise ConfigError(
+            "`variable_order` has no effect with attribution='shapley', which averages "
+            "over every order."
+        )
+    return method
+
+
+def _attribution_plan(
+    features: list[str],
+    cfg: DecomposeConfig,
+    default_order: Callable[[list[str]], list[str]],
+) -> tuple[list[_Player], str]:
+    """Decide what :func:`decom_met` attributes to (features or groups) and how.
+
+    Returns ``(players, method)``, players in result-column order.
+    ``default_order`` is only consulted for a sequential run over single
+    features without ``variable_order``: the one case that needs a ranking.
+    """
+    method = _attribution_method(cfg)
+    if cfg.groups is not None:
+        players = _players_from_groups(cfg.groups, features)
+    elif cfg.variable_order is not None:
+        requested = [str(f) for f in cfg.variable_order]
+        if set(requested) != set(features):
+            raise ConfigError(
+                "`variable_order` must be exactly the model's meteorological (non-time) "
+                f"features, in any order. Missing: {sorted(set(features) - set(requested))}. "
+                f"Not in model: {sorted(set(requested) - set(features))}."
+            )
+        twice = sorted({f for f in requested if requested.count(f) > 1})
+        if twice:
+            raise ConfigError(f"`variable_order` lists {twice} more than once.")
+        players = [(f, [f]) for f in requested]
+    else:
+        order = default_order(features) if method == "sequential" else list(features)
+        players = [(f, [f]) for f in order]
+
+    k = len(players)
+    if method == "shapley" and cfg.n_permutations is None and k > _SHAPLEY_EXACT_MAX:
+        raise ConfigError(
+            f"exact Shapley values over {k} features need 2**{k} = {2**k:,} normalisations. "
+            "Pass `groups` to attribute to fewer, larger units, or `n_permutations` for a "
+            "sampled estimate."
+        )
+    return players, method
+
+
+def _attribute(
+    players: list[_Player],
+    value_of: Callable[[list[str]], np.ndarray],
+    *,
+    method: str,
+    n_permutations: int | None,
+    seed: int,
+    verbose: bool,
+) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    """Split ``v(every player fixed) - v(none fixed)`` among ``players``.
+
+    ``value_of(resample)`` returns the normalised series with the features in
+    ``resample`` resampled and every other feature at its observed values; the
+    value of a coalition (the set of players held at observed values) is that
+    series. Each coalition is evaluated once. Returns ``emi_total`` -- nothing
+    fixed -- and one contribution per player, which for every method add up to
+    ``v(all fixed) - emi_total``.
+    """
+    k = len(players)
+    values: dict[frozenset[int], np.ndarray] = {}
+    if method == "shapley" and n_permutations is not None:
+        n_orders = n_permutations + n_permutations % 2
+        if n_orders * max(k - 1, 1) + 2 >= 2**k:
+            (log.info if verbose else log.debug)(
+                "%d sampled orders would evaluate as many coalitions as the exact Shapley "
+                "values need (2**%d); computing them exactly.",
+                n_orders,
+                k,
+            )
+            n_permutations = None
+    planned = (
+        k + 1
+        if method == "sequential"
+        else 2**k
+        if n_permutations is None
+        else (n_permutations + n_permutations % 2) * (k - 1) + 2
+    )
+    start = time.time()
+
+    def v(fixed: frozenset[int]) -> np.ndarray:
+        if fixed not in values:
+            if not fixed:
+                label = "emi_total"
+            elif method == "sequential":
+                label = players[max(fixed)][0]
+            else:
+                label = "with fixed " + ", ".join(players[i][0] for i in sorted(fixed))
+            _log_decomposition_progress(verbose, start, len(values) + 1, planned, label)
+            resample = [f for i, (_, feats) in enumerate(players) if i not in fixed for f in feats]
+            values[fixed] = np.asarray(value_of(resample), dtype=float)
+        return values[fixed]
+
+    none_fixed: frozenset[int] = frozenset()
+    emi_total = v(none_fixed)
+    totals = [np.zeros_like(emi_total) for _ in players]
+
+    if method == "sequential":
+        prev = none_fixed
+        for i in range(k):
+            cur = prev | {i}
+            totals[i] = v(cur) - v(prev)
+            prev = cur
+    elif n_permutations is None:
+        # Exact: phi_i = sum over S not containing i of |S|!(k-|S|-1)!/k! * (v(S+i) - v(S)).
+        weight = [factorial(s) * factorial(k - s - 1) / factorial(k) for s in range(k)]
+        coalitions = [frozenset(i for i in range(k) if mask >> i & 1) for mask in range(2**k)]
+        coalitions.sort(key=lambda s: (len(s), sorted(s)))
+        for s in coalitions:
+            v(s)
+        for s in coalitions:
+            for i in range(k):
+                if i not in s:
+                    totals[i] += weight[len(s)] * (values[s | {i}] - values[s])
+    else:
+        # Monte Carlo over orders, in antithetic pairs: an order and its reverse.
+        rng = np.random.default_rng(seed)
+        n_pairs = (n_permutations + 1) // 2
+        for _ in range(n_pairs):
+            perm = [int(i) for i in rng.permutation(k)]
+            for order in (perm, perm[::-1]):
+                prev = none_fixed
+                for i in order:
+                    cur = prev | {i}
+                    totals[i] += v(cur) - v(prev)
+                    prev = cur
+        totals = [t / (2 * n_pairs) for t in totals]
+
+    return emi_total, {name: totals[i] for i, (name, _) in enumerate(players)}
+
+
+def _met_result(
+    result: pd.DataFrame, emi_total: np.ndarray, contributions: dict[str, np.ndarray]
+) -> pd.DataFrame:
+    """Add ``emi_total``, the contributions and the ``met_*`` totals to ``result``."""
+    result["emi_total"] = emi_total
+    for name, contribution in contributions.items():
+        result[name] = contribution
+    result["met_total"] = result["observed"] - result["emi_total"]
+    result["met_base"] = float(result["met_total"].mean())
+    contrib_sum = result[list(contributions)].sum(axis=1) if contributions else 0.0
+    result["met_noise"] = result["met_total"] - (result["met_base"] + contrib_sum)
+    return result
 
 
 def decompose(
@@ -199,27 +485,42 @@ def decompose(
 def _decom_met_zero_shot(
     df: pd.DataFrame, model: object | None, cfg: DecomposeConfig
 ) -> pd.DataFrame:
-    """Meteorological decomposition on Chronos-2, one nested de-weathering per feature.
+    """Meteorological decomposition on Chronos-2, one nested de-weathering per coalition.
 
-    Structurally identical to :func:`decom_met`: start with every meteorological
-    feature resampled, fix them one at a time, and take successive differences.
-    Only the inner call changes -- :meth:`Chronos2Estimator.deweather` in place
-    of :func:`normalise` -- because both answer the same question, "what would
-    this series be with these covariates averaged over".
+    Structurally identical to :func:`decom_met` -- same ``groups`` /
+    ``attribution`` options, same result columns. Only the inner call changes:
+    :meth:`Chronos2Estimator.deweather` in place of :func:`normalise`, because
+    both answer the same question, "what would this series be with these
+    covariates averaged over". ``deweather`` draws the weather from the frame
+    itself, so ``resample_df`` / ``resample_pools`` / ``conditional_on`` are
+    refused.
 
-    Ordering is the one real difference. :func:`decom_met` ranks features by
-    fitted importance, which does not exist here. ``variable_order`` is used when
-    given; otherwise features are ranked by their individual covariate
-    sensitivity, which is the zero-shot analogue: how far the forecast moves when
-    that one feature is shuffled. Ranking needs more rows than
-    ``context_length + prediction_length``; below that the covariate order is
-    kept as given and a warning is logged, since an arbitrary order still yields
-    a valid decomposition, only a less interpretable one.
+    Ordering for the sequential attribution is the one real difference.
+    :func:`decom_met` ranks features by fitted importance, which does not exist
+    here. ``variable_order`` is used when given; otherwise features are ranked
+    by their individual covariate sensitivity, which is the zero-shot analogue:
+    how far the forecast moves when that one feature is shuffled, from the
+    latest context the model accepts. Ranking needs more rows than
+    ``context_length + prediction_length`` and one such context; without them
+    the covariate order is kept as given and a warning is logged, since an
+    arbitrary order still yields a valid decomposition, only a less
+    interpretable one. Shapley attribution needs no ranking.
     """
     from ..foundation import Chronos2Estimator, to_indexed_frame
 
     if cfg.target is None:
         raise DataError("`target` must be provided.")
+    refused = [
+        n
+        for n in ("resample_df", "resample_pools", "conditional_on")
+        if getattr(cfg, n) is not None
+    ]
+    if refused:
+        raise ConfigError(
+            f"{', '.join(refused)} not available on the chronos-2 backend: "
+            "Chronos2Estimator.deweather draws the weather from the frame it is given."
+        )
+    _attribution_method(cfg)  # before any weights are loaded
     work = df.copy()
     if "date" not in work.columns:
         work = process_date(work)
@@ -245,52 +546,35 @@ def _decom_met_zero_shot(
         est._load_pipeline()
     est._check_index(indexed.index)
 
-    if cfg.variable_order is not None:
-        requested = list(cfg.variable_order)
-        if set(requested) != set(met):
-            raise ConfigError(
-                "`variable_order` must be exactly the meteorological features, in any "
-                f"order. Missing: {sorted(set(met) - set(requested))}. "
-                f"Not in the model: {sorted(set(requested) - set(met))}."
-            )
-        met = requested
-    else:
-        met = _rank_by_sensitivity(est, indexed, met, cfg)
+    players, method = _attribution_plan(
+        met, cfg, default_order=lambda feats: _rank_by_sensitivity(est, indexed, feats, cfg)
+    )
 
     n_samples = resolve_n_samples(cfg.n_samples, CHRONOS_BACKEND)
     result = pd.DataFrame({"observed": observed}, index=pd.DatetimeIndex(work["date"]))
     result.index.name = "date"
 
-    decomp_order = ["emi_total", *met]
-    resample_vars = met[:]
-    tmp: dict[str, np.ndarray] = {}
-    start = time.time()
-    for i, var_to_fix in enumerate(decomp_order, start=1):
-        if var_to_fix != "emi_total":
-            resample_vars = [v for v in resample_vars if v != var_to_fix]
-        _log_decomposition_progress(cfg.verbose, start, i, len(decomp_order), var_to_fix)
+    def value_of(resample: list[str]) -> np.ndarray:
         out = est.deweather(
             indexed,
             "value",
-            met_features=resample_vars,
+            met_features=resample,
             n_samples=n_samples,
             quantiles=(0.5,),
             random_state=cfg.seed,
             schema="normet",
         )
-        tmp[var_to_fix] = out["normalised"].reindex(result.index).to_numpy()
+        return out["normalised"].reindex(result.index).to_numpy()
 
-    result["emi_total"] = tmp["emi_total"]
-    prev = "emi_total"
-    for feat in met:
-        result[feat] = tmp[feat] - tmp[prev]
-        prev = feat
-
-    result["met_total"] = result["observed"] - result["emi_total"]
-    result["met_base"] = float(result["met_total"].mean())
-    contrib_sum = result[met].sum(axis=1) if met else 0.0
-    result["met_noise"] = result["met_total"] - (result["met_base"] + contrib_sum)
-    return result
+    emi_total, contributions = _attribute(
+        players,
+        value_of,
+        method=method,
+        n_permutations=cfg.n_permutations,
+        seed=cfg.seed,
+        verbose=cfg.verbose,
+    )
+    return _met_result(result, emi_total, contributions)
 
 
 def _rank_by_sensitivity(
@@ -306,7 +590,27 @@ def _rank_by_sensitivity(
             est.context_length + horizon,
         )
         return met
-    anchor = indexed.index[-horizon]
+    # The latest anchor whose context the model would accept. The record's end
+    # alone would refuse a trailing outage that deweather() just skips.
+    target = indexed["value"].to_numpy(dtype=float)
+    n_ctx = est.context_length
+    anchor = next(
+        (
+            indexed.index[i]
+            for i in range(len(indexed) - horizon, n_ctx - 1, -1)
+            if est._context_coverage(target[i - n_ctx : i]) >= est.min_context_coverage
+        ),
+        None,
+    )
+    if anchor is None:
+        log.warning(
+            "no %d-h context has %.0f%% of its target observed to rank features by "
+            "covariate sensitivity from, so the given covariate order is kept. Pass "
+            "variable_order to pin it explicitly.",
+            n_ctx,
+            100 * est.min_context_coverage,
+        )
+        return met
     scores: dict[str, float] = {}
     for feat in met:
         shift = est.covariate_sensitivity(
@@ -334,7 +638,7 @@ def decom_emi(
     **kwargs: Any,
 ) -> pd.DataFrame:
     """
-    Emission-based decomposition via leave-one-out normalisation.
+    Emission-based decomposition by nested normalisation.
 
     Sequentially fixes time variables, in the fixed order ``base`` ->
     ``date_unix`` -> ``day_julian`` -> ``weekday`` -> ``hour``, to isolate
@@ -381,7 +685,10 @@ def decom_emi(
     model : object, optional
         Pre-trained model.
     config : DecomposeConfig, optional
-        Consolidated config object.
+        Consolidated config object. ``resample_df``, ``resample_pools`` and
+        ``conditional_on`` are forwarded to every :func:`normalise` call;
+        ``groups``, ``n_permutations`` and ``attribution`` belong to
+        :func:`decom_met` and are refused here.
     **kwargs
         Supported shorthand for overriding individual :class:`DecomposeConfig`
         fields without constructing a config object. Any field passed both via
@@ -405,6 +712,12 @@ def decom_emi(
         raise ConfigError("Either `model` or `covariates` must be provided.")
     if model is None and _cfg.backend is None:
         raise ConfigError("When training a model, `backend` must be specified.")
+    if _cfg.groups is not None or _cfg.n_permutations is not None or _cfg.attribution is not None:
+        raise ConfigError(
+            "`groups`, `n_permutations` and `attribution` apply to the meteorological "
+            "decomposition (decom_met); decom_emi fixes the time variables in its own "
+            "calendar order."
+        )
 
     df_work = process_date(df.copy()) if "date" not in df.columns else df.copy()
     if "date" not in df_work.columns:
@@ -526,7 +839,9 @@ def decom_emi(
             aggregate=True,
             seed=_cfg.seed,
             n_cores=n_cores_eff,
-            resample_df=None,
+            resample_df=_cfg.resample_df,
+            resample_pools=_cfg.resample_pools,
+            conditional_on=_cfg.conditional_on,
             memory_save=_cfg.memory_save,
             cache=_cfg.cache,
         )
@@ -565,22 +880,47 @@ def decom_met(
     **kwargs: Any,
 ) -> pd.DataFrame:
     """
-    Meteorological decomposition via leave-one-out normalisation.
+    Meteorological decomposition by nested normalisation.
 
-    Iterates over meteorological features ordered by importance, isolating
-    the contribution of each feature to the predicted concentration.  Time
-    variables are excluded from the meteorological contribution set.
+    ``emi_total`` is the normalised series with every meteorological (non-time)
+    feature resampled; the time variables stay at their observed values
+    throughout. The model's prediction minus ``emi_total`` -- the part the
+    meteorology accounts for -- is split into one contribution per feature, or
+    per group of features (``groups``), by re-running :func:`normalise` with
+    some of them held at their observed values instead of resampled:
 
-    Note the asymmetry with :func:`decom_emi`: that function fixes time
-    variables in a *hardcoded* calendar order (``date_unix`` before
-    ``day_julian`` before ``weekday`` before ``hour``, chosen so each
-    component has a specific temporal-frequency meaning -- see its
-    docstring), whereas this function orders meteorological features by
-    *fitted importance*, which can vary run to run with the underlying
-    model. The two are not directly comparable in how "which component
-    comes first" was decided. Pass ``variable_order`` (via ``config`` or
-    as a keyword) to pin an explicit order instead, for results that stay
-    comparable across model refits.
+    - ``attribution="sequential"`` fixes them one at a time and reports each
+      step's change. This is cumulative fixing, not leave-one-out: each
+      contribution is conditional on everything fixed before it, so the split
+      depends on the order -- ``variable_order`` if given, else fitted
+      importance (``importance_ascending``), which can reorder when the model
+      is refitted; with ``groups``, the order they are listed in.
+    - ``attribution="shapley"`` averages each feature's (or group's) marginal
+      effect over every order it could be fixed in: the Shapley value of the
+      game whose value for a set ``S`` is the normalised series with ``S`` at
+      observed values. No order is privileged, so the split does not move when
+      features are listed differently or importance reshuffles.
+
+    Either way the contributions add up exactly to ``prediction - emi_total``,
+    and every :func:`normalise` call uses the same seed, so the differences
+    between calls are paired (common random numbers).
+
+    Separating transport from local effects is what ``groups`` is for::
+
+        decom_met(df, model, groups={"local": met_cols, "transport": traj_cols})
+
+    gives one ``local`` and one ``transport`` column (Shapley by default). Both
+    are measured against ``emi_total``, which averages over the air masses in
+    the resample pool, so over the record they are anomalies with a mean near
+    zero. To measure transport against a reference air mass instead, give the
+    trajectory features a pool of their own --
+    ``resample_pools={"transport": clean_hours[traj_cols]}`` makes
+    ``emi_total`` the level under that air mass and the ``transport`` column
+    the change from it to the air that actually arrived.
+
+    Note the asymmetry with :func:`decom_emi`, which fixes the time variables
+    in a hardcoded calendar order chosen so each component has a specific
+    temporal-frequency meaning.
 
     Parameters
     ----------
@@ -590,21 +930,29 @@ def decom_met(
         Pre-trained model. If None, a new model will be trained.
     config : DecomposeConfig, optional
         Consolidated config object. Individual keyword arguments (``target``,
-        ``backend``, ``covariates``, …) override the corresponding field
-        when provided.
+        ``backend``, ``covariates``, ``groups``, ``attribution``,
+        ``resample_pools``, …) override the corresponding field when provided.
 
     Returns
     -------
     pandas.DataFrame
-        Columns include ``observed``, ``emi_total``, per-meteorological-feature
-        contributions, ``met_total``, ``met_base``, and ``met_noise``.
+        Indexed by ``date``: ``observed``; ``emi_total``; one contribution
+        column per feature, or per group (named after it); ``met_total``
+        (``observed - emi_total``); ``met_base``, its mean (a constant); and
+        ``met_noise`` = ``met_total - met_base - sum of contributions``. That
+        last one equals the model residual ``observed - prediction`` shifted
+        by the constant ``met_base``: it is what the model does not explain,
+        not a meteorological term. When the model is trained here, rows with a
+        missing target are dropped, as :func:`build_model` drops them.
 
     Raises
     ------
-    ValueError
-        If required arguments are missing or columns are not found.
-    RuntimeError
-        If ``normalise`` does not return an ``aggregate`` column.
+    DataError, ConfigError
+        If required arguments are missing, columns are not found, or
+        ``groups`` / ``attribution`` / ``variable_order`` /
+        ``n_permutations`` are inconsistent with the model's features.
+    ModelError
+        If ``normalise`` does not return a ``normalised`` column.
     """
     _cfg = _resolve_config(config=config, **kwargs)
     # n_samples is None-by-default so it can follow the backend; the AutoML
@@ -619,6 +967,7 @@ def decom_met(
         raise ConfigError("Either `model` or `covariates` must be provided.")
     if model is None and _cfg.backend is None:
         raise ConfigError("When training a model, `backend` must be specified.")
+    _attribution_method(_cfg)  # before any model is trained
 
     df = df.copy()
     if "date" not in df.columns:
@@ -627,16 +976,14 @@ def decom_met(
 
     if _cfg.target not in df.columns:
         raise DataError(f"`df` does not contain the target column '{_cfg.target}'.")
-    observed_series = df[_cfg.target].copy()
 
     df_work = df.copy()
     if _cfg.target != "value":
         df_work = df_work.rename(columns={_cfg.target: "value"})
 
     if _cfg.covariates:
-        time_vars = ["date_unix", "day_julian", "weekday", "hour"]
         missing_time_vars = [
-            v for v in time_vars if v in _cfg.covariates and v not in df_work.columns
+            v for v in _TIME_VARS if v in _cfg.covariates and v not in df_work.columns
         ]
         if missing_time_vars:
             try:
@@ -670,6 +1017,11 @@ def decom_met(
             cache=_cfg.cache,
         )
 
+    # Observed values come from the frame actually decomposed: a model trained
+    # here drops the rows with a missing target, and taking `observed` from the
+    # input instead left it longer than the dates it was paired with.
+    observed_series = df_work["value"]
+
     try:
         feat_sorted = extract_features(model, importance_ascending=_cfg.importance_ascending)
     except Exception as exc:
@@ -681,22 +1033,9 @@ def decom_met(
     if not feat_sorted:
         raise DataError("No valid model features found in `df`.")
 
-    time_var_set: set[str] = {"hour", "weekday", "day_julian", "date_unix"}
-    contrib_candidates = [f for f in feat_sorted if f not in time_var_set]
-
-    if _cfg.variable_order is not None:
-        requested = list(_cfg.variable_order)
-        actual_set = set(contrib_candidates)
-        requested_set = set(requested)
-        if requested_set != actual_set:
-            missing = sorted(actual_set - requested_set)
-            extra = sorted(requested_set - actual_set)
-            raise ConfigError(
-                "`variable_order` must be exactly the model's meteorological "
-                f"(non-time) features, in any order. Missing: {missing}. "
-                f"Not in model: {extra}."
-            )
-        contrib_candidates = requested
+    # Already in importance order, which is the default sequential order.
+    contrib_candidates = [f for f in feat_sorted if f not in _TIME_VARS]
+    players, method = _attribution_plan(contrib_candidates, _cfg, default_order=list)
 
     result = (
         pd.DataFrame({"date": df_work["date"].to_numpy(), "observed": observed_series.to_numpy()})
@@ -705,29 +1044,21 @@ def decom_met(
     )
 
     n_cores_eff = _effective_cores(_cfg.n_cores)
-    decomp_order = ["emi_total"] + contrib_candidates[:]
-    resample_vars = contrib_candidates[:]
 
-    start = time.time()
-    tmp: dict[str, np.ndarray] = {}
-
-    for i, var_to_fix in enumerate(decomp_order, start=1):
-        if var_to_fix != "emi_total" and var_to_fix in resample_vars:
-            resample_vars = [v for v in resample_vars if v != var_to_fix]
-
-        _log_decomposition_progress(_cfg.verbose, start, i, len(decomp_order), var_to_fix)
-
+    def value_of(resample: list[str]) -> np.ndarray:
         df_norm = normalise(
             df=df_work,
             model=model,
             covariates=feat_sorted,
-            variables_resample=resample_vars,
+            variables_resample=resample,
             n_samples=_cfg.n_samples,
             replace=True,
             aggregate=True,
             seed=_cfg.seed,
             n_cores=n_cores_eff,
-            resample_df=None,
+            resample_df=_cfg.resample_df,
+            resample_pools=_cfg.resample_pools,
+            conditional_on=_cfg.conditional_on,
             memory_save=_cfg.memory_save,
             cache=_cfg.cache,
         )
@@ -736,19 +1067,14 @@ def decom_met(
             raise ModelError(
                 "`normalise` must return a DataFrame with column 'normalised' when aggregate=True."
             )
+        return df_norm.reindex(result.index)["normalised"].to_numpy()
 
-        tmp[var_to_fix] = df_norm.reindex(result.index)["normalised"].to_numpy()
-
-    result["emi_total"] = tmp["emi_total"]
-
-    prev_key = "emi_total"
-    for feat in contrib_candidates:
-        result[feat] = tmp[feat] - tmp[prev_key]
-        prev_key = feat
-
-    result["met_total"] = result["observed"] - result["emi_total"]
-    result["met_base"] = float(result["met_total"].mean())
-    contrib_sum = result[contrib_candidates].sum(axis=1) if contrib_candidates else 0.0
-    result["met_noise"] = result["met_total"] - (result["met_base"] + contrib_sum)
-
-    return result
+    emi_total, contributions = _attribute(
+        players,
+        value_of,
+        method=method,
+        n_permutations=_cfg.n_permutations,
+        seed=_cfg.seed,
+        verbose=_cfg.verbose,
+    )
+    return _met_result(result, emi_total, contributions)

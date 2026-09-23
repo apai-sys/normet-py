@@ -444,7 +444,7 @@ class MainWindow(QMainWindow):
         df_.addRow("Samples", self.decom_samples)
         self.decom_button = run_button(
             "▶  Run decomposition",
-            "Split the observed series into additive contributions\n(leave-one-out normalisation).",
+            "Split the observed series into additive contributions\n(nested normalisation).",
         )
         self.decom_button.clicked.connect(self._run_decompose)
         df_.addRow(self.decom_button)
