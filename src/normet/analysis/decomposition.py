@@ -675,9 +675,9 @@ def decom_emi(
         raise ConfigError("Either `model` or `covariates` must be provided.")
     if model is None and _cfg.backend is None:
         raise ConfigError("When training a model, `backend` must be specified.")
-    if _cfg.groups is not None or _cfg.n_permutations is not None or _cfg.attribution == "shapley":
+    if _cfg.groups is not None or _cfg.n_permutations is not None or _cfg.attribution is not None:
         raise ConfigError(
-            "`groups`, `n_permutations` and attribution='shapley' apply to the meteorological "
+            "`groups`, `n_permutations` and `attribution` apply to the meteorological "
             "decomposition (decom_met); decom_emi fixes the time variables in its own "
             "calendar order."
         )
