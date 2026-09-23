@@ -356,6 +356,14 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   `fetch_era5_timeseries`, which needs only `cdsapi` — no `xarray`/`netCDF4`.
 
 ### Fixed
+- **Lag analysis silently skipped pre-whitening on statsmodels 0.15.** The
+  AR fit passed `old_names=False`, which statsmodels 0.15 removed, so the
+  pre-whitening step raised, was caught, and fell back to the raw
+  cross-correlation -- the spurious-peak problem pre-whitening exists to
+  remove -- with only a log warning. It also turned CI red on every Python
+  version (`test_prewhitened_ccf_recovers_true_lag`). The argument is dropped;
+  its default had been False since before 0.14, so older statsmodels behave
+  as before.
 - **One long record gap aborted a whole Chronos-2 run, and the workaround
   corrupted it.** `Chronos2Estimator.deweather` and `.predict` refused the
   entire call as soon as a single block's context had less than

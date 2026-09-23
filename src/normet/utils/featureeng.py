@@ -400,11 +400,13 @@ def _prewhiten(
     # only need residuals here, not forecasts, so the warning is noise. The index
     # is preserved (not reset) so the filtered driver stays aligned with target.
     d = driver.dropna()
+    # No `old_names=`: statsmodels 0.15 removed it (TypeError), and before that
+    # its default was already False, which is what this used to pass.
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        sel = ar_model.ar_select_order(d, maxlag=max(1, int(max_ar)), ic="aic", old_names=False)
+        sel = ar_model.ar_select_order(d, maxlag=max(1, int(max_ar)), ic="aic")
         p = max(sel.ar_lags) if sel.ar_lags else 1
-        res = ar_model.AutoReg(d, lags=p, old_names=False).fit()
+        res = ar_model.AutoReg(d, lags=p).fit()
     phi = np.asarray(res.params[1 : p + 1], dtype=float)  # skip the constant
 
     driver_white = res.resid  # AR innovations of the driver (index p..end of d)
