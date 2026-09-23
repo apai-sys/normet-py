@@ -306,6 +306,22 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   `fetch_era5_timeseries`, which needs only `cdsapi` — no `xarray`/`netCDF4`.
 
 ### Fixed
+- **One long record gap aborted a whole Chronos-2 run, and the workaround
+  corrupted it.** `Chronos2Estimator.deweather` and `.predict` refused the
+  entire call as soon as a single block's context had less than
+  `min_context_coverage` of its target observed, so a multi-year run with one
+  outage could not complete. The only way through was
+  `min_context_coverage=0`, which let every gap through as a forecast scaled to
+  nothing: in a 16-year, three-site run, 71% of the hours inside week-long gaps
+  at one site came back with a de-weathered level below 0.5 ug/m3, with no
+  warning. The rolling paths now leave just those blocks NaN, log how many
+  blocks and rows were skipped, and raise only if no block has enough context.
+  The single-anchor methods (`predict_quantiles`, `covariate_sensitivity`,
+  `counterfactual`) still refuse. Runs that used to succeed are unchanged to
+  the bit. Also on `decompose(backend="chronos-2")`, where every coalition
+  skips the same blocks. The `deweather` docstring now says what `dew_pNN` is:
+  the model's predictive quantile averaged over the resampled weather, not a
+  confidence band for `dew_p50`.
 - **`decom_met(df, model=None)` crashed on a missing target** with "All arrays
   must be of the same length": the observed series was taken from the input,
   while the model trained on the fly -- and so the frame being decomposed --

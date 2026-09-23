@@ -297,6 +297,134 @@ def test_partial_context_is_allowed(met_frame):
     est._check_context(gappy["value"].to_numpy()[488:1000])
 
 
+# ------------------------------------------------ record gaps on rolling paths
+#
+# A stub stands in for the forward pass: it forecasts the mean of the observed
+# context, and it refuses -- exactly as the real one does -- any block whose
+# context is too sparse. So these tests pin which blocks are left NaN without
+# loading weights, and would fail if a sparse block ever reached the model.
+
+GAP_L, GAP_STEP = 48, 24
+
+
+def _stub_estimator() -> Chronos2Estimator:
+    est = Chronos2Estimator(context_length=GAP_L, prediction_length=GAP_STEP, device="cpu")
+    est._pipeline = object()
+    est._quantiles = np.array([0.1, 0.5, 0.9])
+
+    def forecast(items, cols, horizon):
+        for hist, _, _ in items:
+            est._check_context(hist)
+        return np.stack([np.full((3, horizon), np.nanmean(hist)) for hist, _, _ in items])
+
+    est._forecast_blocks = forecast  # type: ignore[method-assign]
+    return est
+
+
+def _gappy_frame(gap: tuple[int, int] = (100, 250), n: int = 400) -> pd.DataFrame:
+    t = np.arange(n)
+    value = 10.0 + np.sin(t / 5.0)
+    value[gap[0] : gap[1]] = np.nan
+    idx = pd.date_range("2024-01-01", periods=n, freq="h")
+    return pd.DataFrame({"value": value, "ws": 1.0 + t / n}, index=idx)
+
+
+def _sparse_blocks(value: np.ndarray, cover: float = 0.25) -> list[tuple[int, int]]:
+    """Blocks whose context has less than ``cover`` of the target observed."""
+    spans = [(s, min(s + GAP_STEP, len(value))) for s in range(GAP_L, len(value), GAP_STEP)]
+    return [(s, e) for s, e in spans if np.isfinite(value[max(0, s - GAP_L) : s]).mean() < cover]
+
+
+def _nan_rows(value: np.ndarray, blocks: list[tuple[int, int]]) -> np.ndarray:
+    mask = np.zeros(len(value), dtype=bool)
+    for s, e in blocks:
+        mask[s:e] = True
+    return mask
+
+
+def test_deweather_leaves_blocks_after_a_long_gap_nan(caplog):
+    """A gap longer than the context used to abort the whole run."""
+    df = _gappy_frame()
+    sparse = _sparse_blocks(df["value"].to_numpy())
+    assert len(sparse) == 5  # the blocks the 150 h gap starves of context
+
+    with caplog.at_level("WARNING"):
+        out = _stub_estimator().deweather(df, "value", n_samples=2, random_state=0)
+
+    expected = _nan_rows(df["value"].to_numpy(), sparse)
+    np.testing.assert_array_equal(out["dew_p50"].isna().to_numpy(), expected)
+    assert any("5 of 15 de-weathering blocks" in r.getMessage() for r in caplog.records)
+
+
+def test_predict_leaves_blocks_after_a_long_gap_nan():
+    df = _gappy_frame()
+    pred = _stub_estimator().predict(df)
+
+    expected = _nan_rows(df["value"].to_numpy(), _sparse_blocks(df["value"].to_numpy()))
+    np.testing.assert_array_equal(np.isnan(pred), expected)
+
+
+def test_rolling_paths_refuse_when_no_block_has_context():
+    df = _gappy_frame(gap=(10, 400))
+    with pytest.raises(InsufficientContextError, match="nothing can be projected"):
+        _stub_estimator().deweather(df, "value", n_samples=2, random_state=0)
+    with pytest.raises(InsufficientContextError, match="nothing can be projected"):
+        _stub_estimator().predict(df)
+
+
+def test_a_record_without_gaps_skips_nothing(caplog):
+    df = _gappy_frame(gap=(0, 0))
+    with caplog.at_level("WARNING"):
+        out = _stub_estimator().deweather(df, "value", n_samples=2, random_state=0)
+    assert out["dew_p50"].notna().all()
+    assert not [r for r in caplog.records if "left NaN" in r.getMessage()]
+
+
+def test_zero_shot_decomposition_survives_a_long_gap():
+    """Every coalition skips the same blocks, so the gap stays NaN and the rest closes."""
+    from normet import decompose
+
+    df = _gappy_frame().reset_index().rename(columns={"index": "date"})
+    df["blh"] = 500.0 + np.arange(len(df))
+    res = decompose(
+        df,
+        _stub_estimator(),
+        target="value",
+        method="meteorology",
+        backend="chronos-2",
+        covariates=["ws", "blh"],
+        groups={"wind": ["ws"], "mixing": ["blh"]},
+        n_samples=2,
+    )
+
+    expected = _nan_rows(df["value"].to_numpy(), _sparse_blocks(df["value"].to_numpy()))
+    np.testing.assert_array_equal(res["emi_total"].isna().to_numpy(), expected)
+    ok = ~expected & res["observed"].notna().to_numpy()
+    np.testing.assert_allclose(
+        (res["met_base"] + res["met_noise"] + res["wind"] + res["mixing"])[ok],
+        res["met_total"][ok],
+    )
+
+
+@needs_chronos
+def test_deweather_with_a_long_gap_on_the_real_model(met_frame, make_estimator):
+    """Same contract on the checkpoint: no exception, NaN exactly where starved."""
+    est = make_estimator(context_length=256, prediction_length=48)
+    frame = met_frame.iloc[:900].copy()
+    frame.loc[frame.index[400:700], "value"] = np.nan
+
+    out = est.deweather(frame, "value", met_features=["ws", "blh"], n_samples=2, random_state=0)
+
+    value = frame["value"].to_numpy()
+    spans = [(s, min(s + 48, len(value))) for s in range(256, len(value), 48)]
+    sparse = [(s, e) for s, e in spans if np.isfinite(value[max(0, s - 256) : s]).mean() < 0.25]
+    assert sparse  # the gap does starve some blocks
+    mask = np.zeros(len(value), dtype=bool)
+    for s, e in sparse:
+        mask[s:e] = True
+    np.testing.assert_array_equal(out["dew_p50"].isna().to_numpy(), mask)
+
+
 def test_irregular_index_is_refused(met_frame):
     """Dropped rows must raise: Chronos-2 reads position as time, not the timestamp.
 
