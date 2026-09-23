@@ -29,10 +29,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   every contribution is measured against the *average* conditions in it, so a
   transport term is an anomaly with a mean near zero; `{"transport":
   clean_hours[traj_cols]}` measures transport against a reference air mass
-  instead. Each pool has its own random stream, fixed by its name, so a
-  variable's draws do not move when other variables are fixed and
-  `decom_met`'s differences stay paired. Without pools the draws are unchanged,
-  and results are bit-identical on every execution path.
+  instead. Each pool has its own random stream, derived from its name, so a
+  variable's draws do not move when other variables are fixed -- `decom_met`'s
+  differences stay paired -- nor when other pools are added or renamed.
+  Without pools the draws are unchanged, and results are bit-identical on
+  every execution path.
 - **Notebook 05: transport vs local attribution.** On the bundled MY1 case:
   one transport-aware model scored on a blocked split, the grouped Shapley
   split into `local` and `transport`, the two fixed orders it averages, the
@@ -377,9 +378,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   The single-anchor methods (`predict_quantiles`, `covariate_sensitivity`,
   `counterfactual`) still refuse. Runs that used to succeed are unchanged to
   the bit. Also on `decompose(backend="chronos-2")`, where every coalition
-  skips the same blocks. The `deweather` docstring now says what `dew_pNN` is:
-  the model's predictive quantile averaged over the resampled weather, not a
-  confidence band for `dew_p50`.
+  skips the same blocks, and whose default sequential order is now ranked from
+  the latest context the model accepts rather than from the record's end,
+  which a trailing outage made refuse. The `deweather` docstring now says what
+  `dew_pNN` is: the model's predictive quantile averaged over the resampled
+  weather, not a confidence band for `dew_p50`.
 - **`decom_met(df, model=None)` crashed on a missing target** with "All arrays
   must be of the same length": the observed series was taken from the input,
   while the model trained on the fly -- and so the frame being decomposed --

@@ -7,9 +7,10 @@ Provides :func:`decompose` (and the convenience wrappers :func:`decom_emi`,
 
 from __future__ import annotations
 
+import numbers
 import os
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from math import factorial
 from pathlib import Path
@@ -179,7 +180,15 @@ def _players_from_groups(groups: Mapping[str, Sequence[str]], features: list[str
             raise ConfigError(
                 f"group name {name!r} clashes with a result column; rename the group."
             )
-        feats = [members] if isinstance(members, str) else [str(f) for f in members]
+        if isinstance(members, str):
+            feats = [members]
+        elif isinstance(members, Iterable):
+            feats = [str(f) for f in members]
+        else:
+            raise ConfigError(
+                f"group {name!r} must be a feature name or a list of feature names, "
+                f"got {type(members).__name__}."
+            )
         if not feats:
             raise ConfigError(f"group {name!r} is empty.")
         for f in feats:
@@ -214,16 +223,23 @@ def _players_from_groups(groups: Mapping[str, Sequence[str]], features: list[str
 def _attribution_method(cfg: DecomposeConfig) -> str:
     """Resolve and validate the attribution options that do not depend on the
     model's features, so a bad call fails before a model is trained or loaded."""
-    method = cfg.attribution or ("shapley" if cfg.groups is not None else "sequential")
+    method = (
+        cfg.attribution
+        if cfg.attribution is not None
+        else ("shapley" if cfg.groups is not None else "sequential")
+    )
     if method not in ("sequential", "shapley"):
         raise ConfigError(
             f"`attribution` must be 'sequential' or 'shapley', got {cfg.attribution!r}."
         )
     if cfg.n_permutations is not None:
+        n: object = cfg.n_permutations  # annotated int, but nothing enforces it
         if method != "shapley":
             raise ConfigError("`n_permutations` only applies to attribution='shapley'.")
-        if int(cfg.n_permutations) < 1:
-            raise ConfigError(f"`n_permutations` must be at least 1, got {cfg.n_permutations}.")
+        if isinstance(n, bool) or not isinstance(n, numbers.Integral):
+            raise ConfigError(f"`n_permutations` must be a whole number, got {n!r}.")
+        if n < 1:
+            raise ConfigError(f"`n_permutations` must be at least 1, got {n}.")
     if cfg.groups is not None and cfg.variable_order is not None:
         raise ConfigError(
             "`variable_order` orders single features; with `groups` the groups are the "
@@ -483,9 +499,10 @@ def _decom_met_zero_shot(
     :func:`decom_met` ranks features by fitted importance, which does not exist
     here. ``variable_order`` is used when given; otherwise features are ranked
     by their individual covariate sensitivity, which is the zero-shot analogue:
-    how far the forecast moves when that one feature is shuffled. Ranking needs
-    more rows than ``context_length + prediction_length``; below that the
-    covariate order is kept as given and a warning is logged, since an
+    how far the forecast moves when that one feature is shuffled, from the
+    latest context the model accepts. Ranking needs more rows than
+    ``context_length + prediction_length`` and one such context; without them
+    the covariate order is kept as given and a warning is logged, since an
     arbitrary order still yields a valid decomposition, only a less
     interpretable one. Shapley attribution needs no ranking.
     """
@@ -573,7 +590,27 @@ def _rank_by_sensitivity(
             est.context_length + horizon,
         )
         return met
-    anchor = indexed.index[-horizon]
+    # The latest anchor whose context the model would accept. The record's end
+    # alone would refuse a trailing outage that deweather() just skips.
+    target = indexed["value"].to_numpy(dtype=float)
+    n_ctx = est.context_length
+    anchor = next(
+        (
+            indexed.index[i]
+            for i in range(len(indexed) - horizon, n_ctx - 1, -1)
+            if est._context_coverage(target[i - n_ctx : i]) >= est.min_context_coverage
+        ),
+        None,
+    )
+    if anchor is None:
+        log.warning(
+            "no %d-h context has %.0f%% of its target observed to rank features by "
+            "covariate sensitivity from, so the given covariate order is kept. Pass "
+            "variable_order to pin it explicitly.",
+            n_ctx,
+            100 * est.min_context_coverage,
+        )
+        return met
     scores: dict[str, float] = {}
     for feat in met:
         shift = est.covariate_sensitivity(
@@ -650,7 +687,7 @@ def decom_emi(
     config : DecomposeConfig, optional
         Consolidated config object. ``resample_df``, ``resample_pools`` and
         ``conditional_on`` are forwarded to every :func:`normalise` call;
-        ``groups``, ``n_permutations`` and ``attribution="shapley"`` belong to
+        ``groups``, ``n_permutations`` and ``attribution`` belong to
         :func:`decom_met` and are refused here.
     **kwargs
         Supported shorthand for overriding individual :class:`DecomposeConfig`
