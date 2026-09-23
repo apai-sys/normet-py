@@ -7,6 +7,86 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ## [Unreleased]
 
 ### Added
+- **`decom_met`: feature groups and Shapley attribution.** `groups=` attributes
+  the meteorological features in named groups -- e.g. `{"local": met_cols,
+  "transport": traj_cols}` -- with one result column per group, and
+  `attribution="shapley"` averages each feature's or group's marginal effect
+  over every order it could be fixed in, instead of fixing them one at a time.
+  The sequential split depends on the order: on the bundled MY1 transport case
+  the summed trajectory contribution had a standard deviation between 4.2 and
+  5.6 ug/m3 depending only on the order, and the top-ranked feature -- which
+  sets the default order -- changed between refits. Shapley values are exact
+  (all `2**k` coalitions, up to 10 features or groups -- four normalisations
+  for two groups) or, with `n_permutations=`, sampled in antithetic pairs;
+  every coalition is normalised once and with the
+  same seed, and the contributions add up exactly to `prediction - emi_total`
+  whichever way they are split. Groups default to Shapley; without groups the
+  default stays sequential, and those results are unchanged to the bit. The
+  chronos-2 path (`decompose(backend="chronos-2")`) takes the same options.
+- **`normalise`: `resample_pools=` draws chosen variables from their own pool.**
+  A pool's columns name the variables drawn from it -- whole rows at a time,
+  independently of `resample_df` and of the other pools. With a single pool
+  every contribution is measured against the *average* conditions in it, so a
+  transport term is an anomaly with a mean near zero; `{"transport":
+  clean_hours[traj_cols]}` measures transport against a reference air mass
+  instead. Each pool has its own random stream, fixed by its name, so a
+  variable's draws do not move when other variables are fixed and
+  `decom_met`'s differences stay paired. Without pools the draws are unchanged,
+  and results are bit-identical on every execution path.
+- **Notebook 05: transport vs local attribution.** On the bundled MY1 case:
+  one transport-aware model scored on a blocked split, the grouped Shapley
+  split into `local` and `transport`, the two fixed orders it averages, the
+  two-model difference of notebook 04 for comparison (correlation 0.59 with
+  the grouped transport term, 40% of its amplitude), and a clean-Atlantic
+  reference pool that turns the transport anomaly (mean -0.03 ug/m3) into a
+  contribution (mean +2.70 ug/m3). Notebook 04 stays as the paper's
+  reproduction.
+- **`decom_met` / `decom_emi` forward `resample_df`, `resample_pools` and
+  `conditional_on`** to every `normalise` call. `decom_met` previously passed
+  `resample_df=None` whatever it was given, unlike normet-R's
+  `nm_decom_met`. The chronos-2 path refuses all three rather than ignore them.
+- **Trajectory quality columns and `min_hours`.** `trajectory_features` /
+  `build_trajectory_features` / `run_back_trajectories` now emit
+  `traj_n_endpoints` and `traj_age_max_h`, and take `min_hours`. A trajectory
+  that HYSPLIT ended early (met files ran out, or it left the domain) used to
+  be indistinguishable from a legitimately short-range one: its `dist_km`
+  shrank and its residence fractions were taken over fewer points, with no
+  flag. `min_hours` sets every feature except the two quality columns to NaN for
+  such rows; it is opt-in, so existing frames only gain two columns.
+  `run_back_trajectories` warns about truncated runs either way.
+- **Notebook 04, section 4: a leakage-safe check.** A 6-hourly trajectory
+  carried onto an hourly panel is piecewise constant, so under a random split a
+  tree model uses it as a time fingerprint: on the bundled MY1 case a
+  trajectory-only model scores test R^2 0.84 (random) vs 0.46 (`month_ts`),
+  against 0.79 / 0.46 for local meteorology. The new section crosses
+  {nearest, backward} join with {random, `month_ts`} split. The transport-aware
+  gain survives the blocked split (+0.07 with the backward join) but is smaller
+  than the random-split, nearest-join figures of sections 2-3 suggest. Those
+  sections are left as the paper's reproduction.
+- **`run_back_trajectories` passes each run only the met files it can touch.**
+  It used to list every file in `met_files` in every `CONTROL`, so a multi-year
+  GDAS1 archive (hundreds of weekly files) was handed to, and opened by, each of
+  thousands of runs. GDAS1 files (`gdas1.<mmm><yy>.w<N>`) are now selected from
+  the dates in their names against the run's `[receptor - hours_back, receptor]`
+  window; files with any other name are always kept, and if nothing overlaps all
+  are passed so `hyts_std` reports the coverage problem itself (ported from
+  `normet-r`). The window is widened by one 3-hourly record on each side: probed
+  against `hyts_std` with two adjacent daily ARL files, a start time between one
+  file's last record and the next file's first (23:30, 23:59) failed with only
+  the earlier file and ran with both, so a strict overlap test would break
+  hourly receptors in the last hours of every weekly file.
+- **`build_trajectory_features` warns when source regions overlap.** An
+  endpoint inside several regions counts towards each, so overlapping regions'
+  residence fractions add up to more than 1 and are not shares of the
+  trajectory -- in the bundled MY1 features they sum past 1 for 52% of
+  trajectories, which nothing flagged. The warning names the overlapping pairs
+  (boxes, and polygons via shapely); regions that only touch do not count. A
+  bounding box given as numpy scalars (e.g. `np.float32`) used to fall through
+  to the polygon path and crash; it is now read as a box.
+- **Trajectory docs.** The `normet.io.trajectory` docstring now shows the
+  backward-aligned join (`merge_asof(direction="backward")`) instead of
+  `ffill(limit=8)`, which was longer than a 6-hourly release interval, and
+  documents the random-split caveat.
 - **Fine-tuning: `Chronos2Estimator.finetune`.** Adapts the checkpoint to one
   site's own record and returns a *new* estimator, leaving the original on the
   pretrained weights so the two can be compared without reloading. LoRA is the
@@ -276,6 +356,38 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   `fetch_era5_timeseries`, which needs only `cdsapi` — no `xarray`/`netCDF4`.
 
 ### Fixed
+- **One long record gap aborted a whole Chronos-2 run, and the workaround
+  corrupted it.** `Chronos2Estimator.deweather` and `.predict` refused the
+  entire call as soon as a single block's context had less than
+  `min_context_coverage` of its target observed, so a multi-year run with one
+  outage could not complete. The only way through was
+  `min_context_coverage=0`, which let every gap through as a forecast scaled to
+  nothing: in a 16-year, three-site run, 71% of the hours inside week-long gaps
+  at one site came back with a de-weathered level below 0.5 ug/m3, with no
+  warning. The rolling paths now leave just those blocks NaN, log how many
+  blocks and rows were skipped, and raise only if no block has enough context.
+  The single-anchor methods (`predict_quantiles`, `covariate_sensitivity`,
+  `counterfactual`) still refuse. Runs that used to succeed are unchanged to
+  the bit. Also on `decompose(backend="chronos-2")`, where every coalition
+  skips the same blocks. The `deweather` docstring now says what `dew_pNN` is:
+  the model's predictive quantile averaged over the resampled weather, not a
+  confidence band for `dew_p50`.
+- **`decom_met(df, model=None)` crashed on a missing target** with "All arrays
+  must be of the same length": the observed series was taken from the input,
+  while the model trained on the fly -- and so the frame being decomposed --
+  had dropped the rows with a missing target. It is now taken from the frame
+  actually decomposed. Affected the CLI `decompose --method meteorology` on any
+  table with gaps.
+- **A feature listed twice in `decom_met`'s `variable_order` was credited with
+  exactly zero.** The set-equality check let the duplicate through, the second
+  pass overwrote the feature's column with `0`, and its effect moved into
+  `met_noise` (measured: contribution sd 0.0 instead of 3.0, `met_noise` sd 3.2
+  instead of 0.5). Duplicates are now refused.
+- **Decomposition docs described a leave-one-out scheme.** Both decompositions
+  fix variables cumulatively, so each component is conditional on those fixed
+  before it; the docstrings, GUI tooltip and user guide now say so, and
+  `met_noise` is documented as what it is -- the model residual shifted by
+  `met_base` -- rather than a meteorological term.
 - **`generate_html_report` retained every figure it drew.** The report builds
   its own plot, serialises it to an inline PNG and has no further use for it,
   but pyplot keeps each figure alive until closed -- so generating a report per
