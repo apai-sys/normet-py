@@ -65,6 +65,94 @@ def test_trajectory_features(tmp_path):
     assert f["traj_resid_sw_box"] == 1 / 3
 
 
+def test_trajectory_quality_columns(tmp_path):
+    df = tj.read_trajectory_tdump(_write(tmp_path))
+    f = tj.trajectory_features(df)
+
+    # The fixture reaches back exactly 2 h over 3 endpoints.
+    assert f["traj_n_endpoints"] == 3
+    assert f["traj_age_max_h"] == 2.0
+    # Default (min_hours=None) keeps a short trajectory's geometry intact.
+    assert np.isfinite(f["traj_dist_km"])
+
+
+def test_min_hours_nulls_truncated_trajectory(tmp_path):
+    df = tj.read_trajectory_tdump(_write(tmp_path))
+    box = {"sw_box": (-3.0, 50.5, -1.5, 51.5)}
+
+    # Reach (2 h) satisfies min_hours=2 -> untouched.
+    ok = tj.trajectory_features(df, source_regions=box, min_hours=2)
+    assert np.isfinite(ok["traj_dist_km"]) and ok["traj_resid_sw_box"] == 1 / 3
+
+    # Asking for 72 h of a 2 h trajectory: every feature NaN except the quality
+    # columns, which stay so the truncation is visible rather than silent.
+    short = tj.trajectory_features(df, source_regions=box, min_hours=72)
+    assert short["traj_n_endpoints"] == 3 and short["traj_age_max_h"] == 2.0
+    nulled = {k for k in short if k not in ("traj_n_endpoints", "traj_age_max_h")}
+    assert nulled and all(np.isnan(short[k]) for k in nulled)
+    # Same columns either way, so a frame built from a mix stays rectangular.
+    assert set(short) == set(ok)
+
+
+def test_build_trajectory_features_warns_on_truncated(tmp_path, caplog):
+    _write(tmp_path, "tdump_a")
+
+    with caplog.at_level("WARNING"):
+        out = tj.build_trajectory_features(str(tmp_path / "tdump_*"), min_hours=72)
+
+    assert out["traj_dist_km"].isna().all()
+    assert out["traj_age_max_h"].iloc[0] == 2.0
+    assert any("truncated" in r.message for r in caplog.records)
+
+
+def test_overlapping_regions_are_detected():
+    regions = {
+        "west": (-10.0, 50.0, 0.0, 55.0),
+        "east": (-2.0, 50.0, 5.0, 55.0),  # shares -2..0 with west
+        "north": (-10.0, 55.0, 0.0, 60.0),  # only touches west along lat 55
+        "far": (20.0, 30.0, 25.0, 35.0),
+    }
+    assert tj._overlapping_regions(regions) == [("west", "east")]
+
+
+def test_overlap_check_handles_polygons_and_numpy_boxes():
+    from shapely.geometry import Polygon
+
+    tri = Polygon([(-5.0, 50.0), (5.0, 50.0), (0.0, 58.0)])
+    regions = {
+        "tri": tri,
+        "box32": tuple(np.float32(v) for v in (-1.0, 51.0, 1.0, 52.0)),  # inside the triangle
+        "away": (20.0, 30.0, 25.0, 35.0),
+    }
+    assert tj._overlapping_regions(regions) == [("tri", "box32")]
+
+
+def test_float32_box_gives_the_same_residence_as_a_float_box(tmp_path):
+    # A box of numpy scalars used to fall through to the shapely path and crash.
+    df = tj.read_trajectory_tdump(_write(tmp_path))
+    box = (-3.0, 50.5, -1.5, 51.5)
+    f64 = tj.trajectory_features(df, source_regions={"b": box})
+    f32 = tj.trajectory_features(df, source_regions={"b": tuple(np.float32(v) for v in box)})
+    assert f32["traj_resid_b"] == f64["traj_resid_b"] == 1 / 3
+
+
+def test_build_trajectory_features_warns_on_overlapping_regions(tmp_path, caplog):
+    _write(tmp_path, "tdump_a")
+    with caplog.at_level("WARNING"):
+        tj.build_trajectory_features(
+            str(tmp_path / "tdump_*"),
+            source_regions={"uk": (-6.0, 50.0, 2.0, 56.0), "sw": (-3.0, 50.5, -1.5, 51.5)},
+        )
+    assert any("overlap (uk & sw)" in r.getMessage() for r in caplog.records)
+
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        tj.build_trajectory_features(
+            str(tmp_path / "tdump_*"), source_regions={"sw": (-3.0, 50.5, -1.5, 51.5)}
+        )
+    assert not [r for r in caplog.records if "overlap" in r.getMessage()]
+
+
 def test_build_trajectory_features(tmp_path):
     _write(tmp_path, "tdump_a")
     _write(tmp_path, "tdump_b")  # same receptor time -> deduplicated
@@ -125,6 +213,99 @@ def test_setup_cfg_text():
 
     with pytest.raises(ValueError, match="Unknown diagnostic"):
         tj._setup_cfg_text(["bogus"])
+
+
+MET = ["gdas1.jan20.w1", "gdas1.jan20.w2", "gdas1.jan20.w3", "gdas1.jan20.w4", "gdas1.jan20.w5"]
+
+
+def test_filter_met_files_keeps_only_overlapping_weeks():
+    ts = pd.Timestamp
+    # 72 h back from 16 Jan 12:00 stays inside w3 (15-21 Jan) and w2 (8-14 Jan).
+    kept = tj._filter_met_files(MET, ts("2020-01-13 12:00"), ts("2020-01-16 12:00"))
+    assert kept == ["gdas1.jan20.w2", "gdas1.jan20.w3"]
+    # Entirely inside one week -> one file.
+    assert tj._filter_met_files(MET, ts("2020-01-16 00:00"), ts("2020-01-17 00:00")) == [
+        "gdas1.jan20.w3"
+    ]
+
+
+def test_filter_met_files_pads_the_window_across_a_week_boundary():
+    ts = pd.Timestamp
+    # 22:00 on 7 Jan lies in the gap between w1's last GDAS1 record (21:00) and
+    # w2's first (8 Jan 00:00); interpolating there needs w2 as well. A strict
+    # overlap test would drop it and hyts_std would fail (probed against hyts_std).
+    kept = tj._filter_met_files(MET, ts("2020-01-07 16:00"), ts("2020-01-07 22:00"))
+    assert kept == ["gdas1.jan20.w1", "gdas1.jan20.w2"]
+    # ...but not once the window is a full record interval clear of the boundary.
+    kept = tj._filter_met_files(MET, ts("2020-01-07 06:00"), ts("2020-01-07 12:00"))
+    assert kept == ["gdas1.jan20.w1"]
+
+
+def test_filter_met_files_always_keeps_unrecognised_names():
+    ts = pd.Timestamp
+    paths = ["gdas1.jan20.w1", "custom_met.BIN", "gdas1.jan20.w4"]
+    kept = tj._filter_met_files(paths, ts("2020-01-02"), ts("2020-01-03"))
+    assert kept == ["gdas1.jan20.w1", "custom_met.BIN"]
+
+
+FAKE_HYTS = """\
+#!/bin/sh
+# Stand-in for hyts_std: log the CONTROL it was given, then emit a canned tdump.
+name=$(tail -n 1 CONTROL)
+cp CONTROL "CONTROL_$name"
+cp "$FAKE_TDUMP" "$name"
+"""
+
+
+def _fake_run(tmp_path, monkeypatch, times, met_names, **kw):
+    exe = tmp_path / "exec" / "hyts_std"
+    exe.parent.mkdir()
+    exe.write_text(FAKE_HYTS)
+    exe.chmod(0o755)
+    monkeypatch.setenv("FAKE_TDUMP", str(_write(tmp_path)))
+    mets = []
+    for n in met_names:
+        (tmp_path / n).write_text("")
+        mets.append(str(tmp_path / n))
+    work = tmp_path / "work"
+    tj.run_back_trajectories(
+        times, 51.5, -0.13, met_files=mets, hysplit_exec=exe, work_dir=work, **kw
+    )
+    return work
+
+
+def _control_mets(work, name):
+    lines = (work / f"CONTROL_{name}").read_text().splitlines()
+    n_met = int(lines[6])
+    return [lines[8 + 2 * i] for i in range(n_met)]  # (dir, file) pairs -> file names
+
+
+def test_run_back_trajectories_passes_only_relevant_met_files(tmp_path, monkeypatch):
+    work = _fake_run(
+        tmp_path,
+        monkeypatch,
+        [pd.Timestamp("2020-01-16 12:00"), pd.Timestamp("2020-01-03 06:00")],
+        MET,
+        hours_back=72,
+    )
+    assert _control_mets(work, "tdump_2020011612") == ["gdas1.jan20.w2", "gdas1.jan20.w3"]
+    assert _control_mets(work, "tdump_2020010306") == ["gdas1.jan20.w1"]
+
+
+def test_run_back_trajectories_falls_back_to_all_met_files(tmp_path, monkeypatch):
+    # No file's dates overlap the window -> hand hyts_std everything rather than
+    # nothing, and let it report the coverage problem.
+    work = _fake_run(
+        tmp_path, monkeypatch, [pd.Timestamp("2021-06-01 00:00")], MET[:2], hours_back=24
+    )
+    assert _control_mets(work, "tdump_2021060100") == MET[:2]
+
+
+def test_run_back_trajectories_warns_on_truncated(tmp_path, monkeypatch, caplog):
+    # The canned tdump reaches back 2 h, the run asks for 24 -> truncated.
+    with caplog.at_level("WARNING"):
+        _fake_run(tmp_path, monkeypatch, [pd.Timestamp("2020-01-16 12:00")], MET, hours_back=24)
+    assert any("stopped short" in r.message for r in caplog.records)
 
 
 def test_run_back_trajectories_requires_executable(tmp_path):

@@ -13,6 +13,7 @@ covers days 1-7 (w1), 8-14 (w2), 15-21 (w3), 22-28 (w4), 29-31 (w5).
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +47,37 @@ _GDAS_MONTHS = (
 def _gdas1_week(day: int) -> int:
     """ARL week-of-month index: 1-7→1, 8-14→2, 15-21→3, 22-28→4, 29-31→5."""
     return min((int(day) - 1) // 7 + 1, 5)
+
+
+_GDAS1_NAME = re.compile(r"gdas1\.([a-z]{3})(\d{2})\.w(\d)")
+
+
+def _gdas1_file_range(path: str | Path) -> tuple[pd.Timestamp, pd.Timestamp] | None:
+    """Approximate ``[start, end]`` UTC span of a GDAS1 weekly file, from its name.
+
+    ``gdas1.<mmm><yy>.w<N>`` covers days 1-7 (w1) ... 29-end of month (w5); the
+    end is clamped to the last second of the month, so a short month's ``w4``/
+    ``w5`` does not spill into the next one. Only the *name* is read, never the
+    file.
+
+    Returns
+    -------
+    tuple of Timestamp, or None
+        ``None`` for a name that does not follow the GDAS1 convention -- callers
+        should treat such a file as "covers unknown dates" and keep it.
+    """
+    m = _GDAS1_NAME.search(Path(path).name)
+    if m is None or m.group(1) not in _GDAS_MONTHS:
+        return None
+    month = _GDAS_MONTHS.index(m.group(1)) + 1
+    year, week = 2000 + int(m.group(2)), int(m.group(3))
+    month_start = pd.Timestamp(year=year, month=month, day=1)
+    start = month_start + pd.Timedelta(days=(week - 1) * 7)
+    end = min(
+        month_start + pd.Timedelta(days=week * 7) - pd.Timedelta(seconds=1),
+        month_start + pd.offsets.MonthBegin(1) - pd.Timedelta(seconds=1),
+    )
+    return start, end
 
 
 def gdas1_filenames(date_from: Any, date_to: Any) -> list[str]:

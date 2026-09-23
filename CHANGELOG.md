@@ -7,6 +7,48 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ## [Unreleased]
 
 ### Added
+- **Trajectory quality columns and `min_hours`.** `trajectory_features` /
+  `build_trajectory_features` / `run_back_trajectories` now emit
+  `traj_n_endpoints` and `traj_age_max_h`, and take `min_hours`. A trajectory
+  that HYSPLIT ended early (met files ran out, or it left the domain) used to
+  be indistinguishable from a legitimately short-range one: its `dist_km`
+  shrank and its residence fractions were taken over fewer points, with no
+  flag. `min_hours` sets every feature except the two quality columns to NaN for
+  such rows; it is opt-in, so existing frames only gain two columns.
+  `run_back_trajectories` warns about truncated runs either way.
+- **Notebook 04, section 4: a leakage-safe check.** A 6-hourly trajectory
+  carried onto an hourly panel is piecewise constant, so under a random split a
+  tree model uses it as a time fingerprint: on the bundled MY1 case a
+  trajectory-only model scores test R^2 0.84 (random) vs 0.46 (`month_ts`),
+  against 0.79 / 0.46 for local meteorology. The new section crosses
+  {nearest, backward} join with {random, `month_ts`} split. The transport-aware
+  gain survives the blocked split (+0.07 with the backward join) but is smaller
+  than the random-split, nearest-join figures of sections 2-3 suggest. Those
+  sections are left as the paper's reproduction.
+- **`run_back_trajectories` passes each run only the met files it can touch.**
+  It used to list every file in `met_files` in every `CONTROL`, so a multi-year
+  GDAS1 archive (hundreds of weekly files) was handed to, and opened by, each of
+  thousands of runs. GDAS1 files (`gdas1.<mmm><yy>.w<N>`) are now selected from
+  the dates in their names against the run's `[receptor - hours_back, receptor]`
+  window; files with any other name are always kept, and if nothing overlaps all
+  are passed so `hyts_std` reports the coverage problem itself (ported from
+  `normet-r`). The window is widened by one 3-hourly record on each side: probed
+  against `hyts_std` with two adjacent daily ARL files, a start time between one
+  file's last record and the next file's first (23:30, 23:59) failed with only
+  the earlier file and ran with both, so a strict overlap test would break
+  hourly receptors in the last hours of every weekly file.
+- **`build_trajectory_features` warns when source regions overlap.** An
+  endpoint inside several regions counts towards each, so overlapping regions'
+  residence fractions add up to more than 1 and are not shares of the
+  trajectory -- in the bundled MY1 features they sum past 1 for 52% of
+  trajectories, which nothing flagged. The warning names the overlapping pairs
+  (boxes, and polygons via shapely); regions that only touch do not count. A
+  bounding box given as numpy scalars (e.g. `np.float32`) used to fall through
+  to the polygon path and crash; it is now read as a box.
+- **Trajectory docs.** The `normet.io.trajectory` docstring now shows the
+  backward-aligned join (`merge_asof(direction="backward")`) instead of
+  `ffill(limit=8)`, which was longer than a 6-hourly release interval, and
+  documents the random-split caveat.
 - **Fine-tuning: `Chronos2Estimator.finetune`.** Adapts the checkpoint to one
   site's own record and returns a *new* estimator, leaving the original on the
   pretrained weights so the two can be compared without reloading. LoRA is the

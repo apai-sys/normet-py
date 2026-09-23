@@ -16,13 +16,40 @@ Workflow
 >>> feats = nio.build_trajectory_features(
 ...     "traj/tdump_*",
 ...     source_regions={"industrial_NE": (116.0, 39.0, 120.0, 42.0)},
+...     min_hours=72,  # null out trajectories cut short by the met data
 ... )                                                        # doctest: +SKIP
->>> df = df.join(feats).ffill(limit=8)                        # doctest: +SKIP
+>>> # Align backward: each hour takes the latest trajectory that has already
+>>> # arrived. ``direction="nearest"`` would hand hours 04-05 the 06:00
+>>> # trajectory, i.e. air that has not arrived yet.
+>>> df = pd.merge_asof(
+...     df.sort_values("date"), feats.reset_index().sort_values("date"),
+...     on="date", direction="backward", tolerance=pd.Timedelta("6h"),
+... )                                                        # doctest: +SKIP
 >>> # then pass the ``traj_*`` columns to do_all, also in variables_resample
+
+Evaluation caveat
+-----------------
+Trajectories released every few hours and carried onto an hourly panel are
+piecewise constant: every hour of a release window shares one identical feature
+vector. Under a *random* train/test split a tree model can use that vector as a
+time fingerprint and memorise neighbouring hours, inflating test R^2 (on the
+bundled MY1 case a trajectory-only model scores ~0.84 under a random split but
+~0.46 under a blocked one). Judge transport-aware models with a blocked split
+(``split_method="month_ts"`` / ``"ts"``), or release trajectories hourly.
+
+Quality columns
+---------------
+Every feature row also carries ``traj_n_endpoints`` and ``traj_age_max_h``
+(how far back the trajectory actually reached). A trajectory that terminates
+early -- the met data ran out, or it left the model domain -- otherwise looks
+like a legitimately short-range one: its ``dist_km`` shrinks and its residence
+fractions are computed over fewer points, with no flag. ``min_hours`` turns
+such rows into NaN instead.
 """
 
 from __future__ import annotations
 
+import numbers
 import os
 import shutil
 import subprocess
@@ -36,6 +63,7 @@ import numpy as np
 import pandas as pd
 
 from ..utils.logging import get_logger
+from .gdas import _gdas1_file_range
 
 log = get_logger(__name__)
 
@@ -150,19 +178,45 @@ def _bearing_deg(lat0: float, lon0: float, lat1: float, lon1: float) -> float:
     return float((np.degrees(np.arctan2(y, x)) + 360) % 360)
 
 
+def _is_bbox(region: Any) -> bool:
+    """A ``(lon_min, lat_min, lon_max, lat_max)`` box, numpy scalars included."""
+    return (
+        isinstance(region, tuple | list)
+        and len(region) == 4
+        and all(isinstance(v, numbers.Real) and not isinstance(v, bool) for v in region)
+    )
+
+
 def _region_mask(region: Any, lon: np.ndarray, lat: np.ndarray) -> np.ndarray:
     """Point-in-region test — a 4-tuple bbox, or a shapely geometry (polygon
     boundaries loaded from GeoJSON via :func:`load_source_regions`)."""
-    if (
-        isinstance(region, tuple | list)
-        and len(region) == 4
-        and all(isinstance(v, int | float) for v in region)
-    ):
-        xmn, ymn, xmx, ymx = region
+    if _is_bbox(region):
+        xmn, ymn, xmx, ymx = (float(v) for v in region)
         return (lon >= xmn) & (lon <= xmx) & (lat >= ymn) & (lat <= ymx)
     from shapely import contains_xy
 
     return contains_xy(region, lon, lat)
+
+
+def _overlapping_regions(source_regions: Mapping[str, Any]) -> list[tuple[str, str]]:
+    """Pairs of source regions that share area; regions that only touch do not."""
+    items = list(source_regions.items())
+    pairs: list[tuple[str, str]] = []
+    for i, (name_a, a) in enumerate(items):
+        for name_b, b in items[i + 1 :]:
+            if _is_bbox(a) and _is_bbox(b):
+                ax0, ay0, ax1, ay1 = (float(v) for v in a)
+                bx0, by0, bx1, by1 = (float(v) for v in b)
+                shared = ax0 < bx1 and bx0 < ax1 and ay0 < by1 and by0 < ay1
+            else:
+                from shapely.geometry import box
+
+                ga = box(*(float(v) for v in a)) if _is_bbox(a) else a
+                gb = box(*(float(v) for v in b)) if _is_bbox(b) else b
+                shared = ga.intersection(gb).area > 0
+            if shared:
+                pairs.append((str(name_a), str(name_b)))
+    return pairs
 
 
 def _load_regions_geojson(path: Path) -> dict[str, Any]:
@@ -234,6 +288,7 @@ def trajectory_features(
     *,
     source_regions: Mapping[str, tuple[float, float, float, float] | Any] | None = None,
     prefix: str = "traj_",
+    min_hours: float | None = None,
 ) -> dict[str, float]:
     """Collapse one back-trajectory into a fixed-length feature dict.
 
@@ -249,13 +304,25 @@ def trajectory_features(
         polygon/multipolygon (e.g. from :func:`load_source_regions`)
         for exact point-in-polygon residence time. For each, the fraction of
         trajectory time spent inside is returned as ``{prefix}resid_{name}``.
+        An endpoint inside several overlapping regions counts towards each, so
+        the fractions are only shares of the trajectory when the regions do not
+        overlap; :func:`build_trajectory_features` warns when they do.
     prefix : str, default ``"traj_"``
         Prefix for every feature name.
+    min_hours : float, optional
+        Minimum backward reach (hours) a trajectory must have to be trusted.
+        A trajectory whose span is shorter -- HYSPLIT stopped early because the
+        met files ran out, or it left the model domain -- has every feature
+        except the two quality columns set to NaN, rather than passing off a
+        truncated path as a short-range one. ``None`` (default) keeps every
+        trajectory, leaving detection to ``{prefix}age_max_h``.
 
     Returns
     -------
     dict
-        Transport descriptors: straight-line reach, path length, mean transport
+        Quality descriptors ``{prefix}n_endpoints`` and ``{prefix}age_max_h``
+        (hours the trajectory actually reached back), then transport
+        descriptors: straight-line reach, path length, mean transport
         speed, inflow bearing, mean/min height, per-region residence
         fractions, and — only if the ``tdump`` run wrote them — along-path
         rainfall sum, mean boundary-layer height, mean relative humidity,
@@ -279,6 +346,8 @@ def trajectory_features(
     span_h = float(abs(t["age_h"].iloc[-1] - t["age_h"].iloc[0]))
 
     f = {
+        f"{prefix}n_endpoints": float(len(t)),
+        f"{prefix}age_max_h": span_h,
         f"{prefix}dist_km": float(_haversine_km(lat0, lon0, latn, lonn)),
         f"{prefix}pathlen_km": path_len,
         f"{prefix}speed_kmh": path_len / span_h if span_h > 0 else np.nan,
@@ -301,6 +370,9 @@ def trajectory_features(
         f[f"{prefix}pressure_mean"] = float(t["pressure"].mean())
     if "temp" in t:
         f[f"{prefix}temp_mean"] = float(t["temp"].mean())
+    if min_hours is not None and span_h < min_hours - 1e-6:
+        quality = {f"{prefix}n_endpoints", f"{prefix}age_max_h"}
+        f = {k: (v if k in quality else np.nan) for k, v in f.items()}
     return f
 
 
@@ -310,6 +382,7 @@ def build_trajectory_features(
     source_regions: Mapping[str, tuple[float, float, float, float]] | None = None,
     prefix: str = "traj_",
     date_col: str = "date",
+    min_hours: float | None = None,
 ) -> pd.DataFrame:
     """Build a receptor-time feature table from many HYSPLIT ``tdump`` files.
 
@@ -320,8 +393,9 @@ def build_trajectory_features(
         ``tdump`` file paths. One back-trajectory run per receptor time is the
         typical layout; files holding multiple trajectories are split per
         ``traj`` index.
-    source_regions, prefix
-        Forwarded to :func:`trajectory_features`.
+    source_regions, prefix, min_hours
+        Forwarded to :func:`trajectory_features`. With ``min_hours`` set, the
+        number of trajectories nulled for being truncated is logged.
     date_col : str, default ``"date"``
         Name of the index column (receptor timestamp), so the result joins
         straight onto a date-indexed panel.
@@ -335,6 +409,14 @@ def build_trajectory_features(
     paths = sorted(glob(tdumps)) if isinstance(tdumps, str) else [str(p) for p in tdumps]
     if not paths:
         raise ValueError(f"No tdump files matched: {tdumps!r}")
+    overlaps = _overlapping_regions(source_regions) if source_regions else []
+    if overlaps:
+        log.warning(
+            "Source regions overlap (%s): an endpoint in a shared area counts towards each "
+            "of them, so their residence fractions can add up to more than 1 and are not "
+            "shares of the trajectory.",
+            ", ".join(f"{a} & {b}" for a, b in overlaps),
+        )
 
     rows: list[dict[str, Any]] = []
     for p in paths:
@@ -345,7 +427,9 @@ def build_trajectory_features(
             continue
         for _, g in traj.groupby("traj"):
             receptor = g.loc[g["age_h"].abs().idxmin(), "datetime"]
-            feats = trajectory_features(g, source_regions=source_regions, prefix=prefix)
+            feats = trajectory_features(
+                g, source_regions=source_regions, prefix=prefix, min_hours=min_hours
+            )
             rows.append({date_col: pd.Timestamp(cast(Any, receptor)), **feats})
 
     if not rows:
@@ -358,7 +442,49 @@ def build_trajectory_features(
         .sort_index()
     )
     log.info("Built trajectory features: %d receptors × %d columns", len(out), out.shape[1])
+    if min_hours is not None and f"{prefix}age_max_h" in out:
+        n_short = int((out[f"{prefix}age_max_h"] < min_hours - 1e-6).sum())
+        if n_short:
+            log.warning(
+                "%d of %d trajectories reach back < %g h (truncated); their features are NaN.",
+                n_short,
+                len(out),
+                min_hours,
+            )
     return out
+
+
+# GDAS1 is 3-hourly. A receptor time between a weekly file's last record and the
+# next file's first one needs *both* to interpolate: probed against hyts_std with
+# two adjacent daily ARL files, a start time in that gap (23:30, 23:59) failed
+# with only the earlier file and ran with both. A strict "does the file's span
+# overlap the window" test drops the next file there, so the window is widened by
+# one record interval on each side.
+_MET_RECORD_PAD_H = 3.0
+
+
+def _filter_met_files(
+    paths: list[str],
+    window_start: pd.Timestamp,
+    window_end: pd.Timestamp,
+    *,
+    pad_h: float = _MET_RECORD_PAD_H,
+) -> list[str]:
+    """Keep the ARL files whose span overlaps ``[window_start, window_end]``.
+
+    The span comes from the GDAS1 filename (:func:`_gdas1_file_range`). A file whose
+    name does not follow that convention is always kept -- its dates are unknown,
+    so dropping it could silently truncate the trajectory. The window is widened
+    by ``pad_h`` on each side (see ``_MET_RECORD_PAD_H``).
+    """
+    pad = pd.Timedelta(hours=pad_h)
+    lo, hi = window_start - pad, window_end + pad
+    kept = []
+    for p in paths:
+        span = _gdas1_file_range(p)
+        if span is None or (span[1] >= lo and span[0] <= hi):
+            kept.append(p)
+    return kept
 
 
 def _control_text(
@@ -441,6 +567,7 @@ def run_back_trajectories(
     diagnostics: Iterable[str] = ALL_DIAGNOSTICS,
     source_regions: Mapping[str, tuple[float, float, float, float]] | None = None,
     prefix: str = "traj_",
+    min_hours: float | None = None,
     timeout: int = 600,
 ) -> pd.DataFrame:
     """Run HYSPLIT back-trajectories for many receptor times and reduce to features.
@@ -463,7 +590,11 @@ def run_back_trajectories(
     met_files : str or iterable of str
         ARL-format meteorology file(s). They must collectively cover the full
         backward window (``hours_back`` before each receptor time), or the
-        trajectory truncates where the data runs out.
+        trajectory truncates where the data runs out. Each run is handed only
+        the files that can touch its window: GDAS1 weekly files
+        (``gdas1.<mmm><yy>.w<N>``) are selected by the dates in their name,
+        widened by one 3-hourly record either side; any file with another name
+        is always passed, and if none overlap, all of them are.
     hysplit_exec : str or Path
         Path to the ``hyts_std`` executable (e.g. ``~/hysplit-5.4.2/exec/hyts_std``).
     height_m : float, default 500.0
@@ -483,8 +614,10 @@ def run_back_trajectories(
         ``traj_rain_sum``/``traj_blh_mean``/``traj_rh_mean``/
         ``traj_pressure_mean``/``traj_temp_mean`` columns; pass fewer to
         skip the ones you don't need.
-    source_regions, prefix
-        Forwarded to :func:`build_trajectory_features`.
+    source_regions, prefix, min_hours
+        Forwarded to :func:`build_trajectory_features`. Pass
+        ``min_hours=hours_back`` to null trajectories that HYSPLIT ended early;
+        either way, truncated runs are counted in a warning.
     timeout : int, default 600
         Per-run timeout (seconds) for ``hyts_std``.
 
@@ -536,6 +669,10 @@ def run_back_trajectories(
     for t in times:
         ts = pd.Timestamp(t)
         name = "tdump_" + ts.strftime("%Y%m%d%H")
+        # Hand hyts_std only the files this run can touch: a multi-year archive is
+        # hundreds of weekly files, and every one would otherwise be listed in --
+        # and opened by -- each of the thousands of runs.
+        run_mets = _filter_met_files(mets, ts - pd.Timedelta(hours=abs(hours_back)), ts)
         (work / "CONTROL").write_text(
             _control_text(
                 ts,
@@ -543,7 +680,7 @@ def run_back_trajectories(
                 lon,
                 height_m,
                 hours_back,
-                mets,
+                run_mets or mets,
                 name,
                 top_of_model=top_of_model,
                 vert_motion=vert_motion,
@@ -580,4 +717,19 @@ def run_back_trajectories(
             "the CONTROL settings, and the hyts_std path."
         )
     log.info("Ran %d back-trajectories -> %s", len(tdumps), work)
-    return build_trajectory_features(tdumps, source_regions=source_regions, prefix=prefix)
+    feats = build_trajectory_features(
+        tdumps, source_regions=source_regions, prefix=prefix, min_hours=min_hours
+    )
+    age_col = f"{prefix}age_max_h"
+    if min_hours is None and age_col in feats:
+        n_short = int((feats[age_col] < abs(hours_back) - 1e-6).sum())
+        if n_short:
+            log.warning(
+                "%d of %d trajectories stopped short of hours_back=%d (met coverage or "
+                "domain edge); see %s, or pass min_hours to null them.",
+                n_short,
+                len(feats),
+                abs(hours_back),
+                age_col,
+            )
+    return feats
