@@ -33,6 +33,14 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   variable's draws do not move when other variables are fixed and
   `decom_met`'s differences stay paired. Without pools the draws are unchanged,
   and results are bit-identical on every execution path.
+- **Notebook 05: transport vs local attribution.** On the bundled MY1 case:
+  one transport-aware model scored on a blocked split, the grouped Shapley
+  split into `local` and `transport`, the two fixed orders it averages, the
+  two-model difference of notebook 04 for comparison (correlation 0.59 with
+  the grouped transport term, 40% of its amplitude), and a clean-Atlantic
+  reference pool that turns the transport anomaly (mean -0.03 ug/m3) into a
+  contribution (mean +2.70 ug/m3). Notebook 04 stays as the paper's
+  reproduction.
 - **`decom_met` / `decom_emi` forward `resample_df`, `resample_pools` and
   `conditional_on`** to every `normalise` call. `decom_met` previously passed
   `resample_df=None` whatever it was given, unlike normet-R's

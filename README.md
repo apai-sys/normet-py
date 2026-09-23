@@ -624,6 +624,10 @@ the bundled example data:
 3. [ULEZ Synthetic Control](notebooks/03_scm_ulez.ipynb) — causal effect of the London ULEZ with placebo bands
 4. [Transport-aware normalisation](notebooks/04_transport_aware_normalisation.ipynb) — HYSPLIT back-trajectory features and the transport contribution to PM2.5
 
+Beyond the paper's case studies:
+
+5. [Transport vs local attribution](notebooks/05_transport_vs_local_attribution.ipynb) — `decom_met` groups (Shapley) split PM2.5 into local-weather and transport contributions, against the average air mass or a clean-air reference (`resample_pools`)
+
 ---
 
 ## How to cite
