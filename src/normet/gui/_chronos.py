@@ -165,3 +165,72 @@ def verdict_for(shift: dict[str, float]) -> tuple[str, str]:
         f"{shift['mean_abs_shift']:.3f} ({pct:.2f}%). The model is autoregressing, so a "
         "'de-weathered' series from it would be meaningless. Check the met columns.",
     )
+
+
+def finetune(estimator: Any, df_prep: pd.DataFrame, mode: str, num_steps: int) -> Any:
+    """Adapt the checkpoint to this site's record; a new estimator. Runs on a worker thread.
+
+    Upstream saves a full copy of the tuned model (about 500 MB) under the
+    current folder unless told where; here that copy goes to a temporary folder
+    and is deleted, the tuned weights living in the estimator returned, for the
+    session.
+    """
+    import tempfile
+
+    indexed = to_indexed_frame(df_prep)
+    with tempfile.TemporaryDirectory(prefix="normet-finetune-") as out:
+        return estimator.finetune(indexed, "value", mode=mode, num_steps=num_steps, output_dir=out)
+
+
+def can_lora() -> bool:
+    """Whether LoRA fine-tuning is installed (``peft``); full fine-tuning needs only torch."""
+    import importlib.util
+
+    return importlib.util.find_spec("peft") is not None
+
+
+def donor_similarity(
+    df: pd.DataFrame,
+    date_col: str,
+    unit_col: str,
+    outcome_col: str,
+    treated: str,
+    cutoff: str,
+    device: str | None = None,
+) -> pd.DataFrame:
+    """Every other unit ranked by how its series behaves like the treated unit's,
+    from Chronos-2 embeddings of the record before *cutoff* alone. Runs on a worker.
+
+    The post-intervention record is left out on purpose: a donor chosen for
+    resembling the treated unit after the intervention would carry the effect
+    into the counterfactual. Similarity is the cosine of the two 768-D
+    embeddings (:func:`normet.embed_multisite`): how alike the dynamics are,
+    not the levels -- a donor is still weighted by the synthetic control fit.
+    """
+    import numpy as np
+
+    from normet import embed_multisite
+
+    d = df[[date_col, unit_col, outcome_col]].copy()
+    d[date_col] = pd.to_datetime(d[date_col])
+    d[unit_col] = d[unit_col].astype(str)
+    pre = d[d[date_col] < pd.Timestamp(cutoff)]
+    n = int(pre[date_col].nunique())
+    if n < 8:
+        raise ValueError(f"only {n} time points before the cutoff: too short to compare units by")
+    if treated not in set(pre[unit_col]):
+        raise ValueError(f"the treated unit {treated!r} has no data before the cutoff")
+    # The context is the pre-period's own length, so a short weekly or monthly
+    # panel is not judged as mostly missing against a 2048-point window.
+    vecs = embed_multisite(
+        pre, unit_col, outcome_col, date_col=date_col, context_length=min(2048, n), device=device
+    )
+    t = np.asarray(vecs[treated], dtype=float)
+    rows = []
+    for unit, v in vecs.items():
+        if unit == treated:
+            continue
+        v = np.asarray(v, dtype=float)
+        rows.append((unit, float(t @ v / (np.linalg.norm(t) * np.linalg.norm(v)))))
+    out = pd.DataFrame(rows, columns=[unit_col, "similarity"])
+    return out.sort_values("similarity", ascending=False).reset_index(drop=True)

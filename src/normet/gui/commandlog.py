@@ -229,6 +229,12 @@ _KNOWN: dict[str, tuple[str, str, str, str]] = {
         "from normet.gui._chronos import deweather",
         "The GUI's own helper around Chronos2Estimator.deweather.",
     ),
+    "normet.gui._chronos.finetune": (
+        "Fine-tune Chronos-2",
+        "model",
+        "from normet.gui._chronos import finetune",
+        "The GUI's own helper around Chronos2Estimator.finetune.",
+    ),
     "normet.gui._multiscale.compute_multiscale": (
         "Multi-scale decomposition",
         "multiscale",
