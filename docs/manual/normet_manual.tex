@@ -557,16 +557,20 @@ input: the weather is then not part of what the donors must reproduce.
 $\text{HHI} = \sum_j w_j^2$, the effective number of donors $1/\text{HHI}$, and the top
 donors with their share.
 
-\caution{For the \code{scm} (augmented) estimator the pre-cutoff fit is not evidence that
-the counterfactual is good. Its ridge features are the units' pre-cutoff outcomes, so at a
-pre-cutoff date the treated unit's own value at that date is one of the features it is
-predicted from, and the pre-period is reproduced almost exactly whatever the data are.
-On the ULEZ design of Chapter~\ref{ch:scm} the pre-cutoff $R^2$ is 0.999; with the treated
-unit's series replaced by random noise it is still 0.997. Its donor weights balance only
-the ridge residuals, so their concentration does not describe which donors the synthetic
-unit is made of either. Judge an \code{scm} result by the placebo tests and by agreement
-with other estimators, never by its pre-period fit. For \code{abadie}, \code{robust},
-\code{did} and \code{mcnnm} the pre-period fit is a genuine check.}
+\caution{A good pre-cutoff fit is evidence only if the estimator could not have fitted
+any series as well. Every estimator that weights donors to match the pre-period overfits
+when the donors are many for the pre-cutoff dates, and augmented SCM (\code{scm}) most of
+all: its ridge features are the units' pre-cutoff outcomes, so at a pre-cutoff date the
+treated unit's own value at that date is one of the features it is predicted from, and
+with as many donors as dates it reproduces almost any pre-period. On the ULEZ panel of
+Chapter~\ref{ch:scm} (27 pre-cutoff months), a treated series replaced by random noise is
+fitted with $R^2 = -0.05$ from 5 donors, 0.69 from 20 and 0.997 from 53; classic SCM, with
+40 random-walk donors over 12 months, fits a shuffled series with 0.60. So the SCM Studio
+refits each design with the treated unit's pre-cutoff values shuffled in time, and reads
+the pre-cutoff $R^2$ only when that shuffled series cannot also reach 0.5
+(Section~\ref{sec:scmfit}). The \code{scm} estimator's donor weights balance only the
+ridge residuals, so their concentration does not describe which donors the synthetic unit
+is made of.}
 
 \subsection{Inference}\label{sec:scminference}
 \begin{description}
@@ -1055,25 +1059,36 @@ or there are fewer than 10 pre-cutoff dates, green otherwise.
 monthly de-weathered \NOtwo{}, January~2017 to February~2020. MY1 is the highest of
 them throughout.}{fig:scmpanel}
 
-\section{Fitting}
+\section{Fitting}\label{sec:scmfit}
 \emph{Backend} chooses the estimator (Section~\ref{sec:scmtheory}); \emph{ML backend} and
 \emph{Time budget} (15~s) apply to \code{mlscm}, \emph{Draws} (1000) to
 \code{bayesian}. \emph{Run synthetic control} fills the \tab{Fit} tab: observed and
-synthetic, the effect, the largest donor weights, and the diagnostics table. The verdict
-is read from the pre-cutoff $R^2$ --- green at 0.8 or above, amber from 0.5, red below ---
-and gives the ATT.
+synthetic, the effect, the largest donor weights, and the diagnostics table.
+
+For \code{scm}, \code{abadie}, \code{did}, \code{mcnnm} and \code{robust} the fit is
+followed by one more, of the same design with the treated unit's pre-cutoff values
+shuffled in time: a series with the treated unit's level and spread but no relation to the
+donors (Section~\ref{sec:scmdiag}). Its pre-cutoff $R^2$ is the table's
+\code{pre\_r2, shuffled} row, and it decides how the verdict reads:
+\begin{itemize}\nosep
+  \item If the shuffled series also reaches $R^2 \ge 0.5$, the design fits anything and
+        the observed $R^2$ is not read. The verdict is amber, gives the ATT and both
+        $R^2$, and sends you to Placebo in space and the other estimators.
+  \item Otherwise the verdict is read from the pre-cutoff $R^2$: green at 0.8 or above,
+        amber from 0.5, red below; it gives the ATT.
+\end{itemize}
+\code{mlscm} and \code{bayesian} are too slow to fit twice; their verdict is read from the
+pre-cutoff $R^2$ alone. An \code{scm} fit adds a line saying its weights balance the ridge
+residuals only.
 
 \screenshot{ui_scm_fit.png}{The augmented SCM (\code{scm}) fit for MY1: ATT $=
--18.14$~\ugm{} over the 11 post-cutoff months. Its green verdict reads a pre-cutoff $R^2$
-of 0.999 --- which, for this estimator, is not evidence (see the caution
-below).}{fig:scmfit}
+-18.14$~\ugm{} over the 11 post-cutoff months. Its pre-cutoff $R^2$ is 0.999, but with
+MY1's pre-cutoff values shuffled it still fits 0.997, so the verdict does not read the fit
+and points to the placebo tests.}{fig:scmfit}
 
-\caution{For the \code{scm} backend the verdict on the \tab{Fit} tab, the pre-cutoff fit
-and the donor weights say nothing about the counterfactual
-(Section~\ref{sec:scmdiag}): the pre-period is reproduced by construction. Here the top
-donor carries 99.5\,\% of the weight ($\text{HHI} = 0.99$), but those weights only
-balance the ridge model's residuals. Judge the effect by the inference tabs and by
-whether other estimators agree.}
+With 53 donors for 27 pre-cutoff months, this design is one where augmented SCM fits
+anything. Its top donor carries 99.5\,\% of the weight ($\text{HHI} = 0.99$), but those
+weights only balance the ridge model's residuals.
 
 The estimators do not agree on this design. Run on the same panel, cutoff and donors:
 \begin{center}\small
@@ -1116,8 +1131,8 @@ should report the spread, not one number.
 
 \screenshot{ui_scm_placebo.png}{Placebo in space for the ULEZ: no donor's placebo effect
 comes near MY1's, so $p = 1/54 = 0.019$, the smallest 53 placebos allow. Every placebo is
-fitted by the same estimator, so this comparison is fair even though the \code{scm}
-pre-period fit is not informative.}{fig:scmplacebo}
+fitted by the same estimator, so this comparison is fair even where the pre-period fit
+is not informative.}{fig:scmplacebo}
 
 \screenshot{ui_scm_bands.png}{Jackknife bands: the effect is recomputed 53 times, leaving
 out one donor each time. The mean post-cutoff effect is $-18.14$~\ugm{}, and the band
@@ -1523,6 +1538,11 @@ Nothing else is written unless you save it.
         \code{normet[finetune]} to fine-tune).
   \item[Chronos-2's verdict is red] Shuffling the weather barely moves its forecast: it is
         autoregressing. Check the meteorological columns, or use an AutoML backend.
+  \item[SCM: ``The pre-treatment fit is no check on this design''] A series shuffled out
+        of any relation to the donors fits the pre-period as well as the treated unit
+        does: there are too many donors for the pre-cutoff dates. Judge the effect by
+        Placebo in space and by other estimators, or use fewer, better-chosen donors (the
+        similarity ranking can help) or a longer pre-period.
   \item[SCM: ``Donor pool too small''] Tick at least two donors.
   \item[SCM: no valid fake cutoffs] The post-period must fit before the true cutoff with
         \emph{Min pre-period} steps before it; lower \emph{Min pre-period} or
