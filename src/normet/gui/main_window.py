@@ -58,6 +58,8 @@ from PySide6.QtWidgets import (
 from normet.utils._time import to_datetime_coerced
 
 from . import _chronos, _settings, commandlog, theme
+from ._constants import DOCS_URL, MET_DEFAULTS, TIME_VARS
+from ._lists import _checked_items, _fill_checklist, _set_all, parse_groups
 from ._widgets import (
     CanvasTab,
     NoWheelComboBox,
@@ -72,75 +74,6 @@ from .welcome import Welcome
 from .workers import QtLogHandler, TaskRunner
 
 log = logging.getLogger(__name__)
-
-TIME_VARS = ("date_unix", "day_julian", "weekday", "hour")
-
-#: Column names auto-recognised as meteorological predictors.
-MET_DEFAULTS = {
-    "u10",
-    "v10",
-    "d2m",
-    "t2m",
-    "blh",
-    "sp",
-    "ssrd",
-    "tcc",
-    "tp",
-    "rh2m",
-    "ws",
-    "wd",
-    "temp",
-    "rh",
-    "pressure",
-}
-
-DOCS_URL = "https://github.com/apai-sys/normet-py"
-
-
-def _checked_items(widget: QListWidget) -> list[str]:
-    return [
-        widget.item(i).text()
-        for i in range(widget.count())
-        if widget.item(i).checkState() == Qt.CheckState.Checked
-    ]
-
-
-def _fill_checklist(widget: QListWidget, names: list[str], checked: set[str]) -> None:
-    widget.clear()
-    for name in names:
-        item = QListWidgetItem(name)
-        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-        item.setCheckState(Qt.CheckState.Checked if name in checked else Qt.CheckState.Unchecked)
-        widget.addItem(item)
-
-
-def parse_groups(text: str, variables: list[str]) -> dict[str, list[str]] | None:
-    """``"local: t2m, blh; wind: u10, v10"`` as ``{"local": [...], "wind": [...]}``;
-    None for an empty box. Raises ValueError, in words for the user, on a group
-    without a name or a variable not trained on."""
-    text = text.strip()
-    if not text:
-        return None
-    groups: dict[str, list[str]] = {}
-    for part in filter(None, (p.strip() for p in text.split(";"))):
-        name, colon, members = part.partition(":")
-        name = name.strip()
-        if not colon or not name:
-            raise ValueError(f"write each group as name: var, var — not {part!r}")
-        names = [m.strip() for m in members.split(",") if m.strip()]
-        unknown = [m for m in names if m not in variables]
-        if unknown:
-            raise ValueError(
-                f"{', '.join(unknown)} not among the variables trained on ({', '.join(variables)})"
-            )
-        groups[name] = names
-    return groups
-
-
-def _set_all(widget: QListWidget, checked: bool) -> None:
-    state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
-    for i in range(widget.count()):
-        widget.item(i).setCheckState(state)
 
 
 class MainWindow(QMainWindow):
