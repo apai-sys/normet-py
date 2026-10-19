@@ -7,6 +7,17 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ## [Unreleased]
 
 ### Added
+- **GUI: the Assistant** (View → Assistant, Ctrl+Shift+A; adapted from the
+  cume app's). A language model works in the window with ten tools: it reads
+  the table, the model's fit, the normalised series and the decomposition
+  (`normet.agent.readings`), and runs train, normalise and decompose as their
+  buttons do. A proposed target and predictors come as a card the analyst
+  applies; nothing changes until they do. It runs on API models through
+  `normet.agent.llm` (Anthropic's Messages API or any OpenAI-compatible one,
+  Ollama included; standard library only), with keys from the macOS keychain or
+  the environment. It also runs on Claude Code or Codex signed in to the user's
+  own plan, served the window's tools over MCP on 127.0.0.1
+  (`normet.agent.mcp_http`) with no shell or files of their own.
 - **`normet-mcp` and `normet.agent`: normet for AI assistants** (adapted from
   the cume app's agent layer). `normet.agent` is a tool layer with three parts:
   - text readings of a table, a model's fit (`modStats` on the held-out rows,
