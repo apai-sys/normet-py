@@ -2,9 +2,8 @@
 
 Split out of :mod:`.main_window` so the class that wires the workflow is not
 also the class that builds every piece of furniture around it.  The methods are
-unchanged; they reach the rest of the window through
-:class:`._contract.WindowContract`, which declares the attributes and the
-handlers they call.
+unchanged; they are mixed into :class:`~.main_window.MainWindow` alongside the
+panel mixins, and reach their widgets the same way the window always did.
 """
 
 from __future__ import annotations
@@ -19,6 +18,7 @@ from PySide6.QtWidgets import (
     QDockWidget,
     QHBoxLayout,
     QLabel,
+    QMainWindow,
     QMessageBox,
     QPlainTextEdit,
     QProgressBar,
@@ -32,14 +32,13 @@ from PySide6.QtWidgets import (
 
 from . import _settings, commandlog, theme
 from ._constants import DOCS_URL
-from ._contract import WindowContract
 from ._widgets import CanvasTab
 from .dataframe_model import DataFrameModel
 from .welcome import Welcome
 from .workers import QtLogHandler
 
 
-class ShellMixin(WindowContract):
+class ShellMixin(QMainWindow):
     def _build_menu(self) -> None:
         mb = self.menuBar()
 
@@ -332,3 +331,44 @@ class ShellMixin(WindowContract):
             "for environmental time series.<br>"
             f'<a href="{DOCS_URL}">{DOCS_URL.removeprefix("https://")}</a>',
         )
+
+    def _build_action_bar(self) -> QWidget:
+        bar = QWidget()
+        h = QHBoxLayout(bar)
+        h.setContentsMargins(4, 0, 4, 0)
+        self.exp_csv = QPushButton("⬇  Export result CSV")
+        self.exp_csv.setToolTip("Export the current tab's result table as CSV.")
+        self.exp_csv.clicked.connect(self._export_current)
+        self.exp_csv.setEnabled(False)
+        self.exp_html = QPushButton("📄  HTML report")
+        self.exp_html.setToolTip(
+            "Single-file HTML report of the current tab's result,\nwith provenance metadata."
+        )
+        self.exp_html.clicked.connect(self._export_html)
+        self.exp_html.setEnabled(False)
+        self.scm_btn = QPushButton("🧪  SCM Studio")
+        self.scm_btn.setToolTip(
+            "Synthetic-control (counterfactual) analysis on panel data\n— treated unit vs. donor pool."
+        )
+        self.scm_btn.clicked.connect(self.open_scm_studio)
+        self.data_btn = QPushButton("🌐  Get UK data")
+        self.data_btn.setToolTip(
+            "Fetch UK air quality (AURN, AQE, SAQN, WAQN, NI, LMAM) plus\n"
+            "reanalysis meteorology and merge them into a model-ready table\n"
+            "(no API key)."
+        )
+        self.data_btn.clicked.connect(self.open_data_studio)
+        self.transport_btn = QPushButton("🧭  Transport Studio")
+        self.transport_btn.setToolTip(
+            "Build transport-aware predictors (inflow direction, transport\n"
+            "distance/speed, residence time over source regions) from HYSPLIT\n"
+            "back-trajectory (tdump) output, and join them onto this data."
+        )
+        self.transport_btn.clicked.connect(self.open_transport_studio)
+        h.addWidget(self.data_btn)
+        h.addWidget(self.transport_btn)
+        h.addWidget(self.exp_csv)
+        h.addWidget(self.exp_html)
+        h.addWidget(self.scm_btn)
+        h.addStretch(1)
+        return bar
