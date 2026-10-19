@@ -6,7 +6,10 @@ Decompose → Rolling → PDP), each step with its own prominent "▶ Run"
 button; results land in tabs on the right, which auto-activate when a run
 finishes.  Verdict banners (green / amber / red) summarise quality at a
 glance; every long computation runs on a background thread; the bottom dock
-streams normet's log.
+streams normet's log. Before a table is open the Data tab shows the welcome
+(:mod:`.welcome`); Ctrl+K (⌘K) opens the command palette (:mod:`.palette`);
+the window and its figures follow the system's light/dark appearance unless
+View → Appearance pins one (:mod:`.theme`).
 
 The synthetic-control workflow (panel data, treated unit vs. donors) has
 genuinely different inputs, so it lives in its own window — see
@@ -22,7 +25,7 @@ import os
 
 import pandas as pd
 from PySide6.QtCore import QSettings, Qt, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QActionGroup, QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -52,7 +55,7 @@ from PySide6.QtWidgets import (
 
 from normet.utils._time import to_datetime_coerced
 
-from . import _chronos, _settings
+from . import _chronos, _settings, theme
 from ._widgets import (
     CanvasTab,
     NoWheelComboBox,
@@ -63,6 +66,7 @@ from ._widgets import (
     toggle_button,
 )
 from .dataframe_model import DataFrameModel
+from .welcome import Welcome
 from .workers import QtLogHandler, TaskRunner
 
 log = logging.getLogger(__name__)
@@ -178,9 +182,24 @@ class MainWindow(QMainWindow):
         em.addAction("Select All", lambda: self._clip("selectAll"))
 
         vm = mb.addMenu("&View")
+        self._palette_action = vm.addAction("&Command Palette…", self.show_command_palette)
+        self._palette_action.setShortcut("Ctrl+K")
+        vm.addSeparator()
         vm.addAction("Run &History…", self.show_history)
         vm.addSeparator()
         vm.addAction(self._log_dock.toggleViewAction())
+        appearance = vm.addMenu("&Appearance")
+        group = QActionGroup(self)
+        current = theme.stored_appearance()
+        for key, label in (("system", "Follow System"), ("light", "Light"), ("dark", "Dark")):
+            act = appearance.addAction(label)
+            act.setCheckable(True)
+            act.setChecked(key == current)
+            act.triggered.connect(
+                lambda _checked=False, k=key: theme.theme_manager().set_appearance(k)
+            )
+            group.addAction(act)
+        appearance.setEnabled(theme.can_set_appearance())
 
         am = mb.addMenu("&Analysis")
         act = am.addAction("Synthetic Control (SCM) Studio…", self.open_scm_studio)
@@ -193,6 +212,12 @@ class MainWindow(QMainWindow):
         hm = mb.addMenu("&Help")
         hm.addAction("Documentation", lambda: QDesktopServices.openUrl(QUrl(DOCS_URL)))
         hm.addAction("&About Normet", self._about)
+
+    def show_command_palette(self) -> None:
+        """Every menu command and every tab, found by typing (Ctrl+K)."""
+        from .palette import open_palette
+
+        open_palette(self, skip=(self._palette_action,))
 
     def _clip(self, method: str) -> None:
         w = self.focusWidget()
@@ -629,9 +654,25 @@ class MainWindow(QMainWindow):
     def _build_tabs(self) -> QTabWidget:
         self.tabs = QTabWidget()
 
-        # Data preview tab
+        # Data preview tab: the welcome until a table is open, then its preview.
         data_tab = QWidget()
-        dl = QVBoxLayout(data_tab)
+        outer = QVBoxLayout(data_tab)
+        outer.setContentsMargins(0, 0, 0, 0)
+        self.welcome = Welcome(
+            {
+                "open_csv": self._open_csv,
+                "open_path": lambda p: self.load_csv(p, remember=True),
+                "load_example": self.load_example,
+                "scm_example": self.open_scm_example,
+                "data_studio": self.open_data_studio,
+                "transport_studio": self.open_transport_studio,
+            }
+        )
+        outer.addWidget(self.welcome, 1)
+        self._data_parts = QWidget()
+        outer.addWidget(self._data_parts, 1)
+        dl = QVBoxLayout(self._data_parts)
+        dl.setContentsMargins(0, 0, 0, 0)
         self.data_summary = QLabel("Open a CSV (or load the example) to begin.")
         self.data_summary.setWordWrap(True)
         dl.addWidget(self.data_summary)
@@ -666,7 +707,16 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.tab_multiscale, "Multi-scale")
         self.tab_pdp = CanvasTab("Run Step 5 to see partial-dependence curves.")
         self.tabs.addTab(self.tab_pdp, "⑥ PDP")
+        self._sync_welcome()
         return self.tabs
+
+    def _sync_welcome(self) -> None:
+        """The welcome on the Data tab while no table is open; the preview once one is."""
+        empty = self.df_raw is None
+        if empty:
+            self.welcome.refresh(_settings.read_recent())
+        self.welcome.setVisible(empty)
+        self._data_parts.setVisible(not empty)
 
     # ------------------------------------------------------------- log dock
     def _build_log_dock(self) -> None:
@@ -792,6 +842,7 @@ class MainWindow(QMainWindow):
         self._reset_pdp_toggle_buttons()
 
         self._sync_enabled()
+        self._sync_welcome()
         self._draw_data_preview()
         self.tabs.setCurrentIndex(0)
         self.statusBar().showMessage(
@@ -945,6 +996,8 @@ class MainWindow(QMainWindow):
     def _rebuild_recent_menu(self) -> None:
         self.recent_menu.clear()
         recent = _settings.read_recent()
+        if hasattr(self, "welcome"):
+            self._sync_welcome()
         if not recent:
             self.recent_menu.addAction("(none)").setEnabled(False)
             return
@@ -1850,6 +1903,12 @@ class MainWindow(QMainWindow):
         self._scm_window.show()
         self._scm_window.raise_()
         self._scm_window.activateWindow()
+
+    def open_scm_example(self) -> None:
+        """The SCM Studio, its example panel loaded."""
+        self.open_scm_studio()
+        if self._scm_window is not None:
+            self._scm_window.load_example()
 
     # ---------------------------------------------------------- Data Studio
     def open_data_studio(self) -> None:
