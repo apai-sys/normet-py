@@ -600,9 +600,9 @@ or normalises only once you have agreed. Choose an API model as
 `provider:model` (`anthropic:claude-sonnet-5-5`, `deepseek:deepseek-chat`,
 `ollama:qwen3:8b`, …), its key kept in the macOS keychain (**Key…**) or read from
 the provider's environment variable. Or choose a command-line agent signed in to
-your own plan, Claude Code or Codex: the window serves its tools to the agent
-over MCP on 127.0.0.1 with a per-window token, and gives it no shell or files of
-its own.
+your own plan -- Claude Code, Codex, Antigravity agy or GitHub Copilot -- with
+the effort it thinks at: the window serves its tools to the agent over MCP on
+127.0.0.1 with a per-window token, and gives it no shell or files of its own.
 
 The window and its figures follow the system's light/dark appearance (or View →
 Appearance), Ctrl+K (⌘K) finds any menu command or result tab by typing, and
@@ -613,7 +613,10 @@ call that repeats it, with the arguments it actually ran with; File → Save
 Session as Script… turns a session done by clicking into a Python script that
 reproduces it. **Export for Publication…** on any figure's toolbar lays the
 figure out at a journal's column width (Nature, Elsevier, ACS, or custom) with
-its lettering in points, and saves it at that exact width on a white page.
+its lettering in points, shows it at its printed size to finish -- drag or place
+the legend and set its columns, set line widths and markers, letter the panels,
+double-click any text or tick numbers to edit them -- and saves it at that exact
+width on a white page, leaving the figure on its tab as it was.
 
 **Data Studio** (🌐 toolbar button, or File → Get UK Data) — assemble a
 model-ready dataset without leaving the app: pick a network (AURN, AQE,
