@@ -154,6 +154,25 @@ def test_an_opened_csv_reads_back(win, tmp_path):
     assert "Nothing yet" in win.command_view.toPlainText()
 
 
+def test_a_csv_across_a_daylight_saving_change_loads_and_trains(win, tmp_path):
+    # Local time with its offset, +00:00 then +01:00: pandas 3 refused the column
+    # at load ("Mixed timezones detected"); pandas 2 took it as objects that
+    # training then refused. It is read as UTC, and the logged script agrees.
+    from normet.utils.prepare import add_date_variables
+
+    path = tmp_path / "bst.csv"
+    path.write_text(
+        "date,NO2\n2020-03-29T00:00+00:00,1\n2020-03-29T02:00+01:00,2\n2020-03-29T03:00+01:00,3\n"
+    )
+    win.load_csv(str(path))
+    dates = win.df_raw["date"]
+    assert str(dates.dt.tz) == "UTC" and dates.dt.hour.tolist() == [0, 1, 2]
+    assert add_date_variables(win.df_raw)["hour"].tolist() == [0, 1, 2]
+    ns: dict = {}
+    exec(compile(win.command_log.script(), "session.py", "exec"), ns)
+    pd.testing.assert_frame_equal(ns["df"], win.df_raw)
+
+
 # -- the print layout ---------------------------------------------------------------------
 def _figure():
     from matplotlib.figure import Figure
