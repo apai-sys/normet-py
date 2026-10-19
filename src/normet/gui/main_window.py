@@ -140,6 +140,7 @@ class MainWindow(QMainWindow):
 
         self._build_central()
         self._build_log_dock()
+        self._build_assistant()
         self._build_status_bar()
         self._build_menu()
         self._sync_enabled()
@@ -188,6 +189,10 @@ class MainWindow(QMainWindow):
         vm.addAction("Run &History…", self.show_history)
         vm.addSeparator()
         vm.addAction(self._log_dock.toggleViewAction())
+        act = self.assistant.toggleViewAction()
+        act.setText("&Assistant")
+        act.setShortcut("Ctrl+Shift+A")
+        vm.addAction(act)
         appearance = vm.addMenu("&Appearance")
         group = QActionGroup(self)
         current = theme.stored_appearance()
@@ -666,6 +671,7 @@ class MainWindow(QMainWindow):
                 "scm_example": self.open_scm_example,
                 "data_studio": self.open_data_studio,
                 "transport_studio": self.open_transport_studio,
+                "assistant": self.show_assistant,
             }
         )
         outer.addWidget(self.welcome, 1)
@@ -741,6 +747,20 @@ class MainWindow(QMainWindow):
         logging.getLogger("normet").addHandler(handler)
         logging.getLogger("normet").setLevel(logging.INFO)
         self._log_handler = handler
+
+    # ------------------------------------------------------------- assistant
+    def _build_assistant(self) -> None:
+        """View → Assistant: a language model working in the window (:mod:`.assistant`)."""
+        from .assistant import AssistantDock
+
+        self.assistant = AssistantDock(self)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.assistant)
+        self.assistant.hide()
+
+    def show_assistant(self) -> None:
+        self.assistant.show()
+        self.assistant.raise_()
+        self.assistant.composer.setFocus()
 
     # ------------------------------------------------------------ status bar
     def _build_status_bar(self) -> None:
@@ -2013,6 +2033,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802
         QSettings("apai-sys", "normet-gui").setValue("geometry", self.saveGeometry())
         logging.getLogger("normet").removeHandler(self._log_handler)
+        self.assistant.shutdown()
         self.runner.shutdown()
         if self._scm_window is not None:
             self._scm_window.close()
