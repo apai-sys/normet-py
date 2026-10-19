@@ -22,6 +22,13 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   ask the assistant to propose the predictors and the donor pool for the user
   to confirm, and to quote only numbers the tools return. Files are read only
   under `$NORMET_MCP_ROOTS`.
+- **GUI: light and dark appearance, command palette, welcome page** (adapted
+  from the cume desktop app). The window and its figures follow the system's
+  light/dark mode, or View → Appearance pins one (Qt 6.8+). Figures are still
+  drawn in matplotlib's light colours and recoloured for a dark window; what
+  the figure toolbar saves is always on a white page. Ctrl+K (⌘K) finds any
+  menu command or result tab by typing. Before a table is open, the Data tab
+  shows the examples, the recently opened tables and the data studios.
 - **`decom_met`: feature groups and Shapley attribution.** `groups=` attributes
   the meteorological features in named groups -- e.g. `{"local": met_cols,
   "transport": traj_cols}` -- with one result column per group, and
