@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import logging
 import os
 
 import numpy as np
@@ -24,6 +25,24 @@ def _close_figures():
     import matplotlib.pyplot as plt
 
     plt.close("all")
+
+
+@pytest.fixture(autouse=True)
+def _restore_normet_logger():
+    """Put the shared "normet" logger back the way each test found it.
+
+    ``enable_default_logging`` -- reached directly from test_logging.py and
+    through the CLI in test_cli.py -- sets ``propagate = False`` and a level on
+    that logger. Left in place, every later test that reads a warning through
+    ``caplog`` (whose handler sits on the root logger) saw nothing and failed,
+    but only when run after those modules, never on its own.
+    """
+    logger = logging.getLogger("normet")
+    handlers, level, propagate = list(logger.handlers), logger.level, logger.propagate
+    yield
+    logger.handlers[:] = handlers
+    logger.setLevel(level)
+    logger.propagate = propagate
 
 
 @pytest.fixture(scope="session")
