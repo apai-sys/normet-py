@@ -50,6 +50,10 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
     double-clicking. Every change is undone when the dialog closes.
 
 ### Fixed
+- **GUI: a CSV of zoned dates with one that did not parse would not load.**
+  Dates in `...Z` parse tz-aware, an unparseable one becomes NaT, and with
+  both matplotlib could not convert the data preview's axis: the error stopped
+  the load half-way. The preview now leaves out rows without a date.
 - **Transport Studio's join handed rows trajectories that had not arrived, and
   filled rows no trajectory covered.** "Send to main window" joined with
   `merge_asof(direction="nearest")` and no tolerance: 04:00 and 05:00 took

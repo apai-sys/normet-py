@@ -1166,6 +1166,9 @@ class MainWindow(QMainWindow):
         import matplotlib.pyplot as plt
 
         s = self.df_raw.set_index("date")[target].dropna()
+        # A date that did not parse has no place on the axis; with a time zone, one
+        # NaT also stops matplotlib converting the whole axis.
+        s = s[s.index.notna()]
         note = ""
         if len(s) > 20_000:
             s = s.resample("D").mean()

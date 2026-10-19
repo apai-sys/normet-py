@@ -46,6 +46,27 @@ def test_main_window_example_flow(qapp):
         win.close()
 
 
+def test_a_csv_of_zoned_dates_with_one_that_does_not_parse_loads(qapp, tmp_path):
+    # Dates in ...Z parse tz-aware; one that did not parse is NaT, and together
+    # they stopped the data preview -- and with it the whole load.
+    from normet.gui.main_window import MainWindow
+
+    path = tmp_path / "zoned.csv"
+    path.write_text(
+        "date,PM2.5,t2m\n"
+        "2020-01-01T00:00Z,1,5\n2020-01-01T01:00Z,2,5\nnot a date,3,5\n2020-01-01T03:00Z,4,5\n"
+    )
+    win = MainWindow()
+    try:
+        win.load_csv(str(path))
+        assert win.df_raw["date"].dt.tz is not None and win.df_raw["date"].isna().sum() == 1
+        (line,) = win.data_preview.canvas.figure.axes[0].get_lines()
+        assert list(line.get_ydata()) == [1, 2, 4]  # the row without a date left out
+        assert win.command_log.entries[-1].title == "Open CSV"  # the load went through
+    finally:
+        win.close()
+
+
 def test_train_backend_budget_row(qapp):
     from normet.gui.main_window import MainWindow
 
