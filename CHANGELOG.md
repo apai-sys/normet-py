@@ -50,6 +50,16 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
     double-clicking. Every change is undone when the dialog closes.
 
 ### Fixed
+- **Dates whose UTC offsets differ are read as UTC.** Local time across a
+  daylight-saving change (`+00:00` in winter, `+01:00` in summer) has no one
+  time zone to keep: pandas 3 refused such a CSV at load ("Mixed timezones
+  detected"), and pandas 2 loaded the dates as objects -- with a FutureWarning
+  -- that training then refused ("Tz-aware datetime.datetime cannot be
+  converted to datetime64 unless utc=True"). `to_datetime_coerced`, which every
+  date-taking entry point and the GUI's logged script use, now converts them to
+  UTC, each value by its own offset; a value with no offset among them is read
+  as UTC. A column with one offset throughout keeps it, and an explicit `utc`
+  is left to pandas.
 - **GUI: a CSV of zoned dates with one that did not parse would not load.**
   Dates in `...Z` parse tz-aware, an unparseable one becomes NaT, and with
   both matplotlib could not convert the data preview's axis: the error stopped

@@ -53,3 +53,35 @@ def test_an_explicit_format_wins():
 def test_keyword_arguments_reach_pandas():
     out = to_datetime_coerced(pd.Series(["2024-01-01 00:00:00"]), utc=True)
     assert out.dt.tz is not None
+
+
+def test_offsets_that_differ_are_read_as_utc():
+    """Local time across a daylight-saving change: +00:00, then +01:00.
+
+    pandas 2.x returned those as objects -- with a FutureWarning -- that no
+    DatetimeIndex took, so a model failed at training ("Tz-aware
+    datetime.datetime cannot be converted to datetime64 unless utc=True"), and
+    pandas 3.x refused them at once ("Mixed timezones detected"). They are
+    converted to UTC, each value by its own offset, and quietly.
+    """
+    values = pd.Series(["2020-03-29T00:00+00:00", "not a date", "2020-03-29T02:00+01:00"])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        out = to_datetime_coerced(values)
+    assert str(out.dt.tz) == "UTC"
+    assert out[0] == pd.Timestamp("2020-03-29 00:00", tz="UTC")
+    assert out.isna().tolist() == [False, True, False]
+    assert out[2] == pd.Timestamp("2020-03-29 01:00", tz="UTC")  # 02:00 BST is 01:00 UTC
+    assert pd.DatetimeIndex(out).tz is not None  # what the training path builds
+
+
+def test_a_value_without_an_offset_among_offsets_is_read_as_utc():
+    out = to_datetime_coerced(pd.Series(["2020-01-01 00:00", "2020-01-01T01:00+01:00"]))
+    assert out.tolist() == [pd.Timestamp("2020-01-01 00:00", tz="UTC")] * 2
+
+
+def test_one_offset_throughout_is_kept():
+    """Nothing to reconcile: the column keeps its own zone, as before."""
+    out = to_datetime_coerced(pd.Series(["2020-07-01T07:00+01:00", "2020-07-01T08:00+01:00"]))
+    assert out.dt.tz.utcoffset(None) == pd.Timedelta(hours=1)
+    assert out[0].hour == 7
