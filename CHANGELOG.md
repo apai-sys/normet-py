@@ -62,16 +62,21 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   `normet.gui._lists`. Both are imported back into `main_window`, so code that
   reads them from there -- the tests do -- is unaffected. They move so a panel
   split out of the window can import them without importing the window itself.
-- **The window's chrome moved into `normet.gui._shell`.** The menu, tabs,
-  docks, status bar, command palette, appearance menu and the About box are now
-  `ShellMixin`; `MainWindow` inherits it and keeps only its state, the workflow
-  and `closeEvent`. The seventeen methods moved verbatim.
-  What makes a mixin possible is `normet.gui._contract.WindowContract`: it
-  inherits `QMainWindow`, so `self.statusBar()` still type-checks inside a
-  mixin, and it declares the attributes and the handler signatures the mixins
-  share. Those are annotations and `TYPE_CHECKING`-only stubs, so the class adds
-  nothing at runtime -- a handler no mixin defines raises `AttributeError`
-  rather than quietly doing nothing.
+- **The window is assembled from mixins.** The chrome -- menu, tabs, docks,
+  status bar, command palette, appearance menu, About -- is
+  `normet.gui._shell.ShellMixin`; the left panel is `_panel_inputs` (Data,
+  Columns, the CSV loader, the series preview), `_panel_train` (Step 1 and
+  fine-tuning) and `_panel_analyse` (Steps 2-5 and multi-scale). `main_window`
+  keeps the assembly, the state, the run handlers and `closeEvent`:
+  2329 -> 1238 lines. Every method moved verbatim, and every widget is still an
+  attribute of the window, so the run handlers and the tests are untouched.
+  A mixin inherits `QMainWindow`, so `self.statusBar()` still means something
+  when one module is read on its own. `normet.gui` is excluded from mypy
+  (`ignore_errors = true` in `pyproject.toml`), so none of this is type-checked,
+  and the mixins do not carry a hand-maintained mirror of the window's names
+  pretending otherwise.
+- **`_wrap_row` became `_widgets.wrap_row`.** The normalise box and the
+  trajectory window each had their own copy, identical down to the margins.
 
 ### Fixed
 - **Dates whose UTC offsets differ are read as UTC.** Local time across a

@@ -16,8 +16,10 @@ genuinely different inputs, so it lives in its own window — see
 :mod:`.scm_window` — opened from the toolbar button or the Analysis menu.
 
 The chrome around all of this — menu, tabs, docks, status bar, command palette
-— is in :mod:`.shell`, mixed in as :class:`~._shell.ShellMixin`. What is left
-here is the window's state and the workflow itself.
+— is in :mod:`.shell`; the left panel is built by :mod:`.panel_inputs`,
+:mod:`.panel_train` and :mod:`.panel_analyse`. Each is a mixin, so every widget
+is still an attribute of the window. What is left here is the window's state,
+the run handlers and the workflow itself.
 """
 
 from __future__ import annotations
@@ -30,17 +32,10 @@ import os
 import pandas as pd
 from PySide6.QtCore import QSettings, Qt
 from PySide6.QtWidgets import (
-    QAbstractItemView,
-    QCheckBox,
     QDialog,
     QFileDialog,
-    QFormLayout,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
-    QListWidget,
-    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -54,22 +49,20 @@ from normet.utils._time import to_datetime_coerced
 
 from . import _chronos, _settings, commandlog
 from ._constants import MET_DEFAULTS, TIME_VARS
-from ._lists import _checked_items, _fill_checklist, _set_all, parse_groups
+from ._lists import _checked_items, _fill_checklist, parse_groups
+from ._panel_analyse import AnalysePanelMixin
+from ._panel_inputs import InputsMixin
+from ._panel_train import TrainPanelMixin
 from ._shell import ShellMixin
 from ._widgets import (
-    NoWheelComboBox,
-    NoWheelDoubleSpinBox,
     NoWheelSpinBox,
-    hint_label,
-    run_button,
-    toggle_button,
 )
 from .workers import TaskRunner
 
 log = logging.getLogger(__name__)
 
 
-class MainWindow(ShellMixin):
+class MainWindow(InputsMixin, TrainPanelMixin, AnalysePanelMixin, ShellMixin):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Normet — meteorological normalisation & counterfactual toolkit")
@@ -149,398 +142,6 @@ class MainWindow(ShellMixin):
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         return scroll
 
-    def _build_data_box(self) -> QGroupBox:
-        """Data: open a CSV, or load the bundled example."""
-        box = QGroupBox("Data")
-        dv = QVBoxLayout(box)
-        file_row = QHBoxLayout()
-        file_row.setContentsMargins(0, 0, 0, 0)
-        self.file_btn = QPushButton("Open CSV…")
-        self.file_btn.setToolTip(
-            "Load a time series CSV with a 'date' column.\nYou can also drag && drop a file onto the window."
-        )
-        self.file_btn.clicked.connect(self._open_csv)
-        self.example_btn = QPushButton("Load example")
-        self.example_btn.setToolTip(
-            "Generate a one-year synthetic air-quality + meteorology dataset\nso you can try every step immediately."
-        )
-        self.example_btn.clicked.connect(self.load_example)
-        file_row.addWidget(self.file_btn)
-        file_row.addWidget(self.example_btn)
-        dv.addLayout(file_row)
-        self.file_label = hint_label("No data loaded", small=False)
-        dv.addWidget(self.file_label)
-        return box
-
-    def _build_columns_box(self) -> QGroupBox:
-        """Columns: the target series and the predictors ticked for the model."""
-        box = QGroupBox("Columns")
-        cv = QVBoxLayout(box)
-        cv.addWidget(QLabel("Target (pollutant)"))
-        self.target_combo = NoWheelComboBox()
-        self.target_combo.setToolTip("The variable to model and normalise.")
-        self.target_combo.currentTextChanged.connect(self._target_changed)
-        cv.addWidget(self.target_combo)
-        cv.addWidget(QLabel("Features (predictors)"))
-        self.feature_list = QListWidget()
-        self.feature_list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
-        self.feature_list.setToolTip(
-            "Tick the meteorological (and other) predictors for the model."
-        )
-        self.feature_list.setMinimumHeight(140)
-        self.feature_list.setMaximumHeight(200)
-        cv.addWidget(self.feature_list)
-        btn_row = QHBoxLayout()
-        b_all = QPushButton("All")
-        b_none = QPushButton("None")
-        b_met = QPushButton("Met only")
-        b_met.setToolTip("Tick only the recognised meteorological variables.")
-        b_all.clicked.connect(lambda: _set_all(self.feature_list, True))
-        b_none.clicked.connect(lambda: _set_all(self.feature_list, False))
-        b_met.clicked.connect(self._check_met_only)
-        btn_row.addWidget(b_all)
-        btn_row.addWidget(b_none)
-        btn_row.addWidget(b_met)
-        cv.addLayout(btn_row)
-        cv.addWidget(
-            hint_label(
-                "Time features (date_unix, day_julian, weekday, hour) are added automatically."
-            )
-        )
-        return box
-
-    def _build_train_box(self) -> QGroupBox:
-        """Step 1: backend, split, budget, seed, device — and fine-tuning."""
-        box = QGroupBox("Step 1 · Train model")
-        form = QFormLayout(box)
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        self.backend_combo = NoWheelComboBox()
-        self.backend_combo.addItems(["flaml", "lightgbm", _chronos.BACKEND])
-        self.backend_combo.setToolTip(
-            "flaml = AutoML search (uses the time budget below).\n"
-            "lightgbm = LightGBM with random hyperparameter search.\n"
-            "chronos-2 = zero-shot foundation model; nothing is trained."
-        )
-        chronos_ok, chronos_why = _chronos.chronos_availability()
-        if not chronos_ok:
-            # Grey the option out rather than letting the pick raise ImportError.
-            item = self.backend_combo.model().item(2)
-            item.setEnabled(False)
-            item.setToolTip(chronos_why)
-        self.backend_combo.currentTextChanged.connect(self._train_backend_changed)
-        form.addRow("Backend", self.backend_combo)
-        self.split_combo = NoWheelComboBox()
-        self.split_combo.addItems(["random", "ts", "month_ts", "season_ts"])
-        self.split_combo.setToolTip("How the train/test split is drawn.")
-        self._split_label = QLabel("Split method")
-        form.addRow(self._split_label, self.split_combo)
-        self.train_fraction_spin = NoWheelDoubleSpinBox()
-        self.train_fraction_spin.setRange(0.1, 0.95)
-        self.train_fraction_spin.setSingleStep(0.05)
-        self.train_fraction_spin.setValue(0.75)
-        self._train_fraction_label = QLabel("Training fraction")
-        form.addRow(self._train_fraction_label, self.train_fraction_spin)
-        self.budget_spin = NoWheelSpinBox()
-        self.budget_spin.setRange(5, 36_000)
-        self.budget_spin.setValue(60)
-        self.budget_spin.setSuffix(" s")
-        self.budget_spin.setToolTip("AutoML search time (flaml backend).")
-        self._budget_label = QLabel("Time budget")
-        self._budget_values = {"flaml": 60, "lightgbm": 20}
-        self._prev_backend = "flaml"
-        # Parked value for the "Samples" spin box on the other side of the
-        # chronos-2 divide; see _train_backend_changed.
-        self._norm_samples_parked = _chronos.DEFAULT_SAMPLES
-        self._decom_samples_parked = _chronos.DEFAULT_SAMPLES
-        self._norm_samples_is_chronos = False
-        form.addRow(self._budget_label, self.budget_spin)
-        # flaml only: which AutoML estimators to search over.
-        self.estimator_list = QListWidget()
-        self.estimator_list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
-        self.estimator_list.setMaximumHeight(96)
-        self.estimator_list.setToolTip(
-            "AutoML estimators flaml may try (searched within the time budget).\n"
-            "lgbm is the fastest and usually sufficient; tick more to widen the search."
-        )
-        for name, tip in [
-            ("lgbm", "LightGBM (default, fast)"),
-            ("xgboost", "XGBoost"),
-            ("xgb_limitdepth", "XGBoost, depth-limited"),
-            ("rf", "Random forest"),
-            ("extra_tree", "Extra trees"),
-            ("histgb", "Histogram gradient boosting (sklearn)"),
-        ]:
-            item = QListWidgetItem(name)
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(Qt.CheckState.Checked if name == "lgbm" else Qt.CheckState.Unchecked)
-            item.setToolTip(tip)
-            self.estimator_list.addItem(item)
-        self._estimator_label = QLabel("Estimators")
-        form.addRow(self._estimator_label, self.estimator_list)
-        self._train_form = form
-        self.seed_spin = NoWheelSpinBox()
-        self.seed_spin.setRange(0, 2_147_483_647)
-        self.seed_spin.setValue(7_654_321)
-        self._seed_label = QLabel("Seed")
-        form.addRow(self._seed_label, self.seed_spin)
-        self._chronos_hint = hint_label(
-            "Chronos-2 is zero-shot — nothing is trained, so there is no budget, "
-            "search space or train/test split. The first run downloads about "
-            "500 MB of weights. Meteorology enters through the model's covariate "
-            "channel; the ticked features below are what it sees."
-        )
-        self._chronos_hint.setVisible(False)
-        form.addRow(self._chronos_hint)
-        self._device_label = QLabel("Device")
-        self.device_combo = NoWheelComboBox()
-        self.device_combo.addItems(["auto", "cpu", "cuda", "mps"])
-        self.device_combo.setToolTip(
-            "Where Chronos-2 runs.\n"
-            "auto: CUDA, else Apple Silicon (mps), else CPU.\n"
-            "Every Monte-Carlo sample is a full forward pass, so this is the "
-            "difference between minutes and hours."
-        )
-        self._device_label.setVisible(False)
-        self.device_combo.setVisible(False)
-        form.addRow(self._device_label, self.device_combo)
-        self.train_button = run_button(
-            "▶  Train model",
-            "Prepare the data and train the machine-learning model.\nEverything below needs a trained model.",
-        )
-        self.train_button.clicked.connect(self._run_train)
-        form.addRow(self.train_button)
-        # Chronos-2 only: adapt the loaded checkpoint to this site's own record.
-        self._ft_box = QWidget()
-        ft = QFormLayout(self._ft_box)
-        ft.setContentsMargins(0, 0, 0, 0)
-        self.ft_mode = NoWheelComboBox()
-        self.ft_mode.addItems(["lora", "full"])
-        if not _chronos.can_lora():
-            self.ft_mode.model().item(0).setEnabled(False)
-            self.ft_mode.setCurrentText("full")
-        self.ft_mode.setToolTip(
-            "lora: train small adapters, leave the base weights alone (needs peft).\n"
-            "full: update all 119M parameters; overfits a single site's record more easily."
-        )
-        ft.addRow("Fine-tune", self.ft_mode)
-        self.ft_steps = NoWheelSpinBox()
-        self.ft_steps.setRange(1, 100_000)
-        self.ft_steps.setValue(300)
-        self.ft_steps.setToolTip(
-            "Optimiser steps. On a CPU this takes a while; a GPU or Apple Silicon helps."
-        )
-        ft.addRow("Steps", self.ft_steps)
-        self.ft_button = run_button(
-            "▶  Fine-tune Chronos-2",
-            "Adapt the loaded checkpoint to this site's own record. The tuned weights\n"
-            "replace the model for this session; Load Chronos-2 again to go back.",
-        )
-        self.ft_button.clicked.connect(self._run_finetune)
-        ft.addRow(self.ft_button)
-        self._ft_box.setVisible(False)
-        form.addRow(self._ft_box)
-        return box
-
-    def _build_normalise_box(self) -> QGroupBox:
-        """Step 2: which variables to resample, and how many samples."""
-        box = QGroupBox("Step 2 · Normalise")
-        nf = QFormLayout(box)
-        nf.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        self.norm_vars = QListWidget()
-        self.norm_vars.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
-        self.norm_vars.setMaximumHeight(110)
-        self.norm_vars.setToolTip(
-            "Which variables are resampled in the Monte-Carlo (their influence is\n"
-            "averaged out of the target). Ticked = normalised away; unticked stay\n"
-            "at their observed values. Lists every trained variable, including the\n"
-            "auto-added time features — resampling those too removes trend and\n"
-            "seasonality as well. Default (Met only) is the usual deweathering choice."
-        )
-        nf.addRow("Resample vars", self.norm_vars)
-        nv_row = QHBoxLayout()
-        b_nv_met = QPushButton("Met only")
-        b_nv_met.setToolTip("Tick only the recognised meteorological variables.")
-        b_nv_met.clicked.connect(lambda: self._set_norm_vars_met_only())
-        b_nv_all = QPushButton("All")
-        b_nv_all.clicked.connect(lambda: _set_all(self.norm_vars, True))
-        nv_row.addWidget(b_nv_met)
-        nv_row.addWidget(b_nv_all)
-        nf.addRow("", self._wrap_row(nv_row))
-        self.norm_samples = NoWheelSpinBox()
-        self.norm_samples.setRange(1, 10_000)
-        self.norm_samples.setValue(300)
-        self.norm_samples.setToolTip(
-            "Monte-Carlo resamples of the meteorological conditions.\nMore = smoother but slower."
-        )
-        nf.addRow("Samples", self.norm_samples)
-        self.norm_cores = NoWheelSpinBox()
-        self.norm_cores.setRange(0, 64)
-        self.norm_cores.setValue(0)
-        self.norm_cores.setSpecialValueText("auto")
-        nf.addRow("CPU cores", self.norm_cores)
-        self.norm_quantiles = QCheckBox("5–95 % quantile band")
-        self.norm_quantiles.setToolTip("Also return the Monte-Carlo quantiles and shade the band.")
-        nf.addRow(self.norm_quantiles)
-        self.norm_button = run_button(
-            "▶  Run normalisation",
-            "Remove the meteorological signal from the target\n(counterfactual under average meteorology).",
-        )
-        self.norm_button.clicked.connect(self._run_normalise)
-        nf.addRow(self.norm_button)
-        return box
-
-    def _build_decompose_box(self) -> QGroupBox:
-        """Step 3: emission or meteorology, attribution and groups."""
-        box = QGroupBox("Step 3 · Decompose")
-        df_ = QFormLayout(box)
-        df_.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        self.decom_method = NoWheelComboBox()
-        self.decom_method.addItems(["emission", "meteorology"])
-        self.decom_method.setToolTip(
-            "emission: split the normalised series (Step 2) into time scales\n"
-            "(trend / seasonal / weekly / diurnal / noise).\n"
-            "meteorology: split observed − normalised into the contribution\n"
-            "of each individual meteorological variable."
-        )
-        df_.addRow("Method", self.decom_method)
-        self.decom_attribution = NoWheelComboBox()
-        self.decom_attribution.addItems(["auto", "sequential", "shapley"])
-        self.decom_attribution.setToolTip(
-            "How observed − normalised is split among the variables (meteorology only).\n"
-            "sequential: fix them one at a time; the split depends on the order.\n"
-            "shapley: average each one's effect over every order (2^k normalisations\n"
-            "for k variables or groups, up to 10).\n"
-            "auto: shapley when groups are given, else sequential."
-        )
-        df_.addRow("Attribution", self.decom_attribution)
-        self.decom_groups = QLineEdit()
-        self.decom_groups.setPlaceholderText("optional: local: t2m, blh; wind: u10, v10")
-        self.decom_groups.setToolTip(
-            "Attribute the meteorological variables in named groups (meteorology only):\n"
-            "name: var, var; name: var, …  Every variable trained on must be in exactly\n"
-            "one group; each group gets one contribution column."
-        )
-        df_.addRow("Groups", self.decom_groups)
-        self.decom_method.currentTextChanged.connect(self._decom_method_changed)
-        self.decom_samples = NoWheelSpinBox()
-        self.decom_samples.setRange(1, 10_000)
-        self.decom_samples.setValue(300)
-        df_.addRow("Samples", self.decom_samples)
-        self._decom_method_changed(self.decom_method.currentText())
-        self.decom_button = run_button(
-            "▶  Run decomposition",
-            "Split the observed series into additive contributions\n(nested normalisation).",
-        )
-        self.decom_button.clicked.connect(self._run_decompose)
-        df_.addRow(self.decom_button)
-        return box
-
-    def _build_rolling_box(self) -> QGroupBox:
-        """Step 4: window, step and samples for the rolling normalisation."""
-        box = QGroupBox("Step 4 · Rolling")
-        rf = QFormLayout(box)
-        rf.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        self.roll_window = NoWheelSpinBox()
-        self.roll_window.setRange(1, 365)
-        self.roll_window.setValue(14)
-        self.roll_window.setSuffix(" d")
-        rf.addRow("Window", self.roll_window)
-        self.roll_step = NoWheelSpinBox()
-        self.roll_step.setRange(1, 365)
-        self.roll_step.setValue(7)
-        self.roll_step.setSuffix(" d")
-        rf.addRow("Step", self.roll_step)
-        self.roll_samples = NoWheelSpinBox()
-        self.roll_samples.setRange(1, 10_000)
-        self.roll_samples.setValue(100)
-        rf.addRow("Samples", self.roll_samples)
-        self.roll_button = run_button(
-            "▶  Run rolling normalisation",
-            "Windowed re-normalisation — reveals slow changes in the\n"
-            "emission signal. Resamples the variables ticked in Step 2.",
-        )
-        self.roll_button.clicked.connect(self._run_rolling)
-        rf.addRow(self.roll_button)
-        return box
-
-    def _build_multiscale_box(self) -> QGroupBox:
-        """Multi-scale: three rolling widths, differenced against Step 2."""
-        box = QGroupBox("Multi-scale decomposition")
-        mf = QFormLayout(box)
-        mf.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        mf.addRow(
-            hint_label(
-                "Differences Y_fast − Y_meso − Y_slow − Y_∞ (Step 2) isolate the "
-                "meteorological residual specific to each timescale — like wavelet "
-                "detail coefficients or MSTL's trend/seasonal/remainder."
-            )
-        )
-        self.ms_fast = NoWheelSpinBox()
-        self.ms_fast.setRange(1, 3650)
-        self.ms_fast.setValue(14)
-        self.ms_fast.setSuffix(" d")
-        mf.addRow("Fast window", self.ms_fast)
-        self.ms_meso = NoWheelSpinBox()
-        self.ms_meso.setRange(1, 3650)
-        self.ms_meso.setValue(90)
-        self.ms_meso.setSuffix(" d")
-        mf.addRow("Meso window", self.ms_meso)
-        self.ms_slow = NoWheelSpinBox()
-        self.ms_slow.setRange(1, 3650)
-        self.ms_slow.setValue(365)
-        self.ms_slow.setSuffix(" d")
-        mf.addRow("Slow window", self.ms_slow)
-        self._ms_button_tip = (
-            "Runs rolling normalisation at three window widths and differences\n"
-            "them against each other and against Step 2's Y_∞ — needs Step 2\n"
-            "(Normalise) to have been run first, and is roughly 3× the cost of\n"
-            "a single Rolling run."
-        )
-        self.ms_button = run_button("▶  Multi-scale decomposition", self._ms_button_tip)
-        self.ms_button.clicked.connect(self._run_multiscale)
-        mf.addRow(self.ms_button)
-        return box
-
-    def _build_pdp_box(self) -> QGroupBox:
-        """Step 5: partial-dependence curves for the ticked variables."""
-        box = QGroupBox("Step 5 · Partial dependence")
-        pv = QVBoxLayout(box)
-        pv.addWidget(QLabel("Variables"))
-        self.pdp_vars = QListWidget()
-        self.pdp_vars.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
-        self.pdp_vars.setMaximumHeight(120)
-        self.pdp_vars.setToolTip("Filled with the trained features after Step 1.")
-        pv.addWidget(self.pdp_vars)
-        grid_row = QHBoxLayout()
-        grid_row.addWidget(QLabel("Grid points"))
-        self.pdp_grid = NoWheelSpinBox()
-        self.pdp_grid.setRange(5, 500)
-        self.pdp_grid.setValue(50)
-        grid_row.addWidget(self.pdp_grid)
-        self.pdp_time_btn = toggle_button(
-            "Time variables",
-            "Toggle date_unix / day_julian / weekday / hour:\n"
-            "click to tick all of them, click again to untick.",
-        )
-        self.pdp_time_btn.toggled.connect(lambda checked: self._toggle_pdp_vars(checked, TIME_VARS))
-        self.pdp_met_btn = toggle_button(
-            "Met only",
-            "Toggle the recognised meteorological variables:\n"
-            "click to tick all of them, click again to untick.",
-        )
-        self.pdp_met_btn.toggled.connect(lambda checked: self._toggle_pdp_vars(checked, None))
-        grid_row.addWidget(self.pdp_time_btn)
-        grid_row.addWidget(self.pdp_met_btn)
-        grid_row.addStretch(1)
-        pv.addLayout(grid_row)
-        self.pdp_button = run_button(
-            "▶  Compute PDP",
-            "Partial-dependence curves: how the model's prediction\nresponds to each variable.",
-        )
-        self.pdp_button.clicked.connect(self._run_pdp)
-        pv.addWidget(self.pdp_button)
-        return box
-
     def _build_config_row(self) -> QHBoxLayout:
         """Save/load a config and the run history, under the last step."""
         row = QHBoxLayout()
@@ -554,48 +155,6 @@ class MainWindow(ShellMixin):
         row.addWidget(b_load)
         row.addWidget(b_hist)
         return row
-
-    # ------------------------------------------------------------ action bar
-    def _build_action_bar(self) -> QWidget:
-        bar = QWidget()
-        h = QHBoxLayout(bar)
-        h.setContentsMargins(4, 0, 4, 0)
-        self.exp_csv = QPushButton("⬇  Export result CSV")
-        self.exp_csv.setToolTip("Export the current tab's result table as CSV.")
-        self.exp_csv.clicked.connect(self._export_current)
-        self.exp_csv.setEnabled(False)
-        self.exp_html = QPushButton("📄  HTML report")
-        self.exp_html.setToolTip(
-            "Single-file HTML report of the current tab's result,\nwith provenance metadata."
-        )
-        self.exp_html.clicked.connect(self._export_html)
-        self.exp_html.setEnabled(False)
-        self.scm_btn = QPushButton("🧪  SCM Studio")
-        self.scm_btn.setToolTip(
-            "Synthetic-control (counterfactual) analysis on panel data\n— treated unit vs. donor pool."
-        )
-        self.scm_btn.clicked.connect(self.open_scm_studio)
-        self.data_btn = QPushButton("🌐  Get UK data")
-        self.data_btn.setToolTip(
-            "Fetch UK air quality (AURN, AQE, SAQN, WAQN, NI, LMAM) plus\n"
-            "reanalysis meteorology and merge them into a model-ready table\n"
-            "(no API key)."
-        )
-        self.data_btn.clicked.connect(self.open_data_studio)
-        self.transport_btn = QPushButton("🧭  Transport Studio")
-        self.transport_btn.setToolTip(
-            "Build transport-aware predictors (inflow direction, transport\n"
-            "distance/speed, residence time over source regions) from HYSPLIT\n"
-            "back-trajectory (tdump) output, and join them onto this data."
-        )
-        self.transport_btn.clicked.connect(self.open_transport_studio)
-        h.addWidget(self.data_btn)
-        h.addWidget(self.transport_btn)
-        h.addWidget(self.exp_csv)
-        h.addWidget(self.exp_html)
-        h.addWidget(self.scm_btn)
-        h.addStretch(1)
-        return bar
 
     # ----------------------------------------------------------- command log
     def _record_task(self, fn, args, kwargs):  # noqa: ANN001, ANN202 - TaskRunner.record
@@ -622,265 +181,6 @@ class MainWindow(ShellMixin):
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(self.command_log.script())
             log.info("Session script written to %s", path)
-
-    # ------------------------------------------------------------ data I/O
-    def _open_csv(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Open time-series CSV", "", "CSV files (*.csv *.csv.gz)"
-        )
-        if path:
-            self.load_csv(path, remember=True)
-
-    def load_example(self) -> None:
-        from ._examples import make_deweather_example
-
-        df = make_deweather_example()
-        self._ingest(df, "Example data (synthetic, 1 year hourly)")
-        self._log_command(commandlog.load_example())
-        self.statusBar().showMessage(
-            "Example loaded — target PM2.5 with met features preselected. Click ▶ Train model."
-        )
-
-    def load_csv(self, path: str, remember: bool = False) -> None:
-        """Load *path* into the Data tab and populate the column selectors."""
-        try:
-            df = pd.read_csv(path)
-        except Exception as exc:
-            QMessageBox.critical(self, "Failed to read CSV", str(exc))
-            return
-
-        date_col = next((c for c in df.columns if c.lower() == "date"), None)
-        if date_col is None:
-            QMessageBox.warning(
-                self,
-                "No date column",
-                "The CSV must contain a 'date' column with timestamps.\n\n"
-                "For synthetic-control panel data, use the SCM Studio instead "
-                "(Analysis → Synthetic Control).",
-            )
-            return
-        df[date_col] = to_datetime_coerced(df[date_col])
-        df = df.rename(columns={date_col: "date"})
-
-        self._ingest(df, os.path.basename(path))
-        self._log_command(commandlog.open_csv(os.path.abspath(path), date_col))
-        if remember:
-            _settings.add_recent(path)
-            self._rebuild_recent_menu()
-        log.info("Loaded %s (%d rows)", path, len(df))
-
-    def _ingest(self, df: pd.DataFrame, label: str) -> None:
-        self.df_raw = df
-        self.df_prep = None
-        self.model = None
-        self.chronos_check = None
-        self.trained_features = []
-        self.results.clear()
-        self.tab_model.show_message("Train a model (Step 1) to see its quality here.")
-
-        span = f"{df['date'].min():%Y-%m-%d} → {df['date'].max():%Y-%m-%d}"
-        self.file_label.setText(f"{label}\n{len(df):,} rows × {df.shape[1]} columns")
-        self.file_label.setStyleSheet("")
-        self.table_model.set_dataframe(df)
-
-        n_nan = int(df.isna().sum().sum())
-        self.data_summary.setText(
-            f"{len(df):,} rows × {df.shape[1]} columns   |   date range: {span}"
-            f"   |   missing values: {n_nan:,}"
-        )
-
-        numeric = [c for c in df.columns if c != "date" and pd.api.types.is_numeric_dtype(df[c])]
-        self.target_combo.blockSignals(True)
-        self.target_combo.clear()
-        self.target_combo.addItems(numeric)
-        pollutant = next(
-            (
-                c
-                for c in numeric
-                if c.upper() in {"PM2.5", "PM25", "PM10", "NO2", "O3", "SO2", "CO", "NOX"}
-            ),
-            numeric[0] if numeric else "",
-        )
-        if pollutant:
-            self.target_combo.setCurrentText(pollutant)
-        self.target_combo.blockSignals(False)
-
-        met = {c for c in numeric if c.lower() in MET_DEFAULTS or c in MET_DEFAULTS}
-        _fill_checklist(self.feature_list, numeric, met or set(numeric))
-        self.pdp_vars.clear()
-        self._reset_pdp_toggle_buttons()
-
-        self._sync_enabled()
-        self._sync_welcome()
-        self._draw_data_preview()
-        self.tabs.setCurrentIndex(0)
-        self.statusBar().showMessage(
-            "Data loaded — check the target and features, then ▶ Train model (Step 1)."
-        )
-
-    def _target_changed(self, _text: str) -> None:
-        if self.df_raw is not None:
-            self._draw_data_preview()
-
-    def _train_backend_changed(self, backend: str) -> None:
-        """The budget row means seconds for flaml, search trials for LightGBM;
-        the estimator checklist only applies to flaml's AutoML search.
-
-        Chronos-2 is zero-shot, so the whole training-control block — budget,
-        estimator search space, train/test split, seed — has nothing to act on
-        and is hidden rather than left to imply it does something.
-        """
-        is_chronos = backend == _chronos.BACKEND
-        for label, widget in (
-            (self._budget_label, self.budget_spin),
-            (self._estimator_label, self.estimator_list),
-            (self._split_label, self.split_combo),
-            (self._train_fraction_label, self.train_fraction_spin),
-            (self._seed_label, self.seed_spin),
-        ):
-            label.setVisible(not is_chronos)
-            widget.setVisible(not is_chronos)
-        self._chronos_hint.setVisible(is_chronos)
-        self._ft_box.setVisible(is_chronos)
-        self._device_label.setVisible(is_chronos)
-        self.device_combo.setVisible(is_chronos)
-        self.train_button.setText("▶  Load Chronos-2" if is_chronos else "▶  Train model")
-        # A Monte-Carlo sample is a tree ensemble call under flaml/LightGBM and a
-        # 2048-context transformer forward pass under Chronos-2, so the sensible
-        # count differs by nearly two orders of magnitude. Swap the value when the
-        # backend crosses that divide, parking the other side's so a user who set
-        # it deliberately gets it back on the way over.
-        if is_chronos != self._norm_samples_is_chronos:
-            self._norm_samples_parked, restored = (
-                self.norm_samples.value(),
-                self._norm_samples_parked,
-            )
-            self.norm_samples.setValue(restored)
-            self._decom_samples_parked, restored = (
-                self.decom_samples.value(),
-                self._decom_samples_parked,
-            )
-            self.decom_samples.setValue(restored)
-            self._norm_samples_is_chronos = is_chronos
-        # Chronos-2 decomposes by meteorological variable only: the calendar
-        # components ride in the target's own history, which it never resamples.
-        item = self.decom_method.model().item(0)
-        item.setEnabled(not is_chronos)
-        item.setToolTip(
-            "Not on chronos-2: it reads the calendar off the target's own history."
-            if is_chronos
-            else ""
-        )
-        if is_chronos:
-            self.decom_method.setCurrentText("meteorology")
-        if is_chronos:
-            return
-
-        self._budget_values[self._prev_backend] = self.budget_spin.value()
-        self._prev_backend = backend
-        if backend == "flaml":
-            self._budget_label.setText("Time budget")
-            self.budget_spin.setRange(5, 36_000)
-            self.budget_spin.setSuffix(" s")
-            self.budget_spin.setToolTip("AutoML search time (flaml backend).")
-        else:
-            self._budget_label.setText("Search trials")
-            self.budget_spin.setRange(1, 500)
-            self.budget_spin.setSuffix("")
-            self.budget_spin.setToolTip("Random hyperparameter-search trials (LightGBM backend).")
-        self.budget_spin.setValue(self._budget_values.get(backend, 20))
-        is_flaml = backend == "flaml"
-        self._estimator_label.setVisible(is_flaml)
-        self.estimator_list.setVisible(is_flaml)
-
-    def _selected_estimators(self) -> list[str]:
-        return _checked_items(self.estimator_list)
-
-    @staticmethod
-    def _wrap_row(layout: QHBoxLayout) -> QWidget:
-        w = QWidget()
-        layout.setContentsMargins(0, 0, 0, 0)
-        w.setLayout(layout)
-        return w
-
-    def _set_norm_vars_met_only(self) -> None:
-        for i in range(self.norm_vars.count()):
-            item = self.norm_vars.item(i)
-            is_met = item.text().lower() in MET_DEFAULTS or item.text() in MET_DEFAULTS
-            item.setCheckState(Qt.CheckState.Checked if is_met else Qt.CheckState.Unchecked)
-
-    def _selected_norm_vars(self) -> list[str]:
-        return _checked_items(self.norm_vars)
-
-    def _check_met_only(self) -> None:
-        for i in range(self.feature_list.count()):
-            item = self.feature_list.item(i)
-            is_met = item.text().lower() in MET_DEFAULTS or item.text() in MET_DEFAULTS
-            item.setCheckState(Qt.CheckState.Checked if is_met else Qt.CheckState.Unchecked)
-
-    def _toggle_pdp_vars(self, checked: bool, names: tuple[str, ...] | None) -> None:
-        """Tick/untick a subset of Step 5's variable list.
-
-        *names* selects an explicit subset (time variables); pass None to
-        target the recognised meteorological variables instead.
-        """
-        state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
-        for i in range(self.pdp_vars.count()):
-            item = self.pdp_vars.item(i)
-            text = item.text()
-            matches = (
-                text in names
-                if names is not None
-                else (text.lower() in MET_DEFAULTS or text in MET_DEFAULTS)
-            )
-            if matches:
-                item.setCheckState(state)
-
-    def _reset_pdp_toggle_buttons(self) -> None:
-        """Un-press the Time-variables/Met-only toggles after the variable
-        list is (re)filled, so their pressed state doesn't lie about what's
-        actually ticked."""
-        for btn in (self.pdp_time_btn, self.pdp_met_btn):
-            btn.blockSignals(True)
-            btn.setChecked(False)
-            btn.blockSignals(False)
-
-    def _draw_data_preview(self) -> None:
-        """Quick look at the chosen target series (daily means when dense)."""
-        target = self.target_combo.currentText()
-        if self.df_raw is None or not target or target not in self.df_raw.columns:
-            return
-        import matplotlib.pyplot as plt
-
-        s = self.df_raw.set_index("date")[target].dropna()
-        # A date that did not parse has no place on the axis; with a time zone, one
-        # NaT also stops matplotlib converting the whole axis.
-        s = s[s.index.notna()]
-        note = ""
-        if len(s) > 20_000:
-            s = s.resample("D").mean()
-            note = " (daily means)"
-        fig, ax = plt.subplots(figsize=(9, 2.4))
-        ax.plot(s.index, s.values, lw=0.7, color="#2c7bb6")
-        ax.set_title(f"{target}{note}", fontsize=10, loc="left")
-        ax.grid(alpha=0.2)
-        fig.tight_layout()
-        self.data_preview.show_figure(fig)
-
-    # ---- drag and drop ----
-    def dragEnterEvent(self, event) -> None:  # noqa: N802
-        md = event.mimeData()
-        if md.hasUrls() and any(
-            u.toLocalFile().lower().endswith((".csv", ".csv.gz")) for u in md.urls()
-        ):
-            event.acceptProposedAction()
-
-    def dropEvent(self, event) -> None:  # noqa: N802
-        for u in event.mimeData().urls():
-            p = u.toLocalFile()
-            if p.lower().endswith((".csv", ".csv.gz")):
-                self.load_csv(p, remember=True)
-                break
 
     # ------------------------------------------------------------- config
     def get_config(self) -> dict:
@@ -1157,10 +457,6 @@ class MainWindow(ShellMixin):
             return False
         return True
 
-    def _selected_features(self) -> list[str]:
-        target = self.target_combo.currentText()
-        return [f for f in _checked_items(self.feature_list) if f != target]
-
     def _show_error(self, tb: str) -> None:
         QMessageBox.critical(self, "Task failed", tb.splitlines()[-1] if tb else "Unknown error")
         self.log_view.appendPlainText(tb)
@@ -1238,14 +534,6 @@ class MainWindow(ShellMixin):
             met,
             self._selected_device(),
         )
-
-    def _selected_device(self) -> str | None:
-        """``None`` means let :func:`normet.foundation.resolve_device` choose."""
-        choice = self.device_combo.currentText()
-        return None if choice == "auto" else choice
-
-    def _is_chronos(self) -> bool:
-        return self.backend_combo.currentText() == _chronos.BACKEND
 
     def _render_chronos_model_tab(self) -> None:
         """Report what the checkpoint is and whether it actually reacts to weather.
@@ -1611,11 +899,6 @@ class MainWindow(ShellMixin):
         self.tabs.setCurrentWidget(self.tab_model)
         self.statusBar().showMessage("Fine-tuned — normalise again to use the tuned weights.")
         log.info("Fine-tuning finished")
-
-    def _decom_method_changed(self, method: str) -> None:
-        on = method == "meteorology"
-        self.decom_attribution.setEnabled(on)
-        self.decom_groups.setEnabled(on)
 
     def _decompose_done(self, result: pd.DataFrame) -> None:
         self.results["decompose"] = result

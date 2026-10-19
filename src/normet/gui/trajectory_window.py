@@ -58,7 +58,7 @@ from PySide6.QtWidgets import (
 
 from normet.io.trajectory import _missing_gdas1_files, _naive_utc
 
-from ._widgets import CanvasTab, NoWheelSpinBox, hint_label, run_button
+from ._widgets import CanvasTab, NoWheelSpinBox, hint_label, run_button, wrap_row
 from .workers import TaskRunner
 
 log = logging.getLogger(__name__)
@@ -334,7 +334,7 @@ class TrajectoryWindow(QMainWindow):
         min_row.addWidget(self.build_min_check)
         min_row.addWidget(self.build_min_spin)
         min_row.addStretch(1)
-        tv.addWidget(self._wrap_row(min_row))
+        tv.addWidget(wrap_row(min_row))
         v.addWidget(tdump_box)
 
         # ---- Source regions (shared by build + run)
@@ -398,7 +398,7 @@ class TrajectoryWindow(QMainWindow):
         b_exec = QPushButton("Browse…")
         b_exec.clicked.connect(self._browse_hysplit_exec)
         exec_row.addWidget(b_exec)
-        rf.addRow("hyts_std", self._wrap_row(exec_row))
+        rf.addRow("hyts_std", wrap_row(exec_row))
 
         self.gdas_dir_edit = QLineEdit(os.path.expanduser("~/normet_gdas1"))
         gdas_row = QHBoxLayout()
@@ -406,7 +406,7 @@ class TrajectoryWindow(QMainWindow):
         b_gdas_dir = QPushButton("Browse…")
         b_gdas_dir.clicked.connect(self._browse_gdas_dir)
         gdas_row.addWidget(b_gdas_dir)
-        rf.addRow("GDAS1 cache dir", self._wrap_row(gdas_row))
+        rf.addRow("GDAS1 cache dir", wrap_row(gdas_row))
 
         today = QDate.currentDate()
         self.gdas_from = QDateEdit(today.addDays(-10))
@@ -418,7 +418,7 @@ class TrajectoryWindow(QMainWindow):
         gdas_date_row.addWidget(self.gdas_from)
         gdas_date_row.addWidget(QLabel("→"))
         gdas_date_row.addWidget(self.gdas_to)
-        rf.addRow("GDAS1 range", self._wrap_row(gdas_date_row))
+        rf.addRow("GDAS1 range", wrap_row(gdas_date_row))
         self.gdas_btn = QPushButton("⬇  Download GDAS1 for this range")
         self.gdas_btn.clicked.connect(self._run_download_gdas)
         self.met_files_btn = QPushButton("Use existing met files…")
@@ -430,7 +430,7 @@ class TrajectoryWindow(QMainWindow):
         met_row = QHBoxLayout()
         met_row.addWidget(self.gdas_btn)
         met_row.addWidget(self.met_files_btn)
-        rf.addRow(self._wrap_row(met_row))
+        rf.addRow(wrap_row(met_row))
         self.gdas_hint = hint_label("No met files yet: download GDAS1, or use existing ones.")
         rf.addRow(self.gdas_hint)
 
@@ -445,7 +445,7 @@ class TrajectoryWindow(QMainWindow):
         b_rdel2.clicked.connect(self.receptor_table.remove_selected)
         recv_btn_row.addWidget(b_radd2)
         recv_btn_row.addWidget(b_rdel2)
-        rf.addRow("", self._wrap_row(recv_btn_row))
+        rf.addRow("", wrap_row(recv_btn_row))
         rf.addRow(
             hint_label(
                 "One or more (name, lat, lon) rows. Each name tags its results\n"
@@ -501,7 +501,7 @@ class TrajectoryWindow(QMainWindow):
                 diag_row.addWidget(cb)
             diag_row.addStretch(1)
             diag_col.addLayout(diag_row)
-        rf.addRow("Record diagnostics", self._wrap_row(diag_col))
+        rf.addRow("Record diagnostics", wrap_row(diag_col))
         rf.addRow(
             hint_label(
                 "Along-trajectory meteorology hyts_std writes into tdump —\n"
@@ -532,13 +532,6 @@ class TrajectoryWindow(QMainWindow):
         scroll.setFixedWidth(400)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         return scroll
-
-    @staticmethod
-    def _wrap_row(layout: QHBoxLayout | QVBoxLayout) -> QWidget:
-        w = QWidget()
-        layout.setContentsMargins(0, 0, 0, 0)
-        w.setLayout(layout)
-        return w
 
     def _build_action_bar(self) -> QWidget:
         bar = QWidget()
