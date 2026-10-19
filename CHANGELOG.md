@@ -7,6 +7,18 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ## [Unreleased]
 
 ### Added
+- **GUI: command log and figures for print** (adapted from the cume app's).
+  View → Command Log lists every action that decides a result as the normet
+  call that repeats it -- opening a table, training, normalising,
+  decomposing, rolling, partial dependence. An entry is written from the
+  arguments the step actually ran with, and only once it succeeded. File →
+  Save Session as Script… writes the log as a Python file; the test suite
+  runs that file and checks it reproduces the window's model data and
+  normalised series exactly. Every figure's toolbar gains Export for
+  Publication…, which lays the figure out at a journal's column width (Nature,
+  Elsevier, ACS presets, or custom) with its lettering in points, previews it
+  at printed size, and saves PNG, TIFF, PDF, SVG or EPS on a white page at
+  exactly that width.
 - **GUI: the Assistant** (View → Assistant, Ctrl+Shift+A; adapted from the
   cume app's). A language model works in the window with ten tools: it reads
   the table, the model's fit, the normalised series and the decomposition

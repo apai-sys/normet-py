@@ -87,6 +87,13 @@ class TaskRunner(QObject):
         self._active: tuple[QThread, FunctionWorker] | None = None
         self._zombies: list[tuple[QThread, FunctionWorker]] = []
         self.task_name: str = ""
+        #: ``record(fn, args, kwargs)``, asked as a task is submitted, may return what
+        #: to do once it has succeeded -- the window's command log uses it to write
+        #: down the call a task made, from the arguments it was started with.
+        self.record: Callable[[Callable[..., Any], tuple[Any, ...], dict[str, Any]], Any] | None = (
+            None
+        )
+        self._commit: Callable[[], None] | None = None
 
     @property
     def busy(self) -> bool:
@@ -104,12 +111,16 @@ class TaskRunner(QObject):
         """Start *fn* in a background thread. Returns False if already busy."""
         if self.busy:
             return False
-
+        self._commit = self.record(fn, args, kwargs) if self.record is not None else None
         thread = QThread()
         worker = FunctionWorker(fn, *args, **kwargs)
         worker.moveToThread(thread)
 
         thread.started.connect(worker.run)
+        # Through a method of this object, which lives on the GUI thread, so Qt queues
+        # it there -- a plain function would run on the worker's thread -- and before
+        # on_result, connected after it.
+        worker.finished.connect(self._committed)
         worker.finished.connect(on_result)
         worker.failed.connect(on_error)
         worker.done.connect(thread.quit)
@@ -120,6 +131,12 @@ class TaskRunner(QObject):
         self.started.emit(name)
         thread.start()
         return True
+
+    def _committed(self, _result: Any) -> None:
+        """The active task succeeded: what ``record`` asked to be done, done."""
+        commit, self._commit = self._commit, None
+        if commit is not None:
+            commit()
 
     def abandon(self) -> None:
         """Detach the active task; its eventual result is discarded.

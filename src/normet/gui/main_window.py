@@ -28,6 +28,7 @@ from PySide6.QtCore import QSettings, Qt, QUrl
 from PySide6.QtGui import QActionGroup, QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QCheckBox,
     QDialog,
     QDockWidget,
@@ -55,7 +56,7 @@ from PySide6.QtWidgets import (
 
 from normet.utils._time import to_datetime_coerced
 
-from . import _chronos, _settings, theme
+from . import _chronos, _settings, commandlog, theme
 from ._widgets import (
     CanvasTab,
     NoWheelComboBox,
@@ -137,9 +138,12 @@ class MainWindow(QMainWindow):
         self.runner = TaskRunner(self)
         self.runner.started.connect(self._task_started)
         self.runner.finished.connect(self._task_finished)
+        self.command_log = commandlog.CommandLog()
+        self.runner.record = self._record_task
 
         self._build_central()
         self._build_log_dock()
+        self._build_command_log_dock()
         self._build_assistant()
         self._build_status_bar()
         self._build_menu()
@@ -169,6 +173,7 @@ class MainWindow(QMainWindow):
         self._export_action.setEnabled(False)
         self._report_action = fm.addAction("Export &HTML Report…", self._export_html)
         self._report_action.setEnabled(False)
+        fm.addAction("Save Session as &Script…", self.save_script)
         fm.addSeparator()
         fm.addAction("Save Con&fig…", self.save_config)
         fm.addAction("Load Confi&g…", self.load_config)
@@ -189,6 +194,9 @@ class MainWindow(QMainWindow):
         vm.addAction("Run &History…", self.show_history)
         vm.addSeparator()
         vm.addAction(self._log_dock.toggleViewAction())
+        act = self._command_dock.toggleViewAction()
+        act.setText("Command &Log")
+        vm.addAction(act)
         act = self.assistant.toggleViewAction()
         act.setText("&Assistant")
         act.setShortcut("Ctrl+Shift+A")
@@ -748,6 +756,79 @@ class MainWindow(QMainWindow):
         logging.getLogger("normet").setLevel(logging.INFO)
         self._log_handler = handler
 
+    # ----------------------------------------------------------- command log
+    def _build_command_log_dock(self) -> None:
+        """View → Command Log: the session as the normet calls that repeat it."""
+        from PySide6.QtGui import QFontDatabase
+
+        dock = QDockWidget("Command Log", self)
+        dock.setObjectName("commandLogDock")
+        body = QWidget()
+        v = QVBoxLayout(body)
+        v.setContentsMargins(4, 4, 4, 4)
+        self.command_view = QPlainTextEdit()
+        self.command_view.setReadOnly(True)
+        self.command_view.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
+        v.addWidget(self.command_view, 1)
+        row = QHBoxLayout()
+        copy_btn = QPushButton("Copy")
+        copy_btn.clicked.connect(
+            lambda: QApplication.clipboard().setText(self.command_log.script())
+        )
+        save_btn = QPushButton("Save as Script…")
+        save_btn.clicked.connect(self.save_script)
+        clear_btn = QPushButton("Clear")
+        clear_btn.clicked.connect(self._clear_command_log)
+        for b in (copy_btn, save_btn, clear_btn):
+            row.addWidget(b)
+        row.addStretch(1)
+        v.addLayout(row)
+        dock.setWidget(body)
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, dock)
+        self.tabifyDockWidget(self._log_dock, dock)
+        self._log_dock.raise_()
+        self._command_dock = dock
+        self._refresh_command_log()
+
+    def _refresh_command_log(self) -> None:
+        self.command_view.setPlainText(self.command_log.text())
+        self.command_view.verticalScrollBar().setValue(
+            self.command_view.verticalScrollBar().maximum()
+        )
+
+    def _log_command(self, entry: commandlog.Entry | None) -> None:
+        self.command_log.add(entry)
+        self._refresh_command_log()
+
+    def _clear_command_log(self) -> None:
+        self.command_log.clear()
+        self._refresh_command_log()
+
+    def _record_task(self, fn, args, kwargs):  # noqa: ANN001, ANN202 - TaskRunner.record
+        """The command a task makes, written now from what it was started with and
+        added to the log once it has succeeded."""
+        normalised = self.results.get("normalise")
+        names = [(self.df_raw, "df"), (self.df_prep, "df_prep"), (self.model, "model")]
+        if normalised is not None and "normalised" in normalised:
+            names.append((normalised["normalised"], "normalised['normalised']"))
+        entry = commandlog.task(fn, args, kwargs, [(o, n) for o, n in names if o is not None])
+        if entry is None:
+            return None
+        return lambda: self._log_command(entry)
+
+    def save_script(self) -> None:
+        """The command log as a Python file that repeats the session."""
+        if not len(self.command_log):
+            QMessageBox.information(self, "Nothing to save", "Open a table and run a step first.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save session as script", "normet_session.py", "Python (*.py)"
+        )
+        if path:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(self.command_log.script())
+            log.info("Session script written to %s", path)
+
     # ------------------------------------------------------------- assistant
     def _build_assistant(self) -> None:
         """View → Assistant: a language model working in the window (:mod:`.assistant`)."""
@@ -790,6 +871,7 @@ class MainWindow(QMainWindow):
 
         df = make_deweather_example()
         self._ingest(df, "Example data (synthetic, 1 year hourly)")
+        self._log_command(commandlog.load_example())
         self.statusBar().showMessage(
             "Example loaded — target PM2.5 with met features preselected. Click ▶ Train model."
         )
@@ -816,6 +898,7 @@ class MainWindow(QMainWindow):
         df = df.rename(columns={date_col: "date"})
 
         self._ingest(df, os.path.basename(path))
+        self._log_command(commandlog.open_csv(os.path.abspath(path), date_col))
         if remember:
             _settings.add_recent(path)
             self._rebuild_recent_menu()
@@ -1945,6 +2028,7 @@ class MainWindow(QMainWindow):
         df = df.copy()
         df["date"] = to_datetime_coerced(df["date"])
         self._ingest(df, label)
+        self._log_command(commandlog.from_memory(label))
 
     # ---------------------------------------------------------- Transport Studio
     def open_transport_studio(self) -> None:
