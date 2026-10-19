@@ -92,8 +92,10 @@ def _dates(df: pd.DataFrame) -> pd.Series | None:
 
 
 def _step(dates: pd.Series) -> pd.Timedelta | None:
-    diffs = dates.dropna().drop_duplicates().sort_values().diff().dropna()
-    return pd.Timedelta(diffs.median()) if len(diffs) else None
+    stamps = dates.dropna().drop_duplicates().sort_values().to_numpy()
+    if len(stamps) < 2:
+        return None
+    return pd.Timedelta(int(np.median(np.diff(stamps).astype("timedelta64[ns]").astype("int64"))))
 
 
 def human_step(step: pd.Timedelta) -> str:
@@ -279,7 +281,10 @@ def normalised_reading(result: pd.DataFrame) -> str:
         "",
         table(
             [word, "observed", "normalised", "met part"],
-            [[t.strftime(label), *r] for t, r in by.iterrows()],
+            [
+                [t.strftime(label), *r]
+                for t, r in zip(pd.DatetimeIndex(by.index), by.itertuples(index=False), strict=True)
+            ],
         ),
     ]
     other = [c for c in df.columns if c not in ("observed", "normalised")]
