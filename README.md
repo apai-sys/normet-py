@@ -608,6 +608,13 @@ The window and its figures follow the system's light/dark appearance (or View �
 Appearance), Ctrl+K (⌘K) finds any menu command or result tab by typing, and
 before a table is open the Data tab offers the examples and recent tables.
 
+**Command Log** (View → Command Log) — every step you run, written as the normet
+call that repeats it, with the arguments it actually ran with; File → Save
+Session as Script… turns a session done by clicking into a Python script that
+reproduces it. **Export for Publication…** on any figure's toolbar lays the
+figure out at a journal's column width (Nature, Elsevier, ACS, or custom) with
+its lettering in points, and saves it at that exact width on a white page.
+
 **Data Studio** (🌐 toolbar button, or File → Get UK Data) — assemble a
 model-ready dataset without leaving the app: pick a network (AURN, AQE,
 SAQN, WAQN, NI, LMAM), browse/search its stations by the pollutants they
