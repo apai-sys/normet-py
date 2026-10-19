@@ -210,6 +210,34 @@ class SCMWindow(QMainWindow):
         dbrow.addWidget(b_all)
         dbrow.addWidget(b_none)
         gf.addRow(dbrow)
+        from . import _chronos
+
+        chronos_ok, chronos_why = _chronos.chronos_availability()
+        self.sim_btn = QPushButton("Rank donors by similarity (Chronos-2)")
+        self.sim_btn.setToolTip(
+            "Embed every unit's outcome before the cutoff with Chronos-2 and rank the\n"
+            "others by how alike their dynamics are to the treated unit's (cosine).\n"
+            "Only the pre-period is read, so the effect cannot leak into the choice."
+            if chronos_ok
+            else f"Needs the foundation extra: {chronos_why}"
+        )
+        self.sim_btn.clicked.connect(self._run_similarity)
+        self._chronos_ok = chronos_ok
+        gf.addRow(self.sim_btn)
+        keep = QHBoxLayout()
+        self.sim_keep = NoWheelSpinBox()
+        self.sim_keep.setRange(2, 500)
+        self.sim_keep.setValue(10)
+        self.sim_keep.setPrefix("Tick the top ")
+        self.sim_tick_btn = QPushButton("Apply")
+        self.sim_tick_btn.setToolTip(
+            "Tick the most similar units as the donor pool, untick the rest."
+        )
+        self.sim_tick_btn.clicked.connect(self._tick_most_similar)
+        keep.addWidget(self.sim_keep, 1)
+        keep.addWidget(self.sim_tick_btn)
+        gf.addRow(keep)
+        self._similarity: pd.DataFrame | None = None
         v.addWidget(design_box)
 
         # ---- Estimator
@@ -351,6 +379,10 @@ class SCMWindow(QMainWindow):
         self.tabs.addTab(self.tab_unc, "Uncertainty")
         self.tab_all = CanvasTab("Run 'All units' to rank every unit's pseudo-effect.")
         self.tabs.addTab(self.tab_all, "All Units")
+        self.tab_sim = CanvasTab(
+            "Rank donors by similarity (Chronos-2) to compare every unit's pre-period with the treated unit's."
+        )
+        self.tabs.addTab(self.tab_sim, "Similarity")
         self.tabs.currentChanged.connect(lambda i: self.exp_btn.setEnabled(i in self._tab_data))
         return self.tabs
 
@@ -629,6 +661,8 @@ class SCMWindow(QMainWindow):
         busy = self.runner.busy
         has_df = self.df is not None
         self.fit_btn.setEnabled(not busy and has_df)
+        self.sim_btn.setEnabled(not busy and has_df and self._chronos_ok)
+        self.sim_tick_btn.setEnabled(not busy and self._similarity is not None)
         is_bayes = self.backend_combo.currentText() == "bayesian"
         for b in (self.placebo_space_btn, self.placebo_time_btn, self.unc_btn, self.all_btn):
             b.setEnabled(not busy and has_df and not is_bayes)
@@ -1056,6 +1090,68 @@ class SCMWindow(QMainWindow):
         self.tab_unc.show_result(fig, verdict=verdict)
         self._show_tab(self.tab_unc, export)
         self.statusBar().showMessage("Uncertainty bands done.")
+
+    def _run_similarity(self) -> None:
+        """Rank the other units by Chronos-2 similarity to the treated unit, pre-period only."""
+        if self.df is None:
+            return
+        from . import _chronos
+
+        treated = self.treated_combo.currentText()
+        if not treated:
+            QMessageBox.information(self, "No treated unit", "Pick the treated unit.")
+            return
+        args = (
+            self.df,
+            self.date_combo.currentText(),
+            self.unit_combo.currentText(),
+            self.outcome_combo.currentText(),
+            treated,
+            self.cutoff_edit.date().toString("yyyy-MM-dd"),
+        )
+        self.runner.submit(
+            "donor similarity (chronos-2)",
+            _chronos.donor_similarity,
+            self._similarity_done,
+            self._show_error,
+            *args,
+        )
+
+    def _similarity_done(self, sim: pd.DataFrame) -> None:
+        import matplotlib.pyplot as plt
+
+        self._similarity = sim
+        unit_col = sim.columns[0]
+        top = sim.head(25).iloc[::-1]
+        fig, ax = plt.subplots(figsize=(9, max(3.5, 0.28 * len(top))))
+        ax.barh(top[unit_col].astype(str), top["similarity"], color=DONOR_COLOR)
+        ax.set_xlabel(
+            f"Similarity to {self.treated_combo.currentText()} before the cutoff (cosine)"
+        )
+        ax.set_title("Units ranked by Chronos-2 embedding similarity", fontsize=10, loc="left")
+        fig.tight_layout()
+        self.tab_sim.show_result(
+            fig,
+            lines=[
+                f"{len(sim)} units compared on the record before "
+                f"{self.cutoff_edit.date().toString('yyyy-MM-dd')} only. Similar dynamics, "
+                "not levels: the synthetic control still sets each donor's weight.",
+            ],
+            header=[str(unit_col), "similarity"],
+            rows=[[u, f"{v:.3f}"] for u, v in sim.head(15).itertuples(index=False)],
+        )
+        self._show_tab(self.tab_sim, sim)
+        self._sync_enabled()
+
+    def _tick_most_similar(self) -> None:
+        if self._similarity is None:
+            return
+        keep = set(self._similarity.iloc[: self.sim_keep.value(), 0].astype(str))
+        for i in range(self.donor_list.count()):
+            item = self.donor_list.item(i)
+            item.setCheckState(
+                Qt.CheckState.Checked if item.text() in keep else Qt.CheckState.Unchecked
+            )
 
     def _run_all_units(self) -> None:
         design = self._design()

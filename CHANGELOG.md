@@ -7,6 +7,22 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ## [Unreleased]
 
 ### Added
+- **GUI: the rest of Chronos-2.**
+  - **Step 3 meteorological decomposition** on the chronos-2 backend, through
+    the library's zero-shot path. The emission method stays unavailable there,
+    with the reason in its tooltip. Step 3 also gains **Attribution**
+    (auto/sequential/Shapley) and **Groups** (`local: t2m, blh; wind: u10, v10`)
+    on either backend. The sample count follows the backend, as Step 2's
+    already did.
+  - **Fine-tuning**: LoRA when peft is installed, else full, with a step count.
+    It runs on a worker; upstream's ~500 MB checkpoint copy goes to a
+    temporary folder that is removed, not the current one.
+  - **SCM Studio ranks donors by similarity**: the cosine of Chronos-2
+    embeddings of each unit's pre-cutoff record only, so the effect cannot
+    steer the choice. A Similarity tab shows the ranking, and the top N can be
+    ticked as the donor pool.
+  - **The Assistant reads Chronos-2's covariate-sensitivity check** as its
+    model fit, and explains rather than runs an emission decomposition.
 - **GUI: Antigravity agy and GitHub Copilot in the Assistant; finishing a
   figure for print.**
   - The Assistant now offers four command-line agents signed in to the

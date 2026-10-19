@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
@@ -113,6 +114,29 @@ def _fill_checklist(widget: QListWidget, names: list[str], checked: set[str]) ->
         widget.addItem(item)
 
 
+def parse_groups(text: str, variables: list[str]) -> dict[str, list[str]] | None:
+    """``"local: t2m, blh; wind: u10, v10"`` as ``{"local": [...], "wind": [...]}``;
+    None for an empty box. Raises ValueError, in words for the user, on a group
+    without a name or a variable not trained on."""
+    text = text.strip()
+    if not text:
+        return None
+    groups: dict[str, list[str]] = {}
+    for part in filter(None, (p.strip() for p in text.split(";"))):
+        name, colon, members = part.partition(":")
+        name = name.strip()
+        if not colon or not name:
+            raise ValueError(f"write each group as name: var, var — not {part!r}")
+        names = [m.strip() for m in members.split(",") if m.strip()]
+        unknown = [m for m in names if m not in variables]
+        if unknown:
+            raise ValueError(
+                f"{', '.join(unknown)} not among the variables trained on ({', '.join(variables)})"
+            )
+        groups[name] = names
+    return groups
+
+
 def _set_all(widget: QListWidget, checked: bool) -> None:
     state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
     for i in range(widget.count()):
@@ -131,6 +155,8 @@ class MainWindow(QMainWindow):
         self.model: object | None = None
         self.trained_features: list[str] = []
         self.results: dict[str, pd.DataFrame] = {}
+        #: Chronos-2's covariate-sensitivity check of the model loaded: (numbers, verdict).
+        self.chronos_check: tuple[dict, tuple[str, str]] | None = None
         self._scm_window = None
         self._data_window = None
         self._transport_window = None
@@ -357,6 +383,7 @@ class MainWindow(QMainWindow):
         # Parked value for the "Samples" spin box on the other side of the
         # chronos-2 divide; see _train_backend_changed.
         self._norm_samples_parked = _chronos.DEFAULT_SAMPLES
+        self._decom_samples_parked = _chronos.DEFAULT_SAMPLES
         self._norm_samples_is_chronos = False
         form.addRow(self._budget_label, self.budget_spin)
         # flaml only: which AutoML estimators to search over.
@@ -414,6 +441,36 @@ class MainWindow(QMainWindow):
         )
         self.train_button.clicked.connect(self._run_train)
         form.addRow(self.train_button)
+        # Chronos-2 only: adapt the loaded checkpoint to this site's own record.
+        self._ft_box = QWidget()
+        ft = QFormLayout(self._ft_box)
+        ft.setContentsMargins(0, 0, 0, 0)
+        self.ft_mode = NoWheelComboBox()
+        self.ft_mode.addItems(["lora", "full"])
+        if not _chronos.can_lora():
+            self.ft_mode.model().item(0).setEnabled(False)
+            self.ft_mode.setCurrentText("full")
+        self.ft_mode.setToolTip(
+            "lora: train small adapters, leave the base weights alone (needs peft).\n"
+            "full: update all 119M parameters; overfits a single site's record more easily."
+        )
+        ft.addRow("Fine-tune", self.ft_mode)
+        self.ft_steps = NoWheelSpinBox()
+        self.ft_steps.setRange(1, 100_000)
+        self.ft_steps.setValue(300)
+        self.ft_steps.setToolTip(
+            "Optimiser steps. On a CPU this takes a while; a GPU or Apple Silicon helps."
+        )
+        ft.addRow("Steps", self.ft_steps)
+        self.ft_button = run_button(
+            "▶  Fine-tune Chronos-2",
+            "Adapt the loaded checkpoint to this site's own record. The tuned weights\n"
+            "replace the model for this session; Load Chronos-2 again to go back.",
+        )
+        self.ft_button.clicked.connect(self._run_finetune)
+        ft.addRow(self.ft_button)
+        self._ft_box.setVisible(False)
+        form.addRow(self._ft_box)
         v.addWidget(train_box)
 
         # ---- Step 2: Normalise
@@ -476,10 +533,30 @@ class MainWindow(QMainWindow):
             "of each individual meteorological variable."
         )
         df_.addRow("Method", self.decom_method)
+        self.decom_attribution = NoWheelComboBox()
+        self.decom_attribution.addItems(["auto", "sequential", "shapley"])
+        self.decom_attribution.setToolTip(
+            "How observed − normalised is split among the variables (meteorology only).\n"
+            "sequential: fix them one at a time; the split depends on the order.\n"
+            "shapley: average each one's effect over every order (2^k normalisations\n"
+            "for k variables or groups, up to 10).\n"
+            "auto: shapley when groups are given, else sequential."
+        )
+        df_.addRow("Attribution", self.decom_attribution)
+        self.decom_groups = QLineEdit()
+        self.decom_groups.setPlaceholderText("optional: local: t2m, blh; wind: u10, v10")
+        self.decom_groups.setToolTip(
+            "Attribute the meteorological variables in named groups (meteorology only):\n"
+            "name: var, var; name: var, …  Every variable trained on must be in exactly\n"
+            "one group; each group gets one contribution column."
+        )
+        df_.addRow("Groups", self.decom_groups)
+        self.decom_method.currentTextChanged.connect(self._decom_method_changed)
         self.decom_samples = NoWheelSpinBox()
         self.decom_samples.setRange(1, 10_000)
         self.decom_samples.setValue(300)
         df_.addRow("Samples", self.decom_samples)
+        self._decom_method_changed(self.decom_method.currentText())
         self.decom_button = run_button(
             "▶  Run decomposition",
             "Split the observed series into additive contributions\n(nested normalisation).",
@@ -607,6 +684,7 @@ class MainWindow(QMainWindow):
 
         self._run_buttons = [
             self.train_button,
+            self.ft_button,
             self.norm_button,
             self.decom_button,
             self.roll_button,
@@ -908,6 +986,7 @@ class MainWindow(QMainWindow):
         self.df_raw = df
         self.df_prep = None
         self.model = None
+        self.chronos_check = None
         self.trained_features = []
         self.results.clear()
         self.tab_model.show_message("Train a model (Step 1) to see its quality here.")
@@ -975,6 +1054,7 @@ class MainWindow(QMainWindow):
             label.setVisible(not is_chronos)
             widget.setVisible(not is_chronos)
         self._chronos_hint.setVisible(is_chronos)
+        self._ft_box.setVisible(is_chronos)
         self._device_label.setVisible(is_chronos)
         self.device_combo.setVisible(is_chronos)
         self.train_button.setText("▶  Load Chronos-2" if is_chronos else "▶  Train model")
@@ -989,7 +1069,23 @@ class MainWindow(QMainWindow):
                 self._norm_samples_parked,
             )
             self.norm_samples.setValue(restored)
+            self._decom_samples_parked, restored = (
+                self.decom_samples.value(),
+                self._decom_samples_parked,
+            )
+            self.decom_samples.setValue(restored)
             self._norm_samples_is_chronos = is_chronos
+        # Chronos-2 decomposes by meteorological variable only: the calendar
+        # components ride in the target's own history, which it never resamples.
+        item = self.decom_method.model().item(0)
+        item.setEnabled(not is_chronos)
+        item.setToolTip(
+            "Not on chronos-2: it reads the calendar off the target's own history."
+            if is_chronos
+            else ""
+        )
+        if is_chronos:
+            self.decom_method.setCurrentText("meteorology")
         if is_chronos:
             return
 
@@ -1142,6 +1238,8 @@ class MainWindow(QMainWindow):
             "norm_quantiles": self.norm_quantiles.isChecked(),
             "decom_method": self.decom_method.currentText(),
             "decom_samples": self.decom_samples.value(),
+            "decom_attribution": self.decom_attribution.currentText(),
+            "decom_groups": self.decom_groups.text(),
             "roll_window": self.roll_window.value(),
             "roll_step": self.roll_step.value(),
             "roll_samples": self.roll_samples.value(),
@@ -1191,6 +1289,8 @@ class MainWindow(QMainWindow):
         self.norm_quantiles.setChecked(c.get("norm_quantiles", False))
         self.decom_method.setCurrentText(c.get("decom_method", "emission"))
         self.decom_samples.setValue(c.get("decom_samples", 300))
+        self.decom_attribution.setCurrentText(c.get("decom_attribution", "auto"))
+        self.decom_groups.setText(c.get("decom_groups", ""))
         self.roll_window.setValue(c.get("roll_window", 14))
         self.roll_step.setValue(c.get("roll_step", 7))
         self.roll_samples.setValue(c.get("roll_samples", 100))
@@ -1325,6 +1425,7 @@ class MainWindow(QMainWindow):
         has_model = self.model is not None
         has_y_inf = "normalise" in self.results
         self.train_button.setEnabled(not busy and has_data)
+        self.ft_button.setEnabled(not busy and has_model and self._is_chronos())
         for b in (self.norm_button, self.decom_button, self.roll_button, self.pdp_button):
             b.setEnabled(not busy and has_model)
         if not has_model:
@@ -1332,12 +1433,12 @@ class MainWindow(QMainWindow):
             for b in (self.norm_button, self.decom_button, self.roll_button, self.pdp_button):
                 b.setToolTip(tip)
         elif self._is_chronos():
-            # Decomposition, rolling and PDP all call ml_predict() on a fitted
-            # scikit-learn-style estimator. Chronos-2 forecasts autoregressively
-            # from a context window instead, so there is nothing for them to
-            # call; only the de-weathering path applies.
+            # Rolling and PDP call ml_predict() on a fitted scikit-learn-style
+            # estimator. Chronos-2 forecasts autoregressively from a context
+            # window instead, so there is nothing for them to call. The
+            # meteorological decomposition has its own zero-shot path.
             tip = "Not available for chronos-2 — use flaml or lightgbm for this step."
-            for b in (self.decom_button, self.roll_button, self.pdp_button):
+            for b in (self.roll_button, self.pdp_button):
                 b.setEnabled(False)
                 b.setToolTip(tip)
         self.ms_button.setEnabled(not busy and has_model and has_y_inf)
@@ -1491,6 +1592,7 @@ class MainWindow(QMainWindow):
         try:
             shift = _chronos.sensitivity(est, self.df_prep, met)
             verdict = _chronos.verdict_for(shift)
+            self.chronos_check = (shift, verdict)
             header = ["Diagnostic", "Value"]
             rows = [
                 ["Mean absolute median shift", f"{shift['mean_abs_shift']:.3f}"],
@@ -1498,6 +1600,7 @@ class MainWindow(QMainWindow):
                 ["As % of prediction", f"{shift['pct_of_prediction']:.2f}%"],
             ]
         except Exception as exc:
+            self.chronos_check = None
             log.exception("Chronos-2 covariate sensitivity failed")
             verdict = ("warn", f"Could not run the covariate-sensitivity check: {exc}")
             header, rows = None, None
@@ -1781,17 +1884,68 @@ class MainWindow(QMainWindow):
             return
         from normet import decompose
 
+        method = self.decom_method.currentText()
+        options: dict[str, object] = {}
+        if method == "meteorology":
+            met = [f for f in self.trained_features if f not in TIME_VARS]
+            try:
+                groups = parse_groups(self.decom_groups.text(), met)
+            except ValueError as exc:
+                QMessageBox.warning(self, "Groups", str(exc))
+                return
+            if groups:
+                options["groups"] = groups
+            if self.decom_attribution.currentText() != "auto":
+                options["attribution"] = self.decom_attribution.currentText()
+        if self._is_chronos():
+            # The zero-shot path: each coalition is a de-weathering of the
+            # estimator's own, over the meteorology it was loaded with.
+            options.update(target="value", backend=_chronos.BACKEND)
+            covariates = [f for f in self.trained_features if f not in TIME_VARS]
+        else:
+            covariates = self.trained_features + list(TIME_VARS)
         self.runner.submit(
-            f"decompose ({self.decom_method.currentText()})",
+            f"decompose ({method})",
             decompose,
             self._decompose_done,
             self._show_error,
             self.df_prep,
             self.model,
-            method=self.decom_method.currentText(),
-            covariates=self.trained_features + list(TIME_VARS),
+            method=method,
+            covariates=covariates,
             n_samples=self.decom_samples.value(),
+            **options,
         )
+
+    def _run_finetune(self) -> None:
+        """Adapt the loaded Chronos-2 checkpoint to this site's record (on a worker)."""
+        if not self._check_model() or not self._is_chronos():
+            return
+        self.runner.submit(
+            f"fine-tune ({self.ft_mode.currentText()}, {self.ft_steps.value()} steps)",
+            _chronos.finetune,
+            self._finetune_done,
+            self._show_error,
+            self.model,
+            self.df_prep,
+            self.ft_mode.currentText(),
+            self.ft_steps.value(),
+        )
+
+    def _finetune_done(self, estimator: object) -> None:
+        self.model = estimator
+        self.results.pop("normalise", None)
+        self.results.pop("decompose", None)
+        self._render_chronos_model_tab()
+        self._sync_enabled()
+        self.tabs.setCurrentWidget(self.tab_model)
+        self.statusBar().showMessage("Fine-tuned — normalise again to use the tuned weights.")
+        log.info("Fine-tuning finished")
+
+    def _decom_method_changed(self, method: str) -> None:
+        on = method == "meteorology"
+        self.decom_attribution.setEnabled(on)
+        self.decom_groups.setEnabled(on)
 
     def _decompose_done(self, result: pd.DataFrame) -> None:
         self.results["decompose"] = result
@@ -1815,9 +1969,13 @@ class MainWindow(QMainWindow):
                 d = DP.indexed_result(result)
                 contribs = DP.met_contribution_columns(d)
                 dominant = max(contribs, key=lambda c: d[c].std()) if contribs else "n/a"
+                what = "groups" if self.decom_groups.text().strip() else "meteorological variables"
+                how = self.decom_attribution.currentText()
+                if how == "auto":
+                    how = "shapley" if self.decom_groups.text().strip() else "sequential"
                 lines = [
                     f"met_total = observed − normalised, split across {len(contribs)} "
-                    f"meteorological variables — strongest: {dominant}."
+                    f"{what} ({how} attribution) — strongest: {dominant}."
                 ]
             self.tab_decom.show_result(fig, lines=lines)
         except Exception:
