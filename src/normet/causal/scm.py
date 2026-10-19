@@ -160,6 +160,18 @@ def scm(
     - Residual balancing solves a quadratic program with an equality constraint
       (weights sum to 1) and optional non-negativity bounds.
     - Very short pre-periods or heavy missingness can lead to unstable estimates.
+    - The pre-period fit flatters the counterfactual, the more so the more donors
+      there are for the pre-period dates. The ridge features are the units'
+      pre-period outcomes, so at a pre-period date the treated unit is predicted
+      from, among others, its own value at that date; with as many donors as
+      dates the ridge model can return that value. On the bundled ULEZ panel (27
+      pre-period months) a treated series of pure noise is fitted with
+      ``pre_r2`` -0.05 from 5 donors, 0.69 from 20 and 0.997 from 53. Refit
+      with the treated pre-period shuffled to see what a design gives for
+      nothing, and judge the effect with :func:`normet.placebo_in_space` and
+      against :func:`normet.scm_abadie` or :func:`normet.scm_robust`. The
+      weights balance the ridge residuals only, so their concentration
+      (``hhi``) does not describe which donors the synthetic unit is made of.
     """
     t0 = time.time()
 

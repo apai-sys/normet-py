@@ -60,3 +60,44 @@ def test_loo_weight_stability_shape(scm_panel):
     )
     assert {"dropped_donor", "mean_abs_drift", "max_abs_drift", "effect_shift"} <= set(out.columns)
     assert set(out["dropped_donor"]) <= set(donors)
+
+
+def _noise_panel(n_donors: int, n_pre: int = 12, n_post: int = 6) -> pd.DataFrame:
+    """Donors on independent random walks, and a treated unit of pure noise."""
+    import numpy as np
+
+    rng = np.random.default_rng(3)
+    dates = pd.date_range("2020-01-01", periods=n_pre + n_post, freq="MS")
+    rows = [
+        (d, f"D{j}", v)
+        for j in range(n_donors)
+        for d, v in zip(dates, 50 + np.cumsum(rng.normal(0, 3, len(dates))), strict=True)
+    ]
+    rows += [(d, "T", v) for d, v in zip(dates, rng.normal(50, 5, len(dates)), strict=True)]
+    return pd.DataFrame(rows, columns=["date", "ID", "value"])
+
+
+def _pre_r2(fit, panel: pd.DataFrame) -> float:
+    donors = sorted(set(panel["ID"]) - {"T"})
+    out = fit(
+        df=panel,
+        date_col="date",
+        unit_col="ID",
+        outcome_col="value",
+        treated_unit="T",
+        cutoff_date="2021-01-01",
+        donors=donors,
+    )
+    return scm_diagnostics(out, cutoff_date="2021-01-01")["pre_r2"]
+
+
+def test_augmented_scm_fits_noise_once_donors_outnumber_the_pre_period():
+    # Why the SCM Studio checks a fit against a shuffled series before reading its
+    # pre-period R²: the augmented estimator's ridge features are the units'
+    # pre-period values, the treated unit's own among them. With more donors than
+    # pre-period dates it reproduces a treated unit that is pure noise; with few
+    # it cannot.
+    many = _noise_panel(n_donors=40)  # 40 donors, 12 pre-period months
+    few = _noise_panel(n_donors=4)
+    assert _pre_r2(scm, many) > 0.9
+    assert _pre_r2(scm, few) < 0.5
