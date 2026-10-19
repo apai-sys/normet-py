@@ -404,6 +404,14 @@ class WindowTools:
         ]
 
 
+def unstamp(text: str) -> str:
+    """A reply with the ``[Window now: …]`` line it was sent with taken off its head:
+    an agent that repeats its prompt's first line would show it as its own."""
+    import re
+
+    return re.sub(r"^\s*\[Window now:[^\]]*\]\s*", "", text)
+
+
 def state_text(win: MainWindow) -> str:
     """The window as it stands, in a line: told the model with each message."""
     if win.df_raw is None:
@@ -615,6 +623,9 @@ class AssistantDock(QDockWidget):
         self._cli: assistant_cli.CliChat | None = None
         self._server: ToolServer | None = None
         self._open_tools: list[QLabel] = []
+        self._retried = False
+        #: The agents' entries in the model list: label -> (agent, model).
+        self._agents = {label: (agent, model) for label, agent, model in assistant_cli.choices()}
 
         body = QWidget()
         v = QVBoxLayout(body)
@@ -622,13 +633,19 @@ class AssistantDock(QDockWidget):
         top = QHBoxLayout()
         self.model_box = QComboBox()
         self.model_box.setEditable(True)
-        self.model_box.addItems([*API_MODELS, *assistant_cli.AGENTS])
+        self.model_box.addItems([*API_MODELS, *self._agents])
         self.model_box.setToolTip(
             "An API model as provider:model (anthropic, openai, deepseek, gemini, ollama, "
-            "lmstudio), or a command-line agent signed in to your own plan."
+            "lmstudio), or a command-line agent signed in to your own plan: Claude Code, "
+            "Codex, Antigravity agy or GitHub Copilot."
         )
         self.model_box.setCurrentText(str(_settings().value("assistant/model", API_MODELS[0])))
         self.model_box.currentTextChanged.connect(self._model_changed)
+        self.effort_box = QComboBox()
+        self.effort_box.setToolTip(
+            "How hard the agent thinks: more effort is slower and spends more of your plan."
+        )
+        self.effort_box.currentTextChanged.connect(self._effort_changed)
         self.key_btn = QPushButton("Key…")
         self.key_btn.setToolTip(
             "Store this provider's API key in the macOS keychain (or for this session)."
@@ -638,6 +655,7 @@ class AssistantDock(QDockWidget):
         self.new_btn.setToolTip("Start a new conversation.")
         self.new_btn.clicked.connect(self.new_conversation)
         top.addWidget(self.model_box, 1)
+        top.addWidget(self.effort_box)
         top.addWidget(self.key_btn)
         top.addWidget(self.new_btn)
         v.addLayout(top)
@@ -670,6 +688,7 @@ class AssistantDock(QDockWidget):
         self._tool_started.connect(self._on_tool_started)
         self._tool_ended.connect(self._on_tool_ended)
         self._sync_key_button()
+        self._fill_efforts()
         self.view.note(
             "The Assistant reads what the window holds and runs its steps. It proposes a "
             "target and predictors as a card; nothing is applied until you click Apply."
@@ -677,7 +696,27 @@ class AssistantDock(QDockWidget):
 
     # -- the model -------------------------------------------------------------------
     def _is_agent(self) -> bool:
-        return self.model_box.currentText() in assistant_cli.AGENTS
+        return self.model_box.currentText() in self._agents
+
+    def _fill_efforts(self) -> None:
+        """The efforts the chosen agent's model is offered at, the last one chosen kept;
+        hidden for an API model or a model offered at none."""
+        agent = self._agents.get(self.model_box.currentText())
+        offered = assistant_cli.efforts(*agent) if agent else ()
+        self.effort_box.blockSignals(True)
+        self.effort_box.clear()
+        self.effort_box.addItems(list(offered))
+        kept = str(_settings().value("assistant/effort", "medium"))
+        self.effort_box.setCurrentText(
+            kept if kept in offered else (offered[len(offered) // 2] if offered else "")
+        )
+        self.effort_box.blockSignals(False)
+        self.effort_box.setVisible(bool(offered))
+
+    def _effort_changed(self, effort: str) -> None:
+        if effort:
+            _settings().setValue("assistant/effort", effort)
+        self._close_cli()
 
     def _sync_key_button(self) -> None:
         name = self.model_box.currentText()
@@ -686,6 +725,7 @@ class AssistantDock(QDockWidget):
     def _model_changed(self, name: str) -> None:
         """The analyst chose another model: remembered for the next session."""
         self._sync_key_button()
+        self._fill_efforts()
         _settings().setValue("assistant/model", name)
         self._close_cli()
 
@@ -739,7 +779,7 @@ class AssistantDock(QDockWidget):
 
     def _on_event(self, e: dict[str, Any]) -> None:
         if e["type"] == "model":
-            self.view.reply(e.get("text") or "")
+            self.view.reply(unstamp(e.get("text") or ""))
             for c in e.get("calls") or []:
                 self._open_tools.append(self.view.tool(c["name"], c["arguments"]))
         elif e["type"] == "tool" and self._open_tools:
@@ -784,8 +824,9 @@ class AssistantDock(QDockWidget):
                     on_call=lambda n, a: self._tool_started.emit(n, a),
                     on_result=lambda n, t, err: self._tool_ended.emit(n, t, err),
                 )
-            agent = self.model_box.currentText()
-            self._cli = assistant_cli.make_chat(agent, self._server)
+            agent, model = self._agents[self.model_box.currentText()]
+            effort = self.effort_box.currentText() if self.effort_box.count() else ""
+            self._cli = assistant_cli.make_chat(agent, model, effort, self._server)
             if self._cli is None:
                 command = assistant_cli.AGENTS[agent][0]
                 self.view.note(f"'{command}' is not installed, or not on PATH.", error=True)
@@ -793,19 +834,37 @@ class AssistantDock(QDockWidget):
             first = [True]
 
             def text_in(t: str) -> None:
-                self.view.reply(t, more=not first[0])
+                self.view.reply(unstamp(t) if first[0] else t, more=not first[0])
                 first[0] = False
 
             self._cli.text.connect(text_in)
             self._cli.step.connect(lambda name: self.view.note(f"the agent's own step: {name}"))
             self._cli.failed.connect(lambda msg: self.view.note(msg, error=True))
-            self._cli.ended.connect(lambda: (first.__setitem__(0, True), self._idle()))
+            self._cli.ended.connect(lambda: (first.__setitem__(0, True), self._cli_ended()))
+            self._retried = False
         self._working(True)
         try:
             self._cli.send(text, SYSTEM)
         except (OSError, RuntimeError) as exc:
             self.view.note(str(exc), error=True)
             self._idle()
+
+    def _cli_ended(self) -> None:
+        """The agent's message ended: asked once more on its own where its stream broke
+        mid-answer (agy), else the panel is idle."""
+        cli = self._cli
+        if (
+            cli is not None
+            and cli.interrupted
+            and not self._retried
+            and not self.tools.stop.is_set()
+        ):
+            self._retried = True
+            self.view.note("The agent's stream was interrupted: asking it to continue.")
+            cli.send(assistant_cli.STREAM_INTERRUPTED, SYSTEM)
+            return
+        self._retried = False
+        self._idle()
 
     def _close_cli(self) -> None:
         if self._cli is not None:
