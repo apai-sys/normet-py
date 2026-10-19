@@ -486,7 +486,7 @@ def test_chronos_load_requires_a_met_covariate(qapp, monkeypatch):
 
         shown: list[str] = []
         monkeypatch.setattr(
-            "normet.gui.main_window.QMessageBox.information",
+            "normet.gui._run_train.QMessageBox.information",
             lambda *a, **k: shown.append(a[1] if len(a) > 1 else ""),
         )
         submitted: list[str] = []

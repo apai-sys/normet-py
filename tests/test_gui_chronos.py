@@ -120,7 +120,7 @@ def test_step3_on_chronos(chronos_win, qapp, monkeypatch):
     # A bad group is said before anything runs.
     w.decom_groups.setText("thermal: t2m, rain")
     monkeypatch.setattr(
-        "normet.gui.main_window.QMessageBox.warning", lambda *a: seen.update(warned=a[2])
+        "normet.gui._run_analyse.QMessageBox.warning", lambda *a: seen.update(warned=a[2])
     )
     w._run_decompose()
     assert "rain not among" in seen["warned"]
