@@ -403,9 +403,168 @@ def test_unknown_agent_and_missing_key(win, qapp, monkeypatch):
     assert dock.key_btn.isEnabled()
     dock.send("hi")
     assert not dock.busy() and dock.messages == []
-    agent = next(iter(assistant_cli.AGENTS))
+    assert dock.effort_box.isHidden()  # an API model has no effort to choose
     monkeypatch.setattr(assistant_cli, "find_cli", lambda c: None)
-    dock.model_box.setCurrentText(agent)
+    dock.model_box.setCurrentText("Claude Code · sonnet")
     assert not dock.key_btn.isEnabled()
+    assert not dock.effort_box.isHidden() and dock.effort_box.count() == 5
+    dock.model_box.setCurrentText("GitHub Copilot · auto")
+    assert dock.effort_box.isHidden()
+    dock.model_box.setCurrentText("Antigravity agy · gpt-oss-120b")
+    assert [dock.effort_box.itemText(i) for i in range(dock.effort_box.count())] == ["medium"]
     dock.send("hi")
     assert not dock.busy()
+
+
+# -- agy and Copilot ----------------------------------------------------------------------
+def test_agent_models_and_efforts(monkeypatch, tmp_path):
+    from normet.gui import assistant_cli as cli
+
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    (tmp_path / "models_cache.json").write_text(
+        json.dumps(
+            {
+                "models": [
+                    {
+                        "slug": "gpt-x",
+                        "visibility": "list",
+                        "supported_reasoning_levels": [{"effort": "low"}, {"effort": "xhigh"}],
+                    },
+                    {"slug": "hidden", "visibility": "hide"},
+                ]
+            }
+        )
+    )
+    assert cli.models("codex") == ("default", "gpt-x")
+    assert cli.efforts("codex", "gpt-x") == ("low", "xhigh")
+    assert cli.efforts("codex", "default") == cli.CODEX_EFFORTS
+    assert cli.models("claude-code") == ("sonnet", "opus", "haiku")
+    assert (
+        cli.efforts("copilot", "auto") == ()
+        and cli.efforts("copilot", "gpt-5.4") == cli.COPILOT_EFFORTS
+    )
+    assert cli.agy_model("gemini-4-argon", "high") == "gemini-4-argon-high"
+    assert cli.agy_model("gpt-oss-120b", "low") == "gpt-oss-120b-medium"  # the one it offers
+    assert cli.agy_model("someone-else", "high") == "someone-else"
+    labels = [label for label, _, _ in cli.choices()]
+    assert "Antigravity agy · gemini-4-argon" in labels and "Codex · gpt-x" in labels
+
+
+def test_copilot_command_line_and_events():
+    from normet.gui.assistant_cli import CopilotChat
+
+    server = ToolServer([llm.as_tool(_echo)])
+    try:
+        chat = CopilotChat("/x/copilot", "gpt-5.4", "high", server)
+        assert chat.message("hi", "SYS") is None and chat.conversation
+        argv = chat.argv("SYS")
+        assert argv[argv.index("-p") + 1].startswith("SYS\n") and argv[
+            argv.index("-p") + 1
+        ].endswith("hi")
+        assert argv[argv.index("--available-tools") + 1] == f"{SERVER_NAME}-_echo"
+        assert "--disable-builtin-mcps" in argv and argv[-2:] == ["--reasoning-effort", "high"]
+        sid = chat.conversation
+        chat.message("again", "SYS")
+        assert chat.conversation == sid and chat.argv("SYS")[2] == "again"
+        got, steps = [], []
+        chat.text.connect(got.append)
+        chat.step.connect(steps.append)
+        chat.parse({"type": "assistant.message", "data": {"content": "ok"}})
+        chat.parse(
+            {
+                "type": "tool.execution_start",
+                "data": {"mcpServerName": SERVER_NAME, "toolName": "x"},
+            }
+        )
+        chat.parse(
+            {
+                "type": "tool.execution_start",
+                "data": {"mcpServerName": "other", "toolName": "shell"},
+            }
+        )
+        assert got == ["ok\n"] and steps == ["shell"]
+        chat.close()
+    finally:
+        server.close()
+
+
+def test_agy_guard_allows_only_the_window(tmp_path):
+    import subprocess
+
+    from normet.gui.assistant_cli import agy_guard
+
+    hooks = agy_guard(str(tmp_path / "ws"), home="/h")
+    with open(hooks) as fh:
+        rule = json.load(fh)["normet-window-only"]["PreToolUse"][0]
+    assert rule["matcher"] == "*"
+
+    def decide(event):
+        out = subprocess.run(
+            ["sh", "window_only.sh"],
+            input=json.dumps(event, separators=(",", ":")),  # compact, as agy sends it
+            capture_output=True,
+            text=True,
+            cwd=os.path.dirname(hooks),
+        )
+        return json.loads(out.stdout)["decision"]
+
+    schemas = f"/h/.gemini/antigravity-cli/mcp/{SERVER_NAME}/tools.json"
+    assert decide({"name": "call_mcp_tool", "args": {"ServerName": SERVER_NAME}}) == "allow"
+    assert decide({"name": "call_mcp_tool", "args": {"ServerName": "elsewhere"}}) == "deny"
+    assert decide({"name": "view_file", "args": {"AbsolutePath": schemas}}) == "allow"
+    assert decide({"name": "view_file", "args": {"AbsolutePath": "/h/data.csv"}}) == "deny"
+    assert decide({"name": "view_file", "args": {"AbsolutePath": schemas + "/../../x"}}) == "deny"
+    assert decide({"name": "run_command", "args": {"CommandLine": "ls"}}) == "deny"
+    assert decide({"name": "manage_task"}) == "allow"
+
+
+def test_agy_registers_answers_and_is_asked_again_when_its_stream_breaks(qapp, tmp_path):
+    from normet.gui.assistant_cli import STREAM_INTERRUPTED, AgyChat
+
+    calls = tmp_path / "calls.txt"
+    script = tmp_path / "agy"
+    script.write_text(
+        f"#!{sys.executable}\n"
+        "import json, sys\n"
+        f"open({str(calls)!r}, 'a').write(' '.join(sys.argv[1:4]) + '\\n')\n"
+        "if sys.argv[1] == 'mcp':\n    sys.exit(0)\n"
+        "msg = json.loads(sys.stdin.readline())['message']['content']\n"
+        "print(json.dumps({'event': 'init', 'conversation_id': 'c1'}))\n"
+        f"text = 'done' if msg == {STREAM_INTERRUPTED!r} else 'partial ' + {STREAM_INTERRUPTED!r}\n"
+        "print(json.dumps({'event': 'step_update', 'step_update': {'step_type': 'agent_response', 'text_delta': text}}))\n"
+        "print(json.dumps({'event': 'result', 'result': {'status': 'SUCCESS'}}))\n"
+    )
+    script.chmod(0o755)
+    server = ToolServer([])
+    chat = AgyChat(str(script), "gemini-4-argon", "high", server)
+    assert os.path.exists(os.path.join(chat.workspace, ".agents", "hooks.json"))
+    argv = chat.argv("SYS")
+    assert argv[argv.index("--model") + 1] == "gemini-4-argon-high" and "--sandbox" in argv
+    got, ended = [], []
+    chat.text.connect(got.append)
+    chat.ended.connect(lambda: ended.append(True))
+    try:
+        chat.send("hello", "SYS")
+        _wait(qapp, lambda: ended)
+        assert chat.interrupted and chat.conversation == "c1"
+        assert chat.argv("SYS")[-3:] == ["--conversation", "c1", "-p="]
+        chat.send(STREAM_INTERRUPTED, "SYS")
+        _wait(qapp, lambda: len(ended) == 2)
+        assert not chat.interrupted and got[-1] == "done"
+    finally:
+        chat.close()
+        server.close()
+    lines = calls.read_text().splitlines()
+    assert lines[0].startswith("mcp add --header") and lines[1] == f"mcp enable {SERVER_NAME}"
+    assert lines[3] == f"mcp disable {SERVER_NAME}"  # after the message, off again
+    assert lines[-1] == f"mcp remove {SERVER_NAME}"  # and gone once the chat closes
+
+
+def test_the_window_stamp_is_not_shown_as_the_reply():
+    from normet.gui.assistant import unstamp
+
+    assert (
+        unstamp("[Window now: table: x; target: y] The table has 8 rows.")
+        == "The table has 8 rows."
+    )
+    assert unstamp("No stamp [Window now: here] stays.") == "No stamp [Window now: here] stays."

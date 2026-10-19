@@ -200,7 +200,7 @@ def test_the_dialog_previews_and_follows_its_preset(qapp):
     from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 
     from normet.gui._widgets import ThemedToolbar
-    from normet.gui.printview import PRESETS, PrintDialog
+    from normet.gui.printview import PRESETS, SCREEN_DPI, PrintDialog
 
     fig, _ = _figure()
     canvas = FigureCanvasQTAgg(fig)
@@ -208,11 +208,133 @@ def test_the_dialog_previews_and_follows_its_preset(qapp):
     assert any(a.text() == "Export for Publication…" for a in toolbar.actions())
     dlg = PrintDialog(canvas)
     assert dlg.width.value() == 89.0 and not dlg.width.isEnabled()
+    assert fig.canvas is dlg.canvas  # the figure itself, on the dialog's canvas
+    assert dlg.canvas.width() == round(89 / 25.4 * SCREEN_DPI)
     dlg.preset.setCurrentText("Nature: double column (183 mm)")
     assert dlg.width.value() == 183.0 and round(dlg.height.value()) == round(183 * 0.5)
+    assert np.allclose(fig.get_size_inches(), (183 / 25.4, dlg.height.value() / 25.4))
     dlg.preset.setCurrentText("Custom")
-    assert dlg.width.isEnabled()
-    assert not dlg.preview.pixmap().isNull()
-    assert tuple(fig.get_size_inches()) == (10, 5)
-    assert set(PRESETS) >= {"Custom"}
-    dlg.deleteLater()
+    assert dlg.width.isEnabled() and set(PRESETS) >= {"Custom"}
+    dlg.reject()
+    assert fig.canvas is canvas and tuple(fig.get_size_inches()) == (10, 5)
+
+
+def _two_panels():
+    from matplotlib.figure import Figure
+
+    fig = Figure(figsize=(10, 6))
+    a, b = fig.subplots(2, 1)
+    a.plot(range(10), np.arange(10.0), color="black", label="observed")
+    a.plot(range(10), np.arange(10.0) / 2, label="normalised")
+    a.axhline(0, color="k", lw=0.5)  # a reference line: two points
+    a.legend(loc="lower right")
+    a.set_title("Normalised")
+    b.plot(range(10), np.ones(10))
+    b.set_ylabel("met part")
+    return fig, a, b
+
+
+def _state(fig):
+    """What the dialog may touch, to compare before and after."""
+    from matplotlib.text import Text
+
+    texts = [(t.get_text(), t.get_fontsize(), t.get_rotation()) for t in fig.findobj(Text)]
+    lines = [
+        (ln.get_linewidth(), ln.get_marker(), ln.get_markersize())
+        for ax in fig.axes
+        for ln in ax.get_lines()
+    ]
+    legends = [
+        (id(ax.get_legend()), ax.get_legend()._loc) if ax.get_legend() else None for ax in fig.axes
+    ]
+    return tuple(fig.get_size_inches()), fig.dpi, texts, lines, legends, fig.get_layout_engine()
+
+
+def test_finishing_touches_are_made_and_undone(qapp, tmp_path):
+    from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+    from matplotlib.colors import to_hex
+    from PIL import Image
+
+    from normet.gui.printview import PrintDialog
+    from normet.gui.theme import DARK, apply_figure_theme
+
+    fig, a, b = _two_panels()
+    canvas = FigureCanvasQTAgg(fig)
+    apply_figure_theme(fig, True)  # shown dark on its tab
+    canvas.draw()  # ticks are made at a draw: compare drawn with drawn
+    before = _state(fig)
+    dlg = PrintDialog(canvas)
+    assert to_hex(fig.get_facecolor()) == "#ffffff"  # a white page while it is open
+
+    dlg.legend_place.setCurrentText("Upper left")
+    dlg.legend_cols.setValue(2)
+    dlg.legend_frame.setChecked(True)
+    leg = a.get_legend()
+    assert leg._loc == 2 and leg._ncols == 2 and leg.get_frame_on()
+    dlg.legend_at[a] = (0.3, 0.4)  # as a drag leaves it
+    dlg.apply()
+    assert a.get_legend()._loc == (0.3, 0.4)
+
+    dlg.line_width.setValue(1.5)
+    dlg.marker_size.setValue(3)
+    data, half, ref = a.get_lines()
+    assert data.get_linewidth() == 1.5 and data.get_marker() == "o" and data.get_markersize() == 3
+    assert ref.get_linewidth() == 0.5 and ref.get_marker() in ("None", None, "")  # left alone
+
+    dlg.letters.setCurrentText("(a)  (b)  (c)")
+    assert {t.get_text() for t in a.texts} == {"(a)"} and {t.get_text() for t in b.texts} == {"(b)"}
+
+    dlg.set_text(a.title, "Normalised NO₂", 9)
+    assert a.title.get_text() == "Normalised NO₂" and a.title.get_fontsize() == 9
+    dlg.set_ticks(b.yaxis, 6, 45)
+    assert all(
+        lbl.get_fontsize() == 6 and lbl.get_rotation() == 45 for lbl in b.yaxis.get_ticklabels()
+    )
+
+    dlg.save_to(tmp_path / "fig.png")
+    img = Image.open(tmp_path / "fig.png")
+    assert img.size[0] == int(89 / 25.4 * 300)
+
+    dlg.reject()
+    assert fig.canvas is canvas
+    canvas.draw()
+    assert _state(fig) == before
+    assert to_hex(fig.get_facecolor()) == DARK["figure"]  # dark again on its tab
+    assert len(a.texts) == 0 and len(b.texts) == 0  # the panel letters gone
+
+
+def test_a_double_click_finds_what_it_is_on(qapp, monkeypatch):
+    from matplotlib.backend_bases import MouseEvent
+    from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+
+    from normet.gui import printview
+
+    fig, a, b = _two_panels()
+    dlg = printview.PrintDialog(FigureCanvasQTAgg(fig))
+    fig.canvas.draw()
+
+    def at(artist):
+        box = artist.get_window_extent()
+        return MouseEvent(
+            "button_press_event",
+            fig.canvas,
+            (box.x0 + box.x1) / 2,
+            (box.y0 + box.y1) / 2,
+            dblclick=True,
+        )
+
+    monkeypatch.setattr(
+        printview._TextChoices, "exec", lambda self: (self.text.setText("Edited"), True)[1]
+    )
+    dlg.edit_at(at(b.yaxis.label))
+    assert b.yaxis.label.get_text() == "Edited"
+    monkeypatch.setattr(
+        printview._TickChoices, "exec", lambda self: (self.size.setValue(5), True)[1]
+    )
+    tick = next(lbl for lbl in a.xaxis.get_ticklabels() if lbl.get_text())
+    dlg.edit_at(at(tick))
+    assert a.xaxis in dlg.tick_edits and dlg.tick_edits[a.xaxis][0] == 5
+    fig.canvas.draw()  # the legend made again by that pass, placed at a draw
+    assert dlg._legend_under(at(a.get_legend())) is not None
+    dlg.reject()
+    assert b.yaxis.label.get_text() == "met part"

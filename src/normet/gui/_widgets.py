@@ -22,7 +22,7 @@ from __future__ import annotations
 from typing import Any
 
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT
-from PySide6.QtCore import QRect, QSize, Qt
+from PySide6.QtCore import QEvent, QRect, QSize, Qt
 from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
@@ -145,6 +145,16 @@ class ThemedToolbar(NavigationToolbar2QT):
         self.addSeparator()
         act = self.addAction("Export for Publication…", self.export_for_print)
         act.setToolTip("Lay the figure out at a journal's column width and lettering, and save it.")
+
+    def changeEvent(self, event: Any) -> None:  # noqa: N802
+        """Light or dark: matplotlib draws the icons once, in the palette of the moment
+        (white on a dark window); drawn again, they stay visible after a switch."""
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.PaletteChange:
+            for _text, _tip, image, callback in self.toolitems:
+                action = self._actions.get(callback) if callback else None
+                if action is not None:
+                    action.setIcon(self._icon(image + ".png"))
 
     def export_for_print(self) -> None:
         from .printview import PrintDialog
