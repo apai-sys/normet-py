@@ -79,6 +79,11 @@ def main(argv: list[str] | None = None) -> int:
     app.setOrganizationName("apai-sys")
     _install_excepthook()
 
+    from .theme import apply_stored_appearance, theme_manager
+
+    apply_stored_appearance()  # View → Appearance, as last chosen
+    theme_manager()
+
     from .main_window import MainWindow
 
     window = MainWindow()
