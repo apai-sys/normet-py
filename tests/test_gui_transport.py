@@ -111,7 +111,7 @@ def test_send_for_a_site_the_data_does_not_have(main_win, monkeypatch):
     w._ingest(_panel(site="MY1"), "MY1")
     seen = {}
     monkeypatch.setattr(
-        "normet.gui.main_window.QMessageBox.warning", lambda *a: seen.update(text=a[2])
+        "normet.gui._studios.QMessageBox.warning", lambda *a: seen.update(text=a[2])
     )
     before = w.df_raw
     assert w.merge_trajectory_features(_features(SIX_HOURLY, site="Marylebone")) == 0
