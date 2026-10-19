@@ -19,12 +19,9 @@ Workflow
 ...     min_hours=72,  # null out trajectories cut short by the met data
 ... )                                                        # doctest: +SKIP
 >>> # Align backward: each hour takes the latest trajectory that has already
->>> # arrived. ``direction="nearest"`` would hand hours 04-05 the 06:00
->>> # trajectory, i.e. air that has not arrived yet.
->>> df = pd.merge_asof(
-...     df.sort_values("date"), feats.reset_index().sort_values("date"),
-...     on="date", direction="backward", tolerance=pd.Timedelta("6h"),
-... )                                                        # doctest: +SKIP
+>>> # arrived, within one release interval. A nearest-time join would hand
+>>> # hours 04-05 the 06:00 trajectory, i.e. air that has not arrived yet.
+>>> df = nio.join_trajectory_features(df, feats)             # doctest: +SKIP
 >>> # then pass the ``traj_*`` columns to do_all, also in variables_resample
 
 Evaluation caveat
@@ -54,6 +51,8 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
 from collections.abc import Iterable, Mapping
 from glob import glob
 from pathlib import Path
@@ -62,8 +61,9 @@ from typing import Any, cast
 import numpy as np
 import pandas as pd
 
+from ..utils._time import to_datetime_coerced
 from ..utils.logging import get_logger
-from .gdas import _gdas1_file_range
+from .gdas import _gdas1_file_range, gdas1_filenames
 
 log = get_logger(__name__)
 
@@ -71,6 +71,7 @@ __all__ = [
     "read_trajectory_tdump",
     "trajectory_features",
     "build_trajectory_features",
+    "join_trajectory_features",
     "run_back_trajectories",
     "load_source_regions",
     "ALL_DIAGNOSTICS",
@@ -405,6 +406,17 @@ def build_trajectory_features(
     pandas.DataFrame
         Indexed by receptor timestamp, one ``{prefix}*`` column per feature.
         Sorted by time; deduplicated on the receptor timestamp (last wins).
+        Trajectories started at several heights -- a run with a column of
+        starting points, or runs at different heights mixed -- each get their
+        own columns, suffixed with the start height: ``traj_dist_km_500m``,
+        ``traj_dist_km_1500m``.
+
+    Raises
+    ------
+    ValueError
+        When the trajectories start from more than one place. A feature table
+        is one receptor's: build each site's on its own (and tag it with a
+        ``site`` column to join several, see :func:`join_trajectory_features`).
     """
     paths = sorted(glob(tdumps)) if isinstance(tdumps, str) else [str(p) for p in tdumps]
     if not paths:
@@ -426,32 +438,286 @@ def build_trajectory_features(
             log.warning("Skipping trajectory file %s: %s", p, exc)
             continue
         for _, g in traj.groupby("traj"):
-            receptor = g.loc[g["age_h"].abs().idxmin(), "datetime"]
+            # The endpoint at age 0 is where (and when) the trajectory starts.
+            start = g.loc[g["age_h"].abs().idxmin()]
             feats = trajectory_features(
                 g, source_regions=source_regions, prefix=prefix, min_hours=min_hours
             )
-            rows.append({date_col: pd.Timestamp(cast(Any, receptor)), **feats})
+            rows.append(
+                {
+                    date_col: pd.Timestamp(cast(Any, start["datetime"])),
+                    _START_LAT: float(start["lat"]),
+                    _START_LON: float(start["lon"]),
+                    _START_HEIGHT: round(float(start["height"]), 1),
+                    **feats,
+                }
+            )
 
     if not rows:
         return pd.DataFrame()
 
-    out = (
-        pd.DataFrame(rows)
-        .drop_duplicates(subset=date_col, keep="last")
-        .set_index(date_col)
-        .sort_index()
+    frame = pd.DataFrame(rows)
+    _check_one_receptor(frame)
+    frame = frame.drop(columns=[_START_LAT, _START_LON]).drop_duplicates(
+        subset=[date_col, _START_HEIGHT], keep="last"
     )
-    log.info("Built trajectory features: %d receptors × %d columns", len(out), out.shape[1])
-    if min_hours is not None and f"{prefix}age_max_h" in out:
-        n_short = int((out[f"{prefix}age_max_h"] < min_hours - 1e-6).sum())
+    if min_hours is not None and f"{prefix}age_max_h" in frame:
+        n_short = int((frame[f"{prefix}age_max_h"] < min_hours - 1e-6).sum())
         if n_short:
             log.warning(
                 "%d of %d trajectories reach back < %g h (truncated); their features are NaN.",
                 n_short,
-                len(out),
+                len(frame),
                 min_hours,
             )
+    heights = sorted(frame[_START_HEIGHT].unique())
+    if len(heights) > 1:
+        # Keyed on time alone, the heights would overwrite one another: one column
+        # set per height instead.
+        out = pd.concat(
+            [
+                part.drop(columns=_START_HEIGHT).set_index(date_col).add_suffix(f"_{h:g}m")
+                for h, part in frame.groupby(_START_HEIGHT)
+            ],
+            axis=1,
+        ).sort_index()
+        log.info(
+            "Trajectories start at %d heights (%s m): each height's features are suffixed with it.",
+            len(heights),
+            ", ".join(f"{h:g}" for h in heights),
+        )
+    else:
+        out = frame.drop(columns=_START_HEIGHT).set_index(date_col).sort_index()
+    log.info("Built trajectory features: %d receptors × %d columns", len(out), out.shape[1])
     return out
+
+
+# Where a trajectory starts, carried alongside its features while the table is built.
+_START_LAT, _START_LON, _START_HEIGHT = "__start_lat", "__start_lon", "__start_height"
+# Starting points this close (degrees) are one receptor: tdumps print 3 decimals.
+_SAME_PLACE_DEG = 0.01
+
+
+def _check_one_receptor(frame: pd.DataFrame) -> None:
+    """Raise if the trajectories in *frame* start from more than one place."""
+    lat, lon = frame[_START_LAT], frame[_START_LON]
+    if lat.max() - lat.min() <= _SAME_PLACE_DEG and lon.max() - lon.min() <= _SAME_PLACE_DEG:
+        return
+    places = frame[[_START_LAT, _START_LON]].round(2).drop_duplicates()
+    shown = ", ".join(f"({a:g}, {b:g})" for a, b in places.head(4).itertuples(index=False))
+    raise ValueError(
+        f"The trajectories start from {len(places)} different places ({shown}"
+        f"{', ...' if len(places) > 4 else ''}): build each receptor's features on its own, "
+        "tagged with a 'site' column if they are to be joined together."
+    )
+
+
+def _naive_utc(values: Any) -> pd.Series:
+    """Timestamps on HYSPLIT's clock: tz-naive UTC. A naive value is taken as UTC
+    already; anything unparseable becomes NaT."""
+    s = pd.Series(values).reset_index(drop=True)
+    if not pd.api.types.is_datetime64_any_dtype(s):
+        s = to_datetime_coerced(s, utc=True)
+    if s.dt.tz is not None:
+        s = s.dt.tz_convert("UTC").dt.tz_localize(None)
+    return s.astype("datetime64[ns]")
+
+
+def _release_interval(times: pd.Series, sites: pd.Series) -> pd.Timedelta | None:
+    """The commonest step between one site's successive trajectories (the smaller
+    on a tie), or ``None`` when no site has two."""
+    steps = (
+        pd.DataFrame({"t": times.to_numpy(), "s": sites.to_numpy()})
+        .sort_values(["s", "t"])
+        .groupby("s")["t"]
+        .diff()
+        .dropna()
+    )
+    steps = steps[steps > pd.Timedelta(0)]
+    return pd.Timedelta(steps.mode().iloc[0]) if len(steps) else None
+
+
+def join_trajectory_features(
+    df: pd.DataFrame,
+    features: pd.DataFrame,
+    *,
+    date_col: str = "date",
+    site_col: str = "site",
+    tolerance: str | pd.Timedelta | None = None,
+) -> pd.DataFrame:
+    """Join trajectory features onto a panel, each row taking the latest
+    trajectory to have arrived.
+
+    A row at time *t* takes the trajectory that arrived last at or before *t*,
+    and only if it arrived less than ``tolerance`` before. A nearest-time join
+    instead hands a row the trajectory arriving after it -- air that has not
+    reached the receptor yet -- and, with no tolerance, carries the first and
+    last trajectories over every row before and after them.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        The panel: times in a ``date_col`` column, or in a ``DatetimeIndex``.
+    features : pandas.DataFrame
+        Receptor-time features, e.g. from :func:`build_trajectory_features` or
+        :func:`run_back_trajectories`: times in the index or a ``date_col``
+        column, one row per time (per site, with a ``site_col`` column).
+    date_col : str, default ``"date"``
+        Name of the time column.
+    site_col : str, default ``"site"``
+        When both frames have it, each row takes only its own site's
+        trajectories (sites are matched as text), and rows of sites
+        ``features`` does not hold are left as they were -- so the features of
+        several sites can be joined one batch at a time.
+    tolerance : str or Timedelta, optional
+        How long a trajectory stands for after it arrives (a row strictly less
+        than this after it takes it). Default: the release interval, the
+        commonest step between one site's successive trajectories -- every hour
+        of a 6-hourly release window takes that window's trajectory, and a
+        window whose trajectory is missing stays empty. With a single
+        trajectory, only a row at its exact time takes it.
+
+    Returns
+    -------
+    pandas.DataFrame
+        A copy of ``df``, rows in their order, with the feature columns added;
+        a row no trajectory matches (or with no time) has them NaN. A feature
+        column ``df`` already had is replaced; its other columns are untouched.
+
+    Raises
+    ------
+    ValueError
+        If ``features`` holds several sites but ``df`` has no ``site_col``, or
+        several rows for one receptor time (and site).
+
+    Notes
+    -----
+    Times are compared as UTC, HYSPLIT's clock: tz-aware times are converted
+    and naive ones are taken to be UTC already.
+    """
+    if date_col in df.columns:
+        when = _naive_utc(df[date_col])
+    elif isinstance(df.index, pd.DatetimeIndex):
+        when = _naive_utc(df.index)
+    else:
+        raise KeyError(f"df has no {date_col!r} column and no DatetimeIndex")
+    if date_col in features.columns:
+        ftimes = _naive_utc(features[date_col])
+    elif isinstance(features.index, pd.DatetimeIndex) or features.index.dtype == object:
+        ftimes = _naive_utc(features.index)
+    else:
+        raise KeyError(f"features have no {date_col!r} column and no DatetimeIndex")
+    cols = [c for c in features.columns if c not in (date_col, site_col)]
+    if not cols:
+        raise ValueError("features hold no feature columns")
+
+    fsite = (
+        features[site_col].astype(str).reset_index(drop=True)
+        if site_col in features.columns
+        else pd.Series("", index=ftimes.index)
+    )
+    by_site = site_col in features.columns and site_col in df.columns
+    feature_sites = sorted(set(fsite))
+    if site_col in features.columns and not by_site and len(feature_sites) > 1:
+        raise ValueError(
+            f"features hold {len(feature_sites)} sites ({', '.join(feature_sites)}) but df has "
+            f"no {site_col!r} column to match them on"
+        )
+    known = ftimes.notna()
+    dup = pd.DataFrame({"t": ftimes, "s": fsite})[known].duplicated()
+    if dup.any():
+        first = ftimes[known][dup].iloc[0]
+        raise ValueError(
+            f"features hold {int(dup.sum())} more row(s) for a receptor time already given "
+            f"(e.g. {first}{' at one site' if by_site else ''}); keep one per time"
+        )
+
+    if tolerance is not None:
+        given = pd.Timedelta(tolerance)
+        if not given > pd.Timedelta(0):
+            raise ValueError(f"tolerance must be positive, got {tolerance!r}")
+        tol: pd.Timedelta | None = given
+    else:
+        tol = _release_interval(ftimes[known], fsite[known])
+    # merge_asof's tolerance is inclusive; a trajectory stands for strictly less.
+    asof_tol = tol - pd.Timedelta(1, "ns") if tol is not None else pd.Timedelta(0)
+
+    left = pd.DataFrame({"_t": when.to_numpy(), "_row": np.arange(len(df))})
+    right = pd.DataFrame({"_t": ftimes.to_numpy(), "_pos": np.arange(len(features))})
+    if by_site:
+        left["_site"] = df[site_col].astype(str).to_numpy()
+        right["_site"] = fsite.to_numpy()
+    matched = pd.merge_asof(
+        left[left["_t"].notna()].sort_values("_t", kind="stable"),
+        right[right["_t"].notna()].sort_values("_t", kind="stable"),
+        on="_t",
+        by="_site" if by_site else None,
+        direction="backward",
+        tolerance=asof_tol,
+    )
+    pos = np.full(len(df), -1, dtype=np.int64)
+    hit = matched["_pos"].notna().to_numpy()
+    pos[matched["_row"].to_numpy()[hit]] = matched["_pos"].to_numpy()[hit].astype(np.int64)
+
+    in_scope = (
+        df[site_col].astype(str).isin(feature_sites).to_numpy()
+        if by_site
+        else np.ones(len(df), dtype=bool)
+    )
+    block = features[cols].reset_index(drop=True).reindex(pos)  # -1 -> a row of NaN
+    out = df.copy()
+    replaced = [c for c in cols if c in df.columns]
+    for c in cols:
+        values = block[c].to_numpy()
+        if not in_scope.all():
+            prior = out[c].to_numpy() if c in replaced else np.full(len(out), np.nan)
+            values = np.where(in_scope, values, prior)
+        out[c] = values
+
+    n_hit, n_scope = int((pos >= 0).sum()), int(in_scope.sum())
+    gap = f"less than {_hours(tol)} before" if tol is not None else "at the same time as"
+    log.info(
+        "Joined %d trajectory feature column(s): %d of %d rows took a trajectory (%s).",
+        len(cols),
+        n_hit,
+        n_scope,
+        f"the latest to arrive, if {gap} the row" if tol is not None else "one arriving with it",
+    )
+    if replaced:
+        log.info("Replaced column(s) the panel already had: %s", ", ".join(replaced))
+    if site_col in df.columns and site_col not in features.columns:
+        n_sites = df[site_col].nunique()
+        if n_sites > 1:
+            log.warning(
+                "The features have no %r column, so the rows of all %d of the panel's sites "
+                "took the same trajectories.",
+                site_col,
+                n_sites,
+            )
+    if by_site:
+        present = set(left["_site"])
+        absent = [s for s in feature_sites if s not in present]
+        if absent:
+            log.warning(
+                "No rows of site(s) %s in the panel's %r column; their trajectories were not used.",
+                ", ".join(absent),
+                site_col,
+            )
+    if not n_hit:
+        log.warning(
+            "No row took a trajectory: none arrived %s any of the panel's times (%s → %s); "
+            "they arrive %s → %s.",
+            gap,
+            when.min(),
+            when.max(),
+            ftimes.min(),
+            ftimes.max(),
+        )
+    return out
+
+
+def _hours(td: pd.Timedelta) -> str:
+    return f"{td / pd.Timedelta(hours=1):g} h"
 
 
 # GDAS1 is 3-hourly. A receptor time between a weekly file's last record and the
@@ -487,6 +753,25 @@ def _filter_met_files(
     return kept
 
 
+def _missing_gdas1_files(
+    paths: list[str],
+    window_start: pd.Timestamp,
+    window_end: pd.Timestamp,
+    *,
+    pad_h: float = _MET_RECORD_PAD_H,
+) -> list[str] | None:
+    """The GDAS1 weekly files ``[window_start, window_end]`` needs that *paths* lack.
+
+    ``None`` when a file's name does not say what it covers, so the coverage
+    cannot be judged. The window is widened as in :func:`_filter_met_files`.
+    """
+    if any(_gdas1_file_range(p) is None for p in paths):
+        return None
+    pad = pd.Timedelta(hours=pad_h)
+    have = {Path(p).name for p in paths}
+    return [n for n in gdas1_filenames(window_start - pad, window_end + pad) if n not in have]
+
+
 def _control_text(
     time: pd.Timestamp,
     lat: float,
@@ -502,7 +787,8 @@ def _control_text(
     """Render a HYSPLIT ``CONTROL`` file for a single backward trajectory."""
     ts = pd.Timestamp(time)
     lines = [
-        ts.strftime("%y %m %d %H"),  # start: YY MM DD HH (2-digit year)
+        # start: YY MM DD HH (2-digit year), and MM only when it is not on the hour
+        ts.strftime("%y %m %d %H %M" if ts.minute else "%y %m %d %H"),
         "1",  # one starting location
         f"{float(lat):.4f} {float(lon):.4f} {float(height_m):.1f}",
         str(-abs(int(hours_back))),  # negative run hours = BACKWARD
@@ -552,6 +838,45 @@ def _setup_cfg_text(diagnostics: Iterable[str]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _utc(ts: pd.Timestamp) -> pd.Timestamp:
+    """*ts* on HYSPLIT's clock: tz-naive UTC (a naive time is taken as UTC already)."""
+    return ts.tz_convert("UTC").tz_localize(None) if ts.tzinfo is not None else ts
+
+
+def _run_hyts(
+    exe: str, work: Path, timeout: float, stop: threading.Event | None
+) -> subprocess.CompletedProcess[str] | None:
+    """Run ``hyts_std`` once in *work*; ``None`` if *stop* was set while it ran.
+
+    A stopped or timed-out run is killed rather than left to finish.
+    """
+    proc = subprocess.Popen(
+        [exe],
+        cwd=work,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    deadline = time.monotonic() + timeout
+    while True:
+        left = deadline - time.monotonic()
+        try:
+            wait = min(left, 0.2) if stop is not None else left
+            out, err = proc.communicate(timeout=max(0.0, wait))
+        except subprocess.TimeoutExpired:
+            if stop is not None and stop.is_set():
+                proc.kill()
+                proc.communicate()
+                return None
+            if time.monotonic() >= deadline:
+                proc.kill()
+                proc.communicate()
+                raise
+            continue
+        return subprocess.CompletedProcess([exe], proc.returncode, out, err)
+
+
 def run_back_trajectories(
     times: Iterable[Any],
     lat: float,
@@ -569,6 +894,7 @@ def run_back_trajectories(
     prefix: str = "traj_",
     min_hours: float | None = None,
     timeout: int = 600,
+    stop: threading.Event | None = None,
 ) -> pd.DataFrame:
     """Run HYSPLIT back-trajectories for many receptor times and reduce to features.
 
@@ -585,6 +911,8 @@ def run_back_trajectories(
     ----------
     times : iterable
         Receptor (arrival) timestamps; anything ``pandas.Timestamp`` accepts.
+        HYSPLIT runs on UTC: tz-aware times are converted, naive ones are taken
+        as UTC. Repeats are run once, and ``NaT`` is skipped.
     lat, lon : float
         Receptor location (degrees).
     met_files : str or iterable of str
@@ -594,7 +922,8 @@ def run_back_trajectories(
         the files that can touch its window: GDAS1 weekly files
         (``gdas1.<mmm><yy>.w<N>``) are selected by the dates in their name,
         widened by one 3-hourly record either side; any file with another name
-        is always passed, and if none overlap, all of them are.
+        is always passed. A receptor time no file can touch is skipped, with a
+        warning, rather than run.
     hysplit_exec : str or Path
         Path to the ``hyts_std`` executable (e.g. ``~/hysplit-5.4.2/exec/hyts_std``).
     height_m : float, default 500.0
@@ -603,7 +932,9 @@ def run_back_trajectories(
         Backward duration in hours (sign ignored; always run backward).
     work_dir : str or Path, optional
         Directory for ``CONTROL`` and ``tdump_*`` files. A temp dir is created
-        if omitted; the tdumps are left there for inspection/reuse.
+        if omitted; the tdumps are left there for inspection/reuse. A tdump
+        an earlier call left under the same name is removed before its run, so
+        a failed run cannot pass the old file off as its own.
     top_of_model, vert_motion : float, int
         HYSPLIT ``CONTROL`` settings (model top in m; ``0`` = use met w).
     diagnostics : iterable of str, default all of them
@@ -620,6 +951,10 @@ def run_back_trajectories(
         either way, truncated runs are counted in a warning.
     timeout : int, default 600
         Per-run timeout (seconds) for ``hyts_std``.
+    stop : threading.Event, optional
+        Set it (from another thread) to stop: the run in progress is killed, no
+        other starts, and the features of the runs already done are returned
+        (an empty frame if none was).
 
     Returns
     -------
@@ -642,6 +977,8 @@ def run_back_trajectories(
 
     mets = [met_files] if isinstance(met_files, str | Path) else list(met_files)
     mets = [os.path.abspath(os.path.expanduser(str(m))) for m in mets]
+    if not mets:
+        raise ValueError("No met files given")
     missing = [m for m in mets if not os.path.exists(m)]
     if missing:
         raise FileNotFoundError(f"Met file(s) not found: {missing}")
@@ -665,14 +1002,28 @@ def run_back_trajectories(
     # requested tdump columns (rainfall/blh/rh/temp) are reproducible.
     (work / "SETUP.CFG").write_text(_setup_cfg_text(diagnostics))
 
+    stamps = [_utc(pd.Timestamp(t)) for t in times]
+    stamps = list(dict.fromkeys(ts for ts in stamps if not pd.isna(ts)))
+    window = pd.Timedelta(hours=abs(hours_back))
     tdumps: list[str] = []
-    for t in times:
-        ts = pd.Timestamp(t)
-        name = "tdump_" + ts.strftime("%Y%m%d%H")
+    uncovered: list[pd.Timestamp] = []
+    stopped = False
+    every = max(1, len(stamps) // 10)
+    for i, ts in enumerate(stamps, 1):
+        if stop is not None and stop.is_set():
+            stopped = True
+            break
+        # Minutes in the name only off the hour, so on-the-hour names stay as they were.
+        name = "tdump_" + ts.strftime("%Y%m%d%H%M" if ts.minute else "%Y%m%d%H")
         # Hand hyts_std only the files this run can touch: a multi-year archive is
         # hundreds of weekly files, and every one would otherwise be listed in --
         # and opened by -- each of the thousands of runs.
-        run_mets = _filter_met_files(mets, ts - pd.Timedelta(hours=abs(hours_back)), ts)
+        run_mets = _filter_met_files(mets, ts - window, ts)
+        if not run_mets:
+            uncovered.append(ts)
+            continue
+        out = work / name
+        out.unlink(missing_ok=True)  # else a run that fails would leave the last one's
         (work / "CONTROL").write_text(
             _control_text(
                 ts,
@@ -680,41 +1031,59 @@ def run_back_trajectories(
                 lon,
                 height_m,
                 hours_back,
-                run_mets or mets,
+                run_mets,
                 name,
                 top_of_model=top_of_model,
                 vert_motion=vert_motion,
             )
         )
         try:
-            r = subprocess.run(
-                [exe],
-                cwd=work,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
+            r = _run_hyts(exe, work, timeout, stop)
         except subprocess.TimeoutExpired:
             log.warning("hyts_std timed out (%ds) for receptor %s", timeout, ts)
             continue
+        if r is None:
+            stopped = True
+            break
 
         if r.returncode == 137:  # SIGKILL — almost always macOS Gatekeeper quarantine
             raise RuntimeError(
                 "hyts_std was killed (exit 137) — likely macOS Gatekeeper quarantine. "
                 f"Clear it once with:\n  xattr -dr com.apple.quarantine {Path(exe).parents[1]}"
             )
-        out = work / name
         if not out.exists():
             msg = (r.stderr or r.stdout or "").strip().replace("\n", " ")[:200]
             log.warning("No tdump for %s (hyts_std rc=%s): %s", ts, r.returncode, msg)
             continue
         tdumps.append(str(out))
+        if i % every == 0 and i < len(stamps):
+            log.info("hyts_std: %d of %d receptor times run", i, len(stamps))
 
+    if uncovered:
+        spans = [sp for sp in map(_gdas1_file_range, mets) if sp is not None]
+        log.warning(
+            "%d of %d receptor times skipped: no met file covers any of their %d-h window "
+            "(e.g. %s); the met files span %s → %s.",
+            len(uncovered),
+            len(stamps),
+            abs(hours_back),
+            uncovered[0],
+            min(sp[0] for sp in spans),
+            max(sp[1] for sp in spans),
+        )
+    if stopped:
+        log.warning("Stopped after %d of %d receptor times.", len(tdumps), len(stamps))
+        if not tdumps:
+            return pd.DataFrame()
     if not tdumps:
         raise RuntimeError(
-            "No trajectories produced. Check met coverage of the backward window, "
-            "the CONTROL settings, and the hyts_std path."
+            "No trajectories produced. "
+            + (
+                "No met file covers the receptor times' backward windows."
+                if uncovered and len(uncovered) == len(stamps)
+                else "Check met coverage of the backward window, the CONTROL settings, "
+                "and the hyts_std path."
+            )
         )
     log.info("Ran %d back-trajectories -> %s", len(tdumps), work)
     feats = build_trajectory_features(
