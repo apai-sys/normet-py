@@ -579,8 +579,10 @@ other result, is summarised by a traffic-light verdict banner. Step 1 exposes
 the flaml estimator search list, plus "Time variables"/"Met only" one-click
 toggles for the PDP variable list, and a **Backend** selector — `flaml`,
 `lightgbm`, or `chronos-2` for the zero-shot path, which hides the training
-controls it has nothing to act on and reports a covariate-sensitivity verdict
-in place of the parity plot; Step 2 lets you choose exactly which
+controls it has nothing to act on, reports a covariate-sensitivity verdict
+in place of the parity plot, and can **fine-tune** the checkpoint to the site
+(LoRA or full); Step 3's meteorological decomposition runs on either backend,
+by variable or by named group, with sequential or Shapley attribution; Step 2 lets you choose exactly which
 variables are resampled in the Monte-Carlo ("Met only" by default); Step 4's
 Rolling plot shows the overall rolling mean (± spread across overlapping
 windows), and an adjacent **Multi-scale decomposition** panel differences
@@ -633,6 +635,9 @@ treated unit, cutoff and donor pool, choose an estimator
 (`scm`, `mlscm`, `abadie`, `did`, `mcnnm`, `robust`, `bayesian`), then run
 fit + diagnostics, placebo-in-space/time, jackknife/bootstrap uncertainty
 bands and the all-units batch — each with a p-value / fit-quality verdict.
+With the `foundation` extra, **Rank donors by similarity** embeds every unit's
+pre-cutoff record with Chronos-2 and ranks the others by how alike their
+dynamics are to the treated unit's, and can tick the top N as the donor pool.
 
 **Transport Studio** (🧭 toolbar button) — build transport-aware predictors
 from HYSPLIT back-trajectories: parse existing `tdump` files (no external
