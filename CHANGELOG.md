@@ -56,6 +56,12 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   box, and the panel method only lists them in the order the workflow runs in.
   The widgets and their attribute names are unchanged, so nothing that reads
   them had to change: this is a move, not a rewrite.
+- **The window's shared names and tick-list helpers moved out of it.**
+  `TIME_VARS`, `MET_DEFAULTS` and `DOCS_URL` now live in `normet.gui._constants`,
+  and `_checked_items`, `_fill_checklist`, `_set_all` and `parse_groups` in
+  `normet.gui._lists`. Both are imported back into `main_window`, so code that
+  reads them from there -- the tests do -- is unaffected. They move so a panel
+  split out of the window can import them without importing the window itself.
 
 ### Fixed
 - **Dates whose UTC offsets differ are read as UTC.** Local time across a
