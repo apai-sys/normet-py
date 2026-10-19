@@ -62,6 +62,16 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   `normet.gui._lists`. Both are imported back into `main_window`, so code that
   reads them from there -- the tests do -- is unaffected. They move so a panel
   split out of the window can import them without importing the window itself.
+- **The window's chrome moved into `normet.gui._shell`.** The menu, tabs,
+  docks, status bar, command palette, appearance menu and the About box are now
+  `ShellMixin`; `MainWindow` inherits it and keeps only its state, the workflow
+  and `closeEvent`. The seventeen methods moved verbatim.
+  What makes a mixin possible is `normet.gui._contract.WindowContract`: it
+  inherits `QMainWindow`, so `self.statusBar()` still type-checks inside a
+  mixin, and it declares the attributes and the handler signatures the mixins
+  share. Those are annotations and `TYPE_CHECKING`-only stubs, so the class adds
+  nothing at runtime -- a handler no mixin defines raises `AttributeError`
+  rather than quietly doing nothing.
 
 ### Fixed
 - **Dates whose UTC offsets differ are read as UTC.** Local time across a
