@@ -61,6 +61,14 @@ QPushButton:checked {
 """
 
 
+def wrap_row(layout: QLayout) -> QWidget:
+    """A layout as a widget, for a form row that holds several controls."""
+    w = QWidget()
+    layout.setContentsMargins(0, 0, 0, 0)
+    w.setLayout(layout)
+    return w
+
+
 class _NoWheelMixin:
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
