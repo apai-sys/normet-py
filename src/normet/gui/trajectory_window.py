@@ -13,9 +13,9 @@ Two sections, in the same design language as the Data/SCM Studios:
    'site' column, so batches from several receptors (processed one at a
    time) can all be sent to the main window and matched up correctly.
 2. **Run HYSPLIT (advanced)** — orchestrate ``hyts_std`` itself for one or
-   more receptor sites, at a configurable time resolution, optionally
-   downloading GDAS1 meteorology first. Needs a local HYSPLIT install; most
-   users will only need section 1.
+   more receptor sites, at a configurable time resolution, with GDAS1
+   meteorology it downloads or ARL files already on disk. Needs a local
+   HYSPLIT install; most users will only need section 1.
 
 Source regions (shared by both sections) accept either a manual bounding
 box, or exact polygon boundaries loaded from a GeoJSON/Shapefile
@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from pathlib import Path
 
 import pandas as pd
@@ -55,10 +56,21 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from normet.io.trajectory import _missing_gdas1_files, _naive_utc
+
 from ._widgets import CanvasTab, NoWheelSpinBox, hint_label, run_button
 from .workers import TaskRunner
 
 log = logging.getLogger(__name__)
+
+# A weekly GDAS1 file is ~570 MB: past this many, a download is asked about first.
+_ASK_ABOVE_FILES = 4
+_GDAS1_FILE_GB = 0.57
+
+
+def _n_features(result: pd.DataFrame) -> int:
+    """Feature columns in a result -- its 'site' tag is not one."""
+    return result.shape[1] - int("site" in result.columns)
 
 
 class SourceRegionTable(QTableWidget):
@@ -88,18 +100,47 @@ class SourceRegionTable(QTableWidget):
             self.removeRow(idx)
 
     def regions(self) -> dict[str, tuple[float, float, float, float]]:
+        """The boxes by name. A row left as added (no name, zeros) is skipped; any
+        other row that is not a box raises ``ValueError`` naming it."""
         out: dict[str, tuple[float, float, float, float]] = {}
         for r in range(self.rowCount()):
-            name_item = self.item(r, 0)
-            name = name_item.text().strip() if name_item else ""
+            name, *nums = _cells(self, r)
+            if not name and not any(_filled(v) for v in nums):
+                continue
+            where = f"Source region row {r + 1}" + (f" ({name})" if name else "")
             if not name:
-                continue
+                raise ValueError(f"{where}: give it a name.")
             try:
-                box = tuple(float(self.item(r, c).text()) for c in range(1, 5))
-            except (AttributeError, ValueError):
-                continue
-            out[name] = box  # type: ignore[assignment]
+                lon0, lat0, lon1, lat1 = (float(v) for v in nums)
+            except ValueError:
+                raise ValueError(
+                    f"{where}: lon_min, lat_min, lon_max and lat_max must be numbers."
+                ) from None
+            if not (lon0 < lon1 and lat0 < lat1):
+                raise ValueError(
+                    f"{where}: lon_min must be less than lon_max, and lat_min than lat_max."
+                )
+            if lat0 < -90 or lat1 > 90 or lon0 < -180 or lon1 > 180:
+                raise ValueError(f"{where}: latitudes run -90 to 90, longitudes -180 to 180.")
+            if name in out:
+                raise ValueError(f"{where}: another row is called {name!r} already.")
+            out[name] = (lon0, lat0, lon1, lat1)
         return out
+
+
+def _cells(table: QTableWidget, row: int) -> list[str]:
+    return [
+        (item.text().strip() if (item := table.item(row, c)) is not None else "")
+        for c in range(table.columnCount())
+    ]
+
+
+def _filled(value: str) -> bool:
+    """Whether a cell holds more than the 0 a new row starts with."""
+    try:
+        return float(value) != 0
+    except ValueError:
+        return bool(value)
 
 
 class RegionFileTable(QTableWidget):
@@ -158,8 +199,7 @@ class ReceptorTable(QTableWidget):
         self.setHorizontalHeaderLabels(self._COLS)
         self.setToolTip(
             "One row per receptor site. hyts_std runs once per (site, time),\n"
-            "so results are tagged with a 'site' column when there is more\n"
-            "than one row."
+            "and each result is tagged with the row's name in a 'site' column."
         )
         self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
 
@@ -174,17 +214,24 @@ class ReceptorTable(QTableWidget):
             self.removeRow(idx)
 
     def receptors(self) -> list[tuple[str, float, float]]:
+        """``(name, lat, lon)`` per site. A row left as added is skipped; any other
+        row that is not a place raises ``ValueError`` naming it."""
         out: list[tuple[str, float, float]] = []
         for r in range(self.rowCount()):
-            name_item = self.item(r, 0)
-            name = name_item.text().strip() if name_item else ""
+            name, *nums = _cells(self, r)
+            if not name and not any(_filled(v) for v in nums):
+                continue
+            where = f"Receptor row {r + 1}" + (f" ({name})" if name else "")
             if not name:
-                continue
+                raise ValueError(f"{where}: give it a name; it tags the site's results.")
             try:
-                lat = float(self.item(r, 1).text())
-                lon = float(self.item(r, 2).text())
-            except (AttributeError, ValueError):
-                continue
+                lat, lon = (float(v) for v in nums)
+            except ValueError:
+                raise ValueError(f"{where}: lat and lon must be numbers.") from None
+            if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+                raise ValueError(f"{where}: lat runs -90 to 90, lon -180 to 180.")
+            if any(name == n for n, _, _ in out):
+                raise ValueError(f"{where}: another row is called {name!r} already.")
             out.append((name, lat, lon))
         return out
 
@@ -200,6 +247,8 @@ class TrajectoryWindow(QMainWindow):
         self.features: pd.DataFrame | None = None
         self._tdump_paths: list[str] = []
         self._gdas_paths: list[str] = []
+        #: Set to stop the HYSPLIT run in progress (Cancel, or closing the window).
+        self._hysplit_stop: threading.Event | None = None
 
         self.runner = TaskRunner(self)
         self.runner.started.connect(self._task_started)
@@ -265,11 +314,27 @@ class TrajectoryWindow(QMainWindow):
         tv.addWidget(
             hint_label(
                 "If these tdump files are all for one receptor site, name it\n"
-                "here — the result gets a 'site' column, so batches from\n"
-                "several sites (processed one at a time) can all be sent to\n"
-                "the main window and matched up correctly."
+                "as the main data's 'site' column does: each site's batch,\n"
+                "built and sent one at a time, then fills only its own rows."
             )
         )
+        self.build_min_check = QCheckBox("Null trajectories shorter than")
+        self.build_min_spin = NoWheelSpinBox()
+        self.build_min_spin.setRange(1, 480)
+        self.build_min_spin.setValue(72)
+        self.build_min_spin.setSuffix(" h")
+        self.build_min_spin.setEnabled(False)
+        self.build_min_check.toggled.connect(self.build_min_spin.setEnabled)
+        self.build_min_check.setToolTip(
+            "A trajectory that reaches back less than this -- the met data ran\n"
+            "out, or it left the domain -- gets NaN features instead of passing\n"
+            "for a short-range one (traj_age_max_h says how far each reached)."
+        )
+        min_row = QHBoxLayout()
+        min_row.addWidget(self.build_min_check)
+        min_row.addWidget(self.build_min_spin)
+        min_row.addStretch(1)
+        tv.addWidget(self._wrap_row(min_row))
         v.addWidget(tdump_box)
 
         # ---- Source regions (shared by build + run)
@@ -356,8 +421,17 @@ class TrajectoryWindow(QMainWindow):
         rf.addRow("GDAS1 range", self._wrap_row(gdas_date_row))
         self.gdas_btn = QPushButton("⬇  Download GDAS1 for this range")
         self.gdas_btn.clicked.connect(self._run_download_gdas)
-        rf.addRow(self.gdas_btn)
-        self.gdas_hint = hint_label("No GDAS1 files downloaded yet.")
+        self.met_files_btn = QPushButton("Use existing met files…")
+        self.met_files_btn.setToolTip(
+            "ARL-format meteorology already on disk (GDAS1 weekly files, or\n"
+            "any other ARL archive) instead of downloading."
+        )
+        self.met_files_btn.clicked.connect(self._choose_met_files)
+        met_row = QHBoxLayout()
+        met_row.addWidget(self.gdas_btn)
+        met_row.addWidget(self.met_files_btn)
+        rf.addRow(self._wrap_row(met_row))
+        self.gdas_hint = hint_label("No met files yet: download GDAS1, or use existing ones.")
         rf.addRow(self.gdas_hint)
 
         rf.addRow(QLabel("Receptor sites"))
@@ -374,8 +448,8 @@ class TrajectoryWindow(QMainWindow):
         rf.addRow("", self._wrap_row(recv_btn_row))
         rf.addRow(
             hint_label(
-                "One or more (name, lat, lon) rows. With more than one, the\n"
-                "combined result is tagged with a 'site' column."
+                "One or more (name, lat, lon) rows. Each name tags its results\n"
+                "in a 'site' column: name them as the main data's 'site' does."
             )
         )
         self.height_spin = NoWheelSpinBox()
@@ -387,7 +461,16 @@ class TrajectoryWindow(QMainWindow):
         self.hours_back_spin.setRange(1, 240)
         self.hours_back_spin.setValue(72)
         self.hours_back_spin.setSuffix(" h")
+        self.hours_back_spin.valueChanged.connect(self._suggest_gdas_range)
         rf.addRow("Hours back", self.hours_back_spin)
+        self.run_min_check = QCheckBox("Null trajectories cut short")
+        self.run_min_check.setChecked(True)
+        self.run_min_check.setToolTip(
+            "A trajectory HYSPLIT ended before 'Hours back' -- the met data ran\n"
+            "out, or it left the domain -- gets NaN features instead of passing\n"
+            "for a short-range one (traj_age_max_h says how far each reached)."
+        )
+        rf.addRow("", self.run_min_check)
         self.time_res_spin = NoWheelSpinBox()
         self.time_res_spin.setRange(1, 720)
         self.time_res_spin.setValue(1)
@@ -441,7 +524,7 @@ class TrajectoryWindow(QMainWindow):
         v.addWidget(run_box)
 
         v.addStretch(1)
-        self._run_buttons = [self.build_btn, self.gdas_btn, self.run_btn]
+        self._run_buttons = [self.build_btn, self.gdas_btn, self.met_files_btn, self.run_btn]
 
         scroll = QScrollArea()
         scroll.setWidget(panel)
@@ -466,8 +549,9 @@ class TrajectoryWindow(QMainWindow):
         self.save_btn.setEnabled(False)
         self.send_btn = QPushButton("⬆  Send to main window")
         self.send_btn.setToolTip(
-            "Join the traj_* columns onto the main window's data by date\n"
-            "(nearest-hour match), ready to tick as predictors in Step 1."
+            "Join the traj_* columns onto the main window's data: each row takes\n"
+            "the latest trajectory to have arrived, within one release interval\n"
+            "(a row with none stays empty), ready to tick as predictors in Step 1."
         )
         self.send_btn.clicked.connect(self._send_to_main)
         self.send_btn.setEnabled(False)
@@ -491,6 +575,25 @@ class TrajectoryWindow(QMainWindow):
         if len(df):
             span = f"{df['date'].min():%Y-%m-%d} → {df['date'].max():%Y-%m-%d}"
             self.times_source.setText(f"Receptor times: main window's date range ({span})")
+        self._suggest_gdas_range()
+
+    def _receptor_span(self) -> tuple[pd.Timestamp, pd.Timestamp] | None:
+        """First and last receptor time (UTC), from the main window's dates."""
+        df = getattr(self, "_main_df", None)
+        if df is None or "date" not in df.columns:
+            return None
+        dates = _naive_utc(df["date"]).dropna()
+        return (dates.min(), dates.max()) if len(dates) else None
+
+    def _suggest_gdas_range(self) -> None:
+        """Set the GDAS1 range to what the receptor times need: back from the first
+        one by 'Hours back', up to the last."""
+        span = self._receptor_span()
+        if span is None:
+            return
+        start = span[0] - pd.Timedelta(hours=self.hours_back_spin.value())
+        self.gdas_from.setDate(QDate(start.year, start.month, start.day))
+        self.gdas_to.setDate(QDate(span[1].year, span[1].month, span[1].day))
 
     def _add_tdump_files(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(self, "Add tdump files", "", "All files (*)")
@@ -586,15 +689,22 @@ class TrajectoryWindow(QMainWindow):
         self.cancel_btn.setEnabled(True)
 
     def _task_finished(self) -> None:
+        self._hysplit_stop = None
         self.progress.setRange(0, 1)
         self._sync_enabled()
 
     def _abandon(self) -> None:
-        if self.runner.busy:
-            self.runner.abandon()
-            self.statusBar().showMessage(
-                "Task abandoned — it finishes in the background and its result is discarded."
-            )
+        if not self.runner.busy:
+            return
+        stop = self._hysplit_stop
+        if stop is not None:
+            stop.set()  # kills the hyts_std run in progress; no further run starts
+        self.runner.abandon()
+        self.statusBar().showMessage(
+            "Cancelled — the HYSPLIT run in progress was stopped."
+            if stop is not None
+            else "Task abandoned — it finishes in the background and its result is discarded."
+        )
 
     def _show_error(self, tb: str) -> None:
         QMessageBox.critical(self, "Task failed", tb.splitlines()[-1] if tb else "Unknown error")
@@ -607,6 +717,9 @@ class TrajectoryWindow(QMainWindow):
             return
         from normet import build_trajectory_features
 
+        ok, regions = self._regions_or_warn()
+        if not ok:
+            return
         self._pending_site = self.build_site_edit.text().strip()
         self.runner.submit(
             "build trajectory features",
@@ -614,9 +727,18 @@ class TrajectoryWindow(QMainWindow):
             self._on_build_result,
             self._show_error,
             list(self._tdump_paths),
-            source_regions=self._merged_regions(),
+            source_regions=regions,
             prefix=self.prefix_edit.text() or "traj_",
+            min_hours=self.build_min_spin.value() if self.build_min_check.isChecked() else None,
         )
+
+    def _regions_or_warn(self) -> tuple[bool, dict | None]:
+        """``(True, regions)``, or ``(False, None)`` once the user is told what is wrong."""
+        try:
+            return True, self._merged_regions()
+        except Exception as exc:  # a bad row, or a region file that will not load
+            QMessageBox.warning(self, "Source regions", str(exc))
+            return False, None
 
     def _on_build_result(self, result: pd.DataFrame) -> None:
         if result is not None and not result.empty and self._pending_site:
@@ -638,10 +760,11 @@ class TrajectoryWindow(QMainWindow):
         self._sync_enabled()
         n_sites = result["site"].nunique() if "site" in result.columns else 1
         site_note = f" across {n_sites} site(s)" if n_sites > 1 else ""
+        n_feats = _n_features(result)
         self.statusBar().showMessage(
-            f"Built {result.shape[1]} transport features for {len(result):,} receptor times{site_note}."
+            f"Built {n_feats} transport features for {len(result):,} receptor times{site_note}."
         )
-        log.info("Built trajectory features: %d rows x %d cols", len(result), result.shape[1])
+        log.info("Built trajectory features: %d rows x %d features", len(result), n_feats)
 
     def _draw_features(self, result: pd.DataFrame) -> None:
         import matplotlib.pyplot as plt
@@ -676,7 +799,7 @@ class TrajectoryWindow(QMainWindow):
             fig,
             verdict=(
                 "ok",
-                f"{result.shape[1]} transport features × {len(result):,} rows{site_note}.",
+                f"{_n_features(result)} transport features × {len(result):,} rows{site_note}.",
             ),
             lines=[f"Columns: {', '.join(result.columns)}"],
         )
@@ -696,10 +819,13 @@ class TrajectoryWindow(QMainWindow):
     def _send_to_main(self) -> None:
         if self.features is None or self._main is None:
             return
-        self._main.merge_trajectory_features(self.features)
+        n = self._main.merge_trajectory_features(self.features)
+        if not n:
+            self.statusBar().showMessage("Nothing joined — the main window says why.")
+            return
         self._main.raise_()
         self._main.activateWindow()
-        self.statusBar().showMessage("Sent to the main window — features joined onto its data.")
+        self.statusBar().showMessage(f"Joined onto {n:,} row(s) of the main window's data.")
 
     # ------------------------------------------------------------------ HYSPLIT
     def _run_download_gdas(self) -> None:
@@ -707,25 +833,51 @@ class TrajectoryWindow(QMainWindow):
         if not cache_dir:
             QMessageBox.information(self, "No cache directory", "Pick a GDAS1 cache directory.")
             return
-        from normet import fetch_gdas1
+        from normet import fetch_gdas1, gdas1_filenames
 
+        date_from = self.gdas_from.date().toString("yyyy-MM-dd")
+        date_to = self.gdas_to.date().toString("yyyy-MM-dd")
+        names = gdas1_filenames(date_from, date_to)
+        todo = [n for n in names if not (Path(cache_dir).expanduser() / n).exists()]
+        if len(todo) > _ASK_ABOVE_FILES:
+            ans = QMessageBox.question(
+                self,
+                "Download GDAS1",
+                f"{len(todo)} weekly GDAS1 file(s) to download, about "
+                f"{_GDAS1_FILE_GB * len(todo):.0f} GB ({len(names) - len(todo)} already in "
+                "the cache). Go ahead?",
+            )
+            if ans != QMessageBox.StandardButton.Yes:
+                return
         self.runner.submit(
             "download GDAS1",
             fetch_gdas1,
             self._gdas_done,
             self._show_error,
-            self.gdas_from.date().toString("yyyy-MM-dd"),
-            self.gdas_to.date().toString("yyyy-MM-dd"),
+            date_from,
+            date_to,
             cache_dir,
             on_missing="warn",
         )
 
     def _gdas_done(self, paths: list[str]) -> None:
-        self._gdas_paths = paths
-        self.gdas_hint.setText(
-            f"{len(paths)} GDAS1 file(s) ready: {', '.join(os.path.basename(p) for p in paths)}"
-        )
+        self._set_met_files(paths, "GDAS1 file(s) ready")
         self.statusBar().showMessage(f"Downloaded/cached {len(paths)} GDAS1 file(s).")
+
+    def _choose_met_files(self) -> None:
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Use existing ARL met files", self.gdas_dir_edit.text(), "All files (*)"
+        )
+        if paths:
+            self._set_met_files(sorted(paths), "met file(s) chosen")
+        self.raise_()
+        self.activateWindow()
+
+    def _set_met_files(self, paths: list[str], what: str) -> None:
+        self._gdas_paths = list(paths)
+        self.gdas_hint.setText(
+            f"{len(paths)} {what}: {', '.join(os.path.basename(p) for p in paths)}"
+        )
 
     def _run_hysplit(self) -> None:
         exe = self.hysplit_exec_edit.text().strip()
@@ -738,44 +890,65 @@ class TrajectoryWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "No meteorology",
-                "Download GDAS1 files first (or point to existing ARL met files).",
+                "Download GDAS1 files first, or use existing ARL met files.",
             )
             return
-        receptors = self.receptor_table.receptors()
+        try:
+            receptors = self.receptor_table.receptors()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Receptor sites", str(exc))
+            return
         if not receptors:
             QMessageBox.information(
                 self, "No receptors", "Add at least one receptor site (name, lat, lon)."
             )
             return
-        main_df = getattr(self, "_main_df", None)
-        if main_df is None or "date" not in main_df.columns:
+        span = self._receptor_span()
+        if span is None:
             QMessageBox.information(
                 self,
                 "No receptor times",
                 "Load data in the main window first — its dates set the receptor time range.",
             )
             return
-        dates = pd.to_datetime(main_df["date"])
         step = self.time_res_spin.value()
-        times = list(pd.date_range(dates.min().floor("h"), dates.max().ceil("h"), freq=f"{step}h"))
-        if not times:
-            QMessageBox.information(
-                self, "No receptor times", "The main window's date range is empty."
+        times = list(pd.date_range(span[0].floor("h"), span[1].ceil("h"), freq=f"{step}h"))
+        hours_back = self.hours_back_spin.value()
+        met_files = list(self._gdas_paths)
+        missing = _missing_gdas1_files(
+            met_files, times[0] - pd.Timedelta(hours=hours_back), times[-1]
+        )
+        if missing:
+            self._suggest_gdas_range()
+            shown = ", ".join(missing[:6]) + (", ..." if len(missing) > 6 else "")
+            ans = QMessageBox.question(
+                self,
+                "Meteorology missing",
+                f"The receptor times and their {hours_back}-h backward windows need "
+                f"{len(missing)} GDAS1 file(s) the met files lack: {shown}.\n\n"
+                "Run anyway? Times no met file covers are skipped, and trajectories that "
+                "reach into a gap are cut short. (The GDAS1 range above now covers the "
+                "missing weeks, to download them instead.)",
             )
+            if ans != QMessageBox.StandardButton.Yes:
+                return
+        ok, source_regions = self._regions_or_warn()
+        if not ok:
             return
 
         from normet import run_back_trajectories
 
-        met_files = list(self._gdas_paths)
         height_m = float(self.height_spin.value())
-        hours_back = self.hours_back_spin.value()
-        source_regions = self._merged_regions()
         prefix = self.prefix_edit.text() or "traj_"
         diagnostics = [name for name, cb in self.diag_checks.items() if cb.isChecked()]
+        min_hours = hours_back if self.run_min_check.isChecked() else None
+        stop = threading.Event()
 
         def job() -> pd.DataFrame:
             frames = []
             for name, lat, lon in receptors:
+                if stop.is_set():
+                    break
                 res = run_back_trajectories(
                     times,
                     lat,
@@ -787,6 +960,8 @@ class TrajectoryWindow(QMainWindow):
                     diagnostics=diagnostics,
                     source_regions=source_regions,
                     prefix=prefix,
+                    min_hours=min_hours,
+                    stop=stop,
                 )
                 if res is not None and not res.empty:
                     res = res.copy()
@@ -796,13 +971,18 @@ class TrajectoryWindow(QMainWindow):
                 return pd.DataFrame()
             return pd.concat(frames) if len(frames) > 1 else frames[0]
 
-        self.runner.submit(
+        if self.runner.submit(
             f"run HYSPLIT back-trajectories ({len(receptors)} site(s), {len(times)} time(s))",
             job,
             self._show_features,
             self._show_error,
-        )
+        ):
+            self._hysplit_stop = stop
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        self.runner.shutdown()
+        if self._hysplit_stop is not None:
+            self._hysplit_stop.set()
+        # A stopped run ends within a fraction of a second; give it the time, so its
+        # thread is not destroyed while it runs.
+        self.runner.shutdown(wait_ms=5000)
         super().closeEvent(event)

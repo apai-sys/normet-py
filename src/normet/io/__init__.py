@@ -8,6 +8,7 @@ from .openmeteo import OPENMETEO_HOURLY_DEFAULT, fetch_openmeteo_timeseries
 from .trajectory import (
     ALL_DIAGNOSTICS,
     build_trajectory_features,
+    join_trajectory_features,
     load_source_regions,
     read_trajectory_tdump,
     run_back_trajectories,
@@ -31,6 +32,7 @@ __all__ = [
     "read_trajectory_tdump",
     "trajectory_features",
     "build_trajectory_features",
+    "join_trajectory_features",
     "run_back_trajectories",
     "load_source_regions",
     "ALL_DIAGNOSTICS",
