@@ -2200,64 +2200,76 @@ class MainWindow(QMainWindow):
         self._transport_window.raise_()
         self._transport_window.activateWindow()
 
-    def merge_trajectory_features(self, features: pd.DataFrame) -> None:
+    def merge_trajectory_features(self, features: pd.DataFrame) -> int:
         """Join transport-aware ``traj_*`` columns (indexed by receptor time)
-        onto the loaded dataset by nearest hour, then re-select them as
-        features so they show up ticked in Step 1.
+        onto the loaded dataset, then re-select them as features so they show
+        up ticked in Step 1.
 
-        When *features* carries a ``site`` column (multi-receptor Transport
-        Studio runs) and the loaded dataset has one too, the join is done
-        per site so each row only picks up its own site's trajectory
-        features; otherwise it falls back to a plain nearest-hour join
-        (the usual single-site case).
+        Each row takes the latest trajectory to have arrived, within one
+        release interval (:func:`normet.io.join_trajectory_features`); a row
+        none matches stays empty. When both frames have a ``site`` column, a
+        row takes only its own site's trajectories and other sites' rows are
+        left as they were, so several sites can be sent one at a time.
+
+        Returns the number of rows that took a trajectory: 0 when nothing was
+        joined (the dataset is then left unchanged, and the user told why).
         """
         if self.df_raw is None:
             QMessageBox.information(self, "No data", "Load a dataset in the main window first.")
-            return
+            return 0
+        from normet.io.trajectory import join_trajectory_features
+
+        try:
+            merged = join_trajectory_features(self.df_raw, features)
+        except (KeyError, ValueError) as exc:
+            QMessageBox.warning(self, "Transport features not joined", str(exc).strip("'\""))
+            return 0
         traj_cols = [c for c in features.columns if c != "site"]
-
-        if "site" in features.columns and "site" in self.df_raw.columns:
-            main_sites = set(self.df_raw["site"].unique())
-            feat_sites = set(features["site"].unique())
-            missing = feat_sites - main_sites
-            if missing:
-                log.warning(
-                    "Trajectory features for site(s) %s have no matching rows in the main "
-                    "dataset — skipped",
-                    ", ".join(sorted(missing)),
-                )
-            parts = []
-            for site, sub_main in self.df_raw.set_index("date").groupby("site"):
-                sub_feats = features[features["site"] == site].drop(columns="site")
-                if sub_feats.empty:
-                    parts.append(sub_main)
-                    continue
-                parts.append(
-                    pd.merge_asof(
-                        sub_main.sort_index(),
-                        sub_feats.sort_index(),
-                        left_index=True,
-                        right_index=True,
-                        direction="nearest",
-                    )
-                )
-            merged = pd.concat(parts).sort_index()
-        else:
-            df = self.df_raw.set_index("date").sort_index()
-            feats = features.drop(columns="site", errors="ignore").sort_index()
-            merged = pd.merge_asof(
-                df, feats, left_index=True, right_index=True, direction="nearest"
-            )
-
-        new_cols = [c for c in traj_cols if c not in self.df_raw.columns]
-        self._ingest(
-            merged.reset_index(), f"{self.file_label.text().splitlines()[0]} + transport features"
+        by_site = "site" in features.columns and "site" in self.df_raw.columns
+        feat_sites = sorted(features["site"].astype(str).unique()) if by_site else []
+        in_scope = (
+            self.df_raw["site"].astype(str).isin(feat_sites)
+            if by_site
+            else pd.Series(True, index=self.df_raw.index)
         )
+        n_scope = int(in_scope.sum())
+        n_hit = int((merged[traj_cols].notna().any(axis=1) & in_scope).sum())
+        if not n_hit:
+            if by_site and not n_scope:
+                main_sites = sorted(self.df_raw["site"].astype(str).unique())
+                why = (
+                    f"The features are for site(s) {', '.join(feat_sites)}, but the data's "
+                    f"'site' column holds {', '.join(main_sites[:8])}"
+                    f"{', ...' if len(main_sites) > 8 else ''}.\n\nName the site as the data "
+                    "does (Transport Studio, 'Site name' or the receptor's name) and send "
+                    "it again."
+                )
+            else:
+                dates = pd.to_datetime(features.index)
+                why = (
+                    "No row of the data falls within a release interval after a "
+                    f"trajectory: the trajectories arrive {dates.min():%Y-%m-%d %H:%M} → "
+                    f"{dates.max():%Y-%m-%d %H:%M}, the data spans "
+                    f"{self.df_raw['date'].min():%Y-%m-%d} → {self.df_raw['date'].max():%Y-%m-%d}."
+                )
+            QMessageBox.warning(self, "Transport features not joined", why)
+            log.warning("Transport features not joined: no row took a trajectory")
+            return 0
+
+        self._ingest(merged, f"{self.file_label.text().splitlines()[0]} + transport features")
         for i in range(self.feature_list.count()):
             item = self.feature_list.item(i)
-            if item.text() in new_cols:
+            if item.text() in traj_cols:
                 item.setCheckState(Qt.CheckState.Checked)
-        log.info("Merged %d transport feature column(s) onto the dataset", len(new_cols))
+        log.info(
+            "Joined %d transport feature column(s) onto the dataset: %d of %d row(s) took a "
+            "trajectory%s",
+            len(traj_cols),
+            n_hit,
+            n_scope,
+            f" (site(s) {', '.join(feat_sites)})" if by_site else "",
+        )
+        return n_hit
 
     # ------------------------------------------------------------- misc
     def _about(self) -> None:
@@ -2281,4 +2293,6 @@ class MainWindow(QMainWindow):
             self._scm_window.close()
         if self._data_window is not None:
             self._data_window.close()
+        if self._transport_window is not None:
+            self._transport_window.close()  # stops a HYSPLIT run before the app goes
         super().closeEvent(event)
