@@ -7,6 +7,21 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ## [Unreleased]
 
 ### Added
+- **`normet-mcp` and `normet.agent`: normet for AI assistants** (adapted from
+  the cume app's agent layer). `normet.agent` is a tool layer with three parts:
+  - text readings of a table, a model's fit (`modStats` on the held-out rows,
+    feature importance), a normalised series (means by year or month), a
+    decomposition, a synthetic control (`scm_diagnostics`) and a
+    cross-validation;
+  - do-all, decompose, SCM and cv jobs, each a `normet` CLI command run in its
+    own process and folder, its command line kept as its record;
+  - figures and the HTML report of a run.
+
+  `normet-mcp` (extra `[mcp]`) serves these tools over the Model Context
+  Protocol to Claude Code, Claude Desktop and other clients. Its instructions
+  ask the assistant to propose the predictors and the donor pool for the user
+  to confirm, and to quote only numbers the tools return. Files are read only
+  under `$NORMET_MCP_ROOTS`.
 - **`decom_met`: feature groups and Shapley attribution.** `groups=` attributes
   the meteorological features in named groups -- e.g. `{"local": met_cols,
   "transport": traj_cols}` -- with one result column per group, and

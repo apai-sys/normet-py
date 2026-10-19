@@ -75,6 +75,9 @@ finetune = ["chronos-forecasting>=2.3", "torch>=2.0", "accelerate>=0.26", "peft>
 # lazily, so `import normet.physics` still works without this extra.
 physics = ["torch>=2.0"]
 bayes = ["pymc>=5.0", "arviz>=0.17"]
+# normet-mcp: normet as an MCP server (normet.mcp_server), for Claude Code,
+# Claude Desktop and other MCP clients. 1.x and 2.x of the SDK both served.
+mcp = ["mcp>=1.21.1"]
 docs = ["sphinx>=7.0", "sphinx-rtd-theme>=1.3", "myst-parser>=2.0"]
 dev = [
     "pytest>=7.0",
@@ -110,10 +113,12 @@ all = [
     "torch>=2.0",
     "accelerate>=0.26",
     "peft>=0.10",
+    "mcp>=1.21.1",
 ]
 
 [project.scripts]
 normet = "normet.cli:main"
+normet-mcp = "normet.mcp_server:main"
 
 [project.gui-scripts]
 normet-gui = "normet.gui:main"
@@ -239,6 +244,7 @@ module = [
     "flaml.*", "dask.*",
     "lightgbm.*", "xgboost.*", "matplotlib.*", "scipy.*",
     "sklearn.*", "joblib.*", "yaml.*", "click.*", "cdsapi.*", "pymc.*", "shapely.*", "shapefile.*",
+    "mcp.*",
 ]
 ignore_missing_imports = true
 
@@ -249,6 +255,13 @@ ignore_missing_imports = true
 # it stays on everywhere else, where it does mean something.
 [[tool.mypy.overrides]]
 module = "normet.cli"
+disallow_untyped_decorators = false
+
+# The MCP server's class comes from whichever SDK major is installed (1.x's
+# FastMCP or 2.x's MCPServer), so it is an `Any` here and its @resource and
+# @prompt decorators read as untyped -- the same case as the CLI's click.
+[[tool.mypy.overrides]]
+module = "normet.mcp_server"
 disallow_untyped_decorators = false
 
 # The PySide6 desktop app: dynamic Qt attribute/mixin patterns (setattr-style
@@ -267,6 +280,9 @@ branch = true
 omit = [
     "*/tests/*",
     "*/cli.py",
+    # A job's child process (normet.agent.runner): it runs, and its record is
+    # checked, through the job tests, but in a process coverage does not follow.
+    "*/agent/runner.py",
     "*/_lazy.py",
     # Qt GUI: exercised by the offscreen smoke tests but excluded from the
     # coverage gate — window/dialog code is validated by the packaged-app
