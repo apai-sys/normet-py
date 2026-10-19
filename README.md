@@ -591,6 +591,23 @@ analogous to wavelet detail coefficients. Includes drag-and-drop CSV
 loading, recent files, config save/load, run history, CSV/HTML export, a
 live log dock, and one-click synthetic example data.
 
+**Assistant** (View → Assistant, Ctrl+Shift+A) — a language model working in
+the window. It reads what the window holds (the table, the model's fit on the
+held-out rows, the normalised series, the decomposition) and runs its steps as
+their buttons do. It *proposes* a target and predictors as a card with an
+**Apply** button: nothing in the panel changes until you click it, and it trains
+or normalises only once you have agreed. Choose an API model as
+`provider:model` (`anthropic:claude-sonnet-5-5`, `deepseek:deepseek-chat`,
+`ollama:qwen3:8b`, …), its key kept in the macOS keychain (**Key…**) or read from
+the provider's environment variable. Or choose a command-line agent signed in to
+your own plan, Claude Code or Codex: the window serves its tools to the agent
+over MCP on 127.0.0.1 with a per-window token, and gives it no shell or files of
+its own.
+
+The window and its figures follow the system's light/dark appearance (or View →
+Appearance), Ctrl+K (⌘K) finds any menu command or result tab by typing, and
+before a table is open the Data tab offers the examples and recent tables.
+
 **Data Studio** (🌐 toolbar button, or File → Get UK Data) — assemble a
 model-ready dataset without leaving the app: pick a network (AURN, AQE,
 SAQN, WAQN, NI, LMAM), browse/search its stations by the pollutants they
