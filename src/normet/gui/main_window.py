@@ -281,12 +281,50 @@ class MainWindow(QMainWindow):
 
     # --------------------------------------------------------- left panel
     def _build_param_panel(self) -> QWidget:
+        """The left column: one box per workflow step, top to bottom.
+
+        Each box is built by its own method below, so a step's controls stay
+        findable by name rather than by scrolling through four hundred lines
+        of layout.  The order here is the order the workflow runs in, and
+        ``_run_buttons`` collects the buttons a running task greys out.
+        """
         panel = QWidget()
         v = QVBoxLayout(panel)
+        for box in (
+            self._build_data_box(),
+            self._build_columns_box(),
+            self._build_train_box(),
+            self._build_normalise_box(),
+            self._build_decompose_box(),
+            self._build_rolling_box(),
+            self._build_multiscale_box(),
+            self._build_pdp_box(),
+        ):
+            v.addWidget(box)
+        v.addLayout(self._build_config_row())
+        v.addStretch(1)
 
-        # ---- Data
-        data_box = QGroupBox("Data")
-        dv = QVBoxLayout(data_box)
+        self._run_buttons = [
+            self.train_button,
+            self.ft_button,
+            self.norm_button,
+            self.decom_button,
+            self.roll_button,
+            self.ms_button,
+            self.pdp_button,
+        ]
+
+        scroll = QScrollArea()
+        scroll.setWidget(panel)
+        scroll.setWidgetResizable(True)
+        scroll.setFixedWidth(390)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        return scroll
+
+    def _build_data_box(self) -> QGroupBox:
+        """Data: open a CSV, or load the bundled example."""
+        box = QGroupBox("Data")
+        dv = QVBoxLayout(box)
         file_row = QHBoxLayout()
         file_row.setContentsMargins(0, 0, 0, 0)
         self.file_btn = QPushButton("Open CSV…")
@@ -304,11 +342,12 @@ class MainWindow(QMainWindow):
         dv.addLayout(file_row)
         self.file_label = hint_label("No data loaded", small=False)
         dv.addWidget(self.file_label)
-        v.addWidget(data_box)
+        return box
 
-        # ---- Columns
-        col_box = QGroupBox("Columns")
-        cv = QVBoxLayout(col_box)
+    def _build_columns_box(self) -> QGroupBox:
+        """Columns: the target series and the predictors ticked for the model."""
+        box = QGroupBox("Columns")
+        cv = QVBoxLayout(box)
         cv.addWidget(QLabel("Target (pollutant)"))
         self.target_combo = NoWheelComboBox()
         self.target_combo.setToolTip("The variable to model and normalise.")
@@ -340,11 +379,12 @@ class MainWindow(QMainWindow):
                 "Time features (date_unix, day_julian, weekday, hour) are added automatically."
             )
         )
-        v.addWidget(col_box)
+        return box
 
-        # ---- Step 1: Train
-        train_box = QGroupBox("Step 1 · Train model")
-        form = QFormLayout(train_box)
+    def _build_train_box(self) -> QGroupBox:
+        """Step 1: backend, split, budget, seed, device — and fine-tuning."""
+        box = QGroupBox("Step 1 · Train model")
+        form = QFormLayout(box)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.backend_combo = NoWheelComboBox()
         self.backend_combo.addItems(["flaml", "lightgbm", _chronos.BACKEND])
@@ -471,11 +511,12 @@ class MainWindow(QMainWindow):
         ft.addRow(self.ft_button)
         self._ft_box.setVisible(False)
         form.addRow(self._ft_box)
-        v.addWidget(train_box)
+        return box
 
-        # ---- Step 2: Normalise
-        norm_box = QGroupBox("Step 2 · Normalise")
-        nf = QFormLayout(norm_box)
+    def _build_normalise_box(self) -> QGroupBox:
+        """Step 2: which variables to resample, and how many samples."""
+        box = QGroupBox("Step 2 · Normalise")
+        nf = QFormLayout(box)
         nf.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.norm_vars = QListWidget()
         self.norm_vars.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
@@ -518,11 +559,12 @@ class MainWindow(QMainWindow):
         )
         self.norm_button.clicked.connect(self._run_normalise)
         nf.addRow(self.norm_button)
-        v.addWidget(norm_box)
+        return box
 
-        # ---- Step 3: Decompose
-        dec_box = QGroupBox("Step 3 · Decompose")
-        df_ = QFormLayout(dec_box)
+    def _build_decompose_box(self) -> QGroupBox:
+        """Step 3: emission or meteorology, attribution and groups."""
+        box = QGroupBox("Step 3 · Decompose")
+        df_ = QFormLayout(box)
         df_.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.decom_method = NoWheelComboBox()
         self.decom_method.addItems(["emission", "meteorology"])
@@ -563,11 +605,12 @@ class MainWindow(QMainWindow):
         )
         self.decom_button.clicked.connect(self._run_decompose)
         df_.addRow(self.decom_button)
-        v.addWidget(dec_box)
+        return box
 
-        # ---- Step 4: Rolling
-        roll_box = QGroupBox("Step 4 · Rolling")
-        rf = QFormLayout(roll_box)
+    def _build_rolling_box(self) -> QGroupBox:
+        """Step 4: window, step and samples for the rolling normalisation."""
+        box = QGroupBox("Step 4 · Rolling")
+        rf = QFormLayout(box)
         rf.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.roll_window = NoWheelSpinBox()
         self.roll_window.setRange(1, 365)
@@ -590,11 +633,12 @@ class MainWindow(QMainWindow):
         )
         self.roll_button.clicked.connect(self._run_rolling)
         rf.addRow(self.roll_button)
-        v.addWidget(roll_box)
+        return box
 
-        # ---- Multi-scale meteorological-influence decomposition (builds on Rolling)
-        ms_box = QGroupBox("Multi-scale decomposition")
-        mf = QFormLayout(ms_box)
+    def _build_multiscale_box(self) -> QGroupBox:
+        """Multi-scale: three rolling widths, differenced against Step 2."""
+        box = QGroupBox("Multi-scale decomposition")
+        mf = QFormLayout(box)
         mf.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         mf.addRow(
             hint_label(
@@ -627,11 +671,12 @@ class MainWindow(QMainWindow):
         self.ms_button = run_button("▶  Multi-scale decomposition", self._ms_button_tip)
         self.ms_button.clicked.connect(self._run_multiscale)
         mf.addRow(self.ms_button)
-        v.addWidget(ms_box)
+        return box
 
-        # ---- Step 5: PDP
-        pdp_box = QGroupBox("Step 5 · Partial dependence")
-        pv = QVBoxLayout(pdp_box)
+    def _build_pdp_box(self) -> QGroupBox:
+        """Step 5: partial-dependence curves for the ticked variables."""
+        box = QGroupBox("Step 5 · Partial dependence")
+        pv = QVBoxLayout(box)
         pv.addWidget(QLabel("Variables"))
         self.pdp_vars = QListWidget()
         self.pdp_vars.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
@@ -666,38 +711,21 @@ class MainWindow(QMainWindow):
         )
         self.pdp_button.clicked.connect(self._run_pdp)
         pv.addWidget(self.pdp_button)
-        v.addWidget(pdp_box)
+        return box
 
-        # ---- Config row
-        cfg_row = QHBoxLayout()
+    def _build_config_row(self) -> QHBoxLayout:
+        """Save/load a config and the run history, under the last step."""
+        row = QHBoxLayout()
         b_save = QPushButton("Save config")
         b_save.clicked.connect(self.save_config)
         b_load = QPushButton("Load config")
         b_load.clicked.connect(self.load_config)
         b_hist = QPushButton("History")
         b_hist.clicked.connect(self.show_history)
-        cfg_row.addWidget(b_save)
-        cfg_row.addWidget(b_load)
-        cfg_row.addWidget(b_hist)
-        v.addLayout(cfg_row)
-        v.addStretch(1)
-
-        self._run_buttons = [
-            self.train_button,
-            self.ft_button,
-            self.norm_button,
-            self.decom_button,
-            self.roll_button,
-            self.ms_button,
-            self.pdp_button,
-        ]
-
-        scroll = QScrollArea()
-        scroll.setWidget(panel)
-        scroll.setWidgetResizable(True)
-        scroll.setFixedWidth(390)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        return scroll
+        row.addWidget(b_save)
+        row.addWidget(b_load)
+        row.addWidget(b_hist)
+        return row
 
     # ------------------------------------------------------------ action bar
     def _build_action_bar(self) -> QWidget:
