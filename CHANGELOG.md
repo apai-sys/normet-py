@@ -7,6 +7,27 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ## [Unreleased]
 
 ### Added
+- **GUI: Antigravity agy and GitHub Copilot in the Assistant; finishing a
+  figure for print.**
+  - The Assistant now offers four command-line agents signed in to the
+    user's own plan -- Claude Code, Codex, agy and Copilot -- each at the
+    models it lists and with an effort to choose.
+  - agy's entry for the window is added to its configuration for the
+    conversation, enabled only while it answers, and removed when the
+    conversation closes. Hooks in its empty workspace deny it any tool but the
+    window's. A reply its stream broke off is asked once more on its own.
+  - Copilot gets the window's tools alone, with its built-in servers off.
+  - Export for Publication now shows the figure itself at its printed size,
+    and it can be finished there: the legend placed in a corner or dragged,
+    sized, put in columns, framed or not; data lines' width and marker size
+    set; panels lettered; a title, label or tick's numbers edited by
+    double-clicking. Every change is undone when the dialog closes.
+
+### Fixed
+- **GUI: figure toolbar icons after a light/dark switch.** matplotlib draws
+  them once, in the palette of the moment, so after switching themes with a
+  window open they were white on the light bar. They are now drawn again when
+  the palette changes.
 - **GUI: command log and figures for print** (adapted from the cume app's).
   View → Command Log lists every action that decides a result as the normet
   call that repeats it -- opening a table, training, normalising,
