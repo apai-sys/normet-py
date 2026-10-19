@@ -49,6 +49,14 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
     set; panels lettered; a title, label or tick's numbers edited by
     double-clicking. Every change is undone when the dialog closes.
 
+### Internal
+- **The GUI's left panel is built one workflow step at a time.**
+  `_build_param_panel` had grown to 420 lines, one straight run of layout from
+  Data to PDP; each step is now its own `_build_*_box()` returning the group
+  box, and the panel method only lists them in the order the workflow runs in.
+  The widgets and their attribute names are unchanged, so nothing that reads
+  them had to change: this is a move, not a rewrite.
+
 ### Fixed
 - **Dates whose UTC offsets differ are read as UTC.** Local time across a
   daylight-saving change (`+00:00` in winter, `+01:00` in summer) has no one
