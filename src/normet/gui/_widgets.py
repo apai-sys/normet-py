@@ -137,7 +137,19 @@ def as_figure(obj: Any):
 
 
 class ThemedToolbar(NavigationToolbar2QT):
-    """The figure toolbar, its Save writing the figure in its light colours."""
+    """The figure toolbar, its Save writing the figure in its light colours, and
+    an Export for Publication… that lays it out at a journal's column width."""
+
+    def __init__(self, canvas: Any, parent: QWidget | None = None) -> None:
+        super().__init__(canvas, parent)
+        self.addSeparator()
+        act = self.addAction("Export for Publication…", self.export_for_print)
+        act.setToolTip("Lay the figure out at a journal's column width and lettering, and save it.")
+
+    def export_for_print(self) -> None:
+        from .printview import PrintDialog
+
+        PrintDialog(self.canvas, self.window()).exec()
 
     def save_figure(self, *args: Any) -> Any:
         with light_figure(self.canvas.figure):
