@@ -12,6 +12,11 @@ One layer, two front ends -- the MCP server (:mod:`normet.mcp_server`,
 - :mod:`~normet.agent.tools` -- what an assistant asks of normet: the examples,
   a table's readings, a job started, watched or cancelled, a result read, drawn
   or reported.
+- :mod:`~normet.agent.llm` -- a language model calling tools: Anthropic's and
+  OpenAI-compatible APIs, and the loop between model and tools (the GUI's
+  Assistant).
+- :mod:`~normet.agent.mcp_http` -- tools served over MCP's HTTP transport on
+  127.0.0.1, for a command-line agent the GUI's Assistant talks through.
 
 What a tool gives back is normet's own readings: every number an assistant
 quotes should be one it was given.

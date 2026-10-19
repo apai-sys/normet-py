@@ -99,7 +99,8 @@ class Welcome(QWidget):
     """The welcome: a title, the main buttons and the cards.
 
     *actions* maps a name to what it does: ``open_csv``, ``open_path(path)``,
-    ``load_example``, ``scm_example``, ``data_studio`` and ``transport_studio``.
+    ``load_example``, ``scm_example``, ``data_studio``, ``transport_studio`` and,
+    optionally, ``assistant``.
     """
 
     def __init__(self, actions: dict[str, Callable[..., object]], parent: QWidget | None = None):
@@ -133,6 +134,11 @@ class Welcome(QWidget):
         self.example_btn.clicked.connect(lambda: actions["load_example"]())
         row.addWidget(self.open_btn)
         row.addWidget(self.example_btn)
+        if "assistant" in actions:
+            self.ask_btn = QPushButton("Ask the Assistant")
+            self.ask_btn.setStyleSheet("padding:8px 16px;")
+            self.ask_btn.clicked.connect(lambda: actions["assistant"]())
+            row.addWidget(self.ask_btn)
         row.addStretch(1)
         outer.addLayout(row)
         outer.addSpacing(20)
