@@ -22,7 +22,10 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Callable
+from typing import Any
 
+import numpy as np
 import pandas as pd
 from PySide6.QtCore import QDate, Qt
 from PySide6.QtWidgets import (
@@ -71,6 +74,74 @@ BACKEND_TIPS = {
     "robust": "Robust SCM (de-noised donor matrix).",
     "bayesian": "Bayesian simplex SCM — needs pymc, gives credible bands.",
 }
+
+
+#: A pre-cutoff R² a series unrelated to the donors can reach is no evidence: at or
+#: above the verdict's own "moderate" line, the fit is not read as a check.
+NO_CHECK_R2 = 0.5
+
+
+def shuffled_pre_r2(fit: Callable[..., Any], design: dict, seed: int = 7_654_321) -> float:
+    """The pre-cutoff R² *fit* gives the treated unit's pre-cutoff values shuffled in time.
+
+    Shuffled, the series keeps its level and spread but has no relation to the
+    donors left, so what R² the estimator still reaches is what this design gives
+    for nothing. It rises with the number of donors for the pre-cutoff dates, for
+    any estimator that weights donors to fit the pre-period, and fastest for
+    augmented SCM ("scm"): its ridge model is fitted on the units' pre-cutoff
+    values, the treated unit's own among them, and with as many donors as dates it
+    reproduces almost any pre-period -- 0.997 on the bundled ULEZ panel (53 donors,
+    27 months), against -0.05 with 5 donors.
+    """
+    from normet.causal import scm_diagnostics
+
+    d = design["df"].copy()
+    outcome = design["outcome_col"]
+    pre = (d[design["unit_col"]] == design["treated_unit"]) & (
+        pd.to_datetime(d[design["date_col"]]) < pd.Timestamp(design["cutoff_date"])
+    )
+    pre &= d[outcome].notna()
+    d.loc[pre, outcome] = np.random.default_rng(seed).permutation(d.loc[pre, outcome].to_numpy())
+    result = fit(
+        df=d,
+        date_col=design["date_col"],
+        unit_col=design["unit_col"],
+        outcome_col=outcome,
+        treated_unit=design["treated_unit"],
+        donors=design["donors"],
+        cutoff_date=design["cutoff_date"],
+    )
+    return float(scm_diagnostics(result, cutoff_date=design["cutoff_date"])["pre_r2"])
+
+
+def fit_verdict(diagnostics: dict, shuffled_r2: float | None = None) -> tuple[str, str]:
+    """The Fit tab's verdict, from ``scm_diagnostics`` of a fit and, where it was
+    computed, :func:`shuffled_pre_r2` of the same design.
+
+    The pre-cutoff R² is read on the usual scale unless a shuffled series reaches
+    :data:`NO_CHECK_R2` too, in which case it is not read at all.
+    """
+    pre_r2 = diagnostics.get("pre_r2", float("nan"))
+    att = diagnostics.get("att", float("nan"))
+    if shuffled_r2 is not None and shuffled_r2 >= NO_CHECK_R2:
+        return (
+            "warn",
+            f"ATT = {att:+.2f}. The pre-treatment fit (R² = {pre_r2:.2f}) is no check on "
+            f"this design: with the treated unit's pre-cutoff values shuffled it still fits "
+            f"R² = {shuffled_r2:.2f}. Judge the effect by Placebo in space, and by whether "
+            "other estimators agree.",
+        )
+    if pre_r2 >= 0.8:
+        return ("ok", f"Good pre-treatment fit (R² = {pre_r2:.2f}) — ATT = {att:+.2f}.")
+    if pre_r2 >= 0.5:
+        return (
+            "warn",
+            f"Moderate pre-treatment fit (R² = {pre_r2:.2f}) — interpret ATT = {att:+.2f} with caution.",
+        )
+    return (
+        "error",
+        f"Poor pre-treatment fit (R² = {pre_r2:.2f}) — the counterfactual is unreliable.",
+    )
 
 
 def _checked(widget: QListWidget) -> list[str]:
@@ -735,7 +806,7 @@ class SCMWindow(QMainWindow):
                     cutoff_date=design["cutoff_date"],
                     **ml_kwargs,
                 )
-                return {"synthetic": synth, "weights": None}
+                return {"synthetic": synth, "weights": None}, None
             if backend == "bayesian":
                 from normet.causal import bayesian_scm
 
@@ -748,10 +819,11 @@ class SCMWindow(QMainWindow):
                     donors=design["donors"],
                     cutoff_date=design["cutoff_date"],
                     draws=draws,
-                )
+                ), None
             from normet.causal import BACKENDS
 
-            return BACKENDS[backend](
+            fit = BACKENDS[backend]
+            result = fit(
                 df=design["df"],
                 date_col=design["date_col"],
                 unit_col=design["unit_col"],
@@ -760,11 +832,20 @@ class SCMWindow(QMainWindow):
                 donors=design["donors"],
                 cutoff_date=design["cutoff_date"],
             )
+            # One more fit, of a series the donors cannot explain: what pre-cutoff
+            # R² this design gives for nothing (see shuffled_pre_r2).
+            try:
+                shuffled = shuffled_pre_r2(fit, design)
+            except Exception:
+                log.exception("Shuffled pre-cutoff baseline failed")
+                shuffled = None
+            return result, shuffled
 
         self._last_design = design
         self.runner.submit(f"synthetic control ({backend})", job, self._fit_done, self._show_error)
 
-    def _fit_done(self, result: dict) -> None:
+    def _fit_done(self, payload: tuple[dict, float | None]) -> None:
+        result, shuffled_r2 = payload
         self.result = result
         design = self._last_design
         cutoff = design["cutoff_date"]
@@ -798,20 +879,7 @@ class SCMWindow(QMainWindow):
         header = rows = None
         if self.diagnostics:
             d = self.diagnostics
-            pre_r2 = d.get("pre_r2", float("nan"))
-            att = d.get("att", float("nan"))
-            if pre_r2 >= 0.8:
-                verdict = ("ok", f"Good pre-treatment fit (R² = {pre_r2:.2f}) — ATT = {att:+.2f}.")
-            elif pre_r2 >= 0.5:
-                verdict = (
-                    "warn",
-                    f"Moderate pre-treatment fit (R² = {pre_r2:.2f}) — interpret ATT = {att:+.2f} with caution.",
-                )
-            else:
-                verdict = (
-                    "error",
-                    f"Poor pre-treatment fit (R² = {pre_r2:.2f}) — the counterfactual is unreliable.",
-                )
+            verdict = fit_verdict(d, shuffled_r2)
             keys = [
                 "pre_n",
                 "pre_rmse",
@@ -830,12 +898,24 @@ class SCMWindow(QMainWindow):
                 for k in keys
                 if k in d
             ]
+            if shuffled_r2 is not None:
+                rows.append(["pre_r2, shuffled", f"{shuffled_r2:.3f}"])
             lines = ["Next: run the Inference tools (left) to test significance."]
+            if backend == "scm":
+                lines.insert(
+                    0,
+                    "Its donor weights balance the ridge model's residuals only; they do not "
+                    "say which donors the synthetic unit is made of.",
+                )
 
         self.tab_fit.show_result(fig, verdict=verdict, lines=lines, header=header, rows=rows)
         self._show_tab(self.tab_fit, result.get("synthetic"))
+        no_check = shuffled_r2 is not None and shuffled_r2 >= NO_CHECK_R2
         self.statusBar().showMessage(
-            "Fit done — check the pre-cutoff overlap, then run Placebo / Uncertainty for significance."
+            "Fit done — run Placebo in space: on this design the pre-cutoff overlap is no check."
+            if no_check
+            else "Fit done — check the pre-cutoff overlap, then run Placebo / Uncertainty "
+            "for significance."
         )
 
     # ------------------------------------------------------------- inference

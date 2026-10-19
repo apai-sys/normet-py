@@ -540,3 +540,49 @@ def test_chronos_backend_exposes_a_device_selector(qapp):
         assert not win.device_combo.isVisibleTo(win)
     finally:
         win.close()
+
+
+def test_scm_fit_verdict_reads_the_pre_fit_only_when_a_shuffled_series_cannot_match_it(qapp):
+    from normet.gui.scm_window import fit_verdict
+
+    near_perfect = {"pre_r2": 0.999, "att": -18.14}
+    level, text = fit_verdict(near_perfect, shuffled_r2=0.997)
+    assert level == "warn"
+    assert "Good" not in text and "Placebo in space" in text and "-18.14" in text
+    assert fit_verdict(near_perfect, shuffled_r2=0.1)[0] == "ok"
+    assert fit_verdict(near_perfect)[0] == "ok"  # mlscm / bayesian: no baseline
+    assert fit_verdict({"pre_r2": 0.6, "att": -9.5}, shuffled_r2=0.2)[0] == "warn"
+    assert fit_verdict({"pre_r2": -0.2, "att": -20.7}, shuffled_r2=-0.2)[0] == "error"
+
+
+def test_shuffled_pre_r2_flags_a_design_with_more_donors_than_pre_cutoff_dates(qapp):
+    import numpy as np
+    import pandas as pd
+
+    from normet.causal import BACKENDS
+    from normet.gui.scm_window import NO_CHECK_R2, shuffled_pre_r2
+
+    def design(n_donors: int) -> dict:
+        # Donors on random walks over 12 pre-cutoff months; T is a mix of two.
+        rng = np.random.default_rng(3)
+        dates = pd.date_range("2020-01-01", periods=18, freq="MS")
+        frames = [
+            pd.DataFrame(
+                {"date": dates, "ID": f"D{j}", "value": 50 + np.cumsum(rng.normal(0, 3, 18))}
+            )
+            for j in range(n_donors)
+        ]
+        treated = 0.5 * frames[0]["value"] + 0.5 * frames[1]["value"]
+        frames.append(pd.DataFrame({"date": dates, "ID": "T", "value": treated}))
+        return {
+            "df": pd.concat(frames, ignore_index=True),
+            "date_col": "date",
+            "unit_col": "ID",
+            "outcome_col": "value",
+            "treated_unit": "T",
+            "donors": [f"D{j}" for j in range(n_donors)],
+            "cutoff_date": "2021-01-01",
+        }
+
+    assert shuffled_pre_r2(BACKENDS["scm"], design(40)) >= NO_CHECK_R2
+    assert shuffled_pre_r2(BACKENDS["scm"], design(4)) < NO_CHECK_R2
