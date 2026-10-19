@@ -1083,8 +1083,8 @@ residuals only.
 
 \screenshot{ui_scm_fit.png}{The augmented SCM (\code{scm}) fit for MY1: ATT $=
 -18.14$~\ugm{} over the 11 post-cutoff months. Its pre-cutoff $R^2$ is 0.999, but with
-MY1's pre-cutoff values shuffled it still fits 0.997, so the verdict does not read the fit
-and points to the placebo tests.}{fig:scmfit}
+MY1's pre-cutoff values shuffled it still fits 0.9998 (both shown as 1.00), so the verdict
+does not read the fit and points to the placebo tests.}{fig:scmfit}
 
 With 53 donors for 27 pre-cutoff months, this design is one where augmented SCM fits
 anything. Its top donor carries 99.5\,\% of the weight ($\text{HHI} = 0.99$), but those
@@ -1092,18 +1092,20 @@ weights only balance the ridge model's residuals.
 
 The estimators do not agree on this design. Run on the same panel, cutoff and donors:
 \begin{center}\small
-\begin{tabular}{@{}lrrr@{}}
+\begin{tabular}{@{}lrrrr@{}}
 \toprule
-Backend & pre-cutoff $R^2$ & pre-cutoff RMSE & ATT (\ugm{}) \\
+Backend & pre-cutoff $R^2$ & shuffled $R^2$ & pre-cutoff RMSE & ATT (\ugm{}) \\
 \midrule
-\code{scm}    & 0.999  & 0.16  & $-18.14$ \\
-\code{abadie} & $-2.94$ & 13.20 & $-6.83$ \\
-\code{robust} & 0.37   & 5.27  & $-9.48$ \\
-\code{did}    & $-0.23$ & 7.36  & $-20.67$ \\
+\code{scm}    & 0.999  & 1.000   & 0.16  & $-18.14$ \\
+\code{abadie} & $-2.94$ & $-3.33$ & 13.20 & $-6.83$ \\
+\code{robust} & 0.37   & 0.16    & 5.27  & $-9.48$ \\
+\code{did}    & $-0.23$ & $-0.09$ & 7.36  & $-20.67$ \\
 \bottomrule
 \end{tabular}
 \end{center}
-Classic SCM cannot fit MY1 at all: its weights are non-negative and sum to one, so the
+The shuffled column is the baseline the \tab{Fit} tab computes: only for \code{scm} does
+a series unrelated to the donors fit as well as MY1, so only its pre-cutoff $R^2$ goes
+unread. Classic SCM cannot fit MY1 at all: its weights are non-negative and sum to one, so the
 synthetic unit cannot exceed the highest donor, and MY1 is above every donor. Robust SCM
 fits it only loosely. The four estimates agree on the sign and differ threefold in size.
 That is a finding about the design, not a fault of the software: a treated unit outside
