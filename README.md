@@ -643,11 +643,12 @@ dynamics are to the treated unit's, and can tick the top N as the donor pool.
 from HYSPLIT back-trajectories: parse existing `tdump` files (no external
 binary needed) into per-receptor features (inflow direction, transport
 distance/speed, residence time over named source regions, along-path
-rainfall/boundary-layer height), preview them, then join straight onto the
-loaded dataset by nearest hour — the new `traj_*` columns are auto-ticked as
-predictors in Step 1. An advanced panel can also drive `hyts_std` itself for
-a set of receptor times, downloading the matching GDAS1 meteorology first, if
-HYSPLIT is installed locally.
+rainfall/boundary-layer height), preview them, then join them onto the loaded
+dataset — each row takes the latest trajectory to have arrived, within one
+release interval, and each site its own — with the new `traj_*` columns
+auto-ticked as predictors in Step 1. An advanced panel can also drive
+`hyts_std` itself for a set of receptor times, with GDAS1 meteorology it
+downloads or met files already on disk, if HYSPLIT is installed locally.
 
 Long computations run on a background thread; the window stays responsive and
 tasks can be abandoned from the status bar.

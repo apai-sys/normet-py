@@ -195,8 +195,11 @@ traj = nio.build_trajectory_features(
 # them) traj_rain_sum, traj_blh_mean, traj_rh_mean, traj_pressure_mean,
 # traj_temp_mean
 
-# 2. Join onto the AQ + local-met panel (trajectory features are slow-varying)
-df = df.join(traj).ffill(limit=8)
+# 2. Join onto the AQ + local-met panel: each row takes the latest trajectory
+#    to have arrived, within one release interval (every hour of a 6-hourly
+#    window takes that window's trajectory; a window whose run is missing
+#    stays empty). With a 'site' column in both, each site takes its own.
+df = nio.join_trajectory_features(df, traj)
 
 # 3. Use them as transport-aware predictors. Because they are
 #    transport/meteorology, list them in variables_resample too so the
@@ -214,6 +217,12 @@ out, model, df_prep = nm.do_all(
 
 To **keep** the transport signal and normalise only local weather, leave
 `traj_*` out of `variables_resample` (they stay fixed at observed values).
+
+A run that starts trajectories at several heights gives each height its own
+columns (`traj_dist_km_100m`, `traj_dist_km_500m`, ...). A feature table is one
+receptor's: `build_trajectory_features` refuses tdumps that start from different
+places, so build each site on its own, tag it with a `site` column, and join the
+sites one after another -- each join fills only its own site's rows.
 
 Lower-level helpers are also exported: `nm.io.read_trajectory_tdump(path)`
 parses a single `tdump` file, and `nm.io.trajectory_features(traj, ...)`
@@ -244,14 +253,15 @@ output to the feature table:
 met = nm.io.fetch_gdas1("2020-04-01", "2020-04-30", cache_dir=".gdas_cache")
 
 traj = nm.run_back_trajectories(
-    times=df.index,                       # receptor (arrival) timestamps
+    times=df["date"],                     # receptor (arrival) times, run in UTC
     lat=51.52, lon=-0.13,
     met_files=met,
     hysplit_exec="~/hysplit-5.4.2/exec/hyts_std",
     hours_back=72,
+    min_hours=72,                         # null trajectories HYSPLIT cut short
     source_regions={"industrial_NE": (116.0, 39.0, 120.0, 42.0)},
 )
-df = df.join(traj).ffill(limit=8)         # then pass traj_* to nm.do_all
+df = nm.join_trajectory_features(df, traj)  # then pass traj_* to nm.do_all
 ```
 
 > **macOS:** HYSPLIT ships `x86_64` binaries via a disk image (run under Rosetta

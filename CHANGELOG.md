@@ -7,6 +7,16 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ## [Unreleased]
 
 ### Added
+- **`join_trajectory_features`** (`normet.io`, `normet`): joins a trajectory
+  feature table onto a panel the way the module docstring recommends, so
+  scripts and the GUI no longer each write their own `merge_asof`. A row takes
+  the latest trajectory to have arrived, less than one release interval before
+  it (inferred: the commonest step between one site's successive
+  trajectories), so a window whose run is missing stays empty. With a `site`
+  column in both frames each row takes only its own site's trajectories and
+  other sites' rows are left alone, so sites can be joined one batch at a time;
+  a column sent again is replaced. Rows without a time are kept, and times are
+  compared as UTC, tz-aware or not.
 - **GUI: the rest of Chronos-2.**
   - **Step 3 meteorological decomposition** on the chronos-2 backend, through
     the library's zero-shot path. The emission method stays unavailable there,
@@ -40,6 +50,50 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
     double-clicking. Every change is undone when the dialog closes.
 
 ### Fixed
+- **Transport Studio's join handed rows trajectories that had not arrived, and
+  filled rows no trajectory covered.** "Send to main window" joined with
+  `merge_asof(direction="nearest")` and no tolerance: 04:00 and 05:00 took
+  06:00's trajectory, and two days of trajectories filled all 240 rows of a
+  ten-day panel. It now uses `join_trajectory_features`; a row none matches
+  stays empty, and the log says how many rows took one.
+- **Transport Studio reported a join that had not happened.** With site names
+  that differed from the data's (`Marylebone` vs `MY1`) no column was filled,
+  yet the log said "Merged 9 transport feature column(s)". It now says which
+  sites the data has and leaves the data as it was. Sending features a second
+  time gave `traj_*_x` / `traj_*_y` pairs in place of the columns; they are now
+  replaced. A date that did not parse (`Merge keys contain null values`) or a
+  tz-aware one (a CSV in `...Z`) stopped the join; both now go through.
+- **`build_trajectory_features` kept one start height of several.** A run with
+  starts at 100, 500 and 1500 m came back as one row, the 1500 m trajectory's:
+  rows were de-duplicated on the receptor time alone. Each height now has its
+  own columns (`traj_dist_km_500m`, ...), and tdumps that start from different
+  places are refused instead of interleaved.
+- **`run_back_trajectories` could return an earlier run's trajectory.** In a
+  reused `work_dir`, a run that failed left the last call's `tdump` of the
+  same name in place, and it was read as this run's: (10N, 20E) came back with
+  London's trajectory. The file is now removed before each run.
+- **`run_back_trajectories` with tz-aware times** raised in the met-file
+  filter ("Cannot compare tz-naive and tz-aware"), and would have started each
+  run at local wall time; times are now converted to UTC, HYSPLIT's clock.
+  A receptor time off the hour now passes its minutes to `CONTROL` and its
+  tdump name, rather than running at the hour; repeated times run once.
+- **`run_back_trajectories` ran times no met file covers**: each was handed
+  every file and failed on its own (240 failed runs for a January panel given
+  June's GDAS1). They are now skipped with one warning.
+- **Transport Studio's Cancel did not stop HYSPLIT, and quitting could crash.**
+  Cancel only detached the task, which went on starting runs (7 to 30 in
+  3 s); quitting left that thread running ("QThread: Destroyed while thread is
+  still running"). `run_back_trajectories` takes a `stop` event that kills the
+  run in progress; Cancel and closing the window (or the main window) set it.
+- **Transport Studio, smaller things.** It checks that the met files cover
+  the receptor times' backward windows before running, names the missing
+  GDAS1 weeks and sets the download range to them; the range follows the
+  data's dates (it was the last week's), and a download of more than four
+  weekly files is asked about first. Met files already on disk can be used.
+  Both sections can null trajectories cut short (`min_hours`). A source region
+  or receptor row that is not one (lon_min above lon_max, a missing name,
+  text for a number) is named in a message instead of skipped silently. The
+  feature count no longer counts the `site` tag.
 - **GUI: figure toolbar icons after a light/dark switch.** matplotlib draws
   them once, in the palette of the moment, so after switching themes with a
   window open they were white on the light bar. They are now drawn again when
