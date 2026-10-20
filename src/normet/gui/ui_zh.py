@@ -356,7 +356,7 @@ TEXTS = {
     "Save the figure": "保存图形",
     "Save figure": "保存图形",
     # -- export for publication ------------------------------------------------------------------
-    "For print…": "投稿用图…",
+    "For print…": "打印用图…",
     "Export for Publication": "导出出版图",
     "Export for Publication…": "导出出版图…",
     "Export Figure for Publication": "导出出版图",
@@ -930,7 +930,7 @@ INNER.update(
 # what they ask, read from the figure -- cume's own words where cume has them.
 TEXTS.update(
     {
-        "Figure for Print": "投稿用图",
+        "Figure for Print": "打印用图",
         "Journal": "期刊",
         "Panel labels": "子图标签",
         "As the figure needs": "按图的需要",
@@ -955,7 +955,7 @@ TEXTS.update(
         "The guide:": "指南：",
         "What the journal's guide asks, read from the figure:": "期刊指南的要求，从图上读取：",
         "Double-click a label or a tick's numbers to size them, the legend or a colour bar to edit it; drag a legend or a colour bar where it reads best.": "双击标签或刻度数字可调整其大小，双击图例或色标可编辑；可把图例或色标拖到最易读的位置。",
-        "Save figure for print": "保存投稿用图",
+        "Save figure for print": "保存打印用图",
         "Label": "标签",
         "Tick labels": "刻度标签",
         "Rotation": "旋转",
