@@ -469,6 +469,9 @@ class SCMWindow(QMainWindow):
 
     def _build_tabs(self) -> QTabWidget:
         self.tabs = QTabWidget()
+        # Pages on the window's own ground, as the toolbars above their figures are: a
+        # framed pane drew them lighter, and each toolbar as a grey band across it.
+        self.tabs.setDocumentMode(True)
         self.tab_panel = CanvasTab("Load a panel CSV to preview the outcome by unit.")
         self.tabs.addTab(self.tab_panel, "Panel")
         self.tab_fit = CanvasTab("Run the synthetic control to see observed vs. synthetic here.")
