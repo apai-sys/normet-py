@@ -692,3 +692,45 @@ def test_the_groups_show_only_for_the_meteorological_decomposition(qapp):
         assert win.decom_groups.isHidden() and not win.decom_attribution.isEnabled()
     finally:
         win.close()
+
+
+@pytest.mark.parametrize("method", ["meteorology", "emission"])
+def test_the_groups_names_are_not_cut_short(qapp, method):
+    """The longest group's name fits its cell beside the variables' names: the panel
+    widens to the table once a model's variables are in it, whether the groups show
+    then or later; a name still too long (typed in) reads from its start."""
+    from PySide6.QtWidgets import QApplication, QComboBox
+
+    from normet.gui._groups import PRESETS
+    from normet.gui.main_window import MainWindow
+
+    def settle():
+        for _ in range(6):
+            QApplication.sendPostedEvents()
+            qapp.processEvents()
+
+    win = MainWindow()
+    try:
+        win.resize(1320, 860)
+        win.show()
+        win.decom_method.setCurrentText(method)
+        ed = win.decom_groups
+        ed.set_variables(["ws", "wd", "temp", "RH", "atmos_pres", "blh", "tcc", "tp", "ssrd"])
+        ed.suggest()
+        win.param_panel.refit()  # as training does
+        win.show_panel_page("Decompose")
+        win.decom_method.setCurrentText("meteorology")
+        settle()
+        probe = QComboBox()
+        probe.setEditable(True)
+        probe.addItems(list(PRESETS))
+        probe.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        assert ed.table.columnWidth(1) >= probe.sizeHint().width()
+        assert ed.table.columnWidth(0) >= ed.table.sizeHintForColumn(0)
+        box = ed._box(5)  # blh
+        assert box.currentText() == "Boundary layer and pressure"
+        assert box.toolTip() == "Boundary layer and pressure"
+        box.setCurrentText("Boundary layer, pressure and everything above the canopy")
+        assert box.lineEdit().cursorPosition() == 0
+    finally:
+        win.close()
