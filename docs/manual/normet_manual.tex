@@ -463,8 +463,10 @@ days (14 by default), started every \code{rolling\_every} days (7), each normali
 its weather drawn \emph{from that window only}. A short window therefore removes only the
 weather that varies within it --- synoptic variability for a fortnight --- and keeps the
 slower meteorological variation that a full-record normalisation would remove. The result
-has one column per window, \code{rolling\_0}, \code{rolling\_1}, \dots; the window shows
-their mean, with the spread across overlapping windows.
+has one column per window, counted from 1: \code{window\_01}, \code{window\_02}, \dots\
+(padded to three digits past 99 windows, so the names sort in the windows' order);
+\code{window\_columns(rolled)} lists them. The window shows their mean, with the spread
+across overlapping windows.
 
 \section{Multi-scale decomposition}\label{sec:multiscale}
 Write $Y_W$ for the mean of the rolling-normalised series at window width $W$, and

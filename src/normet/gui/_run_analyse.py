@@ -280,7 +280,9 @@ class AnalyseRunMixin(QMainWindow):
 
     def _rolling_done(self, result: pd.DataFrame) -> None:
         self.results["rolling"] = result
-        rolling_cols = [c for c in result.columns if c.startswith("rolling_")]
+        from normet import window_columns
+
+        rolling_cols = window_columns(result)
         window, step = self.roll_window.value(), self.roll_step.value()
 
         def render(d: pd.DataFrame):

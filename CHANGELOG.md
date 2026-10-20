@@ -119,6 +119,13 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
     double-clicking. Every change is undone when the dialog closes.
 
 ### Changed
+- **`rolling` names its windows `window_01`, `window_02`, …** (was
+  `rolling_0`, `rolling_1`, …): counted from 1 and zero-padded, to three
+  digits past 99 windows, so the names sort in the windows' order. Code that
+  picks the windows with `startswith("rolling_")` needs `window_` now, or
+  `normet.window_columns(result)`, new, which lists them in order. Its log
+  lines count windows from 1 too. Sessions saved by the GUI with the old names
+  are renamed as they are loaded.
 - **GUI start-up**: the packaged app keeps matplotlib's font cache between
   launches (PyInstaller's runtime hook rebuilt it every time, ~20 s on
   macOS), shows a splash before loading normet, and `import normet` no longer
