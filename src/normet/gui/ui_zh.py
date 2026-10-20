@@ -515,7 +515,6 @@ TEXTS = {
     "Hourly meteorology at the station coordinates. Open-Meteo serves the ERA5 archive without registration; the Copernicus CDS needs an account and ~/.cdsapirc.": "站点坐标处的逐时气象。Open-Meteo 无需注册即可提供 ERA5 档案；Copernicus CDS 需要账号和 ~/.cdsapirc。",
     "Open-Meteo (ERA5, no key needed)": "Open-Meteo（ERA5，无需密钥）",
     "Copernicus CDS (needs ~/.cdsapirc)": "Copernicus CDS（需要 ~/.cdsapirc）",
-    "None (air quality only)": "无（仅空气质量）",
     "Adds t2m, d2m, rh2m, sp, tcc, tp, ssrd, ws, wd, u10, v10 — the predictors the Train step auto-recognises as met.": "添加 t2m、d2m、rh2m、sp、tcc、tp、ssrd、ws、wd、u10、v10——训练步骤会自动将其识别为气象预测变量。",
     "Site name (optional)": "站点名称（可选）",
     "e.g. MY1 — leave blank for single-site data": "例如 MY1——单站点数据可留空",
