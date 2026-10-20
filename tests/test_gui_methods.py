@@ -134,7 +134,7 @@ def test_the_manual_in_the_window_language_and_the_shortcuts(qapp, monkeypatch):
 
         table = w._shortcuts_dialog.findChild(QTableWidget)
         commands = {table.item(i, 1).text() for i in range(table.rowCount())}
-        assert {"Open CSV…", "Save Results…", "User Manual", "Command Palette…"} <= commands
+        assert {"Open Data…", "Save Results…", "User Manual", "Command Palette…"} <= commands
         w._shortcuts_dialog.close()
     finally:
         w.close()

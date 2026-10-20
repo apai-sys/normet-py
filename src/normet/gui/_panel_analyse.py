@@ -17,15 +17,15 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QListWidget,
     QMainWindow,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
 )
 
 from ._constants import MET_DEFAULTS, TIME_VARS
-from ._lists import _checked_items, _set_all
+from ._lists import ALL_TIP, _checked_items, _toggle_all
 from ._widgets import (
     NoWheelComboBox,
     NoWheelSpinBox,
@@ -39,7 +39,7 @@ from ._widgets import (
 class AnalysePanelMixin(QMainWindow):
     def _build_normalise_box(self) -> QGroupBox:
         """Step 2: which variables to resample, and how many samples."""
-        box = QGroupBox("Step 2 · Normalise")
+        box = QGroupBox("Normalise")
         nf = QFormLayout(box)
         nf.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.norm_vars = QListWidget()
@@ -58,10 +58,11 @@ class AnalysePanelMixin(QMainWindow):
         b_nv_met.setToolTip("Tick only the recognised meteorological variables.")
         b_nv_met.clicked.connect(lambda: self._set_norm_vars_met_only())
         b_nv_all = QPushButton("All")
-        b_nv_all.clicked.connect(lambda: _set_all(self.norm_vars, True))
+        b_nv_all.setToolTip(ALL_TIP)
+        b_nv_all.clicked.connect(lambda: _toggle_all(self.norm_vars))
         nv_row.addWidget(b_nv_met)
         nv_row.addWidget(b_nv_all)
-        nf.addRow("", wrap_row(nv_row))
+        nf.addRow(wrap_row(nv_row))  # the whole row: under an empty label it widened the panel
         self.norm_samples = NoWheelSpinBox()
         self.norm_samples.setRange(1, 10_000)
         self.norm_samples.setValue(300)
@@ -87,13 +88,13 @@ class AnalysePanelMixin(QMainWindow):
 
     def _build_decompose_box(self) -> QGroupBox:
         """Step 3: emission or meteorology, attribution and groups."""
-        box = QGroupBox("Step 3 · Decompose")
+        box = QGroupBox("Decompose")
         df_ = QFormLayout(box)
         df_.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.decom_method = NoWheelComboBox()
         self.decom_method.addItems(["emission", "meteorology"])
         self.decom_method.setToolTip(
-            "emission: split the normalised series (Step 2) into time scales\n"
+            "emission: split the normalised series into time scales\n"
             "(trend / seasonal / weekly / diurnal / noise).\n"
             "meteorology: split observed − normalised into the contribution\n"
             "of each individual meteorological variable."
@@ -109,14 +110,12 @@ class AnalysePanelMixin(QMainWindow):
             "auto: shapley when groups are given, else sequential."
         )
         df_.addRow("Attribution", self.decom_attribution)
-        self.decom_groups = QLineEdit()
-        self.decom_groups.setPlaceholderText("optional: local: t2m, blh; wind: u10, v10")
-        self.decom_groups.setToolTip(
-            "Attribute the meteorological variables in named groups (meteorology only):\n"
-            "name: var, var; name: var, …  Every variable trained on must be in exactly\n"
-            "one group; each group gets one contribution column."
-        )
-        df_.addRow("Groups", self.decom_groups)
+        from ._groups import GroupEditor
+
+        # The variables in named groups (meteorology only): a contribution per group.
+        self.decom_groups = GroupEditor()
+        df_.addRow(QLabel("Groups"))
+        df_.addRow(self.decom_groups)
         self.decom_method.currentTextChanged.connect(self._decom_method_changed)
         self.decom_samples = NoWheelSpinBox()
         self.decom_samples.setRange(1, 10_000)
@@ -133,7 +132,7 @@ class AnalysePanelMixin(QMainWindow):
 
     def _build_rolling_box(self) -> QGroupBox:
         """Step 4: window, step and samples for the rolling normalisation."""
-        box = QGroupBox("Step 4 · Rolling")
+        box = QGroupBox("Rolling normalisation")
         rf = QFormLayout(box)
         rf.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.roll_window = NoWheelSpinBox()
@@ -153,7 +152,7 @@ class AnalysePanelMixin(QMainWindow):
         self.roll_button = run_button(
             "▶  Run rolling normalisation",
             "Windowed re-normalisation — reveals slow changes in the\n"
-            "emission signal. Resamples the variables ticked in Step 2.",
+            "emission signal. Resamples the variables ticked under Normalise.",
         )
         self.roll_button.clicked.connect(self._run_rolling)
         rf.addRow(self.roll_button)
@@ -166,7 +165,7 @@ class AnalysePanelMixin(QMainWindow):
         mf.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         mf.addRow(
             hint_label(
-                "Differences Y_fast − Y_meso − Y_slow − Y_∞ (Step 2) isolate the "
+                "Differences Y_fast − Y_meso − Y_slow − Y_∞ isolate the "
                 "meteorological residual specific to each timescale — like wavelet "
                 "detail coefficients or MSTL's trend/seasonal/remainder."
             )
@@ -188,9 +187,9 @@ class AnalysePanelMixin(QMainWindow):
         mf.addRow("Slow window", self.ms_slow)
         self._ms_button_tip = (
             "Runs rolling normalisation at three window widths and differences\n"
-            "them against each other and against Step 2's Y_∞ — needs Step 2\n"
-            "(Normalise) to have been run first, and is roughly 3× the cost of\n"
-            "a single Rolling run."
+            "them against each other and against the normalisation's Y_∞ — needs\n"
+            "the normalisation to have been run first, and is roughly 3× the cost\n"
+            "of a single Rolling run."
         )
         self.ms_button = run_button("▶  Multi-scale decomposition", self._ms_button_tip)
         self.ms_button.clicked.connect(self._run_multiscale)
@@ -199,13 +198,13 @@ class AnalysePanelMixin(QMainWindow):
 
     def _build_pdp_box(self) -> QGroupBox:
         """Step 5: partial-dependence curves for the ticked variables."""
-        box = QGroupBox("Step 5 · Partial dependence")
+        box = QGroupBox("Partial dependence")
         pv = QVBoxLayout(box)
         pv.addWidget(QLabel("Variables"))
         self.pdp_vars = QListWidget()
         self.pdp_vars.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self.pdp_vars.setMaximumHeight(120)
-        self.pdp_vars.setToolTip("Filled with the trained features after Step 1.")
+        self.pdp_vars.setToolTip("Filled with the trained features after training.")
         pv.addWidget(self.pdp_vars)
         grid_row = QHBoxLayout()
         grid_row.addWidget(QLabel("Grid points"))
@@ -225,10 +224,15 @@ class AnalysePanelMixin(QMainWindow):
             "click to tick all of them, click again to untick.",
         )
         self.pdp_met_btn.toggled.connect(lambda checked: self._toggle_pdp_vars(checked, None))
-        grid_row.addWidget(self.pdp_time_btn)
-        grid_row.addWidget(self.pdp_met_btn)
         grid_row.addStretch(1)
         pv.addLayout(grid_row)
+        # A row of their own, as wide as the run button under them.
+        pick_row = QHBoxLayout()
+        pick_row.setContentsMargins(0, 0, 0, 0)
+        for btn in (self.pdp_time_btn, self.pdp_met_btn):
+            btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            pick_row.addWidget(btn, 1)
+        pv.addLayout(pick_row)
         self.pdp_button = run_button(
             "▶  Compute PDP",
             "Partial-dependence curves: how the model's prediction\nresponds to each variable.",

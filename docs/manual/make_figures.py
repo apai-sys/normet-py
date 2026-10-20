@@ -42,7 +42,7 @@ import matplotlib  # noqa: E402
 
 matplotlib.use("QtAgg")
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg  # noqa: E402
-from PySide6.QtCore import QDate, Qt  # noqa: E402
+from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 # The window's language, set here and not left to the system's: an English build on a
@@ -132,7 +132,6 @@ def main_window():
 
 
 def main_figures(app):
-    import normet as nm
 
     win = main_window()
     print("welcome")
@@ -144,17 +143,15 @@ def main_figures(app):
     win.toggle_panel(True)
     win.assistant.hide()
 
-    # MY1 as a CSV, opened as File > Open CSV opens it, so the command log starts
-    # from a read_csv a reader can repeat.
-    data_dir = tempfile.mkdtemp(prefix="normet-figures-data-")
-    path = os.path.join(data_dir, "my1.csv")
-    nm.datasets.load_my1().to_csv(path, index=False)
-    win.load_csv(path)
+    # MY1 as File > Load Example opens it: the paper's target and predictors ticked, and
+    # the command log starting from the loader a reader can repeat.
+    win.load_example("my1")
     tick(win.feature_list, MY1_MET)
     print("data:", win.data_summary.text())
     grab(win, "ui_data.png")
 
     print("train")
+    win.show_panel_page("Model")  # the panel's page for the step
     win.backend_combo.setCurrentText("flaml")
     win.budget_spin.setValue(30)
     tick(win.estimator_list, ["lgbm"])
@@ -165,6 +162,7 @@ def main_figures(app):
     grab(win, "ui_model.png")
 
     print("normalise")
+    win.show_panel_page("Normalise")  # the panel's page for the step
     tick(win.norm_vars, MY1_MET)  # Met only leaves atmos_pres out; it is meteorology
     win.norm_quantiles.setChecked(True)
     win.norm_samples.setValue(300)
@@ -177,6 +175,7 @@ def main_figures(app):
     grab(win, "ui_normalise.png")
 
     print("decompose: emission")
+    win.show_panel_page("Decompose")  # the panel's page for the step
     win.decom_method.setCurrentText("emission")
     win.decom_samples.setValue(100)
     win._run_decompose()
@@ -192,17 +191,17 @@ def main_figures(app):
     print("decompose: meteorology, four groups")
     win.decom_method.setCurrentText("meteorology")
     win.decom_attribution.setCurrentText("auto")
-    win.decom_groups.setText(
-        "wind: ws, wd; thermo: temp, RH; mixing: blh, atmos_pres; sky: tcc, tp, ssrd"
-    )
+    win.decom_groups.suggest()  # wind, temperature and humidity, boundary layer, sky
     win._run_decompose()
     met = win.results["decompose"]
     print("  columns:", list(met.columns))
-    print("  sd:", met[["wind", "thermo", "mixing", "sky"]].std().round(2).to_dict())
+    groups = ["Wind", "Temperature and humidity", "Boundary layer and pressure", "Sky and rain"]
+    print("  sd:", met[groups].std().round(2).to_dict())
     said(win.tab_decom)
     grab(win, "ui_decompose_met.png")
 
     print("rolling")
+    win.show_panel_page("Rolling")  # the panel's page for the step
     win.roll_window.setValue(14)
     win.roll_step.setValue(7)
     win.roll_samples.setValue(50)
@@ -212,6 +211,7 @@ def main_figures(app):
     grab(win, "ui_rolling.png")
 
     print("multi-scale")
+    win.show_panel_page("Decompose")  # the panel's page for the step
     win.ms_fast.setValue(14)
     win.ms_meso.setValue(60)
     win.ms_slow.setValue(120)
@@ -220,26 +220,26 @@ def main_figures(app):
     grab(win, "ui_multiscale.png")
 
     print("pdp")
+    win.show_panel_page("PDP")  # the panel's page for the step
     tick(win.pdp_vars, ["ws", "temp", "blh", "hour"])
     win.pdp_grid.setValue(40)
     win._run_pdp()
     grab(win, "ui_pdp.png")
 
     print("command log")
-    win._command_dock.show()
-    win._command_dock.raise_()
+    win.show_log_page(1)
     win.tabs.setCurrentWidget(win.tab_norm)
     grab(win, "ui_command_log.png")
     # The script names the temporary CSV, so it is printed, not kept beside the figures.
     print(win.command_log.script())
-    win._log_dock.raise_()
+    win.show_log_page(0)
 
     print("print dialog")
     from normet.gui.printview import PrintDialog
 
     canvas = win.tab_norm.findChild(FigureCanvasQTAgg)
-    dlg = PrintDialog(canvas, win)
-    dlg.resize(1180, 820)
+    dlg = PrintDialog(canvas, win, settings={"preset": "nature"}, on_settings=lambda s: None)
+    dlg.resize(1280, 860)
     dlg.show()
     grab(dlg, "ui_print.png")
     dlg.reject()
@@ -264,33 +264,22 @@ def main_figures(app):
 
 
 def scm_figures(parent):
-    import normet as nm
     from normet.gui.scm_window import SCMWindow
 
     print("scm")
-    # The README's design: pre-COVID window, traffic-type donors with a complete record.
-    scm_df = nm.datasets.load_scm()
-    df = scm_df.query("'2017-01-01' <= date < '2020-03-01'")
-    df = df[df["type"].str.contains("Traffic")]
-    counts = df.dropna(subset=["NO2_dw"]).groupby("code").size()
-    donors = [c for c in counts[counts == df["date"].nunique()].index if c != "MY1"]
-    df = df[df["code"].isin(donors + ["MY1"])]
-    print(f"  {len(donors)} donors, {df['date'].nunique()} months")
-
     w = SCMWindow(parent=None)
     w.resize(*SIZE)
     w.show()
     run_inline(w.runner)
-    w._ingest(df.reset_index(drop=True), "load_scm(): ULEZ design")
-    w.unit_combo.setCurrentText("code")
-    w.outcome_combo.setCurrentText("NO2_dw")
-    w._columns_changed()
-    w.treated_combo.setCurrentText("MY1")
-    w.cutoff_edit.setDate(QDate(2019, 4, 1))
-    w._redraw_panel_tab()
+    # The README's design, as the studio's File > Load Example > London ULEZ sets it up:
+    # pre-COVID window, traffic-type donors with a complete record.
+    w.load_example("ulez")
+    print(f"  {w.donor_list.count()} donors, {w.df['date'].nunique()} months")
+    w.panel.show_page("Design")  # the treated unit, cutoff and donors in view
     said(w.tab_panel)
     grab(w, "ui_scm_panel.png")
 
+    w.panel.show_page("Estimator")
     w.backend_combo.setCurrentText("scm")
     w._run_fit()
     said(w.tab_fit)
@@ -311,6 +300,7 @@ def scm_figures(parent):
         },
     )
     grab(w, "ui_scm_fit.png")
+    w.panel.show_page("Inference")
     w._run_placebo_space()
     said(w.tab_pspace)
     grab(w, "ui_scm_placebo.png")

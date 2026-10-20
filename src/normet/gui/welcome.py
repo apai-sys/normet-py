@@ -138,8 +138,8 @@ class Welcome(QWidget):
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         outer.addWidget(title)
         said = _Paragraph(
-            "Open a CSV with a 'date' column, a pollutant and its meteorology — or drop one "
-            "onto the window."
+            "Open a table of times, a pollutant and its meteorology — CSV, Excel, Parquet and "
+            "more — or drop one onto the window; or start from an example below."
         )
         said.setWordWrap(True)
         said.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -151,14 +151,10 @@ class Welcome(QWidget):
         outer.addSpacing(8)
         row = QHBoxLayout()
         row.addStretch(1)
-        self.open_btn = QPushButton("Open CSV…")
+        self.open_btn = QPushButton("Open Data…")
         self.open_btn.setStyleSheet("font-weight:600; padding:8px 16px;")
         self.open_btn.clicked.connect(lambda: actions["open_csv"]())
-        self.example_btn = QPushButton("Load example")
-        self.example_btn.setStyleSheet("padding:8px 16px;")
-        self.example_btn.clicked.connect(lambda: actions["load_example"]())
         row.addWidget(self.open_btn)
-        row.addWidget(self.example_btn)
         if "assistant" in actions:
             self.ask_btn = QPushButton("Ask the Assistant")
             self.ask_btn.setStyleSheet("padding:8px 16px;")
@@ -194,13 +190,16 @@ class Welcome(QWidget):
                 w.deleteLater()
         a = self._actions
         self.cards = {}
+        from ._examples import EXAMPLES
+
         card = Card("Examples")
-        card.add(
-            "De-weathering",
-            "A year of hourly PM2.5 with ERA5-style meteorology",
-            a["load_example"],
-            tip="Synthetic single-site data: train, normalise, decompose, rolling, PDP.",
-        )
+        for ex in EXAMPLES.values():
+            card.add(
+                ex.title,
+                ex.description.split(":")[0].rstrip("."),
+                lambda key=ex.key: a["load_example"](key),
+                tip=ex.description,
+            )
         card.add(
             "Synthetic control",
             "A weekly panel of units, one treated",

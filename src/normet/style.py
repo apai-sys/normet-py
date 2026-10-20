@@ -44,11 +44,14 @@ PALETTE: list[str] = [
     "#AA4499",  # magenta
 ]
 
-# What a colour stands for, the same in every figure.
-OBSERVED = PALETTE[0]  # a measured series
-MODELLED = PALETTE[1]  # the normalised series, a synthetic control, the treated unit
-COMPONENT = PALETTE[0]  # one part of a decomposition
-SECONDARY = PALETTE[2]
+# What a colour stands for, the same in every figure -- cume's (``cume.plotting``): what
+# was measured in the system blue, what a model makes of it in the system red, a third
+# series in green; the palette is for categories (sources, variables, sites), one each.
+OBSERVED = "#007AFF"  # a measured series
+MODELLED = "#FF3B30"  # the normalised series, a synthetic control, a fit
+COMPONENT = "#007AFF"  # one part of a decomposition
+SECONDARY = "#34C759"  # a third series beside the two
+TERTIARY = "#FF9500"  # a fourth
 NEUTRAL = "#8E8E93"  # noise, the donors, what is context rather than result
 INK = "#1A1A1A"  # text, and a line that is no series' (a 1:1 line, a cutoff)
 REFERENCE = "#8E8E93"  # a zero line

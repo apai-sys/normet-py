@@ -118,7 +118,7 @@ def test_palette_lists_menus_and_tabs(qapp):
     win = MainWindow()
     try:
         names = {c.text for c in menu_commands(win, skip=(win._palette_action,))}
-        assert {"Open CSV…", "Load Example Data", "Run History…"} <= names
+        assert {"Open Data…", "Synthetic site, one year hourly (normet)", "Run History…"} <= names
         assert "Command Palette…" not in names
         tabs = tab_commands(win.tabs)
         assert [c.text for c in tabs][:2] == ["Data", "Model"]
@@ -126,10 +126,10 @@ def test_palette_lists_menus_and_tabs(qapp):
         assert win.tabs.currentWidget() is win.tab_model
 
         dlg = CommandPalette(menu_commands(win) + tabs, win)
-        dlg.field.setText("example data")
-        assert dlg.shown()[0].text == "Load Example Data"
+        dlg.field.setText("synthetic site")
+        assert dlg.shown()[0].text == "Synthetic site, one year hourly (normet)"
         dlg._run()
-        assert dlg.chosen is not None and dlg.chosen.text == "Load Example Data"
+        assert dlg.chosen is not None and dlg.chosen.text.startswith("Synthetic site")
         dlg.deleteLater()
     finally:
         win.close()

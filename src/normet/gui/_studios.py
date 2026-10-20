@@ -61,9 +61,14 @@ class StudiosMixin(QMainWindow):
         self._data_window.activateWindow()
 
     def ingest_dataframe(self, df: pd.DataFrame, label: str) -> None:
-        """Load an in-memory table (e.g. from the Data Studio) as the dataset."""
+        """Load an in-memory table (e.g. from the Data Studio, on UTC) as the dataset, on
+        the window's clock (the time zone chosen under Data)."""
+        from normet.io.tables import utc_to_clock
+
         df = df.copy()
-        df["date"] = to_datetime_coerced(df["date"])
+        df["date"] = utc_to_clock(to_datetime_coerced(df["date"]), self._zone())
+        self._data_path = None  # not a file the time zone can read again
+        self._show_dates(None)
         self._ingest(df, label)
         self._log_command(commandlog.from_memory(label))
 
@@ -73,7 +78,12 @@ class StudiosMixin(QMainWindow):
         if self._transport_window is None:
             self._transport_window = TrajectoryWindow(parent=self)
         if self.df_raw is not None:
-            self._transport_window.offer_main_data(self.df_raw)
+            # HYSPLIT runs on UTC: the receptor times are the table's, on UTC.
+            from normet.io.tables import clock_to_utc
+
+            on_utc = self.df_raw.copy()
+            on_utc["date"] = clock_to_utc(on_utc["date"], self._zone())
+            self._transport_window.offer_main_data(on_utc)
         self._transport_window.show()
         self._transport_window.raise_()
         self._transport_window.activateWindow()
@@ -96,11 +106,15 @@ class StudiosMixin(QMainWindow):
             self.notify(
                 "Open a table in the main window first: the trajectory features are joined onto it.",
                 key="need-data",
-                actions=(("Open CSV…", self._open_csv),),
+                actions=(("Open Data…", self._open_csv),),
             )
             return 0
+        from normet.io.tables import utc_to_clock
         from normet.io.trajectory import join_trajectory_features
 
+        # The trajectories arrive on UTC; the table is on the window's clock.
+        features = features.copy()
+        features.index = pd.DatetimeIndex(utc_to_clock(features.index.to_series(), self._zone()))
         try:
             merged = join_trajectory_features(self.df_raw, features)
         except (KeyError, ValueError) as exc:
@@ -138,6 +152,8 @@ class StudiosMixin(QMainWindow):
             log.warning("Transport features not joined: no row took a trajectory")
             return 0
 
+        self._data_path = None  # not a file the time zone can read again
+        self._show_dates(None)
         self._ingest(merged, f"{self.file_label.text().splitlines()[0]} + transport features")
         for i in range(self.feature_list.count()):
             item = self.feature_list.item(i)

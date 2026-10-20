@@ -78,10 +78,12 @@ class SourceRegionTable(QTableWidget):
     """Editable ``{name: (lon_min, lat_min, lon_max, lat_max)}`` table."""
 
     _COLS = ["name", "lon_min", "lat_min", "lon_max", "lat_max"]
+    #: The columns as the table heads them: in words, translated as the window is.
+    _HEADS = ["Name", "Lon min", "Lat min", "Lon max", "Lat max"]
 
     def __init__(self) -> None:
         super().__init__(0, len(self._COLS))
-        self.setHorizontalHeaderLabels(self._COLS)
+        self.setHorizontalHeaderLabels(self._HEADS)
         self.setToolTip(
             "Named bounding boxes; for each, the fraction of trajectory time\n"
             "spent inside is added as a traj_resid_<name> feature (a\n"
@@ -154,12 +156,13 @@ class RegionFileTable(QTableWidget):
     """
 
     _COLS = ["name", "path"]
+    _HEADS = ["Name", "File"]
 
     def __init__(self) -> None:
         super().__init__(0, len(self._COLS))
-        self.setHorizontalHeaderLabels(self._COLS)
+        self.setHorizontalHeaderLabels(self._HEADS)
         self.setToolTip(
-            "Loaded region files. 'name' is used directly for single-region\n"
+            "Loaded region files. 'Name' is used directly for single-region\n"
             "files (e.g. one administrative boundary); multi-region files\n"
             "keep their own per-feature names, prefixed with this one."
         )
@@ -194,10 +197,11 @@ class ReceptorTable(QTableWidget):
     """Editable list of ``(name, lat, lon)`` receptor sites for HYSPLIT runs."""
 
     _COLS = ["name", "lat", "lon"]
+    _HEADS = ["Name", "Lat", "Lon"]
 
     def __init__(self) -> None:
         super().__init__(0, len(self._COLS))
-        self.setHorizontalHeaderLabels(self._COLS)
+        self.setHorizontalHeaderLabels(self._HEADS)
         self.setToolTip(
             "One row per receptor site. hyts_std runs once per (site, time),\n"
             "and each result is tagged with the row's name in a 'site' column."
@@ -361,7 +365,7 @@ class TrajectoryWindow(QMainWindow):
             "Exact point-in-polygon residence time instead of a bounding\n"
             "box — use real administrative or airshed boundaries. Pick\n"
             "several at once, or click again to add more; rename a row by\n"
-            "double-clicking its 'name' cell."
+            "double-clicking its 'Name' cell."
         )
         b_load_region.clicked.connect(self._load_region_file)
         b_rdel_file = QPushButton("Remove row")
@@ -449,7 +453,7 @@ class TrajectoryWindow(QMainWindow):
         rf.addRow("", wrap_row(recv_btn_row))
         rf.addRow(
             hint_label(
-                "One or more (name, lat, lon) rows. Each name tags its results\n"
+                "One or more (Name, Lat, Lon) rows. Each name tags its results\n"
                 "in a 'site' column: name them as the main data's 'site' does."
             )
         )
@@ -545,7 +549,7 @@ class TrajectoryWindow(QMainWindow):
         self.send_btn.setToolTip(
             "Join the traj_* columns onto the main window's data: each row takes\n"
             "the latest trajectory to have arrived, within one release interval\n"
-            "(a row with none stays empty), ready to tick as predictors in Step 1."
+            "(a row with none stays empty), ready to tick as predictors."
         )
         self.send_btn.clicked.connect(self._send_to_main)
         self.send_btn.setEnabled(False)

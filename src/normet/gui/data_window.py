@@ -358,7 +358,7 @@ class DataWindow(QMainWindow):
 
         self.fetch_btn = run_button(
             "▶  Fetch && merge",
-            "Download the pollutant series and the meteorology, and join them\ninto one hourly table ready for Step 1 training.",
+            "Download the pollutant series and the meteorology, and join them\ninto one hourly table ready for training.",
         )
         self.fetch_btn.clicked.connect(self._run_fetch)
         v.addWidget(self.fetch_btn)
@@ -381,7 +381,7 @@ class DataWindow(QMainWindow):
         self.save_btn.clicked.connect(self._save_csv)
         self.save_btn.setEnabled(False)
         self.send_btn = QPushButton("⬆  Send to main window")
-        self.send_btn.setToolTip("Load the merged table into the main window, ready for Step 1.")
+        self.send_btn.setToolTip("Load the merged table into the main window, ready for training.")
         self.send_btn.clicked.connect(self._send_to_main)
         self.send_btn.setEnabled(False)
         h.addWidget(self.save_btn)
@@ -507,7 +507,9 @@ class DataWindow(QMainWindow):
         self.station_table.clear()
         self.station_table.setRowCount(len(df))
         self.station_table.setColumnCount(len(cols))
-        self.station_table.setHorizontalHeaderLabels(cols)
+        self.station_table.setHorizontalHeaderLabels(
+            ["Site", "Code", "Type", "Pollutants", "From", "To", "Lat", "Lon"]
+        )
         for r, (_, row) in enumerate(df.iterrows()):
             for c, col in enumerate(cols):
                 val = row[col]
@@ -667,7 +669,7 @@ class DataWindow(QMainWindow):
             else ("warn", "Empty result."),
             lines=[
                 "Columns follow the modelling convention: met variables are "
-                "auto-ticked as features in Step 1."
+                "auto-ticked as features for training."
             ],
         )
 
@@ -694,7 +696,7 @@ class DataWindow(QMainWindow):
         )
         self._main.raise_()
         self._main.activateWindow()
-        self.statusBar().showMessage("Sent to the main window — continue with Step 1 there.")
+        self.statusBar().showMessage("Sent to the main window — train a model there.")
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self.runner.shutdown()

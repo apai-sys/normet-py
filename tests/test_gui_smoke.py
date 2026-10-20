@@ -59,10 +59,11 @@ def test_a_csv_of_zoned_dates_with_one_that_does_not_parse_loads(qapp, tmp_path)
     win = MainWindow()
     try:
         win.load_csv(str(path))
-        assert win.df_raw["date"].dt.tz is not None and win.df_raw["date"].isna().sum() == 1
+        # put on the window's clock (UTC by default), as times without a zone of their own
+        assert win.df_raw["date"].dt.tz is None and win.df_raw["date"].isna().sum() == 1
         (line,) = win.data_preview.canvas.figure.axes[0].get_lines()
         assert list(line.get_ydata()) == [1, 2, 4]  # the row without a date left out
-        assert win.command_log.entries[-1].title == "Open CSV"  # the load went through
+        assert win.command_log.entries[-1].title == "Open data"  # the load went through
     finally:
         win.close()
 
@@ -237,6 +238,24 @@ def test_norm_vars_selector(qapp):
         win.close()
 
 
+def test_all_ticks_every_one_then_unticks_every_one(qapp):
+    """One All button does what an All and a None did: it ticks every item, and once
+    every one is ticked, unticks every one."""
+    from PySide6.QtWidgets import QListWidget
+
+    from normet.gui._lists import _toggle_all
+    from normet.gui.main_window import _checked_items, _fill_checklist
+
+    lst = QListWidget()
+    _fill_checklist(lst, ["t2m", "ws", "blh"], {"t2m"})
+    _toggle_all(lst)
+    assert _checked_items(lst) == ["t2m", "ws", "blh"]
+    _toggle_all(lst)
+    assert _checked_items(lst) == []
+    _toggle_all(lst)
+    assert _checked_items(lst) == ["t2m", "ws", "blh"]
+
+
 def test_pdp_toggle_buttons(qapp):
     """'Time variables' / 'Met only' in Step 5: click ticks the matching
     subset, click again unticks it; the two subsets don't interfere."""
@@ -358,6 +377,7 @@ def test_chronos_backend_hides_the_training_controls(qapp):
     win = MainWindow()
     try:
         win.load_example()
+        win.show_panel_page("Model")  # the panel shows one step's page at a time
         assert win.backend_combo.currentText() == "flaml"
         assert win.budget_spin.isVisibleTo(win)
         assert win.split_combo.isVisibleTo(win)
@@ -518,6 +538,7 @@ def test_chronos_backend_exposes_a_device_selector(qapp):
     win = MainWindow()
     try:
         win.load_example()
+        win.show_panel_page("Model")  # the panel shows one step's page at a time
         assert not win.device_combo.isVisibleTo(win)
 
         win.backend_combo.setCurrentText(_chronos.BACKEND)
@@ -584,3 +605,72 @@ def test_shuffled_pre_r2_flags_a_design_with_more_donors_than_pre_cutoff_dates(q
 
     assert shuffled_pre_r2(BACKENDS["scm"], design(40)) >= NO_CHECK_R2
     assert shuffled_pre_r2(BACKENDS["scm"], design(4)) < NO_CHECK_R2
+
+
+def test_each_example_opens_set_up_as_its_source_sets_it(qapp):
+    """File → Load Example, as cume's: each example with its own target and predictors,
+    and the Data box offers no example button of its own."""
+    from normet.gui._examples import EXAMPLES
+    from normet.gui.main_window import MainWindow, _checked_items
+
+    win = MainWindow()
+    try:
+        assert not hasattr(win, "example_btn")
+        win.load_example("my1")
+        assert win.target_combo.currentText() == "NO2"
+        assert set(_checked_items(win.feature_list)) == set(EXAMPLES["my1"].features)
+        assert win.command_log.entries[-1].text().endswith("df = nm.datasets.load_my1()")
+        win.load_example()  # the synthetic site
+        assert win.target_combo.currentText() == "PM2.5"
+    finally:
+        win.close()
+
+
+def test_a_table_on_local_time_keeps_its_clock_and_a_new_clock_reads_it_again(qapp, tmp_path):
+    import pandas as pd
+
+    from normet.gui.main_window import MainWindow
+
+    path = tmp_path / "beijing.xlsx"
+    pytest.importorskip("openpyxl")
+    pd.DataFrame(
+        {"时间": ["2020年1月1日 8时", "2020年1月1日 9时"], "PM2.5": [10.0, 12.0], "t2m": [1.0, 2.0]}
+    ).to_excel(path, index=False)
+    win = MainWindow()
+    try:
+        win.zone_combo.setCurrentIndex(win.zone_combo.findData("Asia/Shanghai"))
+        win.load_csv(str(path))
+        assert win.df_raw["date"].dt.hour.tolist() == [8, 9]  # shown on Beijing's clock
+        assert "(Asia/Shanghai)" in win.data_summary.text()
+        assert "zone='Asia/Shanghai'" in win.command_log.entries[-1].text()
+        win.zone_combo.setCurrentIndex(win.zone_combo.findData("UTC"))
+        assert win.df_raw["date"].dt.hour.tolist() == [8, 9]  # written without an offset
+    finally:
+        win.zone_combo.setCurrentIndex(win.zone_combo.findData("UTC"))
+        win.close()
+
+
+def test_the_group_editor_suggests_groups_and_keeps_the_text_form(qapp):
+    """The decomposition's groups set in a table: Suggest groups puts each recognised
+    variable in its group, one left alone is a contribution of its own, and the text
+    form a config keeps goes both ways."""
+    from normet.gui._groups import GroupEditor
+
+    ed = GroupEditor()
+    ed.set_variables(["ws", "wd", "temp", "blh", "traffic"])
+    ed.suggest()
+    assert (
+        ed.text()
+        == "Wind: ws, wd; Temperature and humidity: temp; Boundary layer and pressure: blh"
+    )
+    assert ed.groups(["ws", "wd", "temp", "blh", "traffic"])["traffic"] == ["traffic"]
+    ed.clear()
+    assert ed.text() == "" and ed.groups(["ws"]) is None
+    ed.setText("local: temp, blh; wind: ws, wd")
+    assert ed.groups(["ws", "wd", "temp", "blh"]) == {
+        "local": ["temp", "blh"],
+        "wind": ["ws", "wd"],
+    }
+    with pytest.raises(ValueError, match="rain not among"):
+        ed.setText("wet: rain")
+        ed.groups(["ws"])
