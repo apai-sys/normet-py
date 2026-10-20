@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtWidgets import (
     QGroupBox,
     QScrollArea,
@@ -75,8 +75,15 @@ class StepPanel(QWidget):
             self.bar.minimumSizeHint().width(),
         )
         bar_width = self.scroll.verticalScrollBar().sizeHint().width() or 15
-        self.setFixedWidth(max(need + bar_width + 4, least))
+        #: The width the panel opens at, and the least it is let go to: as cume's, a
+        #: minimum the splitter starts at, not a fixed width -- fixed, the splitter's
+        #: wider slot was left as a gap between the panel and the results.
+        self.least_width = max(need + bar_width + 4, least)
+        self.setMinimumWidth(self.least_width)
         self.show_index(0)
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt's
+        return QSize(self.least_width, super().sizeHint().height())
 
     def show_index(self, i: int) -> None:
         """Page ``i`` in view: the others take no room, so the scroll is the page's own

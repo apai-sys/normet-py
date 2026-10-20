@@ -109,7 +109,7 @@ class MainWindow(
         geo = settings.value("geometry")
         if geo is not None:
             self.restoreGeometry(geo)
-        self.statusBar().showMessage("Open a CSV or load the example data to begin.")
+        self.statusBar().showMessage("Open data, or load an example from the File menu, to begin.")
 
     # --------------------------------------------------------- left panel
     #: The left panel's pages, each a step of the workflow (as cume's are): one column
