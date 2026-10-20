@@ -55,8 +55,12 @@ def available_bands(result: dict) -> list[tuple[str, str]]:
 
 
 @S.styled
-def multiscale_figure(result: dict, target: str = "") -> Any:
+def multiscale_figure(result: dict, target: str = "", sigma_from: dict | None = None) -> Any:
+    """The figure of a multi-scale run. ``sigma_from``: the run the bands' σ are taken
+    from, where *result* is its series averaged to a coarser step for drawing."""
     import matplotlib.pyplot as plt
+
+    full = sigma_from if sigma_from is not None else result
 
     bands = available_bands(result)
     n = 1 + len(bands)
@@ -93,7 +97,7 @@ def multiscale_figure(result: dict, target: str = "") -> Any:
     sigmas: dict[str, float] = {}
     for i, (key, label) in enumerate(bands, start=1):
         s = result[key]
-        sigmas[key] = float(s.std())
+        sigmas[key] = float(full[key].std())
         ax = fig.add_subplot(gs[i, 0], sharex=ax0)
         S.line(ax, s.index, s.values, lw=_lw(pd.DataFrame(index=s.index)), color=COMP_COLOR)
         S.zero_line(ax)
