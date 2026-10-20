@@ -56,6 +56,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from normet import style as S
 from normet.io.trajectory import _missing_gdas1_files, _naive_utc
 
 from ._widgets import CanvasTab, NoWheelSpinBox, hint_label, run_button, wrap_row
@@ -766,10 +767,12 @@ class TrajectoryWindow(QMainWindow):
             c for c in result.columns if c.endswith(("dist_km", "speed_kmh", "inflow_deg"))
         ]
         n = max(1, len(plot_cols))
-        fig, axes = plt.subplots(n, 1, figsize=(9, 2.0 * n), sharex=True, squeeze=False)
+        fig, axes = plt.subplots(n, 1, figsize=(8, 1.5 * n + 0.4), sharex=True, squeeze=False)
         has_sites = "site" in result.columns and result["site"].nunique() > 1
         groups = list(result.groupby("site")) if has_sites else [(None, result)]
-        cmap = plt.get_cmap("tab10")
+        # Few receptor times: each one marked, the line only joining them.
+        marker = "o" if len(result) <= 200 else None
+        shown = []
         for ax, col in zip(axes.ravel(), plot_cols or [None], strict=False):
             if col is None:
                 ax.axis("off")
@@ -779,14 +782,22 @@ class TrajectoryWindow(QMainWindow):
                     sub.index,
                     sub[col],
                     lw=0.8,
-                    color=cmap(i % 10),
+                    marker=marker,
+                    ms=2.5,
+                    color=S.PALETTE[i % len(S.PALETTE)],
                     label=site if has_sites else None,
                 )
-            ax.set_title(col, fontsize=9, loc="left")
-            ax.grid(alpha=0.2)
+            ax.set_title(col)
+            if col.endswith("inflow_deg"):  # a bearing: read against the compass
+                ax.set_ylim(0, 360)
+                ax.set_yticks([0, 90, 180, 270, 360], ["N", "E", "S", "W", "N"])
+            S.grid(ax)
             if has_sites and col == (plot_cols or [None])[0]:
-                ax.legend(fontsize=7, ncols=min(4, len(groups)))
-        fig.tight_layout()
+                S.legend(ax, loc="upper right", ncols=min(4, len(groups)))
+            shown.append(ax)
+        if shown and isinstance(result.index, pd.DatetimeIndex):
+            S.format_time_axis(shown[-1])
+        S.outer_ticks(shown)
         site_note = f" ({result['site'].nunique()} sites)" if has_sites else ""
         self.tab_features.show_result(
             fig,

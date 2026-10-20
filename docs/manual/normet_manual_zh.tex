@@ -1,0 +1,1340 @@
+\documentclass[11pt]{ctexrep}
+
+% ---------------------------------------------------------------------------
+% normet 用户手册（中文版）——normet_manual.tex 的译本，章节、标签与之一一对应。
+% 构建：docs/manual/build.sh（XeLaTeX + ctex）
+% 截图：docs/manual/make_figures.py，NORMET_UI_LANGUAGE=zh 时存入 figures_zh/；
+%       没有中文截图的取 figures/。
+% ---------------------------------------------------------------------------
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{fancyhdr}
+\usepackage{listings}
+\usepackage[hidelinks,colorlinks=true,linkcolor=blue!55!black,urlcolor=blue!55!black,
+            citecolor=blue!55!black]{hyperref}
+
+% Compact list spacing without the enumitem package.
+\newcommand{\nosep}{\setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}\setlength{\topsep}{2pt}}
+
+\definecolor{nmblue}{HTML}{2C7BB6}
+\definecolor{nmgray}{HTML}{8E8E93}
+\definecolor{codebg}{HTML}{F5F5F7}
+\definecolor{warn}{HTML}{FF9500}
+
+% --- code listings -----------------------------------------------------------
+% A listing's comments may be Chinese: listings passes them through as they are.
+\lstdefinestyle{normet}{
+  backgroundcolor=\color{codebg},
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{nmblue}\bfseries,
+  commentstyle=\color{nmgray}\itshape,
+  stringstyle=\color{green!45!black},
+  breaklines=true, frame=single, rulecolor=\color{nmgray!40},
+  showstringspaces=false, upquote=true, columns=fullflexible, xleftmargin=4pt, framexleftmargin=4pt,
+  extendedchars=false,
+}
+\lstset{style=normet}
+
+% --- headers / footers -------------------------------------------------------
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small normet 用户手册}
+\fancyhead[R]{\small\leftmark}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% --- handy macros ------------------------------------------------------------
+\newcommand{\nm}{\textsf{normet}}
+\newcommand{\codeunderscore}{\textunderscore\allowbreak}
+\newcommand{\code}[1]{\texttt{\let\_\codeunderscore #1}}
+\setlength{\emergencystretch}{2.5em}
+\newcommand{\tab}[1]{\textbf{#1}}
+\newcommand{\NOtwo}{NO\textsubscript{2}}
+\newcommand{\PMtwo}{PM\textsubscript{2.5}}
+\newcommand{\ugm}{\ensuremath{\mu}g\,m\textsuperscript{$-3$}}
+\newcommand{\note}[1]{\par\noindent\colorbox{codebg}{\parbox{0.97\linewidth}{\small\textbf{注意。}#1}}\par}
+\newcommand{\caution}[1]{\par\noindent\colorbox{warn!15}{\parbox{0.97\linewidth}{\small\textbf{警告。}#1}}\par}
+% The window as the Chinese manual shows it: its screenshot in Chinese where one was
+% taken (figures_zh/), else the English one.
+\newcommand{\screenshot}[3]{%
+  \begin{figure}[htbp]\centering
+    \fboxsep=0pt\fbox{\IfFileExists{figures_zh/#1}%
+      {\includegraphics[width=0.98\linewidth]{figures_zh/#1}}%
+      {\includegraphics[width=0.98\linewidth]{figures/#1}}}%
+    \caption{#2}\label{#3}
+  \end{figure}}
+
+\begin{document}
+
+% ============================ TITLE PAGE ====================================
+\begin{titlepage}
+\centering
+\vspace*{2.5cm}
+{\IfFileExists{../../packaging/assets/normet.png}{\includegraphics[width=3.2cm]{../../packaging/assets/normet.png}\\[1cm]}{}}
+{\Huge\bfseries\color{nmblue} normet\par}
+\vspace{0.4cm}
+{\Large 环境时间序列的归一化、分解\\与反事实建模\par}
+\vspace{1.2cm}
+{\large\bfseries 用户手册\par}
+\vspace{0.3cm}
+{\large 版本 1.0.0\par}
+\vfill
+{\large 一个桌面应用和 Python 库：从空气质量记录中去除天气的影响，\\
+并回答一项干预究竟改变了什么。\par}
+\vspace{1.5cm}
+{\color{nmgray}\today}
+\end{titlepage}
+
+\tableofcontents
+\cleardoublepage
+
+% ============================ 1. INTRODUCTION ===============================
+\chapter{简介}\label{ch:intro}
+
+\section{normet 是什么？}
+\nm{} 是一个用于分析环境时间序列（首先是空气质量记录）的桌面应用和 Python 库。它回答
+原始浓度记录本身回答不了的两个问题：
+\begin{enumerate}\nosep
+  \item \emph{我看到的变化有多少是天气造成的？}一个月的静稳、寒冷的反气旋天气，和一个新
+        污染源一样会抬高浓度。\nm{} 学习污染物如何依赖气象和日历，再把气象平均掉，留下
+        天气解释不了的那部分记录。这就是\emph{气象归一化}，也称\emph{去气象化}。
+  \item \emph{如果没有这项干预，会怎样？}低排放区、封控或工厂关停在某一天改变了某一个
+        地方。\nm{} 用干预没有触及的其他地方为这个地方构建一个反事实——\emph{合成控制}
+        ——并度量干预日期之后的差异，用安慰剂检验和不确定性区间说明这个差异是否大于偶然。
+\end{enumerate}
+窗口里的每一个操作都是对 \nm{} Python 包的一次调用；这些调用可以写成脚本、在命令行运行，
+或通过模型上下文协议（MCP）由 AI 助手驱动（第\ref{ch:script}章）。窗口会记下它做的每一次
+调用，因此靠点击完成的分析可以保存为一个能重复它的脚本（第~\ref{sec:commandlog}~节）。
+
+\section{一个方程讲清思路}
+记 $y_t$ 为 $t$ 时刻的浓度，$\mathbf{m}_t$ 为该时刻的气象（风速和风向、温度、湿度、边界层
+高度……），$\mathbf{c}_t$ 为日历（趋势计数、一年中的第几天、星期几、小时）。\nm{} 拟合一个
+机器学习模型
+\begin{equation}
+  y_t \approx f(\mathbf{m}_t, \mathbf{c}_t)
+\end{equation}
+然后追问：如果 $t$ 时刻的天气换成该站点出现过的任何其他天气，$f$ 会预测出什么。对许多次
+这样的抽样取平均，
+\begin{equation}
+  \tilde{y}_t \;=\; \frac{1}{N}\sum_{k=1}^{N} f\bigl(\mathbf{m}^{(k)}, \mathbf{c}_t\bigr),
+  \qquad \mathbf{m}^{(k)} \sim \text{记录自身的气象},
+  \label{eq:norm}
+\end{equation}
+得到\emph{归一化}序列 $\tilde{y}_t$：典型天气下 $t$ 时刻应有的浓度。由于日历 $\mathbf{c}_t$
+被保留，排放的变化——模型只能通过趋势、季节、星期和小时来表达它——会保留在 $\tilde{y}_t$
+中，而天气造成的逐日起伏则被平均掉。第\ref{ch:theory}章展开这一思路以及在其上构建的各种
+分解。
+
+\section{主要功能}
+\begin{itemize}\nosep
+  \item 用 FLAML（在时间预算内搜索估计器）或调参的 LightGBM 进行 AutoML 训练，以 $R^2$、
+        RMSE 及另外九项统计量报告留出集上的拟合。
+  \item 蒙特卡洛气象归一化：可选择重采样哪些变量，提供不确定性分位数、参考池和条件
+        重采样；还有一个在序列收敛后自动停止的自适应版本。
+  \item 排放分解（趋势、季节、星期、日变化、短期）和气象分解（每个变量或命名分组一项
+        贡献，顺序归因或 Shapley 归因）。
+  \item 滚动（分窗）归一化，以及按时间尺度区分天气影响的多尺度分解。
+  \item 已训练模型的部分依赖曲线。
+  \item 用 Chronos-2 时间序列基础模型零样本去气象化，结果格式相同——无需训练。
+  \item 面板数据上的合成控制：增广 SCM、经典 Abadie SCM、双重差分、矩阵补全、稳健 SCM、
+        ML-SCM 和贝叶斯 SCM，配有空间安慰剂和时间安慰剂检验、刀切法和自助法区间，以及
+        全部单元批量运行。
+  \item 数据工作室：来自六个监测网络的英国空气质量数据加再分析气象，无需 API 密钥即可
+        合并成可建模的表。
+  \item 传输工作室：把 HYSPLIT 后向轨迹转换为传输预测变量，并合并到记录上。
+  \item 命令日志：把每个操作写成能重复它的调用；带溯源信息的 HTML 报告；按期刊栏宽
+        排版的图。
+  \item 助手（在窗口中工作的语言模型）：提议目标变量和预测变量，并与你一起解读结果。
+\end{itemize}
+
+\section{本手册的组织}
+第\ref{ch:install}章介绍安装。第\ref{ch:theory}章讲解方法，深度足以解读程序报告的每一个
+数字。第\ref{ch:start}--\ref{ch:pdp}章在窗口中用一条真实记录走完一次完整的去气象化分析，
+第\ref{ch:scm}章用一个真实面板走完合成控制流程。第\ref{ch:data}章介绍数据导入，
+第\ref{ch:export}章介绍导出、报告和重现一次会话，第\ref{ch:assistant}章介绍助手，
+第\ref{ch:script}章介绍脚本。附录列出默认值、\nm{} 存放文件的位置和故障排除指南。
+
+图均为真实窗口的截图，由 \code{docs/manual/make\_figures.py} 在 \nm{} 自带的记录上生成：
+伦敦 Marylebone Road（站点 MY1）2020 年 1 月至 8 月的逐时 \NOtwo{} 和 ERA5 气象，这段时间
+跨越了英国第一次 COVID-19 封控。正文引用的数字就是该脚本打印出的数字。你自己运行的结果会
+在最后一两位上有所不同：AutoML 搜索以墙钟时间为界，两次访问的候选模型不会完全一样。
+
+本手册另有英文版（\code{normet\_manual.pdf}），章节一一对应，截图为英文界面
+（第~\ref{sec:appearance}~节）。
+
+% ============================ 2. INSTALLATION ===============================
+\chapter{安装}\label{ch:install}
+
+\nm{} 为每个平台提供一个自包含的桌面应用，也在 PyPI 上提供 Python 包。交互式分析请选安装包，
+脚本、服务器和笔记本请选 Python 包。
+
+\section{macOS}
+打开 \code{Normet-1.0.0-macos-arm64.dmg}，把 \code{Normet.app} 拖到\code{应用程序}文件夹。
+应用自带 Python、Qt、FLAML、LightGBM 和 XGBoost，以及数据工作室所需的读取器，因此
+去气象化、合成控制和数据获取都无需另装任何东西。首次启动比之后慢，因为要建立字体缓存，
+之后的启动会复用它（保存在 \code{\textasciitilde/.normet/matplotlib}）；期间会显示启动画面。
+
+\note{应用没有用 Apple 开发者 ID 签名。第一次打开时，请右键点击 \code{Normet.app}，选择
+\emph{打开}，再在对话框中确认；只需一次。也可以在终端运行
+\code{xattr -dr com.apple.quarantine /Applications/Normet.app}。}
+
+安装包不包含可选的 Chronos-2 基础模型（它需要 PyTorch，单这一项就约 1~GB）、贝叶斯 SCM
+后端（PyMC）和 MCP 服务器。它们的选项在窗口中呈灰色，工具提示会说明缺什么；要使用它们，
+请从 PyPI 安装带相应扩展的 \nm{}（见下文）。
+
+\section{Windows 和 Linux}
+在 Windows 上运行 \code{normet-setup-1.0.0.exe}，这是一个 Inno~Setup 安装向导，会添加开始
+菜单快捷方式和可选的桌面快捷方式。安装程序未签名，所以首次运行时 SmartScreen 会显示
+\emph{Windows 已保护你的电脑}：选择\emph{更多信息} $\rightarrow$ \emph{仍要运行}。在 Linux
+上下载 \code{normet-1.0.0-x86\_64.AppImage}，赋予可执行权限（\code{chmod +x}）后运行。在
+精简的发行版上，Qt 可能需要 \code{libegl1 libgl1 libxkbcommon0 libdbus-1-3 libxcb-cursor0}。
+
+安装包由仓库的 \code{build-gui.yml} 工作流构建（每个操作系统一个；PyInstaller 不能交叉
+编译），附在其运行记录的 \emph{Actions $\rightarrow$ Artifacts} 下。
+\code{packaging/README.md} 说明了如何在本地构建。
+
+\section{从 PyPI 安装}
+\nm{} 需要 Python~3.10 或更高版本（测试过 3.10--3.12），以及低于 2 的 NumPy。核心包很小，
+较重的依赖都是扩展：
+\begin{lstlisting}[language=bash]
+python -m venv .venv && source .venv/bin/activate
+pip install "normet[gui,flaml]"      # the desktop app with the AutoML backend
+normet-gui                           # or: normet-gui mydata.csv
+\end{lstlisting}
+
+\begin{center}\small
+\begin{tabular}{@{}ll@{}}
+\toprule
+扩展 & 增加的功能 \\
+\midrule
+\code{flaml}      & FLAML AutoML 后端（含 FLAML 会导入的 XGBoost）——推荐 \\
+\code{lgb}        & LightGBM 后端，随机超参数搜索 \\
+\code{gui}        & PySide6，用于 \code{normet-gui} \\
+\code{data}       & ERA5（CDS）、英国监测网络、OpenAQ、EEA、Open-Meteo 适配器 \\
+\code{geo}        & Shapely 和 pyshp：从 GeoJSON/Shapefile 读取源区 \\
+\code{cli}        & Click 和 PyYAML，用于 \code{normet} 命令 \\
+\code{foundation} & Chronos-2 和 PyTorch：零样本去气象化、站点嵌入 \\
+\code{finetune}   & \code{foundation} 加 \code{accelerate} 和 \code{peft}，用于微调 Chronos-2 \\
+\code{bayes}      & PyMC 和 ArviZ，用于贝叶斯 SCM \\
+\code{mcp}        & MCP 服务器 \code{normet-mcp}，供 AI 助手使用 \\
+\code{physics}    & PyTorch，用于物理约束的图模型 \\
+\code{dask}       & Dask，用于大数据集 \\
+\code{all}        & 以上全部 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+导入 \nm{} 从不需要可选依赖：需要某个依赖的函数在被调用时会说明应安装哪个扩展。
+
+% ============================ 3. METHODOLOGY =================================
+\chapter{方法}\label{ch:theory}
+
+本章解释 \nm{} 计算的是什么，好让你有把握地解读它报告的数字。运行一次分析不需要读它；
+为一次分析辩护则需要。
+
+\section{准备数据}\label{sec:prepare}
+训练模型之前，表格按以下顺序经过 \code{prepare\_data}：
+\begin{enumerate}\nosep
+  \item \textbf{日期列。}表格必须有一个名为 \code{date} 的日期时间列（或者是索引，或者是
+        名为 \code{datetime}、\code{time} 或 \code{timestamp} 的列，会被重命名）。带时区
+        的日期先转换为 UTC，再去掉时区。
+  \item \textbf{目标和预测变量。}目标重命名为 \code{value}；表格只保留日期、目标和预测
+        变量。
+  \item \textbf{缺失值。}目标缺失的行被删除。数值型预测变量的缺失值用该列中位数填补；
+        类别型的用众数填补。
+  \item \textbf{日历变量。}增加四列：\code{date\_unix}（自 1970 年起的秒数，即趋势）、
+        \code{day\_julian}（一年中的第几天，即季节）、\code{weekday}（1~=~星期一 到
+        7~=~星期日，类别型）和 \code{hour}。模型只使用列在其预测变量中的那些；窗口总是把
+        四个都列上。
+  \item \textbf{训练/测试划分。}\code{set} 列把每一行标为 \code{training} 或
+        \code{testing}（第~\ref{sec:split}~节）。
+\end{enumerate}
+
+\subsection{划分}\label{sec:split}
+模型的拟合好坏以留出的行来评判。提供四种划分：
+\begin{description}\nosep
+  \item[\code{random}]（默认）随机留出 25\,\% 的行。每个季节、星期几和小时在训练集中
+        都有代表。
+  \item[\code{ts}] 留出记录的最后 25\,\%。此时趋势变量必须外推到训练中从未见过的范围，
+        而树模型做不到；用它来检验预测能力，不要用它来为归一化训练模型。
+  \item[\code{month\_ts}] 在每一年的每个日历月内，留出一段连续的 25\,\%，其在月中的位置
+        随机（有种子）。
+  \item[\code{season\_ts}] 同上，但在每个气象季节内（DJF、MAM、JJA、SON；12 月算入
+        下一年的冬季）。
+\end{description}
+
+\caution{在 \code{random} 划分下，相邻的小时分落在划分的两侧，所以自相关的记录看起来比
+实际更容易预测：测试集的 $R^2$ 是一个上界。对在若干小时内保持不变的预测变量，这一点最要紧，
+例如每六小时释放一次的后向轨迹特征——树模型可以把它当作时间戳来用。在自带的 MY1 \PMtwo{}
+案例上，只用轨迹的模型在随机划分下得分约 0.84，在分块划分下只有 0.46。请用
+\code{month\_ts} 来评判这类模型。}
+
+\section{训练模型}\label{sec:train}
+\nm{}（默认）训练梯度提升树，把预测变量映射到目标。提供两种后端：
+\begin{description}\nosep
+  \item[FLAML] 在墙钟\emph{时间预算}内对所勾选的估计器做 AutoML 搜索（默认只有
+        LightGBM；可以加入 XGBoost、限深 XGBoost、随机森林、极端随机树和 scikit-learn 的
+        直方图梯度提升），最大化 $R^2$。库的默认预算是 90~s，窗口的是 60~s。
+  \item[LightGBM] LightGBM 加上固定\emph{次数}的随机超参数搜索（窗口中为 20 次）。
+\end{description}
+更长的预算很少有害，对长记录常常有益。由于 FLAML 的预算是墙钟时间，同一脚本在同一数据上，
+在更繁忙的机器上可能停在不同的候选模型上；若要以次数而非时间为界，请在 \code{model\_config}
+中设置 \code{max\_iter} 并令 \code{time\_budget=-1}。
+
+\subsection{模型统计量}\label{sec:modstats}
+\code{modStats} 分别预测训练行、测试行和全部行，并对每一组报告：$n$；FAC2（预测值落在观测
+值两倍以内的比例）；MB 和 MGE（平均偏差和平均总误差）；NMB 和 NMGE（同上，按观测值之和
+归一化）；RMSE；$r$ 及其显著性；COE（效率系数）；IOA（一致性指数）；以及 $R^2$。评判模型
+应看留出（$\text{set} = \text{testing}$）那一行。
+
+\section{气象归一化}\label{sec:normalise}
+方程~\eqref{eq:norm} 用蒙特卡洛方法计算。对 $N$ 次抽样（\code{n\_samples}，默认 300）中的
+每一次：
+\begin{enumerate}\nosep
+  \item 每一行的\emph{重采样变量}被整体替换为从\emph{重采样池}（默认即记录本身）中
+        随机（有放回）抽取的一行的对应值。抽取的是整行，所以重采样变量保持其联合结构：
+        一次抽样绝不会把冬季的温度和夏季的边界层配在一起。
+  \item 其余每个预测变量——默认是四个日历变量——保持其观测值。
+  \item 模型预测每一行。
+\end{enumerate}
+归一化序列是每个时刻 $N$ 次预测的平均；设置 \code{return\_quantiles} 时，还会返回 $N$ 次
+预测的指定分位数，列名为 \code{q050}、\code{q950} 等（分位数 $\times 1000$）。这些分位数
+描述的是预测在不同天气下的离散程度，而不是模型的不确定性。
+
+\paragraph{重采样哪些变量。}重采样气象、保留日历，是通常的去气象化。若也重采样某个日历
+变量，就会去掉它所承载的东西：重采样 \code{day\_julian} 会去掉季节循环，重采样
+\code{date\_unix} 会去掉趋势。非气象的预测变量——比如交通流量——不勾选即可保持其观测值。
+
+\paragraph{抽样多少次。}每个时刻的蒙特卡洛误差按 $1/\sqrt{N}$ 减小。对平滑的日均或月均，
+300 次绰绰有余；单个小时的噪声更大。\code{normalise\_auto} 会替你选择 $N$：它每次增加 100
+次抽样，直到连续三次检查中 95\,\% 的时刻蒙特卡洛相对标准误都低于 3\,\%，或已达 5000 次
+（达到上限时会发出警告）。
+
+\paragraph{参考池。}\code{resample\_df} 从另一张表中抽取天气——例如用 2019 年的天气，
+询问在 2019 年的气象下 2020 年会是什么样子。\code{conditional\_on} 把重采样池限制在满足
+条件的行——一个值、一组值或该列的一个函数，例如 \code{\{"ws": lambda v: v < 2\}} 只从静风
+时段中抽取。\code{resample\_pools} 让某些变量从各自的池中抽取：
+\code{\{"transport": clean\_hours[traj\_cols]\}} 从清洁气团时段中抽取轨迹特征，而本地天气
+仍从整条记录中抽取。每个池有自己的随机数流，所以增加或重命名一个池不会改变其他池的抽样。
+
+\paragraph{可重复性。}抽样带有种子（默认 \code{seed=7654321}），所以相同的模型、数据和
+设置给出逐位相同的序列。
+
+\section{排放分解}\label{sec:emission}
+排放分解通过\emph{嵌套}归一化，把归一化序列分解到日历变量所承载的各个时间尺度上。用同一个
+种子运行五次归一化，每次多固定一个日历变量，顺序固定如下：
+\begin{center}\small
+\begin{tabular}{@{}llll@{}}
+\toprule
+运行 & 保持观测值 & 重采样 & 得到 \\
+\midrule
+$b$         & 无                                       & 全部       & 基准 \\
+$u$         & \code{date\_unix}                        & 其余       & 趋势 $= u - b$ \\
+$j$         & \ldots{} + \code{day\_julian}            & 其余       & 季节 $= j - u$ \\
+$w$         & \ldots{} + \code{weekday}                & 其余       & 星期 $= w - j$ \\
+$h$         & \ldots{} + \code{hour}                   & 气象       & 日变化 $= h - w$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+最后一次运行 $h$ 就是普通的归一化序列，报告为 \code{emi\_total}。基准运行被拆为其均值
+\code{emi\_base} 和相对该均值的偏差 \code{emi\_noise}；于是
+\begin{equation}
+  \text{emi\_total} = \text{emi\_base} + \text{date\_unix} + \text{day\_julian}
+     + \text{weekday} + \text{hour} + \text{emi\_noise}.
+\end{equation}
+不在模型预测变量中的日历变量没有对应的列。
+
+\caution{顺序决定了每个分量能容纳什么。计算趋势时，一年中的第几天、星期几和小时仍在被
+平均，所以趋势不能承载每年同一日期重复出现的信号——只能是真正的漂移。计算季节分量时，
+每一行自己的趋势值已经固定，所以它不是气候态：它仍特定于其所在的年份，尽管名为“季节”，
+也可能记录下一次性事件，例如某一年的假期低谷或一次封控。要找重复出现的日历效应，请看
+\code{day\_julian}，而不是 \code{date\_unix}。}
+
+\section{气象分解}\label{sec:metdecomp}
+气象分解把预测中由天气解释的部分分摊到各个气象变量上，或分摊到它们的命名分组上。日历始终
+保持观测值。记 $v(S)$ 为把 $S$ 中的变量保持观测值、其余重采样时的归一化序列；
+$v(\emptyset)$ 即 \code{emi\_total}，$v(\text{all})$ 是不做任何重采样时模型的预测。差值
+$v(\text{all}) - v(\emptyset)$ 有两种分摊方式：
+\begin{description}
+  \item[顺序归因] 一次固定一个变量，报告每一步的变化：
+        $\phi_i = v(\{1,\dots,i\}) - v(\{1,\dots,i-1\})$。$k$ 个变量需要 $k+1$ 次归一化，
+        但每项贡献都以其之前固定的变量为条件，所以分摊结果取决于顺序——显式给出的
+        \code{variable\_order}，否则是模型的特征重要性，而后者在模型重新拟合时可能改变。
+  \item[Shapley 归因] 对每个变量在所有可能固定顺序下的边际效应取平均：
+        \begin{equation}
+          \phi_i = \sum_{S \not\ni i} \frac{|S|!\,(k-|S|-1)!}{k!}\,
+                   \bigl[v(S\cup\{i\}) - v(S)\bigr].
+        \end{equation}
+        没有哪个顺序享有特权。精确值需要全部 $2^k$ 个联盟，最多允许 $k=10$；超过时，
+        请把变量分组，或传入 \code{n\_permutations}，用随机顺序（成对的对偶抽样）估计。
+\end{description}
+无论哪种方式，各项贡献之和都严格等于 $v(\text{all}) - v(\emptyset)$；每次归一化都用同一个
+种子，所以它们之间的差是配对的（公共随机数），而不是两个含噪估计之差。结果还包含
+\code{met\_total} = 观测 $-$ \code{emi\_total}、其均值 \code{met\_base}，以及
+\code{met\_noise} = \code{met\_total} $-$ \code{met\_base} $-\sum_i\phi_i$，即观测中模型
+没有再现的部分。
+
+\paragraph{分组。}\code{groups=\{"local": met\_cols, "transport": traj\_cols\}} 为每个分组
+给出一列；分组作为整体固定和重采样，所以它的列包含组内成员之间的交互作用。每个气象预测
+变量必须恰好属于一个分组。有分组时默认用 Shapley 归因，没有分组时默认用顺序归因。
+
+\section{滚动归一化}\label{sec:rolling}
+\code{rolling} 逐窗口地归一化记录：每 \code{rolling\_every} 天（7）开始一个长
+\code{window\_days} 天（默认 14）的窗口，每个窗口的天气\emph{只从该窗口内}抽取。因此短窗口
+只去掉在窗口内变化的天气——对两周的窗口来说就是天气尺度的变化——而保留全记录归一化会去掉
+的较慢的气象变化。结果每个窗口一列，\code{rolling\_0}、\code{rolling\_1}、……；窗口中显示
+它们的均值，以及重叠窗口之间的离散度。
+
+\section{多尺度分解}\label{sec:multiscale}
+记 $Y_W$ 为窗口宽度 $W$ 下滚动归一化序列的均值，$Y_\infty$ 为普通归一化序列（其池为整条
+记录）。随着 $W$ 增大，窗口的池趋近整条记录，$Y_W \to Y_\infty$。不同宽度之间的差值分离出
+每个时间尺度频带特有的天气影响，就像小波细节系数那样：
+\begin{align}
+  D_\text{fast} &= Y_\text{fast} - Y_\text{meso} && \text{天气尺度，月以下} \\
+  D_\text{meso} &= Y_\text{meso} - Y_\text{slow} && \text{季节内} \\
+  D_\text{slow} &= Y_\text{slow} - Y_\infty      && \text{连慢窗口的池也留下的部分}
+\end{align}
+宽度默认为 14、90 和 365~天。每个尺度的窗口以宽度的四分之一为步长；在记录上窗口少于两个
+的尺度会被跳过，并附说明。
+
+\section{部分依赖}\label{sec:pdptheory}
+部分依赖曲线显示模型的预测如何随一个预测变量变化，而其他变量在数据上取平均：在该变量第 1
+到第 99 百分位之间取 \code{grid\_points} 个值，对每个值，把每个训练行的该变量设为这个值，
+再对预测取平均。\code{pdp\_mean} 就是这个平均，\code{pdp\_std} 是预测围绕它的离散度。曲线
+描述的是模型，而不是大气；相关的预测变量（比如温度和边界层高度）被一次只改变一个，会得到
+记录中可能从未出现过的组合。
+
+\section{用 Chronos-2 零样本去气象化}\label{sec:chronos}
+Chronos-2 是一个预训练的时间序列基础模型。\nm{} 不经训练直接使用它：气象通过模型的协变量
+通道输入，天气则完全按方程~\eqref{eq:norm} 通过重采样边缘化。它适用于历史太短无法训练、
+刚投入运行的站点，或者作为一个从未见过目标自身记录的模型给出的第二个估计。四个特性决定它
+是否合适：
+\begin{itemize}\nosep
+  \item \textbf{前 \code{context\_length} 行不是结果。}模型需要这么长的历史（默认 2048 行）
+        才能外推，所以这些行用观测值填入，两条曲线在那里按构造重合。给它几年的数据，
+        而不是几个月。
+  \item \textbf{每次蒙特卡洛抽样都是一次完整的前向计算}，所以默认 8 次抽样，而不是 300 次。
+        模型按优先顺序在 CUDA、Apple Silicon（\code{mps}）或 CPU 上运行；CPU 很慢。
+  \item \textbf{位置即时间。}Chronos-2 数的是行，所以记录必须在规则网格上；
+        \code{to\_regular\_index} 会重建它，空缺留作缺失。
+  \item \textbf{协变量敏感性是质量门槛。}没有拟合任何东西，所以没有留出集上的拟合，
+        也没有特征重要性。取而代之的是打乱未来的天气，度量预测中位数的偏移。若低于预测值
+        的约 1\,\%，说明模型在读目标自身的历史而忽略天气，由它得到的“归一化”序列没有意义。
+\end{itemize}
+气象分解有零样本路径。排放分解、滚动归一化和部分依赖没有：它们定义在已拟合模型对日历变量
+的响应上，而 Chronos-2 是从目标自身的历史中读出这些的。
+
+\section{合成控制}\label{sec:scmtheory}
+合成控制用一个在\emph{干预日期}前后都有观测的单元面板，估计一项干预对一个\emph{处理}单元
+（一个站点、一座城市）的效应。干预没有触及的单元——\emph{供体池}——被组合成处理单元的一个
+合成版本，在干预日期之前跟踪处理单元；干预日期之后，合成序列就是反事实，而
+\begin{equation}
+  \text{效应}_t = \text{观测}_t - \text{合成}_t .
+\end{equation}
+干预后时段的平均效应报告为 ATT（处理组平均处理效应）。对空气质量结果变量而言，去气象化的
+序列是自然的输入：这样天气就不属于供体必须再现的东西。
+
+\subsection{估计器}
+\begin{description}\nosep
+  \item[\code{scm}] 增广 SCM（默认）。在每个日期，对供体做岭回归，用每个单元干预前的轨迹
+        预测结果变量；合成值是处理单元的岭回归预测加上供体岭回归残差的加权和，权重之和为
+        一（除非允许，否则非负）。
+  \item[\code{abadie}] 经典 SCM：非负且和为一的供体权重，拟合处理单元干预前的路径。
+        易于解释，但处理单元落在供体范围之外时无法拟合。
+  \item[\code{did}] 双重差分：假设平行趋势的双向固定效应基准。
+  \item[\code{mcnnm}] 核范数最小化的矩阵补全（Athey 等，2021）：把干预后处理单元的格子
+        当作缺失，用面板的低秩拟合填补。
+  \item[\code{robust}] 稳健 SCM（Amjad、Shah 和 Shen，2018）：拟合权重之前，先用奇异值
+        阈值对供体矩阵去噪。
+  \item[\code{mlscm}] ML 增广 SCM（\emph{实验性}）：一个 AutoML 模型在干预前时段把供体的
+        结果映射到处理单元的结果。它缺乏其他方法的因果保证，并会就此发出警告。
+  \item[\code{bayesian}] 贝叶斯单纯形 SCM（PyMC）：权重取 Dirichlet 先验，直接给出后验
+        可信区间。
+\end{description}
+
+\subsection{诊断}\label{sec:scmdiag}
+\code{scm\_diagnostics} 报告干预前的拟合（\code{pre\_rmse}、\code{pre\_mae}、
+\code{pre\_mape}、\code{pre\_r2}）、干预后的效应（\code{att}、\code{att\_cum}、
+\code{post\_rmse}）以及权重的集中程度：Herfindahl 指数 $\text{HHI} = \sum_j w_j^2$、有效
+供体数 $1/\text{HHI}$，以及权重最大的供体及其份额。
+
+\caution{只有当估计器不能把任意序列拟合得同样好时，干预前的良好拟合才算证据。凡是对供体
+加权以匹配干预前时段的估计器，在供体数相对于干预前日期数较多时都会过拟合，增广 SCM
+（\code{scm}）最甚：它的岭回归特征是各单元干预前的结果，所以在某个干预前日期，处理单元自己
+在该日期的值就是用来预测它的特征之一；供体数与日期数一样多时，它几乎能再现任何干预前时段。
+在第\ref{ch:scm}章的 ULEZ 面板上（27 个干预前月份），把处理序列换成随机噪声，用 5 个供体
+拟合得 $R^2 = -0.05$，20 个得 0.69，53 个得 0.997；经典 SCM 用 40 个随机游走供体拟合 12 个
+月，对打乱的序列也能得到 0.60。因此 SCM 工作室会把处理单元干预前的值按时间打乱后，用同一
+设计重新拟合一次，只有当打乱的序列达不到 0.5 时，才解读干预前的 $R^2$
+（第~\ref{sec:scmfit}~节）。\code{scm} 估计器的供体权重只平衡岭回归残差，所以它们的集中
+程度并不说明合成单元由哪些供体构成。}
+
+\subsection{推断}\label{sec:scminference}
+\begin{description}
+  \item[空间安慰剂] 依次把每个供体当作处理单元，用\emph{其他}供体为它构建合成控制（真正的
+        处理单元从不作为安慰剂的供体）。以干预后平均效应为统计量，置换 $p$ 值为
+        \begin{equation}
+          p = \frac{1 + \#\{\,j : |\bar{e}_j| \ge |\bar{e}_\text{treated}|\,\}}{1 + J},
+        \end{equation}
+        其中 $J$ 为安慰剂单元数；它最小为 $1/(J+1)$。安慰剂效应也给出处理效应的逐点区间。
+  \item[时间安慰剂] 把干预日期移到更早、什么都没发生的日期（每 \code{placebo\_every} 步
+        一个，其前至少保留 \code{min\_pre\_period} 步）。真实效应以同样方式与这些伪干预
+        日期的效应排序。每个伪干预后时段都必须在真实干预日期之前结束。
+  \item[刀切法区间] 依次去掉每个供体重新拟合；效应的离散度给出逐点区间。由单个供体撑起的
+        结果会在这里显现。
+  \item[自助法区间] 在供体的随机子集上（默认 80\,\%）重复拟合 $B$ 次，可选地对干预前时段
+        做分块重采样。
+  \item[共形区间] \code{conformal\_effect\_interval} 给出干预后平均效应的有限样本区间
+        （Chernozhukov、W\"uthrich 和 Zhu，2021）；\code{rmspe\_ratio\_test} 给出 Abadie
+        的干预后/干预前 RMSPE 比值检验。
+\end{description}
+
+% ============================ 4. GETTING STARTED ==============================
+\chapter{入门}\label{ch:start}
+
+\section{打开表格之前的窗口}
+\nm{} 启动时停在\tab{数据}标签页上，尚未载入任何数据（图~\ref{fig:welcome}）；参数面板
+收起，助手（第\ref{ch:assistant}章）在结果旁边打开。操作栏上的\emph{展开面板}或 Ctrl+B
+把参数面板展开；\tab{视图 $\rightarrow$ 助手}关闭助手。在\emph{从时间序列开始}下面有三个
+按钮——\emph{打开 CSV…}、\emph{载入示例}和\emph{询问助手}——以及几张入口卡片：两个示例、
+最近打开的五张表（各附文件夹、大小和最后修改日期；之后被移动过的会变灰），以及无需自备文件
+就能获取数据的两处：数据工作室和传输工作室。没有内容可列的卡片会被省略。把 \code{.csv} 或
+\code{.csv.gz} 文件拖到窗口任意位置即可打开它。
+
+\screenshot{ui_welcome.png}{启动时的窗口：\tab{数据}标签页上的欢迎页，标签页上方的操作栏
+（第一个按钮是\emph{展开面板}），右侧的助手和底部的日志。参数面板收起，需要时再展开。}{fig:welcome}
+
+\section{示例}\label{sec:examples}
+\begin{description}
+  \item[去气象化]（\emph{载入示例}，或\tab{文件 $\rightarrow$ 载入示例数据}）即时生成的
+        一年合成逐时数据：\PMtwo{}、PM\textsubscript{10}、\NOtwo{}、O\textsubscript{3}、
+        SO\textsubscript{2} 和 CO，以及 ERA5 风格的气象（\code{u10}、\code{v10}、
+        \code{t2m}、\code{d2m}、\code{blh}、\code{sp}、\code{ssrd}、\code{tcc}、\code{tp}、
+        \code{rh2m}、\code{ws}、\code{wd}）。污染物混合了季节循环、早晚高峰循环和对风速的
+        依赖，所以每一步都有东西可看。目标设为 \PMtwo{}，气象已勾选。
+  \item[合成控制]（欢迎页上的卡片）打开 SCM 工作室，载入一个 31 个单元的周数据面板，其中
+        单元“2+26 cities”的 SO\textsubscript{2} 自 2015-10-23 起被削减约 35\,\%，其他单元
+        都是干净的供体。
+\end{description}
+\nm{} 模型描述论文中的真实记录随包提供，在脚本中载入；本手册的图由其中前两个生成。
+\begin{center}\small
+\begin{tabular}{@{}lp{7.0cm}p{3.2cm}@{}}
+\toprule
+载入函数 & 内容 & 用于 \\
+\midrule
+\code{load\_my1()}      & 伦敦 Marylebone Road 逐时 \NOtwo{} + ERA5 气象，2020 年 1--8 月 & 去气象化 \\
+\code{load\_scm()}      & 104 个英国站点的月均去气象化 \NOtwo{}，2016--2021 & 合成控制（ULEZ） \\
+\code{load\_my1\_pm25()} & MY1 逐时 \PMtwo{} + 气象，2020 年 1--8 月 & 考虑传输的案例 \\
+\code{load\_traj\_my1()} & 到达 MY1 的 6 小时一次的 HYSPLIT 轨迹特征 & 考虑传输的案例 \\
+\code{example\_traj\_dir()} & 两天的原始 HYSPLIT \code{tdump} 文件 & 传输工作室 \\
+\bottomrule
+\end{tabular}
+\end{center}
+要在窗口中打开 MY1，先把它写成 CSV：
+\begin{lstlisting}[language=Python]
+import normet as nm
+nm.datasets.load_my1().to_csv("my1.csv", index=False)
+\end{lstlisting}
+数据来源：英国 AURN（Defra，Open Government Licence v3.0）；ERA5（Copernicus 气候变化服务）；
+HYSPLIT（NOAA ARL）。
+
+\section{第一次分析}
+\begin{enumerate}\nosep
+  \item \tab{载入数据。}\emph{打开 CSV…}，选择一张含 \code{date} 列、污染物及其气象的表
+        （第\ref{ch:data}章）。用\emph{展开面板}（Ctrl+B）展开参数面板，或者询问助手。
+  \item \tab{选择列。}检查目标，勾选预测变量（第~\ref{sec:columns}~节）。
+  \item \tab{训练}（第 1 步），阅读\tab{模型}标签页：留出集上的拟合是否足以用来归一化？
+        （第\ref{ch:train}章）
+  \item \tab{归一化}（第 2 步），比较归一化序列与观测序列（第\ref{ch:normalise}章）。
+  \item 按问题需要进行\tab{分解}（第 3 步）、\tab{滚动}（第 4 步）和\tab{部分依赖}
+        （第 5 步）（第\ref{ch:decompose}--\ref{ch:pdp}章）。
+  \item \tab{保存结果：}导出表格、HTML 报告，并把会话保存为脚本（第\ref{ch:export}章）。
+\end{enumerate}
+
+% ============================ 5. THE INTERFACE ================================
+\chapter{界面}\label{ch:ui}
+
+主窗口左侧是可滚动的\emph{参数面板}，右侧是\emph{结果标签页}。参数面板沿着工作流程往下排列
+——数据、列，然后是第 1 到第 5 步——每一步在决定它的设置旁边都有自己的\emph{运行}按钮。结果
+落在同名步骤的标签页里，该步骤完成时这个标签页会切到前面。参数面板启动时是收起的，把宽度
+留给结果和助手；操作栏上的\emph{折叠 / 展开面板}（Ctrl+B）收起和展开它。参数面板收起时，
+窗口可以缩窄到约 740 像素：此时操作栏会折成两行。
+
+\section{参数面板}
+\begin{description}\nosep
+  \item[数据] \emph{打开 CSV…}和\emph{载入示例}，下方是文件名及其行数和列数。
+  \item[列] 目标和预测变量（第~\ref{sec:columns}~节）。
+  \item[第 1 步 $\cdot$ 训练模型] 后端、划分、训练集比例、时间预算（或搜索次数）、
+        估计器、随机种子；Chronos-2 则换成设备和微调（第\ref{ch:train}章）。
+  \item[第 2 步 $\cdot$ 归一化] 重采样的变量、样本数、CPU 核心数和分位数带
+        （第\ref{ch:normalise}章）。
+  \item[第 3 步 $\cdot$ 分解] 排放或气象；气象分解还有归因方式和分组
+        （第\ref{ch:decompose}章）。
+  \item[第 4 步 $\cdot$ 滚动] 窗口、步长和样本数（第~\ref{sec:rollingui}~节）。
+  \item[多尺度分解] 三种窗口宽度（第~\ref{sec:multiscaleui}~节）。
+  \item[第 5 步 $\cdot$ 部分依赖] 变量和网格点数（第\ref{ch:pdp}章）。
+\end{description}
+底部的\emph{保存配置}和\emph{载入配置}把参数面板的每一项设置写成 JSON 或从 JSON 读回
+（包括目标和预测变量，不包括数据）；\emph{历史}列出已做的运行，最新的在前。
+
+\section{结果标签页}
+\begin{center}\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+标签页 & 显示 & 由谁填充 \\
+\midrule
+数据     & 目标的预览、表格、大小、时间跨度和缺失值 & 载入 \\
+模型     & 评估结论、统计表、散点对比图、特征重要性 & 第 1 步 \\
+归一化   & 观测序列和归一化序列，以及分位数带 & 第 2 步 \\
+分解     & 排放分量或气象分量 & 第 3 步 \\
+滚动     & 各滚动窗口的均值及其离散度 & 第 4 步 \\
+多尺度   & 尺度空间级联和各频带的能量 & 多尺度 \\
+PDP      & 每个变量一幅部分依赖图 & 第 5 步 \\
+\bottomrule
+\end{tabular}
+\end{center}
+需要做判断的标签页以一条\emph{评估横幅}开头，绿色（好）、琥珀色（注意）或红色（不可用），
+接着是几行说明运行了什么的文字，有表格时再附一张简表。每幅图都有一条图标小巧、与窗口配色
+一致的工具栏——主页、后退、前进、平移、缩放、子图间距、坐标轴和曲线选项、保存——然后是
+\emph{投稿用图…}（第~\ref{sec:print}~节），最右端是指针所在处的数值。无论窗口是什么外观，
+图都以白底深色保存。每幅图都按期刊的要求绘制：7 到 8.5~pt 的文字，细坐标轴，刻度朝外，图例
+不加边框，色盲读者也能分辨的配色，化学式带下标（\NOtwo{}、\PMtwo{}），日期轴每一级只写一次
+——年份写一次，然后是月份——共用一条时间轴的堆叠子图只在最下面一幅标注日期。
+
+\paragraph{时间分辨率。}\tab{数据}、\tab{归一化}、\tab{分解}和\tab{滚动}标签页上的时间
+序列图上方有一个\emph{时间分辨率}选择器：\emph{原始}、\emph{逐时}、\emph{日均}、\emph{周均}、
+\emph{月均}或\emph{年均}。选择更粗的步长时，图按每个时段的均值重画，长的逐时记录因此更易读；
+比记录本身更细的步长呈灰色。改变的只是显示：结果、结果表及其导出仍保持记录本身的分辨率。
+
+\section{操作栏}
+标签页上方依次是：\emph{折叠 / 展开面板}、\emph{获取英国数据}（数据工作室，
+第~\ref{sec:datastudio}~节）、\emph{传输工作室}（第~\ref{sec:transport}~节）、
+\emph{导出结果 CSV}（当前标签页的表）、\emph{HTML 报告}（当前标签页的结果，连同其溯源信息
+生成报告）和 \emph{SCM 工作室}（第\ref{ch:scm}章）。
+
+\section{运行按钮}
+\begin{center}\small
+\begin{tabular}{@{}lp{5.0cm}l@{}}
+\toprule
+按钮 & 需要 & 运行 \\
+\midrule
+训练模型 / 载入 Chronos-2 & 一张表，至少勾选一个预测变量 & \code{build\_model} \\
+微调 Chronos-2        & 已载入 Chronos-2         & \code{finetune} \\
+运行归一化            & 一个模型，至少一个重采样变量 & \code{normalise} \\
+运行分解              & 一个模型                 & \code{decompose} \\
+运行滚动归一化        & 一个 AutoML 模型         & \code{rolling} \\
+多尺度分解            & 一个 AutoML 模型，第 2 步的结果 & \code{rolling} $\times 3$ \\
+计算 PDP              & 一个 AutoML 模型，至少勾选一个变量 & \code{pdp} \\
+\bottomrule
+\end{tabular}
+\end{center}
+按钮只在能执行时才可用；不能执行时，它的工具提示会说明缺什么。一次只运行一个任务，在后台
+线程上运行，所以窗口保持响应；运行期间各运行按钮被禁用，状态栏显示任务名和忙碌进度条，
+\emph{取消}可用。取消会\emph{放弃}该任务：窗口立刻空出来，但计算无法中断，它会在后台跑完，
+结果被丢弃。每一步的调用在成功时被加入命令日志（第~\ref{sec:commandlog}~节）。
+
+\section{菜单和快捷键}
+\begin{center}\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+菜单 & 命令 & 快捷键 \\
+\midrule
+文件     & 打开 CSV…                            & Ctrl+O \\
+         & 载入示例数据                         & \\
+         & 获取英国数据（空气质量网络 + 气象）… & Ctrl+D \\
+         & 最近打开（八张表）                   & \\
+         & 导出当前结果…                        & Ctrl+E \\
+         & 导出 HTML 报告…                      & \\
+         & 将会话保存为脚本…                    & \\
+         & 保存配置… / 载入配置…                & \\
+视图     & 命令面板…                            & Ctrl+K \\
+         & 折叠 / 展开面板                      & Ctrl+B \\
+         & 运行历史…                            & \\
+         & 日志、命令日志                       & \\
+         & 助手                                 & Ctrl+Shift+A \\
+         & 外观：跟随系统、浅色、深色           & \\
+         & 语言：跟随系统、English、中文        & \\
+分析     & 合成控制（SCM）工作室…               & Ctrl+Shift+S \\
+帮助     & 文档、关于 Normet                    & \\
+\bottomrule
+\end{tabular}
+\end{center}
+在 macOS 上，Ctrl 即 Command 键。\emph{命令面板}（Ctrl+K）列出每一条菜单命令和每一个结果
+标签页；输入其中几个字母再按回车即可。
+
+\section{停靠窗}
+底部的\emph{日志}停靠窗实时显示 \nm{} 的日志：每一步做了什么、多少行、FLAML 选中的估计器
+及其超参数、一次滚动运行生成了多少窗口。任务失败时，完整的回溯写在这里，最后一行显示在
+对话框中。\emph{命令日志}与它共用停靠窗（第~\ref{sec:commandlog}~节）；\emph{助手}在右侧
+打开（第\ref{ch:assistant}章）。
+
+\section{外观和语言}\label{sec:appearance}
+窗口及其图跟随系统的浅色或深色外观；\tab{视图 $\rightarrow$ 外观}可以固定其中一种。深色
+窗口上的图只为显示而重新着色——底色、文字、刻度和网格；承载数据的颜色保持不变——保存时
+用浅色。
+
+窗口可以用英文或中文显示：默认跟随系统语言，也可以在\tab{视图 $\rightarrow$ 语言}中选择，
+选择会保留到下次启动。切换立即生效——菜单、按钮、标签页、工具提示、评估结论，以及图的标题、
+坐标轴标签和月份名，都会用所选语言重新写出，图按显示的样子保存。数据自身的文字（列名、站点
+代码）、日志、命令日志里的代码和助手的对话保持原样。在 macOS 上，系统自带的菜单项（服务、
+隐藏、退出）从下次启动起跟随新语言。
+
+% ============================ 6. COLUMNS AND TRAINING =========================
+\chapter{训练模型（第 1 步）}\label{ch:train}
+
+\section{表格及其列}\label{sec:columns}
+在主窗口中打开的表需要一个名为 \code{date}（不区分大小写）、取值能解析为日期的列；其他每个
+数值列都可作为目标和预测变量。目标预设为第一个名字像污染物的列（\PMtwo{}、PM10、\NOtwo{}、
+O3、SO2、CO、NOx），预测变量预设为被识别为气象的列：
+\begin{center}\small
+\code{u10 v10 d2m t2m blh sp ssrd tcc tp rh2m ws wd temp rh pressure}
+\end{center}
+（匹配时不区分大小写）。\emph{全部}、\emph{无}和\emph{仅气象}一次性设置勾选。目标即使被
+勾选也从不作为预测变量。四个日历变量自动加入每个模型，不在列表中列出。
+
+\note{用其他名字命名的气象列不会被识别，必须手动勾选——在 MY1 中就是 \code{atmos\_pres}。
+第 2 步的\emph{仅气象}也是如此（第\ref{ch:normalise}章）。}
+
+\screenshot{ui_data.png}{打开 MY1：2020-01-01 至 2020-08-31 共 5,793 个逐时行、11 列，
+无缺失值。目标 \NOtwo{} 被识别出来；九个气象预测变量已勾选（\code{atmos\_pres} 为手动
+勾选）。标签页预览目标序列并列出表格。}{fig:data}
+
+\section{设置}
+\begin{description}\nosep
+  \item[后端] \code{flaml}、\code{lightgbm} 或 \code{chronos-2}
+        （第~\ref{sec:chronosui}~节）。未安装 Chronos-2 的扩展时它呈灰色，工具提示会说明
+        原因。
+  \item[划分方法、训练集比例] 见第~\ref{sec:split}~节；默认 0.75。
+  \item[时间预算] FLAML 的搜索时间，默认 60~s。对 LightGBM，这一行变为\emph{搜索次数}，
+        默认 20；切换后端时各自的值会被保留。
+  \item[估计器]（仅 FLAML）默认只有 LightGBM；加入更多以扩大搜索范围。
+  \item[随机种子] 默认 7654321：划分和搜索都以它为种子。
+\end{description}
+
+\section{阅读模型标签页}
+\emph{训练模型}运行 \code{build\_model}——准备数据、划分和搜索——并填充\tab{模型}标签页
+（图~\ref{fig:model}）。评估结论依据留出集的 $R^2$：0.7 及以上为拟合良好，0.5 到 0.7 为
+一般，低于 0.5 为差。表格是训练行、测试行和全部行的 \code{modStats}
+（第~\ref{sec:modstats}~节）；散点对比图显示留出行的观测与预测；条形图是模型的特征重要性
+（LightGBM 为分裂次数）。
+
+\screenshot{ui_model.png}{用 FLAML（LightGBM，30~s 预算，随机划分）训练 MY1：在 1,448 个
+留出小时上 $R^2 = 0.883$、RMSE $= 8.66$~\ugm{}，而在 4,345 个训练小时上为 $0.976$。风向和
+风速、边界层高度和趋势承担了最多的分裂。}{fig:model}
+
+提升树在训练行上的拟合远好于留出行，这是意料之中的，本身不成问题；留出集上拟合差才是问题。
+在用一般或差的模型做归一化之前，试试更多预测变量、更长的预算或更多估计器。归一化序列会
+继承模型的误差。
+
+\section{Chronos-2}\label{sec:chronosui}
+选择 \code{chronos-2} 时，训练相关的控件被隐藏——没有东西要训练，没有预算，没有划分——按钮
+变为\emph{载入 Chronos-2}。第一次载入会下载约 500~MB 的权重。\emph{设备}选择在哪里运行
+（\emph{auto}：先 CUDA，再 Apple Silicon，最后 CPU）。至少要勾选一个气象预测变量：没有
+协变量时，模型做的只是普通预测，而不是去气象化。
+
+此后\tab{模型}标签页报告检查点、设备、上下文长度和预测长度，以及协变量敏感性检查
+（第~\ref{sec:chronos}~节）：打乱未来天气时预测中位数的平均偏移和最大偏移，以及该偏移占
+预测值的百分比。5\,\% 及以上为绿色，1 到 5\,\% 为琥珀色（序列主要由目标自身的历史承载），
+低于 1\,\% 为红色（模型在做自回归，由它得到的去气象化序列毫无意义）。
+
+\emph{微调 Chronos-2} 让已载入的检查点适应本站点自己的记录：\emph{lora} 训练小型适配器，
+不动基础权重（需要 \code{peft}）；\emph{full} 更新全部 1.19 亿个参数，更容易对单个站点
+过拟合。\emph{步数}设置优化器步数（300）。微调后的权重在本次会话中替换原模型；重新归一化
+才会用上它们，重新载入 Chronos-2 即可恢复。在 Chronos-2 后端上，第 4、5 步和排放分解被
+禁用，建立在第 4 步之上的多尺度分解也不适用（第~\ref{sec:chronos}~节）。
+
+% ============================ 7. NORMALISATION ================================
+\chapter{归一化（第 2 步）}\label{ch:normalise}
+
+\begin{description}\nosep
+  \item[重采样变量] 模型训练所用的每个变量，包括四个日历变量。勾选的变量被重采样（其影响
+        被平均掉）；未勾选的保持观测值。训练后列表设为\emph{仅气象}——通常的去气象化——
+        \emph{全部}则勾选一切，这会把趋势以及季节和星期循环也一并去掉。
+  \item[样本数] 蒙特卡洛抽样次数，默认 300（Chronos-2 为 8；多少次才够见
+        第~\ref{sec:normalise}~节）。
+  \item[CPU 核心数] \emph{auto} 使用除一个以外的全部核心。
+  \item[5--95\,\% 分位数带] 同时返回抽样的第 5、25、75 和 95 百分位，并给外侧带上色。
+\end{description}
+
+\screenshot{ui_normalise.png}{用全部九个气象变量、300 次抽样归一化 MY1。归一化序列（红）
+保留了日变化和星期循环——日历保持观测值——而观测序列（蓝）中由天气驱动的峰值被平均掉。
+三月第三周的台阶式下降是封控：天气解释不了它。}{fig:normalise}
+
+图上方的一行给出时刻数、抽样次数和重采样变量数，以及整条记录上归一化 $-$ 观测的均值：这里
+是 $-0.26$~\ugm{}，因为八个月下来天气的影响大致相互抵消。月均值讲述了图中的故事：
+\begin{center}\small
+\begin{tabular}{@{}lrrrrrrrr@{}}
+\toprule
+\NOtwo{}（\ugm{}） & 1 月 & 2 月 & 3 月 & 4 月 & 5 月 & 6 月 & 7 月 & 8 月 \\
+\midrule
+观测     & 60.3 & 65.2 & 51.7 & 34.5 & 30.7 & 35.1 & 31.6 & 36.6 \\
+归一化   & 59.7 & 64.7 & 54.0 & 34.7 & 32.1 & 32.5 & 32.1 & 33.8 \\
+\bottomrule
+\end{tabular}
+\end{center}
+从 2 月到 4 月，归一化序列下降了 30.0~\ugm{}（46\,\%），观测下降了 30.7~\ugm{}：春季的
+下降几乎都不是天气造成的。3 月的天气比通常更清洁（观测比归一化低 2.3），6 月和 8 月则更脏。
+
+\note{在 Chronos-2 上，前 \code{context\_length} 行用观测值填入；它们在图上以灰色阴影标出，
+图下方的一行说明有多少行，均值只在其余的行上计算。}
+
+\caution{归一化序列是模型在典型天气下的期望。没有学到天气影响的模型——拟合差，或预测变量中
+缺少气象——返回的结果接近观测序列，看起来像一条没什么可去除的去气象化序列。请先阅读
+\tab{模型}标签页。}
+
+% ============================ 8. DECOMPOSITION ================================
+\chapter{分解（第 3 步）}\label{ch:decompose}
+
+\section{按时间尺度：排放分解}
+把\emph{方法}设为 \emph{emission} 时，第 3 步运行第~\ref{sec:emission}~节的嵌套归一化，
+画出归一化序列及其趋势、季节、星期、日变化和短期分量，每个分量附其标准差 $\sigma$
+（图~\ref{fig:emission}）。图上方的一行指出 $\sigma$ 最大的分量。
+
+\screenshot{ui_decompose_emission.png}{MY1 的排放分解（每次归一化 100 次抽样；基准
+43.1~\ugm{}）。封控同时表现为趋势（$\sigma = 9.56$）和季节分量（$\sigma = 4.74$）中的
+台阶：一次性事件不是季节，而记录太短，无法把二者分开。日变化最大（$\sigma = 9.92$），
+并在封控后减弱，就像早晚高峰的交通一样；星期循环（$\sigma = 3.36$）每到周末下降。}{fig:emission}
+
+\section{按变量：气象分解}
+把\emph{方法}设为 \emph{meteorology} 时，第 3 步把观测 $-$ 归一化分摊到各个气象变量上
+（第~\ref{sec:metdecomp}~节）。另有两项设置可用：
+\begin{description}\nosep
+  \item[归因方式] \emph{sequential}（顺序）、\emph{shapley}，或 \emph{auto}（给了分组时用
+        Shapley，否则用顺序）。
+  \item[分组] 可选的命名分组，写作 \code{name: var, var; name: var, \ldots}。每个训练用到的
+        气象变量必须恰好属于一个分组，否则窗口会在运行前指出缺了哪些。
+\end{description}
+图中显示 met\_total，以及每个变量或分组一幅子图，并在 \code{met\_noise}（模型没有再现的
+部分）旁边给出它们 $\sigma$ 的排序（图~\ref{fig:metdecomp}）。
+
+\screenshot{ui_decompose_met.png}{MY1 的天气影响（观测 $-$ 归一化，
+$\sigma = 16.79$~\ugm{}）按精确 Shapley 值（16 个联盟）分摊到四个分组：风（\code{ws}、
+\code{wd}；$\sigma = 9.92$）、热力（\code{temp}、\code{RH}；5.24）、混合（\code{blh}、
+\code{atmos\_pres}；4.89）和天空（\code{tcc}、\code{tp}、\code{ssrd}；3.44）。}{fig:metdecomp}
+
+分解在顺序归因下运行 $k+1$ 次归一化，在 Shapley 归因下运行 $2^k$ 次，每次\emph{样本数}次
+抽样，所以开销随变量数迅速增长。十个变量用 Shapley 就是 1024 次归一化：请分组。与归一化
+不同，气象分解总是重采样训练用到的每一个气象变量；它不跟随第 2 步的列表。
+
+% ============================ 9. ROLLING ======================================
+\chapter{滚动与多尺度（第 4 步）}\label{ch:rolling}
+
+\section{滚动归一化}\label{sec:rollingui}
+\emph{窗口}（14~d）、\emph{步长}（7~d）和\emph{样本数}（100）设置第~\ref{sec:rolling}~节
+的窗口；重采样的变量就是第 2 步的那些。标签页显示每个时刻重叠窗口的均值，两个及以上窗口
+重叠处附带它们之间 $\pm 1$ 个标准差（图~\ref{fig:rolling}）。导出的结果表每个窗口一列。
+
+\screenshot{ui_rolling.png}{MY1 的滚动归一化：33 个两周窗口，每周开始一个，每个 50 次抽样。
+每个窗口只去掉在它自己那两周内变化的天气。}{fig:rolling}
+
+\section{多尺度分解}\label{sec:multiscaleui}
+多尺度一栏以三种宽度运行滚动归一化——默认\emph{快窗口}（14~d）、\emph{中窗口}（90~d）和
+\emph{慢窗口}（365~d）——并让它们相互之间以及与第 2 步的序列求差（第~\ref{sec:multiscale}~节）；
+所以必须先运行第 2 步。它使用第 4 步的\emph{样本数}，开销约为三次滚动运行。评估结论指出能量
+（$\sigma$）最大的频带；无法计算的频带会在说明中列出，并附原因。
+
+\screenshot{ui_multiscale.png}{MY1 在 14、60 和 120~天下的多尺度分解（默认的 365 天比这条
+八个月的记录还长）：分别 77、13 和 5 个窗口。天气尺度频带承载最多（$D_\text{fast}$，
+$\sigma \approx 3.0$），其次是季节内和慢频带。}{fig:multiscale}
+
+% ============================ 10. PDP =========================================
+\chapter{部分依赖（第 5 步）}\label{ch:pdp}
+
+训练后，变量列表包含每个预测变量和日历变量，前四个已勾选。\emph{时间变量}和\emph{仅气象}
+切换这两组；\emph{网格点数}（50）设置曲线的精细程度。每幅子图显示曲线（\code{pdp\_mean}）
+及 $\pm$ \code{pdp\_std} 的带，即该取值下各训练行预测值的离散度（第~\ref{sec:pdptheory}~节）。
+
+\screenshot{ui_pdp.png}{MY1 模型的部分依赖：\NOtwo{} 随风速增大而下降，随边界层从最浅处
+加深而下降，在约 20\,$^\circ$C 以上上升，并跟随交通的一天——05:00 前低，07:00 到 17:00
+高。}{fig:pdp}
+
+这些带很宽，是因为其他预测变量在各行之间仍在变化；它们不是曲线的置信区间。
+
+% ============================ 11. SCM STUDIO ==================================
+\chapter{合成控制（SCM 工作室）}\label{ch:scm}
+
+合成控制流程的输入不同——由许多单元组成的长面板——所以它有自己的窗口，可从操作栏上的
+\emph{SCM 工作室}、\tab{分析 $\rightarrow$ 合成控制（SCM）工作室}（Ctrl+Shift+S）或欢迎页
+的示例卡片打开。它的布局与主窗口相同：左侧是参数面板（面板数据、列、设计、估计器、推断），
+右侧是结果标签页（\tab{面板}、\tab{拟合}、\tab{空间安慰剂}、\tab{时间安慰剂}、
+\tab{不确定性}、\tab{全部单元}、\tab{相似度}），上方是\emph{导出当前标签页数据}。方法见
+第~\ref{sec:scmtheory}~节。
+
+本章的图重现了 \nm{} 论文中的 ULEZ 案例：伦敦超低排放区（ULEZ）于 2019 年 4 月 8 日启用，
+在 Marylebone Road（MY1）上用月均去气象化 \NOtwo{} 评估，以英国其他地方的交通站点为供体。
+为了让 COVID-19 不进入干预后时段，面板截止于 2020 年 2 月，并且只保留记录完整的交通站点：
+38 个月、53 个供体。用脚本表示：
+\begin{lstlisting}[language=Python]
+import normet as nm
+scm_df = nm.datasets.load_scm()
+df = scm_df.query("'2017-01-01' <= date < '2020-03-01'")
+df = df[df["type"].str.contains("Traffic")]
+counts = df.dropna(subset=["NO2_dw"]).groupby("code").size()
+donors = [c for c in counts[counts == df["date"].nunique()].index if c != "MY1"]
+df = df[df["code"].isin(donors + ["MY1"])]
+df.to_csv("ulez_panel.csv", index=False)
+\end{lstlisting}
+
+\section{面板数据和列}
+\emph{打开 CSV…}读取一张长表：每个单元每个日期一行。主窗口的表有单元列时，\emph{使用主窗口
+数据}会取用它。\emph{日期}列按列名猜测；\emph{单元}列取第一个非数值、且不同取值个数在 3 到
+行数四分之一之间的列；\emph{结果变量}取名字以 \code{wn} 结尾的数值列（论文表格中的去气象化
+序列），否则取第一个数值列。三者都请检查。
+
+\section{设计}
+\begin{description}\nosep
+  \item[处理单元] 干预所到达的单元。
+  \item[干预日期] 干预后时段的第一天。干预发生的那个月算在哪边是一个判断：这里取
+        2019-04-01，即 ULEZ 启用的月份。
+  \item[供体池] 其余每个单元，均已勾选。干预可能直接或通过溢出到达的单元请取消勾选——
+        自己也受了处理的供体会把反事实拉向处理单元。
+  \item[按相似度排列供体]（需要 \code{foundation} 扩展）用 Chronos-2 嵌入每个单元干预前的
+        记录，按其动态与处理单元的余弦相似度对其他单元排序，显示在\tab{相似度}标签页上；
+        \emph{勾选前 N 个}和\emph{应用}把它们设为供体池。
+\end{description}
+\tab{面板}标签页画出每个单元的结果变量，处理单元为红色，并检查面板：日期 $\times$ 单元的
+格子缺失超过 10\,\% 或干预前日期少于 10 个时为琥珀色，否则为绿色。
+
+\screenshot{ui_scm_panel.png}{ULEZ 面板：MY1（红）与 53 个交通站点供体，月均去气象化
+\NOtwo{}，2017 年 1 月至 2020 年 2 月。MY1 始终是其中最高的。}{fig:scmpanel}
+
+\section{拟合}\label{sec:scmfit}
+\emph{后端}选择估计器（第~\ref{sec:scmtheory}~节）；\emph{机器学习后端}和\emph{时间预算}
+（15~s）用于 \code{mlscm}，\emph{抽样次数}（1000）用于 \code{bayesian}。\emph{运行合成控制}
+填充\tab{拟合}标签页：观测与合成、效应、权重最大的供体，以及诊断表。
+
+对 \code{scm}、\code{abadie}、\code{did}、\code{mcnnm} 和 \code{robust}，这次拟合之后还会
+再拟合一次：同一设计，但处理单元干预前的值按时间打乱——一条与处理单元水平和离散度相同、
+却与供体毫无关系的序列（第~\ref{sec:scmdiag}~节）。它在干预前的 $R^2$ 就是表中
+\code{pre\_r2, shuffled} 一行，并决定评估结论怎么读：
+\begin{itemize}\nosep
+  \item 如果打乱的序列也能达到 $R^2 \ge 0.5$，说明这个设计什么都能拟合，观测的 $R^2$ 不予
+        解读。评估结论为琥珀色，给出 ATT 和两个 $R^2$，并引导你去看空间安慰剂和其他估计器。
+  \item 否则评估结论依据干预前的 $R^2$：0.8 及以上为绿色，0.5 起为琥珀色，更低为红色；
+        并给出 ATT。
+\end{itemize}
+\code{mlscm} 和 \code{bayesian} 太慢，无法拟合两次；它们的评估结论只依据干预前的 $R^2$。
+\code{scm} 拟合会多一行说明其权重只平衡岭回归残差。
+
+\screenshot{ui_scm_fit.png}{MY1 的增广 SCM（\code{scm}）拟合：在 11 个干预后月份上
+ATT $= -18.14$~\ugm{}。干预前 $R^2$ 为 0.999，但把 MY1 干预前的值打乱后仍能拟合到 0.9998
+（两者都显示为 1.00），所以评估结论不解读这一拟合，而是指向安慰剂检验。}{fig:scmfit}
+
+用 53 个供体拟合 27 个干预前月份，这个设计正是增广 SCM 什么都能拟合的情形。它权重最大的
+供体占 99.5\,\%（$\text{HHI} = 0.99$），但这些权重只平衡岭回归模型的残差。
+
+在这个设计上，各估计器的结果并不一致。在同一面板、干预日期和供体上运行：
+\begin{center}\small
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+后端 & 干预前 $R^2$ & 打乱后 $R^2$ & 干预前 RMSE & ATT（\ugm{}） \\
+\midrule
+\code{scm}    & 0.999  & 1.000   & 0.16  & $-18.14$ \\
+\code{abadie} & $-2.94$ & $-3.33$ & 13.20 & $-6.83$ \\
+\code{robust} & 0.37   & 0.16    & 5.27  & $-9.48$ \\
+\code{did}    & $-0.23$ & $-0.09$ & 7.36  & $-20.67$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+打乱一列就是\tab{拟合}标签页计算的基准：只有对 \code{scm}，一条与供体无关的序列才能拟合得和
+MY1 一样好，所以只有它的干预前 $R^2$ 不予解读。经典 SCM 根本拟合不了 MY1：它的权重非负且和为
+一，所以合成单元不能超过最高的供体，而 MY1 高于每一个供体。稳健 SCM 也只能松散地拟合它。
+四个估计在符号上一致，大小却相差三倍。这是关于设计的发现，不是软件的毛病：处理单元落在供体
+范围之外，正是合成控制最难处理的情形，对它的分析应报告这个范围，而不是一个数字。
+
+\section{推断}
+\begin{description}
+  \item[运行空间安慰剂] \tab{空间安慰剂}标签页把每个供体的安慰剂效应画成灰色，处理单元的
+        画成红色，再把处理效应画在安慰剂的 95\,\% 区间内。$p \le 0.05$ 为绿色，0.15 以内为
+        标注“临界”的琥珀色，其余为琥珀色。
+  \item[运行时间安慰剂] 每隔\emph{安慰剂间隔}步（7）设一个伪干预日期，其前至少有
+        \emph{最短干预前时段}步（30）。伪干预后时段必须在真实干预日期之前结束，所以这需要
+        较长的干预前时段；放不下任何一个时，标签页会说明。$p \le 0.05$ 为绿色；当 $p$
+        已是伪干预日期个数所允许的最小值时，评估结论会说明这一点，并建议用更小的步长。
+  \item[不确定性区间] 刀切法（依次去掉每个供体）或自助法（$B$ 次重拟合，默认 100）。评估
+        结论给出干预后的平均效应，以及区间排除零的干预后日期所占比例；达到一半及以上为
+        绿色。
+  \item[运行全部单元] 把每个单元都当作处理单元、以其他所有单元为供体拟合，并按干预后效应
+        的大小排序。处理单元应当突出：位于前十分之一时为绿色。
+\end{description}
+
+\screenshot{ui_scm_placebo.png}{ULEZ 的空间安慰剂：没有哪个供体的安慰剂效应接近 MY1 的，
+所以 $p = 1/54 = 0.019$，即 53 个安慰剂所允许的最小值。每个安慰剂都用同一个估计器拟合，
+所以即使干预前的拟合没有信息量，这一比较也是公平的。}{fig:scmplacebo}
+
+\screenshot{ui_scm_bands.png}{刀切法区间：效应被重新计算 53 次，每次去掉一个供体。干预后
+平均效应为 $-18.14$~\ugm{}，区间在 55\,\% 的干预后日期上排除零（评估结论说的是“天”；面板是
+月数据）。}{fig:scmbands}
+
+% ============================ 12. DATA ========================================
+\chapter{导入数据}\label{ch:data}
+
+\section{输入格式}\label{sec:input}
+主窗口读取的 CSV（或 \code{.csv.gz}）应包含：
+\begin{itemize}\nosep
+  \item 一个名为 \code{date}（不区分大小写）的列，其值能解析为日期和时间——ISO~8601 最稳妥；
+        混合的时区偏移按 UTC 读取；
+  \item 污染物，数值型；
+  \item 气象及其他预测变量，数值型。
+\end{itemize}
+每个时刻一行，逐时或更粗。一个文件里有多个站点的表应放到 SCM 工作室，或在脚本中用
+\code{do\_all\_multisite} 处理。没有 \code{date} 列的表会被拒绝，并提示面板数据请用 SCM
+工作室。允许有缺失值：没有目标的行被删除，缺失的预测变量被填补（第~\ref{sec:prepare}~节）。
+
+\section{数据工作室：英国空气质量和气象}\label{sec:datastudio}
+\emph{获取英国数据}（Ctrl+D）无需离开应用即可拼出一张可建模的表（图~\ref{fig:datastudio}）：
+\begin{enumerate}\nosep
+  \item \textbf{空气质量。}选择一个监测网络——AURN（国家网络，约 210 个站点）、AQE、SAQN、
+        WAQN、NI 或 LMAM（地方管理），共约 1500 个站点——勾选污染物（默认 \PMtwo{}、
+        \NOtwo{} 和 O\textsubscript{3}），然后\emph{查找站点}。\tab{站点}标签页列出测量这些
+        污染物的站点；可按名称或官方代码搜索（\code{MAN3} 是 Manchester Piccadilly），选中
+        一个。
+  \item \textbf{日期范围。}档案按整个日历年提供，从各站点开始运行时起；选中站点后，日期
+        范围会对齐到它的记录。
+  \item \textbf{气象。}Open-Meteo 的 ERA5 档案（无需密钥）、Copernicus CDS（需要
+        \code{\textasciitilde/.cdsapirc}），或不要气象。Open-Meteo 会加入 \code{t2m}、
+        \code{d2m}、\code{rh2m}、\code{sp}、\code{tcc}、\code{tp}、\code{ssrd}、\code{ws}、
+        \code{wd}、\code{u10} 和 \code{v10}——都是第 1 步识别为气象的名字。
+  \item \textbf{获取并合并}下载逐时测量值和站点坐标处的气象，按小时合并。\tab{预览}和
+        \tab{表格}显示结果；\emph{保存合并的 CSV…}把它写出，\emph{发送到主窗口}在主窗口
+        中打开它。
+\end{enumerate}
+这些档案就是 R 的 \code{importUKAQ()} 读取的 openair \code{.RData} 文件，不经 R 直接解析，
+所以数据与 openair 工作流一致。数据工作室需要联网；从它发送来的表保存在内存中，命令日志会
+如实说明这一点，而不是写一条无法重复的 \code{read\_csv}。
+
+\screenshot{ui_data_studio.png}{搜索前的数据工作室：左侧是监测网络、污染物、日期范围和气象
+来源；右侧是站点表、预览和合并后的表。}{fig:datastudio}
+
+\section{传输工作室：后向轨迹预测变量}\label{sec:transport}
+本地气象不会告诉你空气从哪里来。传输工作室把 HYSPLIT 后向轨迹转换成能说明这一点的预测
+变量，并把它们合并到表上（图~\ref{fig:transport}）。
+
+\paragraph{1 $\cdot$ 轨迹文件。}\emph{添加文件…}读入已有的 HYSPLIT \code{tdump} 文件（读取
+它们不需要安装 HYSPLIT）。\emph{站点名称}给结果加上一个 \code{site} 列，这样为多个受体点
+逐一构建的批次只填充各自站点的行。\emph{将短于此值的轨迹置空}（72~h）把因气象数据用完或
+空气离开区域而提前终止的轨迹置空，否则它们会被当成短程传输。
+
+\paragraph{源区。}可选的区域，可以是边界框（名称、经纬度的最小值和最大值），也可以是来自
+GeoJSON 或 Shapefile 文件的多边形（\code{geo} 扩展）。每个区域增加一个停留时间特征：轨迹
+在区域内所占的时间比例。重叠的区域会各自计入落在两者之内的端点。
+
+\paragraph{特征。}每条轨迹成为一行，包含：\code{traj\_n\_endpoints} 和
+\code{traj\_age\_max\_h}（质量：它回溯了多远）、\code{traj\_dist\_km}（直线距离）、
+\code{traj\_pathlen\_km}、\code{traj\_speed\_kmh}、\code{traj\_inflow\_deg}（从受体点指向
+起点的方位角）、\code{traj\_height\_mean} 和 \code{traj\_height\_min}、每个区域一个
+\code{traj\_resid\_}\emph{区域名}，以及——在 \code{tdump} 中有这些数据时——沿途的降水、
+混合层高度、湿度、气压和温度。
+
+\paragraph{2 $\cdot$ 运行 HYSPLIT（高级）。}本地有 \code{hyts\_std} 时，工作室可以自己为一张
+受体点表运行轨迹，可选高度、回溯小时数和时间步长，气象用它下载的 GDAS1 或磁盘上已有的 ARL
+文件。
+
+\paragraph{合并。}\emph{发送到主窗口}把特征合并到已打开的表上：每一行取\emph{已经到达}的
+最近一条轨迹，且在一个释放间隔之内——按最近时间合并会把 06:00 的轨迹给 04:00，那是还没
+到达的空气——新的 \code{traj\_*} 列在第 1 步中被勾选为预测变量。
+
+\screenshot{ui_transport.png}{\nm{} 自带的两天 \code{tdump} 文件，为受体点 MY1 构建：8 个
+受体时刻、9 个特征，每六小时释放一次。2020 年 1 月 1--2 日，来流方向从东（80$^\circ$）
+转为西（270$^\circ$）。}{fig:transport}
+
+\caution{每六小时释放一次的轨迹在六个逐时行上保持不变。在随机划分下，树模型会把它们当作
+时间戳使用，测试集 $R^2$ 因而虚高（第~\ref{sec:split}~节）。请用 \code{month\_ts} 评判考虑
+传输的模型。要把 \PMtwo{} 分成本地天气和传输两部分贡献，请给气象分解两个分组：\code{local}
+和 \code{transport}（第~\ref{sec:metdecomp}~节）。}
+
+% ============================ 13. EXPORT ======================================
+\chapter{导出与重现}\label{ch:export}
+
+\section{表格和报告}
+\begin{description}
+  \item[导出结果 CSV]（Ctrl+E）当前标签页背后的表：\tab{数据}上是载入的数据，\tab{模型}上
+        是统计量，以及归一化序列及其分位数、分解、每个滚动窗口、多尺度序列、部分依赖值。
+  \item[HTML 报告] 把当前标签页的结果做成一个自包含的 HTML 文件——图嵌入其中，没有脚本或外部
+        链接——附有模型和结果的摘要及其溯源信息：\nm{} 的版本、时间、平台和 Python 版本、
+        主机名和用户名、数据的形状和哈希、参数面板的设置及其哈希，以及随机种子。如果不希望
+        主机名和用户名随报告流传，分享前请删掉它们。
+\end{description}
+
+\section{命令日志}\label{sec:commandlog}
+每一个决定结果的步骤——打开表、训练、归一化、分解、滚动运行、多尺度运行、部分依赖——都以
+做同样事情的 \nm{} 调用写入\tab{视图 $\rightarrow$ 命令日志}，参数就是窗口实际使用的那些。
+只有任务成功后才写入条目，依据的是实际发出的调用，而不是参数面板当前显示的内容。
+\emph{复制}把日志放到剪贴板，\emph{保存为脚本…}（也可用\tab{文件 $\rightarrow$
+将会话保存为脚本…}）把它写成一个能重复本次会话的 Python 文件，\emph{清空}清空日志。
+
+\screenshot{ui_command_log.png}{本手册会话之后的命令日志，显示的是最后几条：多尺度运行和
+部分依赖，写成能重复它们的调用。}{fig:commandlog}
+
+本手册各图背后的会话保存为（路径已缩短，省略了导入语句以及多尺度和部分依赖的调用）：
+\begin{lstlisting}[language=Python]
+# 21:09:36  Open CSV
+df = pd.read_csv('my1.csv')
+df['date'] = to_datetime_coerced(df['date'])
+
+# 21:10:09  Train model
+df_prep, model = build_model(df, 'NO2', backend='flaml',
+                             covariates=['ws', 'wd', 'temp', 'RH', 'atmos_pres', 'blh', 'tcc', 'tp', 'ssrd', 'date_unix', 'day_julian', 'weekday', 'hour'],
+                             split_method='random', train_fraction=0.75,
+                             model_config={'time_budget': 30, 'estimator_list': ['lgbm']},
+                             seed=7654321)
+
+# 21:10:11  Normalise
+normalised = normalise(df_prep, model,
+                       covariates=[...the same 13...],
+                       variables_resample=['ws', 'wd', 'temp', 'RH', 'atmos_pres', 'blh', 'tcc', 'tp', 'ssrd'],
+                       n_samples=300, n_cores=None,
+                       return_quantiles=(0.05, 0.25, 0.75, 0.95))
+
+# 21:10:22  Decompose
+decomposition = decompose(df_prep, model, method='meteorology',
+                          covariates=[...the same 13...], n_samples=100,
+                          groups={'wind': ['ws', 'wd'], 'thermo': ['temp', 'RH'],
+                                  'mixing': ['blh', 'atmos_pres'], 'sky': ['tcc', 'tp', 'ssrd']})
+
+# 21:10:25  Rolling normalisation
+rolled = rolling(df_prep, model, covariates=[...],
+                 variables_resample=[...the nine...],
+                 window_days=14, rolling_every=7, n_samples=50)
+\end{lstlisting}
+再次运行，同一个模型给出相同的归一化和分解；模型本身可能略有不同，因为 FLAML 的搜索以墙钟
+时间为界（第~\ref{sec:train}~节）。
+
+\section{投稿用图}\label{sec:print}
+屏幕上的图按标签页的大小绘制；缩进期刊 89~mm 的栏宽后，文字也随之缩小。每幅图工具栏上的
+\emph{投稿用图…}按印刷宽度重新排版，文字以磅为单位，并按该尺寸显示（图~\ref{fig:print}）：
+\begin{description}\nosep
+  \item[期刊] Nature 单栏（89~mm）或双栏（183~mm）；Elsevier 单栏（90~mm）、1.5 栏
+        （140~mm）或双栏（190~mm）；ACS 单栏（3.25~in）或双栏（7~in）；或自定义。
+  \item[宽度、高度、字号] 印刷尺寸，以及以磅为单位的文字大小。
+  \item[分辨率] 300、600 或 1200~dpi，用于 PNG 和 TIFF。
+  \item[图例] 位置（或直接拖动）、文字大小、列数、边框。
+  \item[线条与子图] 线宽和标记大小，以及子图字母（a、(a)、A、(A)）。
+\end{description}
+在预览上双击标题、坐标轴标签或刻度数字即可编辑。\emph{保存…}按所选宽度精确写出 PNG、PDF、
+SVG、TIFF 或 EPS，白色底。什么都不会被保留：对话框关闭后，图恢复为它在标签页中的样子。这些
+宽度取自各出版社的插图指南；投稿前请查阅期刊的最新指南。
+
+\screenshot{ui_print.png}{为 Nature 单栏排版的归一化序列：89 $\times$ 46~mm，7~pt 文字，
+300~dpi，按印刷尺寸显示。}{fig:print}
+
+\section{配置和历史}
+\emph{保存配置}把参数面板的每一项设置写成 JSON——目标、预测变量、后端、划分、预算、估计器、
+随机种子，以及每一步的设置——\emph{载入配置}从 JSON 设置参数面板；数据不在其中。
+\emph{历史}（\tab{视图 $\rightarrow$ 运行历史}）列出每次运行的时间、任务、目标、后端、行数
+和一项细节（训练运行为留出集 $R^2$，归一化为抽样次数）。
+
+% ============================ 14. ASSISTANT ===================================
+\chapter{助手}\label{ch:assistant}
+
+助手是在窗口中工作的语言模型。\nm{} 启动时它在右侧打开；\tab{视图 $\rightarrow$ 助手}
+（Ctrl+Shift+A）关闭和重新打开它。它以 \nm{} 自己对窗口内容的解读——文字形式——读取窗口中的
+东西：表格、模型在留出集上的拟合、归一化序列、分解；并像按钮那样运行窗口的步骤，所以它做的
+事和你自己的运行一样出现在屏幕上，也进入命令日志。
+
+它最能帮上忙的是建模对象的选择和结果的解读。它以一张带\emph{应用}按钮的卡片\emph{提议}目标
+和预测变量，说明它排除了什么以及为什么；在你点击“应用”之前，参数面板不会有任何改变，并且
+只有在你同意之后它才会训练或归一化。它被要求只引用工具返回的数字。
+
+\section{选择模型}
+\begin{description}
+  \item[API 模型] 命名为 \code{provider:model}：\code{anthropic}、\code{openai}、
+        \code{deepseek}、\code{gemini}，或本地的 \code{ollama} 或 \code{lmstudio} 服务器
+        ——例如 \code{anthropic:claude-sonnet-5-5}、\code{deepseek:deepseek-chat}、
+        \code{ollama:qwen3:8b}。其密钥从 macOS 钥匙串（\emph{密钥…}把它存在那里）或该
+        服务商的环境变量（\code{ANTHROPIC\_API\_KEY}、\code{OPENAI\_API\_KEY}、
+        \code{DEEPSEEK\_API\_KEY}、\code{GEMINI\_API\_KEY}）读取，不写到任何其他地方。本地
+        服务器不需要密钥。
+  \item[命令行代理] 登录到你自己的订阅：Claude Code、Codex、Google Antigravity 的
+        \code{agy} 或 GitHub Copilot，可设置其思考强度。窗口通过 127.0.0.1 上的 MCP、用为该
+        窗口生成的令牌把工具提供给代理，不给它 shell，也不给它自己的文件。
+\end{description}
+助手发送给远程模型的是解读——摘要、统计量、图注——和你的消息，而不是表格本身。
+
+% ============================ 15. SCRIPTING ===================================
+\chapter{脚本：API、CLI 和 MCP}\label{ch:script}
+
+\section{Python API}
+窗口做的每件事都是 \code{normet} 包的一个函数。一次调用的流水线完成准备、训练和归一化：
+\begin{lstlisting}[language=Python]
+import normet as nm
+
+df = nm.datasets.load_my1()
+met = ["ws", "wd", "temp", "RH", "atmos_pres", "blh", "tcc", "tp", "ssrd"]
+predictors = met + ["date_unix", "day_julian", "weekday", "hour"]
+
+out, model, df_prep = nm.do_all(
+    df=df, target="NO2", backend="flaml",
+    covariates=predictors, variables_resample=met,
+    n_samples=300, n_cores=4,
+)
+print(nm.modStats(df_prep, model))   # training, testing and all rows
+\end{lstlisting}
+逐步进行：
+\begin{lstlisting}[language=Python]
+df_prep, model = nm.build_model(df, "NO2", backend="flaml", covariates=predictors,
+                                model_config={"time_budget": 120})
+norm = nm.normalise(df_prep, model, covariates=predictors,
+                    variables_resample=met, n_samples=300,
+                    return_quantiles=[0.025, 0.975])
+auto = nm.normalise_auto(df_prep, model, covariates=predictors,
+                         variables_resample=met)       # stops when converged
+emi = nm.decompose(df_prep, model, covariates=predictors, method="emission")
+mets = nm.decompose(df_prep, model, covariates=predictors, method="meteorology",
+                    groups={"wind": ["ws", "wd"], "rest": met[2:]})
+roll = nm.rolling(df_prep, model, covariates=predictors, variables_resample=met)
+curves = nm.pdp(df_prep, model, var_list=["ws", "temp"])
+\end{lstlisting}
+更多函数，均在顶层导出：
+\begin{center}\small
+\begin{tabular}{@{}p{7.4cm}p{8.0cm}@{}}
+\toprule
+函数 & 作用 \\
+\midrule
+\code{do\_all\_unc}       & 在 \code{n\_models} 个种子上运行流水线，给出置信区间 \\
+\code{do\_all\_multisite} & 并行的逐站点流水线 \\
+\code{cv\_score}          & 前向滚动交叉验证 \\
+\code{run\_scm}, \code{scm\_all} & 一次合成控制；把每个单元都当作处理单元 \\
+\code{placebo\_in\_space}, \code{placebo\_in\_time} & 安慰剂检验 \\
+\code{uncertainty\_bands}, \code{effect\_bands\_space} & 刀切法/自助法区间和安慰剂区间 \\
+\code{scm\_diagnostics}, \code{conformal\_effect\_interval} & 拟合诊断；共形区间 \\
+\code{bayesian\_scm}      & 贝叶斯 SCM（\code{bayes} 扩展） \\
+\code{detect\_events}, \code{anomaly\_scores} & 归一化序列中的事件 \\
+\code{normalise\_plot}, \code{decomposition\_stack}, \code{scm\_dashboard} & 窗口中的图 \\
+\code{make\_run}, \code{save\_run}, \code{generate\_html\_report} & 溯源和报告 \\
+\code{make\_memory}       & 磁盘缓存 \\
+\code{Chronos2Estimator}  & 零样本去气象化（\code{foundation} 扩展） \\
+\bottomrule
+\end{tabular}
+\end{center}
+每个耗时函数的配置也是一个数据类（\code{NormaliseConfig}、\code{DecomposeConfig}、
+\code{RollingConfig}）；关键字参数覆盖其字段。\url{https://normet.readthedocs.io} 上的指南
+用实例讲解每个领域，仓库 \code{notebooks/} 文件夹中的笔记本重现了论文中的案例。
+
+\section{命令行}\label{sec:cli}
+安装 \code{cli} 扩展后，\code{normet} 可在 CSV 或 Parquet 文件上运行流水线：
+\begin{lstlisting}[language=bash]
+normet do-all my1.csv --target NO2 \
+    --covariates ws,wd,temp,RH,atmos_pres,blh,tcc,tp,ssrd,date_unix,day_julian,weekday,hour \
+    --resample-vars ws,wd,temp,RH,atmos_pres,blh,tcc,tp,ssrd \
+    --n-samples 300 --out normalised.csv --run-path my1_run
+normet report my1_run.joblib --out my1_report.html
+normet decompose my1.csv --target NO2 --covariates ... --method emission --out emi.csv
+normet scm ulez_panel.csv --treated MY1 --cutoff 2019-04-01 --date-col date \
+    --unit-col code --outcome-col NO2_dw --backend scm --out scm.csv
+normet cv my1.csv --target NO2 --covariates ... --n-splits 5 --out cv.csv
+normet deweather site.csv --target PM2.5 --met-vars t2m,blh,u10,v10 --out dw.csv
+normet info                     # version and the backends installed
+\end{lstlisting}
+每条命令都接受 \code{--config file.yaml}，其键就是选项名；命令行上的选项覆盖文件中的。
+\code{--run-path} 还会保存一个 \code{NormetRun} 档案（\code{.joblib} 加一个
+\code{.meta.json} 附属文件），\code{normet report} 可把它转成 HTML 或 Markdown。命令行的
+\code{scm} 提供 \code{scm}、\code{mlscm}、\code{abadie}、\code{did} 和 \code{mcnnm}。
+
+\section{通过 MCP 使用 AI 助手}\label{sec:mcp}
+安装 \code{mcp} 扩展后，\code{normet-mcp} 通过模型上下文协议把 \nm{} 提供给 AI 助手：
+\begin{lstlisting}[language=bash]
+claude mcp add normet -- normet-mcp          # Claude Code
+# Claude Desktop, claude_desktop_config.json:
+#   {"mcpServers": {"normet": {"command": "normet-mcp"}}}
+\end{lstlisting}
+助手可以列出示例、检查表格、启动 \code{do-all}、\code{decompose}、\code{scm} 和 \code{cv}
+任务、跟踪和取消它们、读取运行或结果、画图和写报告。每次拟合都是一条在自己的进程和文件夹
+（\code{\$NORMET\_MCP\_HOME}，默认 \code{\textasciitilde/.normet/mcp}）中运行的 \nm{} 命令，
+所以它的命令行就是它的记录，不需要助手也能再次运行。助手得到的是 \nm{} 对表格或结果的解读，
+而不是数据；只读取 \code{\$NORMET\_MCP\_ROOTS}（默认为你的主文件夹）下的文件。服务器要求
+助手说明理由地提议目标、预测变量和供体池，让你确认，并且只引用工具返回的数字。
+
+% ============================ APPENDICES ======================================
+\appendix
+
+\chapter{默认值}\label{app:defaults}
+\begin{center}\small
+\begin{longtable}{@{}p{4.9cm}p{4.3cm}p{5.8cm}@{}}
+\toprule
+设置 & 窗口 & 库 \\
+\midrule
+\endhead
+划分方法 / 训练集比例          & random / 0.75 & random / 0.75 \\
+FLAML 时间预算                 & 60 s & 90 s \\
+FLAML 估计器                   & lgbm & lgbm \\
+FLAML 指标                     & $R^2$ & $R^2$ \\
+LightGBM 搜索次数              & 20 & --- \\
+随机种子                       & 7654321 & 7654321 \\
+归一化抽样次数                 & 300（Chronos-2：8） & 300（Chronos-2：8） \\
+重采样变量                     & 识别出的气象 & 所有非日历预测变量 \\
+分位数                         & 勾选时 5、25、75、95\,\% & 无 \\
+分解抽样次数                   & 300 & 300 \\
+归因方式                       & auto & 顺序（有分组时 Shapley） \\
+滚动窗口 / 步长 / 抽样次数     & 14 d / 7 d / 100 & 14 d / 7 d / 300 \\
+多尺度宽度                     & 14 / 90 / 365 d & --- \\
+PDP 网格点数 / 范围            & 50 / 第 1--99 百分位 & 50 / 第 1--99 百分位 \\
+\code{normalise\_auto}          & --- & 每批 100，P95 RSE $<$ 3\,\%，连续 3 次，$\le$ 5000 \\
+Chronos-2 上下文 / 预测长度    & 2048 / 168 行 & 2048 / 168 行 \\
+SCM 后端                       & scm & scm \\
+时间安慰剂：最短干预前 / 间隔  & 30 / 7 步 & --- \\
+不确定性区间                   & 刀切法，$B = 100$ & 刀切法，$B = 200$，80\,\% 供体 \\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\chapter{normet 存放文件的位置}\label{app:files}
+\begin{center}\small
+\begin{tabular}{@{}ll@{}}
+\toprule
+内容 & 位置 \\
+\midrule
+最近打开的表（八张）           & \code{\textasciitilde/.normet/gui\_recent\_files.json} \\
+运行历史                       & \code{\textasciitilde/.normet/gui\_run\_history.jsonl} \\
+窗口几何、外观、语言、助手模型 & 系统的设置存储（\code{apai-sys/normet-gui}） \\
+字体缓存（安装包）             & \code{\textasciitilde/.normet/matplotlib} \\
+助手 API 密钥                  & macOS 钥匙串，服务名 \code{normet} \\
+MCP 任务                       & \code{\$NORMET\_MCP\_HOME}，默认 \code{\textasciitilde/.normet/mcp} \\
+Chronos-2 权重                 & Hugging Face 缓存 \\
+\bottomrule
+\end{tabular}
+\end{center}
+除非你保存，否则不会写入其他任何东西。
+
+\chapter{故障排除}\label{app:trouble}
+\begin{description}
+  \item[“The CSV must contain a 'date' column”] 把时间戳列重命名为 \code{date}。面板数据
+        （多个单元）应放到 SCM 工作室。
+  \item[模型的评估结论为红色] 预测变量解释不了目标。检查气象是否已勾选、与目标的时间基准
+        是否一致，延长预算，或加入估计器。用差的模型归一化，得到的不过是观测序列而已。
+  \item[某个气象列没有被勾选] 只有第~\ref{sec:columns}~节中的名字会被识别；其他的请在第 1 步
+        和第 2 步中手动勾选。
+  \item[Exact Shapley values over $k$ features need $2^k$ normalisations] 用 Shapley 分解
+        超过十个变量：请给出分组，或改用顺序归因。
+  \item[“every meteorological model feature must be in exactly one group”] 分组必须覆盖训练
+        用到的每个气象预测变量，且每个只出现一次；提示信息会列出缺少的那些。
+  \item[“'rdata' is required but not installed”] \emph{查找站点}用 \code{rdata} 读取英国
+        档案，它属于 \code{data} 扩展：\code{pip install "normet[data]"}。安装包已包含它。
+  \item[多尺度提示先运行第 2 步] 它要与第 2 步的序列求差。
+  \item[某个多尺度频带被跳过] 它的宽度使记录上的窗口少于两个；请调小。
+  \item[滚动和 PDP 被禁用] 它们需要 AutoML 模型；Chronos-2 后端没有可供改变的响应面。
+  \item[Chronos-2 呈灰色] 安装 \code{normet[foundation]}（微调还需 \code{normet[finetune]}）。
+  \item[Chronos-2 的评估结论为红色] 打乱天气几乎不改变它的预测：它在做自回归。检查气象列，
+        或改用 AutoML 后端。
+  \item[SCM：“The pre-treatment fit is no check on this design”] 一条被打乱、与供体毫无关系
+        的序列在干预前拟合得和处理单元一样好：相对于干预前日期数，供体太多了。请用空间
+        安慰剂和其他估计器评判效应，或者用更少、更精选的供体（相似度排序可以帮忙），或者
+        更长的干预前时段。
+  \item[SCM：“Donor pool too small”] 至少勾选两个供体。
+  \item[SCM：没有有效的伪干预日期] 干预后时段必须能放在真实干预日期之前，且其前有
+        \emph{最短干预前时段}步；调小\emph{最短干预前时段}或\emph{安慰剂间隔}，或把干预
+        日期往后移。
+  \item[参数面板不见了] 它被收起了：点击操作栏上的\emph{展开面板}，或按 Ctrl+B。
+  \item[任务运行太久] \emph{取消}立刻释放窗口；计算在后台跑完，结果被丢弃。减少抽样次数、
+        预算或分解的变量数。
+  \item[任务失败] 对话框显示最后一行；完整的回溯在\tab{日志}停靠窗中。
+  \item[macOS：“无法打开 Normet”] 应用未签名：右键点击它，选择\emph{打开}，一次即可
+        （第\ref{ch:install}章）。
+\end{description}
+
+\end{document}
