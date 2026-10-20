@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import time
 
 import numpy as np
@@ -91,20 +92,22 @@ def test_the_status_bar_says_how_far_a_task_has_come_and_how_long_it_took(qapp):
     win = MainWindow()
     try:
         bar = win.statusBar()
-        reported = []
+        seen = threading.Event()
 
         def task():
             progress.report(1, 2)
-            reported.append(True)
-            time.sleep(0.3)
-            return "ok"
+            seen.wait(10)  # until the window has shown it
+            return "Done."
 
-        win.runner.submit("a test task", task, lambda _r: bar.showMessage("Done."), print)
+        # The result goes to a method of a widget, queued on the GUI thread, as a
+        # window's own handlers are (a plain function would run on the worker's).
+        win.runner.submit("a test task", task, bar.showMessage, print)
         assert bar.currentMessage() == "Running: a test task… · 0 s so far"
         assert win.progress.maximum() == 0  # nothing known yet: a busy bar
         _until(qapp, lambda: "50 %" in bar.currentMessage())
         assert bar.currentMessage() == "Running: a test task… · 50 % · 0 s so far"
         assert win.progress.maximum() == 1000 and win.progress.value() == 500
+        seen.set()
         _until(qapp, lambda: not win.runner.busy)
         assert bar.currentMessage() == "Done. · took 0 s"
         assert win.progress.maximum() == 1
