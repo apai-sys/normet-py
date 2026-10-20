@@ -60,7 +60,10 @@ lgb = ["lightgbm>=4.0"]
 dask = ["dask[dataframe]>=2023.1"]
 data = ["requests>=2.31", "cdsapi>=0.6", "rdata>=0.9"]
 cli = ["click>=8.0", "pyyaml>=6.0"]
-gui = ["PySide6>=6.5"]
+# The readers pandas needs for the tables Open Data offers beyond text: Parquet and
+# Feather (pyarrow), .xlsx/.xlsm (openpyxl), .xls (xlrd). pyarrow 26 needs NumPy 2,
+# which the numpy pin above rules out: installed, it fails to import.
+gui = ["PySide6>=6.5", "pyarrow>=10.0.1,<26", "openpyxl>=3.1", "xlrd>=2.0"]
 geo = ["shapely>=2.0", "pyshp>=2.3"]
 stats = ["statsmodels>=0.14"]
 # Chronos-2 time-series foundation model (normet.foundation).
@@ -107,6 +110,9 @@ all = [
     "pymc>=5.0",
     "arviz>=0.17",
     "PySide6>=6.5",
+    "pyarrow>=10.0.1,<26",
+    "openpyxl>=3.1",
+    "xlrd>=2.0",
     "shapely>=2.0",
     "pyshp>=2.3",
     "chronos-forecasting>=2.3",
