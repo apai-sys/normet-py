@@ -172,15 +172,16 @@ def test_appearance_is_remembered(qapp, tmp_path, monkeypatch):
         theme.theme_manager().set_appearance("sepia")
 
 
-def test_toolbar_icons_follow_the_palette(qapp):
+def test_toolbar_icons_follow_the_theme(qapp):
     from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
     from matplotlib.figure import Figure
-    from PySide6.QtGui import QColor, QPalette
 
+    from normet.gui import theme
     from normet.gui._widgets import ThemedToolbar
 
     toolbar = ThemedToolbar(FigureCanvasQTAgg(Figure()))
     home = toolbar._actions["home"]
+    assert toolbar.iconSize().width() == ThemedToolbar.ICON  # cume's 16 pt
 
     def ink():
         img = home.icon().pixmap(24, 24).toImage()
@@ -188,14 +189,8 @@ def test_toolbar_icons_follow_the_palette(qapp):
         drawn = [c for c in pixels if c.alpha() > 128]
         return sum(c.lightness() for c in drawn) / len(drawn)
 
-    def palette(window, text):
-        pal = QPalette(toolbar.palette())
-        # The toolbar's own roles (a switch of the app's theme changes every role).
-        pal.setColor(QPalette.ColorRole.Button, QColor(window))
-        pal.setColor(QPalette.ColorRole.ButtonText, QColor(text))
-        toolbar.setPalette(pal)
-
-    palette("#1c1c1e", "#ffffff")
+    # As the window's theme announces itself, the icons are tinted for it.
+    theme.theme_manager().themeChanged.emit(True)
     assert ink() > 200  # light icons on a dark bar
-    palette("#ececec", "#000000")
+    theme.theme_manager().themeChanged.emit(False)
     assert ink() < 80  # and dark again on a light one
