@@ -1543,6 +1543,19 @@ target and predictors as a card with an \emph{Apply} button, saying what it left
 why; nothing in the panel changes until you click Apply, and it trains or normalises only
 once you have agreed. It is told to quote only numbers the tools return.
 
+\section{Full automatic}\label{sec:autoassistant}
+\emph{Auto}, beside \emph{Key\ldots}, lets the Assistant work without waiting for you, as
+cume's does. With it on, the target and predictors it proposes are applied at once (the
+card says \emph{Applied}), and it works the analysis through in the window's order ---
+the data, the set-up, training, normalisation, decomposition --- reading each result as it
+comes. A model that stops with steps left is told what is left and goes on, up to eight
+times; two reminders in a row that change nothing end the turn, as a model that cannot do
+a step should not circle. A call to the model that fails, or an empty reply, is made again,
+twice at most. Each reminder and retry is a line in the conversation. \emph{Stop} ends it
+at any time; the choice is kept for the next session, and \emph{What full automatic
+does\ldots} under the button's arrow says all this. A command-line agent has the set-up
+applied at once too, and works the chain as far as its own loop allows.
+
 \section{Choosing a model}
 \begin{description}
   \item[An API model] named \code{provider:model}: \code{anthropic}, \code{openai},

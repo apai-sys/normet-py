@@ -415,12 +415,17 @@ class ChatView(QScrollArea):
         self._add(lbl)
         self._reply = None
 
-    def card(self, title: str, body: str, apply: Callable[[], str]) -> QPushButton:
+    def card(
+        self, title: str, body: str, apply: Callable[[], str], applied: str = ""
+    ) -> QPushButton:
+        """A proposal with its Apply button; ``applied``, what applying it said where it
+        was applied already (the Assistant's full automatic), on the button instead."""
         frame = QFrame()
         frame.setObjectName("proposal")
         lay = QVBoxLayout(frame)
         lay.setContentsMargins(12, 10, 12, 10)
-        head = _label(html.escape(title), self.look, rich=True, keep=True)
+        # The title is the window's own words (translated); the body is the model's.
+        head = _label(html.escape(title), self.look, rich=True, keep=False)
         head.setFont(self.look.font(bold=True))
         lay.addWidget(head)
         body_item = _Reply(body, self.look)
@@ -437,6 +442,9 @@ class ChatView(QScrollArea):
             btn.setEnabled(False)
 
         btn.clicked.connect(clicked)
+        if applied:
+            btn.setText(applied)
+            btn.setEnabled(False)
         lay.addWidget(btn, 0, Qt.AlignmentFlag.AlignLeft)
         self._add(frame)
         self._reply = None

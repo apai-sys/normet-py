@@ -1203,3 +1203,30 @@ INNER.update(
         "Wind": "风",
     }
 )
+# The Assistant's full automatic (.assistant: Auto, its notes)
+TEXTS.update(
+    {
+        "Auto": "自动",
+        "Full automatic: the set-up the Assistant proposes is applied at once, and it works the analysis through -- data, set-up, training, normalisation, decomposition -- without waiting for you.": "全自动：助手提出的设定立即应用，并一路完成分析——数据、设定、训练、归一化、分解——无需等你确认。",
+        "What full automatic does…": "全自动会做什么…",
+        "Full automatic": "全自动",
+        "With Auto on, the Assistant works without waiting for you:\n\n• the target and predictors it proposes are applied at once;\n• it goes through the analysis in the window's order -- the data, the set-up, training, normalisation, decomposition -- reading each result;\n• if it stops with steps left, it is told what is left and goes on (up to 8 times; it stops when two reminders in a row change nothing);\n• a failed or empty answer from the model is asked again, twice at most.\n\nStop ends it at any time. With an API model all of this applies; a command-line agent has the set-up applied at once and works the chain as its own loop allows.": "打开“自动”后，助手不必等你确认：\n\n• 它提出的目标和预测变量立即应用；\n• 按窗口的顺序完成分析——数据、设定、训练、归一化、分解——并读取每一步的结果；\n• 如果还有步骤没做它就停下，会被告知还剩什么并继续（最多 8 次；连续两次提醒都没有进展就停止）；\n• 模型调用失败或回复为空时会重新请求，最多两次。\n\n随时可以点“停止”结束。以上全部适用于 API 模型；命令行智能体会立即应用设定，并在它自己的循环允许的范围内完成整个流程。",
+        "Full automatic on: what the Assistant proposes is applied at once, and it works the analysis through.": "全自动已打开：助手提出的内容立即应用，并一路完成分析。",
+        "Full automatic off: proposals wait for Apply again.": "全自动已关闭：提议重新等待你点击“应用”。",
+        "Full automatic: not finished, so it goes on -- left: {s0}.": "全自动：尚未完成，继续进行——还剩：{s0}。",
+        "The call to the model failed ({s0}: {s1}); full automatic tries again.": "调用模型失败（{s0}：{s1}）；全自动将重试。",
+        "Applied": "已应用",
+        "Applied ({s0} not in the list)": "已应用（列表中没有 {s0}）",
+        "Proposed set-up": "提议的设定",
+    }
+)
+INNER.update(
+    {
+        "the run under way": "正在进行的运行",
+        "a look at the data": "查看数据",
+        "the set-up": "设定",
+        "training": "训练",
+        "the normalisation": "归一化",
+        "the decomposition": "分解",
+    }
+)
