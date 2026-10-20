@@ -19,6 +19,8 @@ from typing import Any
 
 import pandas as pd
 
+from . import style as S
+from .style import styled
 from .utils.logging import get_logger
 from .utils.provenance import NormetRun
 
@@ -54,6 +56,7 @@ def _json_pre(obj: Any) -> str:
     return f"<pre class='nm-meta'>{html.escape(s)}</pre>"
 
 
+@styled
 def _auto_plot(run: NormetRun) -> Any:
     """Pick a sensible default plot for the run kind. Returns the figure (or None)."""
     import matplotlib
@@ -87,7 +90,7 @@ def _auto_plot(run: NormetRun) -> Any:
                 except ValueError:
                     pass
 
-            fig, ax = plt.subplots(figsize=(10, 4))
+            fig, ax = plt.subplots(figsize=(8, 3), layout="constrained")
             normalise_plot(
                 res,
                 observed_col="observed",
@@ -124,18 +127,18 @@ def _auto_plot(run: NormetRun) -> Any:
         ):
             from .plotting import decomposition_stack
 
-            fig, ax = plt.subplots(figsize=(11, 4))
+            fig, ax = plt.subplots(figsize=(8, 3), layout="constrained")
             decomposition_stack(res, ax=ax, title=kind or "decomposition")
 
         # CV scores
         elif {"fold", "RMSE"}.issubset(res.columns) or {"fold", "r"}.issubset(res.columns):
             metric = "RMSE" if "RMSE" in res.columns else "r"
-            fig, ax = plt.subplots(figsize=(8, 3.5))
-            ax.bar(res["fold"], res[metric], color="tab:blue")
+            fig, ax = plt.subplots(figsize=(6, 2.8), layout="constrained")
+            ax.bar(res["fold"], res[metric], color=S.COMPONENT, width=0.6)
             ax.set_xlabel("fold")
             ax.set_ylabel(metric)
             ax.set_title("Walk-forward CV scores")
-            ax.grid(axis="y", alpha=0.2)
+            S.grid(ax, axis="y")
     except Exception as e:
         log.debug("auto_plot failed: %s", e)
         # The figure was created before the call that raised, so nothing else

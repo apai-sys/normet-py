@@ -10,6 +10,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from .. import style as S
+from ..style import styled
 from ..utils._config import DEFAULT_SEED
 from ..utils._time import to_datetime_coerced
 from ..utils.logging import get_logger
@@ -534,6 +536,7 @@ def uncertainty_bands(
         raise ValueError("`method` must be either 'bootstrap' or 'jackknife'.")
 
 
+@styled
 def plot_effect_with_bands(
     bands_df: pd.DataFrame,
     cutoff_date: object | None = None,
@@ -565,7 +568,7 @@ def plot_effect_with_bands(
     matplotlib.axes.Axes
     """
     if ax is None:
-        _, ax = plt.subplots(figsize=(10, 4))
+        _, ax = plt.subplots(figsize=(8, 3), layout="constrained")
 
     if "effect" not in bands_df.columns:
         raise ValueError("bands_df must have an 'effect' column.")
@@ -583,11 +586,18 @@ def plot_effect_with_bands(
     # Shade band if available
     if lower_col and upper_col:
         ax.fill_between(
-            idx, bands_df[lower_col], bands_df[upper_col], alpha=0.25, label="placebo band"
+            idx,
+            bands_df[lower_col],
+            bands_df[upper_col],
+            color=S.NEUTRAL,
+            alpha=0.3,
+            lw=0,
+            label="placebo band",
         )
 
     # Plot effect
-    ax.plot(idx, bands_df["effect"], lw=1.8, label="treated effect")
+    ax.plot(idx, bands_df["effect"], lw=1.2, color=S.MODELLED, label="treated effect")
+    S.zero_line(ax)
 
     # Optional vertical reference line
     if cutoff_date is not None:
@@ -598,19 +608,24 @@ def plot_effect_with_bands(
             else:
                 # Event-time axis (numeric); try to cast to int/float
                 cd = int(cutoff_date)  # type: ignore[call-overload]
-            ax.axvline(cd, ls="--", lw=1, color="k", alpha=0.6, label="cutoff")
+            S.cutoff_line(ax, cd)
         except Exception:
             # Swallow conversion issues silently; the plot is still useful
             pass
 
     ax.set_title(title)
-    ax.set_xlabel("Date" if pd.api.types.is_datetime64_any_dtype(idx) else "Event time")
-    ax.set_ylabel("Effect (Observed - Synthetic)")
-    ax.legend(frameon=False)
-    ax.grid(alpha=0.2)
+    if pd.api.types.is_datetime64_any_dtype(idx):
+        S.format_time_axis(ax)
+    else:
+        ax.set_xlabel("Event time")
+    ax.set_ylabel("Effect (observed − synthetic)")
+    ax.margins(x=0)
+    S.legend(ax)
+    S.grid(ax)
     return ax
 
 
+@styled
 def plot_uncertainty_bands(
     out: dict,
     cutoff_date: object | None = None,
@@ -682,7 +697,7 @@ def plot_uncertainty_bands(
     high = out.get("high")
 
     if ax is None:
-        _, ax = plt.subplots(figsize=(10, 4))
+        _, ax = plt.subplots(figsize=(8, 3), layout="constrained")
 
     # Plot bands if available
     if low is not None and high is not None:
@@ -695,19 +710,23 @@ def plot_uncertainty_bands(
         elif "bootstrap" in title.lower():
             label_band = "bootstrap band"
 
-        ax.fill_between(df_true.index, low, high, alpha=0.25, label=label_band)
+        ax.fill_between(
+            df_true.index, low, high, color=S.MODELLED, alpha=0.18, lw=0, label=label_band
+        )
 
     # Plot treated effect
-    ax.plot(df_true.index, df_true["effect"], lw=1.8, label="treated effect")
+    ax.plot(df_true.index, df_true["effect"], lw=1.2, color=S.MODELLED, label="treated effect")
+    S.zero_line(ax)
 
     # Mark cutoff
     if cutoff_date is not None:
-        cd = pd.to_datetime(cutoff_date)  # type: ignore[call-overload]
-        ax.axvline(cd, ls="--", lw=1, color="k", alpha=0.6, label="cutoff")
+        S.cutoff_line(ax, pd.to_datetime(cutoff_date))  # type: ignore[call-overload]
 
     ax.set_title(title)
-    ax.set_xlabel("Date")
-    ax.set_ylabel("Effect (Observed - Synthetic)")
-    ax.legend(frameon=False)
-    ax.grid(alpha=0.2)
+    if isinstance(df_true.index, pd.DatetimeIndex):
+        S.format_time_axis(ax)
+    ax.set_ylabel("Effect (observed − synthetic)")
+    ax.margins(x=0)
+    S.legend(ax)
+    S.grid(ax)
     return ax

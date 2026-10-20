@@ -4,8 +4,9 @@ Adapted from the cume desktop app's theme manager. The window follows the
 system's appearance (macOS / Windows / Linux dark mode, through Qt's colour
 scheme) unless View → Appearance pins it to Light or Dark.
 
-Figures are always *drawn* in matplotlib's default light colours — normet's
-plotting helpers, the HTML report and scripts all share one look — and a
+Figures are always *drawn* in the light colours of :mod:`normet.style` (or
+matplotlib's defaults, for one drawn without it) — normet's plotting helpers,
+the HTML report and scripts all share one look — and a
 figure shown on a dark window is recoloured in place by
 :func:`apply_figure_theme`: its faces, text, ticks, spines, grid and any mark
 drawn in black ink. Colours that carry data (a series' own colour, a colour
@@ -34,12 +35,23 @@ DARK = {
     "grid": "#38383a",
 }
 
-#: matplotlib's default light colours, mapped to the dark theme's by role.
-_TEXT = {"#000000": DARK["ink"]}
-_LINE = {"#000000": DARK["ink"], "#b0b0b0": DARK["grid"]}
+#: The light colours -- normet.style's, and matplotlib's defaults -- mapped to the dark
+#: theme's by role.
+_TEXT = {"#000000": DARK["ink"], "#1a1a1a": DARK["ink"], "#333333": DARK["tick"]}
+_LINE = {
+    "#000000": DARK["ink"],
+    "#1a1a1a": DARK["ink"],
+    "#b0b0b0": DARK["grid"],
+    "#e5e5ea": DARK["grid"],
+}
 _FACE = {"#ffffff": DARK["axes"]}
-_EDGE = {"#000000": DARK["edge"], "#cccccc": DARK["edge"]}
-_COLLECTION = {"#000000": DARK["ink"], "#ffffff": DARK["axes"]}
+_EDGE = {
+    "#000000": DARK["edge"],
+    "#1a1a1a": DARK["edge"],
+    "#262626": DARK["edge"],
+    "#cccccc": DARK["edge"],
+}
+_COLLECTION = {"#000000": DARK["ink"], "#1a1a1a": DARK["ink"], "#ffffff": DARK["axes"]}
 
 #: View → Appearance choices, as stored in QSettings.
 APPEARANCES = ("system", "light", "dark")
@@ -79,8 +91,11 @@ def apply_figure_theme(fig: Any, dark: bool) -> None:
         for setter, was in reversed(getattr(fig, "_normet_undo", [])):
             setter(was)
         fig._normet_undo = []
+        import matplotlib as mpl
+
+        tick = mpl.rcParams["xtick.color"]  # what the figure was drawn with
         for ax in fig.get_axes():
-            ax.tick_params(colors="black", which="both")
+            ax.tick_params(colors=tick, which="both")
         fig._normet_dark = False
         return
 
