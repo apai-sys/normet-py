@@ -25,7 +25,7 @@ conversation (the model's own words), logs, code.
                            system give (call once, before the window is built)
     set_language(code)     "en" or "zh" now; every window's texts written again
     choice() / set_choice  the analyst's choice: "system", "en" or "zh"
-    mac_app_language()     macOS's own menu items and panels kept to it (from the next start)
+    mac_follow_system()    macOS's own menu items and panels left to the system's language
     language()             the language in use
     tr(text)               one text in the language in use (for text drawn by hand)
     translate_cells(t)     a table's cells translated (the window's words, not data)
@@ -781,10 +781,18 @@ def _wrap_menus():
     QMenu.addSection = addSection
 
 
+def panel_caption(caption):
+    """A file dialog's caption in the system's language, as the panel's own texts are."""
+    return tr(caption, system_language())
+
+
 def _wrap_dialog_statics():
     """Message boxes and file dialogs opened by their static functions: the title and the
     text translated as they are asked for (the box's own children are polished too, but
-    a native file dialog's caption is not a widget of ours)."""
+    a native file dialog's caption is not a widget of ours). A file dialog is the
+    system's panel, its buttons and places in the system's language whatever the
+    window's, so its caption is written in the system's language too: one panel, one
+    language (as cume's)."""
     from PySide6.QtWidgets import QFileDialog, QInputDialog
 
     for name in ("information", "warning", "critical", "question", "about"):
@@ -804,9 +812,9 @@ def _wrap_dialog_statics():
 
         def ask(parent=None, caption="", *a, _f0=f0, **kw):
             if "caption" in kw:
-                kw["caption"] = tr(kw["caption"])
+                kw["caption"] = panel_caption(kw["caption"])
                 return _f0(parent, *a, **kw)
-            return _f0(parent, tr(caption), *a, **kw)
+            return _f0(parent, panel_caption(caption), *a, **kw)
 
         setattr(QFileDialog, name, staticmethod(ask))
     for name in ("getText", "getInt", "getDouble", "getItem", "getMultiLineText"):
@@ -1164,20 +1172,22 @@ def set_choice(c: str):
         raise ValueError(f"choice must be one of {', '.join(CHOICES)}, not {c!r}")
     set_pref(PREF, c)
     set_language(resolve(c))
-    mac_app_language(c)
 
 
-#: What macOS's own texts are written in for each choice: its menu items (Edit's AutoFill,
-#: Start Dictation, Emoji & Symbols; View's Enter Full Screen) and the open and save panels.
-_MAC_LANGUAGES = {"zh": ("zh-Hans", "en"), "en": ("en", "zh-Hans")}
+#: The app's languages (AppleLanguages) an earlier normet wrote to follow the window's
+#: choice: macOS's own panels and menu items now follow the system whatever the window's
+#: language (as cume's do), so these are taken away again. A value the analyst set
+#: (System Settings -> Language & Region -> Applications) is not one of them and stays.
+_MAC_WRITTEN = (("zh-Hans", "en"), ("en", "zh-Hans"))
 
 
-def mac_app_language(c: str | None = None) -> bool:
-    """The packaged Mac app's own language (its AppleLanguages, as System Settings ->
-    Language & Region -> Applications sets it) kept to the analyst's choice -- "system"
-    removes it. macOS reads it as the app starts: its texts follow from the next start.
-    Not from source (the setting would be Python's) or where NORMET_UI_LANGUAGE forces a
-    language (a test's, a screenshot's). True where it was written."""
+def mac_follow_system() -> bool:
+    """macOS's own texts -- its open and save panels, the items it adds to the menus
+    (AutoFill, Start Dictation, Emoji & Symbols) -- in the system's language, whichever
+    the window is written in: the app's AppleLanguages that an earlier normet wrote
+    removed (macOS reads it as the app starts). Not from source (the setting would be
+    Python's) or where NORMET_UI_LANGUAGE forces a language (a test's, a screenshot's).
+    True where one was removed."""
     import sys
 
     if (
@@ -1186,7 +1196,6 @@ def mac_app_language(c: str | None = None) -> bool:
         or os.environ.get("NORMET_UI_LANGUAGE") in LANGUAGES
     ):
         return False
-    c = choice() if c is None else c
     try:
         import ctypes
         import ctypes.util
@@ -1194,31 +1203,41 @@ def mac_app_language(c: str | None = None) -> bool:
         cf = ctypes.cdll.LoadLibrary(ctypes.util.find_library("CoreFoundation"))
         cf.CFStringCreateWithCString.restype = ctypes.c_void_p
         cf.CFStringCreateWithCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32]
-        cf.CFArrayCreate.restype = ctypes.c_void_p
-        cf.CFArrayCreate.argtypes = [
+        cf.CFPreferencesCopyAppValue.restype = ctypes.c_void_p
+        cf.CFPreferencesCopyAppValue.argtypes = [ctypes.c_void_p] * 2
+        cf.CFGetTypeID.restype = ctypes.c_ulong
+        cf.CFGetTypeID.argtypes = [ctypes.c_void_p]
+        cf.CFArrayGetTypeID.restype = ctypes.c_ulong
+        cf.CFArrayGetCount.restype = ctypes.c_long
+        cf.CFArrayGetCount.argtypes = [ctypes.c_void_p]
+        cf.CFArrayGetValueAtIndex.restype = ctypes.c_void_p
+        cf.CFArrayGetValueAtIndex.argtypes = [ctypes.c_void_p, ctypes.c_long]
+        cf.CFStringGetCString.restype = ctypes.c_bool
+        cf.CFStringGetCString.argtypes = [
             ctypes.c_void_p,
-            ctypes.c_void_p,
+            ctypes.c_char_p,
             ctypes.c_long,
-            ctypes.c_void_p,
+            ctypes.c_uint32,
         ]
         cf.CFPreferencesSetAppValue.argtypes = [ctypes.c_void_p] * 3
         cf.CFPreferencesAppSynchronize.argtypes = [ctypes.c_void_p]
-
-        def cfstr(t):
-            return cf.CFStringCreateWithCString(None, t.encode(), 0x08000100)  # UTF-8
-
+        cf.CFRelease.argtypes = [ctypes.c_void_p]
+        utf8 = 0x08000100
+        key = cf.CFStringCreateWithCString(None, b"AppleLanguages", utf8)
         app = ctypes.c_void_p.in_dll(cf, "kCFPreferencesCurrentApplication")
-        langs = _MAC_LANGUAGES.get(c)
-        value = None
-        if langs:
-            items = (ctypes.c_void_p * len(langs))(*[cfstr(x) for x in langs])
-            value = cf.CFArrayCreate(
-                None,
-                items,
-                len(langs),
-                ctypes.addressof(ctypes.c_char.in_dll(cf, "kCFTypeArrayCallBacks")),
-            )
-        cf.CFPreferencesSetAppValue(cfstr("AppleLanguages"), value, app)
+        value = cf.CFPreferencesCopyAppValue(key, app)
+        if not value:
+            return False
+        held = []
+        if cf.CFGetTypeID(value) == cf.CFArrayGetTypeID():
+            buf = ctypes.create_string_buffer(64)
+            for i in range(cf.CFArrayGetCount(value)):
+                if cf.CFStringGetCString(cf.CFArrayGetValueAtIndex(value, i), buf, 64, utf8):
+                    held.append(buf.value.decode())
+        cf.CFRelease(value)
+        if tuple(held) not in _MAC_WRITTEN:
+            return False
+        cf.CFPreferencesSetAppValue(key, None, app)
         cf.CFPreferencesAppSynchronize(app)
         return True
     except (OSError, AttributeError, ValueError):
@@ -1232,4 +1251,4 @@ def install(app: QApplication | None = None):
         _wrap_all()
         _state["installed"] = True
     set_language(resolve())
-    mac_app_language()  # a choice made before this setting was kept
+    mac_follow_system()  # an AppleLanguages an earlier normet wrote taken away
