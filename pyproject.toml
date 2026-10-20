@@ -142,7 +142,7 @@ include = ["normet*"]
 
 # Include non-code files (README, LICENSE) in sdists/wheels
 [tool.setuptools.package-data]
-"normet" = ["py.typed", "data/*.csv.gz", "data/traj/tdump_*"]
+"normet" = ["py.typed", "data/*.csv.gz", "data/traj/tdump_*", "gui/assets/*.png"]
 
 # Optional: exclude heavy assets if you add any later
 [tool.setuptools.exclude-package-data]

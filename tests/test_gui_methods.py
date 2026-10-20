@@ -138,3 +138,24 @@ def test_the_manual_in_the_window_language_and_the_shortcuts(qapp, monkeypatch):
         w._shortcuts_dialog.close()
     finally:
         w.close()
+
+
+def test_about_shows_the_app_icon_and_version(qapp):
+    import os
+
+    from PySide6.QtWidgets import QLabel
+
+    import normet
+    from normet.gui._widgets import app_icon_path
+    from normet.gui.main_window import MainWindow
+
+    assert os.path.isfile(app_icon_path())  # shipped in the package
+    w = MainWindow()
+    try:
+        w._about()
+        labels = w._about_dialog.findChildren(QLabel)
+        assert any(lbl.pixmap() is not None and not lbl.pixmap().isNull() for lbl in labels)
+        assert f"Version {normet.__version__}" in [lbl.text() for lbl in labels]
+        w._about_dialog.close()
+    finally:
+        w.close()
