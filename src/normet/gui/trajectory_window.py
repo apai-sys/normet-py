@@ -59,6 +59,7 @@ from PySide6.QtWidgets import (
 from normet import style as S
 from normet.io.trajectory import _missing_gdas1_files, _naive_utc
 
+from ._clock import TaskClock
 from ._widgets import CanvasTab, NoWheelSpinBox, hint_label, run_button, wrap_row
 from .workers import TaskRunner
 
@@ -258,6 +259,7 @@ class TrajectoryWindow(QMainWindow):
         self.runner = TaskRunner(self)
         self.runner.started.connect(self._task_started)
         self.runner.finished.connect(self._task_finished)
+        self.task_clock = TaskClock(self, self.runner)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self._build_panel())
@@ -683,15 +685,12 @@ class TrajectoryWindow(QMainWindow):
         self.cancel_btn.setEnabled(busy)
 
     def _task_started(self, name: str) -> None:
-        self.progress.setRange(0, 0)
-        self.statusBar().showMessage(f"Running: {name}…")
         for b in self._run_buttons:
             b.setEnabled(False)
         self.cancel_btn.setEnabled(True)
 
     def _task_finished(self) -> None:
         self._hysplit_stop = None
-        self.progress.setRange(0, 1)
         self._sync_enabled()
 
     def _abandon(self) -> None:

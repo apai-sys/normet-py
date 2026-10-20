@@ -48,10 +48,11 @@ def _compile(template: str, whole: bool = True, sentences: bool = True) -> re.Pa
         free = r".+?" if whole else r"\S.*?"
         if not sentences:
             # A {s} within its sentence and its part of a line: the window strings
-            # sentences together, and facts with " | " -- a template's {s} would otherwise
-            # take the sentences, or the facts, after it ("Backend: {s0}" took
-            # "lightgbm | features: 9 | rows: 5,793", and those two stayed English).
-            stop = r"(?!\. [A-Z(]| \| )"
+            # sentences together, and facts with " | " or " · " -- a template's {s} would
+            # otherwise take the sentences, or the facts, after it ("Backend: {s0}" took
+            # "lightgbm | features: 9 | rows: 5,793", and those two stayed English; a
+            # line a step wrote took the time the task clock adds after it).
+            stop = r"(?!\. [A-Z(]| \| | · )"
             free = rf"(?:{stop}.)+?" if whole else rf"\S(?:{stop}.)*?"
         parts.append(f"(?P<{name}>{_NUM})" if m.group(1) == "n" else f"(?P<{name}>{free})")
         pos = m.end()

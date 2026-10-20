@@ -51,6 +51,7 @@ from PySide6.QtWidgets import (
 from normet import style as S
 from normet.utils._time import to_datetime_coerced
 
+from ._clock import TaskClock
 from ._lists import ALL_TIP, _toggle_all
 from ._widgets import (
     CanvasTab,
@@ -198,6 +199,7 @@ class SCMWindow(QMainWindow):
         self.runner = TaskRunner(self)
         self.runner.started.connect(self._task_started)
         self.runner.finished.connect(self._task_finished)
+        self.task_clock = TaskClock(self, self.runner)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self._build_panel())
@@ -803,14 +805,11 @@ class SCMWindow(QMainWindow):
         self.cancel_btn.setEnabled(busy)
 
     def _task_started(self, name: str) -> None:
-        self.progress.setRange(0, 0)
-        self.statusBar().showMessage(f"Running: {name}…")
         for b in self._run_buttons:
             b.setEnabled(False)
         self.cancel_btn.setEnabled(True)
 
     def _task_finished(self) -> None:
-        self.progress.setRange(0, 1)
         self._sync_enabled()
 
     def _abandon(self) -> None:

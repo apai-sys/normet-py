@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import commandlog
+from ._clock import TaskClock
 from ._constants import MET_DEFAULTS, TIME_VARS  # noqa: F401 - still importable from here
 from ._lists import _checked_items, _fill_checklist, parse_groups  # noqa: F401 - likewise
 from ._panel_analyse import AnalysePanelMixin
@@ -94,6 +95,7 @@ class MainWindow(
         self.runner = TaskRunner(self)
         self.runner.started.connect(self._task_started)
         self.runner.finished.connect(self._task_finished)
+        self.task_clock = TaskClock(self, self.runner)
         self.command_log = commandlog.CommandLog()
         self.runner.record = self._record_task
 
