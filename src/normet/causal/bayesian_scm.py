@@ -11,9 +11,7 @@ synthetic counterfactual.
 
 from __future__ import annotations
 
-import contextlib
 import functools
-from collections.abc import Iterator
 from typing import Any
 
 import numpy as np
@@ -52,13 +50,20 @@ def _compiler_broken() -> bool:
         return True
 
 
-@contextlib.contextmanager
-def _usable_backend() -> Iterator[None]:
-    """Run pytensor without its C compiler while inside, if that compiler is broken:
-    slower, but the sampler runs."""
+def _sample(pm: Any, model: Any, **kwargs: Any) -> Any:
+    """``pm.sample(model=model, **kwargs)``, without pytensor's C++ compiler if that
+    compiler cannot build the model's ops: slower, but the sampler runs.
+
+    The probe catches a compiler that builds nothing; one that builds a plain program
+    but not every op pytensor writes (a newer clang rejecting its narrowing casts)
+    shows only when the model's own ops are built, before any draw is taken."""
+    from pytensor.link.c.exceptions import CompileError
+
     if not _compiler_broken():
-        yield
-        return
+        try:
+            return pm.sample(model=model, **kwargs)
+        except CompileError:
+            pass
     import pytensor
 
     log.warning(
@@ -68,7 +73,7 @@ def _usable_backend() -> Iterator[None]:
         pytensor.config.cxx,
     )
     with pytensor.config.change_flags(cxx=""):
-        yield
+        return pm.sample(model=model, **kwargs)
 
 
 def bayesian_scm(
@@ -173,20 +178,22 @@ def bayesian_scm(
         chains,
     )
 
-    with _usable_backend(), pm.Model() as model:  # noqa: F841 — used implicitly by the sampler
+    with pm.Model() as model:
         w = pm.Dirichlet("w", a=np_module.full(J, float(dirichlet_alpha)))
         sigma = pm.HalfNormal("sigma", sigma=float(sigma_prior))
         mu = pm.math.dot(X_pre, w)
         pm.Normal("y_obs", mu=mu, sigma=sigma, observed=y_pre)
-        idata = pm.sample(
-            draws=int(draws),
-            tune=int(tune),
-            chains=int(chains),
-            target_accept=float(target_accept),
-            cores=n_cores,
-            random_seed=int(seed),
-            progressbar=progressbar,
-        )
+    idata = _sample(
+        pm,
+        model,
+        draws=int(draws),
+        tune=int(tune),
+        chains=int(chains),
+        target_accept=float(target_accept),
+        cores=n_cores,
+        random_seed=int(seed),
+        progressbar=progressbar,
+    )
 
     posterior = idata.posterior["w"].stack(sample=("chain", "draw")).transpose("sample", ...).values
     w_mean = posterior.mean(axis=0)
