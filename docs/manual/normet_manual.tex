@@ -786,8 +786,12 @@ Compute PDP           & an AutoML model, one variable ticked & \code{pdp} \\
 \end{center}
 A button is enabled only when it can act, and its tooltip says what is missing when it
 cannot. One task runs at a time, on a background thread, so the window stays responsive;
-while it runs the run buttons are disabled, the status bar names the task and shows a
-busy bar, and \emph{Cancel} is enabled. Cancel \emph{abandons} the task: the window is
+while it runs the run buttons are disabled, \emph{Cancel} is enabled, and the status bar
+names the task with the time it has taken so far. Where the task says how far it has come
+--- the rolling windows, the decomposition's steps, LightGBM's trials, the receptor times
+HYSPLIT runs, FLAML's time budget --- the progress bar fills with it, and the line gives
+the share done and, once there is enough to go on, the time left; elsewhere the bar is a
+busy bar. When the task ends, the line its step writes says how long it took. Cancel \emph{abandons} the task: the window is
 free at once, but the computation cannot be interrupted, so it finishes in the background
 and its result is discarded. Each step's call is added to the command log when it
 succeeds (Section~\ref{sec:commandlog}).

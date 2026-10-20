@@ -22,6 +22,7 @@ import pandas as pd
 from ..exceptions import ConfigError, DataError, ModelError
 from ..foundation.estimator import CHRONOS_BACKEND, resolve_n_samples
 from ..model.train import build_model
+from ..utils import progress
 from ..utils._config import DEFAULT_SEED, resolve_config
 from ..utils.features import extract_features
 from ..utils.logging import get_logger
@@ -139,7 +140,9 @@ def _effective_cores(n_cores: int | None) -> int:
 def _log_decomposition_progress(
     verbose: bool, start: float, i: int, total: int, var_to_fix: str
 ) -> None:
-    """Log a "Decomposing <var>" progress line with an ETA, shared by decom_emi/decom_met."""
+    """Log a "Decomposing <var>" progress line with an ETA, shared by decom_emi/decom_met,
+    and report the steps done (:mod:`normet.utils.progress`)."""
+    progress.report(i - 1, total)
     elapsed = time.time() - start
     eta = (elapsed / max(i - 1, 1)) * (total - (i - 1)) if i > 1 else None
     eta_str = (
@@ -342,7 +345,8 @@ def _attribute(
                 label = "with fixed " + ", ".join(players[i][0] for i in sorted(fixed))
             _log_decomposition_progress(verbose, start, len(values) + 1, planned, label)
             resample = [f for i, (_, feats) in enumerate(players) if i not in fixed for f in feats]
-            values[fixed] = np.asarray(value_of(resample), dtype=float)
+            with progress.part(len(values), planned):
+                values[fixed] = np.asarray(value_of(resample), dtype=float)
         return values[fixed]
 
     none_fixed: frozenset[int] = frozenset()
@@ -829,22 +833,23 @@ def decom_emi(
 
         _log_decomposition_progress(_cfg.verbose, start, i, len(present_time_vars), var_to_fix)
 
-        df_norm = normalise(
-            df=df_work,
-            model=model,
-            covariates=model_feats,
-            variables_resample=resample_vars,
-            n_samples=_cfg.n_samples,
-            replace=True,
-            aggregate=True,
-            seed=_cfg.seed,
-            n_cores=n_cores_eff,
-            resample_df=_cfg.resample_df,
-            resample_pools=_cfg.resample_pools,
-            conditional_on=_cfg.conditional_on,
-            memory_save=_cfg.memory_save,
-            cache=_cfg.cache,
-        )
+        with progress.part(i - 1, len(present_time_vars)):
+            df_norm = normalise(
+                df=df_work,
+                model=model,
+                covariates=model_feats,
+                variables_resample=resample_vars,
+                n_samples=_cfg.n_samples,
+                replace=True,
+                aggregate=True,
+                seed=_cfg.seed,
+                n_cores=n_cores_eff,
+                resample_df=_cfg.resample_df,
+                resample_pools=_cfg.resample_pools,
+                conditional_on=_cfg.conditional_on,
+                memory_save=_cfg.memory_save,
+                cache=_cfg.cache,
+            )
         if "normalised" not in df_norm.columns:
             log.exception("`normalise` did not return 'normalised' column (aggregate=True).")
             raise ModelError(
