@@ -152,18 +152,31 @@ def test_bayesian_scm_smoke(scm_panel):
 
 
 @requires_pymc
-def test_broken_compiler_samples_in_python(monkeypatch):
-    """A C++ compiler that cannot build pytensor's ops is set aside while sampling."""
+@pytest.mark.parametrize(
+    "probe_says_broken, fails_on_ops, tried",
+    [(True, False, [""]), (False, True, ["c++", ""]), (False, False, ["c++"])],
+    ids=["builds-nothing", "builds-a-program-not-the-ops", "works"],
+)
+def test_broken_compiler_samples_in_python(monkeypatch, probe_says_broken, fails_on_ops, tried):
+    """A C++ compiler that cannot build the model's ops is set aside while sampling,
+    whether the probe sees it or only the model's own ops do."""
     import pytensor  # noqa: PLC0415
+    from pytensor.link.c.exceptions import CompileError  # noqa: PLC0415
 
     mod = importlib.import_module("normet.causal.bayesian_scm")
+    monkeypatch.setattr(pytensor.config, "cxx", "c++")
+    monkeypatch.setattr(mod, "_compiler_broken", lambda: probe_says_broken)
 
-    before = pytensor.config.cxx
-    monkeypatch.setattr(mod, "_compiler_broken", lambda: True)
-    with mod._usable_backend():
-        assert pytensor.config.cxx == ""
-    assert pytensor.config.cxx == before
+    calls = []
 
-    monkeypatch.setattr(mod, "_compiler_broken", lambda: False)
-    with mod._usable_backend():
-        assert pytensor.config.cxx == before
+    class FakePm:
+        @staticmethod
+        def sample(model, **kwargs):
+            calls.append(pytensor.config.cxx)
+            if fails_on_ops and pytensor.config.cxx:
+                raise CompileError("narrowing")
+            return "idata"
+
+    assert mod._sample(FakePm, model=None, draws=1) == "idata"
+    assert calls == tried
+    assert pytensor.config.cxx == "c++"
