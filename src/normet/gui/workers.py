@@ -88,6 +88,9 @@ class TaskRunner(QObject):
     finished = Signal()
     #: The share of the active task done, 0 to 1, where the task reports it.
     progress = Signal(float)
+    #: The active task's result or error is in, before its handler sees it: from here
+    #: on the status bar is the handler's (the thread's end, ``finished``, comes later).
+    settled = Signal()
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -129,6 +132,7 @@ class TaskRunner(QObject):
         # on_result, connected after it.
         worker.finished.connect(self._committed)
         worker.finished.connect(on_result)
+        worker.failed.connect(self._failed)
         worker.failed.connect(on_error)
         worker.progress.connect(self.progress)
         worker.done.connect(thread.quit)
@@ -142,9 +146,13 @@ class TaskRunner(QObject):
 
     def _committed(self, _result: Any) -> None:
         """The active task succeeded: what ``record`` asked to be done, done."""
+        self.settled.emit()
         commit, self._commit = self._commit, None
         if commit is not None:
             commit()
+
+    def _failed(self, _tb: str) -> None:
+        self.settled.emit()
 
     def abandon(self) -> None:
         """Detach the active task; its eventual result is discarded.
@@ -156,6 +164,7 @@ class TaskRunner(QObject):
             return
         _thread, worker = self._active
         for sig in (worker.finished, worker.failed, worker.progress):
+            # (the runner's own slots too: an abandoned task's end is not the next one's)
             try:
                 sig.disconnect()
             except RuntimeError:

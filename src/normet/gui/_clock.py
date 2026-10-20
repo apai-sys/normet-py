@@ -48,6 +48,8 @@ class TaskClock(QObject):
         self._t0 = 0.0
         self._share: float | None = None
         self._budget: float | None = None
+        #: How long the task took, once its result is in (``settle``) until it ends.
+        self._took: float | None = None
         #: The line last written, to tell whether the task's step has written its own.
         self._line = ""
         self._timer = QTimer(self)
@@ -55,6 +57,7 @@ class TaskClock(QObject):
         self._timer.timeout.connect(self._show)
         runner.started.connect(self.start)
         runner.progress.connect(self.report)
+        runner.settled.connect(self.settle)
         runner.finished.connect(self.stop)
 
     def elapsed(self) -> float:
@@ -62,7 +65,7 @@ class TaskClock(QObject):
 
     def start(self, name: str) -> None:
         self._name, self._t0 = name, time.monotonic()
-        self._share, self._budget = None, None
+        self._share, self._budget, self._took = None, None, None
         self._window.progress.setRange(0, 0)
         self._timer.start()
         self._show()
@@ -74,6 +77,8 @@ class TaskClock(QObject):
 
     def report(self, share: float) -> None:
         """The share the task says is done; it never goes back."""
+        if not self._timer.isActive():
+            return  # a report that arrives after the task's result
         self._share = max(self._share or 0.0, min(share, 1.0))
         self._show()
 
@@ -107,13 +112,22 @@ class TaskClock(QObject):
         self._line = " · ".join(parts)
         self._window.statusBar().showMessage(self._line)
 
+    def settle(self) -> None:
+        """The task's result is in, its step about to write its line: the clock stops,
+        so no tick writes over that line before the task has ended (``stop``)."""
+        if self._timer.isActive():
+            self._timer.stop()
+            self._took = self.elapsed()
+
     def stop(self) -> None:
         """The task has ended: the line its step wrote says how long it took; where it
         wrote none (it failed, or was abandoned), that it ended."""
-        if not self._timer.isActive():
-            return
-        self._timer.stop()
-        took = f"took {format_duration(self.elapsed())}"
+        if self._took is None:
+            if not self._timer.isActive():
+                return
+            self.settle()
+        took = f"took {format_duration(self._took or 0.0)}"
+        self._took = None
         bar = self._window.progress
         bar.setRange(0, 1)
         bar.setValue(0)
