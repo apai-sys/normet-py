@@ -22,7 +22,7 @@ class TaskMixin(QMainWindow):
         for b in (self.norm_button, self.decom_button, self.roll_button, self.pdp_button):
             b.setEnabled(not busy and has_model)
         if not has_model:
-            tip = "Train a model first (Step 1)."
+            tip = "Train a model first."
             for b in (self.norm_button, self.decom_button, self.roll_button, self.pdp_button):
                 b.setToolTip(tip)
         elif self._is_chronos():
@@ -38,7 +38,7 @@ class TaskMixin(QMainWindow):
         self.ms_button.setToolTip(
             self._ms_button_tip
             if has_y_inf
-            else "Run Step 2 (Normalise) first — it provides Y_∞, the full-record baseline."
+            else "Run the normalisation first — it provides Y_∞, the full-record baseline."
         )
         # A notice asking for a step that has now been taken has been answered.
         for key, done in (
@@ -81,7 +81,7 @@ class TaskMixin(QMainWindow):
             self.notify(
                 "Open a table first: a CSV with a date column, the pollutant and its meteorology.",
                 key="need-data",
-                actions=(("Open CSV…", self._open_csv), ("Load example", self.load_example)),
+                actions=(("Open Data…", self._open_csv), ("Load example", self.load_example)),
             )
             return False
         if not self._selected_features():
@@ -96,7 +96,7 @@ class TaskMixin(QMainWindow):
     def _check_model(self) -> bool:
         if self.model is None or self.df_prep is None:
             self.notify(
-                "Train a model first (Step 1): every later step reads it.",
+                "Train a model first: every later step reads it.",
                 key="need-model",
                 actions=(("Train model", self._run_train),),
             )

@@ -1,9 +1,9 @@
 """Main window of the normet Qt GUI.
 
-Design language: a scrollable parameter panel on the left walks the user
-through the workflow top-to-bottom (Data → Columns → Train → Normalise →
-Decompose → Rolling → PDP), each step with its own prominent "▶ Run"
-button; results land in tabs on the right, which auto-activate when a run
+Design language: a parameter panel on the left walks the user through the
+workflow a page per step (Data → Model → Normalise → Decompose → Rolling →
+PDP, chosen from a bar above them, as cume's are), each step with its own
+prominent "▶ Run" button; results land in tabs on the right, which auto-activate when a run
 finishes.  Verdict banners (green / amber / red) summarise quality at a
 glance; every long computation runs on a background thread; the bottom dock
 streams normet's log. Before a table is open the Data tab shows the welcome
@@ -30,12 +30,8 @@ from __future__ import annotations
 import logging
 
 import pandas as pd
-from PySide6.QtCore import QSettings, Qt
+from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import (
-    QHBoxLayout,
-    QPushButton,
-    QScrollArea,
-    QVBoxLayout,
     QWidget,
 )
 
@@ -116,30 +112,38 @@ class MainWindow(
         self.statusBar().showMessage("Open a CSV or load the example data to begin.")
 
     # --------------------------------------------------------- left panel
+    #: The left panel's pages, each a step of the workflow (as cume's are): one column
+    #: holding every box was four screens long, and the run a step needed was a scroll
+    #: away from the settings it reads.
+    PANEL_PAGES = ("Data", "Model", "Normalise", "Decompose", "Rolling", "PDP")
+
     def _build_param_panel(self) -> QWidget:
-        """The left column: one box per workflow step, top to bottom.
+        """The left column: a page per workflow step, chosen from a bar above them
+        (:class:`._pages.StepPanel`, as cume's).
 
         Each box is built by its own method below, so a step's controls stay
         findable by name rather than by scrolling through four hundred lines
         of layout.  The order here is the order the workflow runs in, and
         ``_run_buttons`` collects the buttons a running task greys out.
         """
-        panel = QWidget()
-        v = QVBoxLayout(panel)
-        for box in (
-            self._build_data_box(),
-            self._build_columns_box(),
-            self._build_train_box(),
-            self._build_normalise_box(),
-            self._build_decompose_box(),
-            self._build_rolling_box(),
-            self._build_multiscale_box(),
-            self._build_pdp_box(),
-        ):
-            v.addWidget(box)
-        v.addLayout(self._build_config_row())
-        v.addStretch(1)
+        from ._pages import StepPanel
 
+        panel = StepPanel(
+            list(
+                zip(
+                    self.PANEL_PAGES,
+                    (
+                        (self._build_data_box(), self._build_columns_box()),
+                        (self._build_train_box(),),
+                        (self._build_normalise_box(),),
+                        (self._build_decompose_box(), self._build_multiscale_box()),
+                        (self._build_rolling_box(),),
+                        (self._build_pdp_box(),),
+                    ),
+                    strict=True,
+                )
+            )
+        )
         self._run_buttons = [
             self.train_button,
             self.ft_button,
@@ -149,28 +153,16 @@ class MainWindow(
             self.ms_button,
             self.pdp_button,
         ]
+        self.panel_stack, self.panel_bar, self.param_scroll = panel.stack, panel.bar, panel.scroll
+        self.param_panel = panel  # folded and unfolded by toggle_panel (._shell)
+        return panel
 
-        scroll = QScrollArea()
-        scroll.setWidget(panel)
-        scroll.setWidgetResizable(True)
-        scroll.setFixedWidth(390)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.param_panel = scroll  # folded and unfolded by toggle_panel (._shell)
-        return scroll
+    def _show_panel_index(self, i: int) -> None:
+        self.param_panel.show_index(i)
 
-    def _build_config_row(self) -> QHBoxLayout:
-        """Save/load a config and the run history, under the last step."""
-        row = QHBoxLayout()
-        b_save = QPushButton("Save config")
-        b_save.clicked.connect(self.save_config)
-        b_load = QPushButton("Load config")
-        b_load.clicked.connect(self.load_config)
-        b_hist = QPushButton("History")
-        b_hist.clicked.connect(self.show_history)
-        row.addWidget(b_save)
-        row.addWidget(b_load)
-        row.addWidget(b_hist)
-        return row
+    def show_panel_page(self, name: str) -> None:
+        """The panel's page ``name``: one of PANEL_PAGES."""
+        self.param_panel.show_page(name)
 
     def closeEvent(self, event) -> None:  # noqa: N802
         QSettings("apai-sys", "normet-gui").setValue("geometry", self.saveGeometry())

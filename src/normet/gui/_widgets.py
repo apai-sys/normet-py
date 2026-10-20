@@ -672,6 +672,7 @@ class CanvasTab(QWidget):
         rows: list[list[Any]] | None = None,
         export_fn: Any = None,
         top_widget: QWidget | None = None,
+        own_words: bool = False,
     ) -> None:
         """Show a verdict banner + notes + compact table + figure.
 
@@ -685,6 +686,9 @@ class CanvasTab(QWidget):
             Plain informational lines shown under the verdict.
         header, rows
             A compact table (e.g. diagnostics) shown above the figure.
+        own_words
+            The table's cells are the window's words (a subset's name), not the data's:
+            translated as the window is (``uilang.translate_cells``).
         export_fn
             Callback for a "⬇ Export data (CSV)" button.
         top_widget
@@ -717,6 +721,10 @@ class CanvasTab(QWidget):
             for r, row in enumerate(rows):
                 for c, val in enumerate(row):
                     table.setItem(r, c, QTableWidgetItem(str(val)))
+            if own_words:
+                from .uilang import translate_cells
+
+                translate_cells(table)
             table.setMaximumHeight(160)
             table.resizeColumnsToContents()
             self._layout.addWidget(table)

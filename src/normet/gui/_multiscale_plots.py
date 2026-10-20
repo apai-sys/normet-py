@@ -68,7 +68,7 @@ def multiscale_figure(result: dict, target: str = "") -> Any:
         ("Y_fast", f"Y_{result['fast_days']}"),
         ("Y_meso", f"Y_{result['meso_days']}"),
         ("Y_slow", f"Y_{result['slow_days']}"),
-        ("Y_inf", "Y_∞ (Step 2)"),
+        ("Y_inf", "Y_∞ (normalised)"),
     ]
     index = None
     for (key, label), color in zip(scales, SCALE_COLORS, strict=True):

@@ -95,9 +95,22 @@ class ShellMixin(QMainWindow):
         mb = self.menuBar()
 
         fm = mb.addMenu("&File")
-        act = fm.addAction("&Open CSV…", self._open_csv)
+        act = fm.addAction("&Open Data…", self._open_csv)
         act.setShortcut("Ctrl+O")
-        fm.addAction("Load &Example Data", self.load_example)
+        # The examples, each set up as its source sets it up (._examples), and the SCM
+        # Studio's own -- as cume lists its own under File → Load Example.
+        from ._examples import EXAMPLES
+
+        ex_menu = fm.addMenu("Load &Example")
+        for ex in EXAMPLES.values():
+            if ex.key == "synthetic":
+                ex_menu.addSeparator()
+            act = ex_menu.addAction(ex.title, lambda key=ex.key: self.load_example(key))
+            act.setToolTip(ex.description)
+        ex_menu.addSeparator()
+        act = ex_menu.addAction("Synthetic control panel (SCM Studio)", self.open_scm_example)
+        act.setToolTip("Opens the SCM Studio with its example panel loaded.")
+        ex_menu.setToolTipsVisible(True)
         act = fm.addAction("Get &UK Data (AQ networks + met)…", self.open_data_studio)
         act.setShortcut("Ctrl+D")
         self.recent_menu = fm.addMenu("Open &Recent")
@@ -129,6 +142,7 @@ class ShellMixin(QMainWindow):
         fm.addSeparator()
         fm.addAction("Save Con&fig…", self.save_config)
         fm.addAction("Load Confi&g…", self.load_config)
+        fm.addAction("Run &History…", self.show_history)
         fm.addSeparator()
         act = fm.addAction("&Quit", self.close)
         act.setShortcut("Ctrl+Q")
@@ -145,12 +159,9 @@ class ShellMixin(QMainWindow):
         vm.addSeparator()
         act = vm.addAction("Collapse / Expand &Panel", lambda: self.toggle_panel())
         act.setShortcut("Ctrl+B")
-        vm.addAction("Run &History…", self.show_history)
         vm.addSeparator()
-        vm.addAction(self._log_dock.toggleViewAction())
-        act = self._command_dock.toggleViewAction()
-        act.setText("Command &Log")
-        vm.addAction(act)
+        vm.addAction("&Log", lambda: self.show_log_page(0))
+        vm.addAction("Command &Log", lambda: self.show_log_page(1))
         act = self.assistant.toggleViewAction()
         act.setText("&Assistant")
         act.setShortcut("Ctrl+Shift+A")
@@ -272,27 +283,27 @@ class ShellMixin(QMainWindow):
         dl.addWidget(self.table_view, 1)
         self.tabs.addTab(data_tab, "Data")
 
-        self.tab_model = CanvasTab("Train a model (Step 1) to see its quality here.")
+        self.tab_model = CanvasTab("Train a model to see its quality here.")
         self.tabs.addTab(self.tab_model, "Model")
         self.tab_norm = CanvasTab(
-            "Run Step 2 to see observed vs. meteorologically normalised series."
+            "Run the normalisation to see observed vs. meteorologically normalised series."
         )
         self.tabs.addTab(self.tab_norm, "Normalise")
         self.tab_decom = CanvasTab(
-            "Run Step 3 to see the decomposition — emission splits the "
+            "Run a decomposition to see it here — emission splits the "
             "normalised series into time scales; meteorology splits "
             "observed − normalised by met variable."
         )
         self.tabs.addTab(self.tab_decom, "Decompose")
-        self.tab_roll = CanvasTab("Run Step 4 to see the rolling normalisation.")
+        self.tab_roll = CanvasTab("Run the rolling normalisation to see it here.")
         self.tabs.addTab(self.tab_roll, "Rolling")
         self.tab_multiscale = CanvasTab(
-            "Run Step 2 (Normalise) then Multi-scale decomposition to see "
+            "Run the normalisation, then Multi-scale decomposition, to see "
             "how meteorological residuals split across fast/meso/slow "
             "timescales."
         )
         self.tabs.addTab(self.tab_multiscale, "Multi-scale")
-        self.tab_pdp = CanvasTab("Run Step 5 to see partial-dependence curves.")
+        self.tab_pdp = CanvasTab("Compute PDP to see partial-dependence curves.")
         self.tabs.addTab(self.tab_pdp, "PDP")
         self._sync_welcome()
         return self.tabs
@@ -306,19 +317,37 @@ class ShellMixin(QMainWindow):
         self._data_parts.setVisible(not empty)
 
     def _build_log_dock(self) -> None:
+        """The log and the command log: one dock at the foot, a page each, without a title
+        bar of its own -- its two tabs are on the status bar's line (``_log_tabs``)."""
+        from PySide6.QtWidgets import QStackedWidget, QTabBar
+
         dock = QDockWidget("Log", self)
+        dock.setObjectName("logDock")
         dock.setFeatures(
             QDockWidget.DockWidgetFeature.DockWidgetMovable
             | QDockWidget.DockWidgetFeature.DockWidgetFloatable
             | QDockWidget.DockWidgetFeature.DockWidgetClosable
         )
+        dock.setTitleBarWidget(QWidget())  # the tabs name it, on the status bar
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(5_000)
-        dock.setWidget(self.log_view)
-        dock.setMaximumHeight(160)
+        self._log_stack = QStackedWidget()
+        self._log_stack.addWidget(self.log_view)
+        dock.setWidget(self._log_stack)
+        dock.setMaximumHeight(180)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, dock)
         self._log_dock = dock
+        tabs = QTabBar()
+        tabs.setDocumentMode(True)
+        tabs.setDrawBase(False)
+        tabs.setExpanding(False)
+        tabs.setStyleSheet("QTabBar::tab { padding: 2px 10px; }")
+        tabs.addTab("Log")
+        tabs.addTab("Command Log")
+        tabs.setToolTip("Show the log or the command log; click the open one to fold it away.")
+        tabs.tabBarClicked.connect(self._log_tab_clicked)
+        self._log_tabs = tabs
 
         handler = QtLogHandler()
         handler.message.connect(self.log_view.appendPlainText)
@@ -332,8 +361,6 @@ class ShellMixin(QMainWindow):
         """View → Command Log: the session as the normet calls that repeat it."""
         from PySide6.QtGui import QFontDatabase
 
-        dock = QDockWidget("Command Log", self)
-        dock.setObjectName("commandLogDock")
         body = QWidget()
         v = QVBoxLayout(body)
         v.setContentsMargins(4, 4, 4, 4)
@@ -354,12 +381,23 @@ class ShellMixin(QMainWindow):
             row.addWidget(b)
         row.addStretch(1)
         v.addLayout(row)
-        dock.setWidget(body)
-        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, dock)
-        self.tabifyDockWidget(self._log_dock, dock)
-        self._log_dock.raise_()
-        self._command_dock = dock
+        self._log_stack.addWidget(body)
         self._refresh_command_log()
+
+    def show_log_page(self, index: int) -> None:
+        """The log (0) or the command log (1) in view, the dock opened if folded."""
+        self._log_stack.setCurrentIndex(index)
+        self._log_tabs.setCurrentIndex(index)
+        self._log_dock.show()
+
+    def _log_tab_clicked(self, index: int) -> None:
+        """A tab clicked: its page in view -- or, the page already open, the dock folded."""
+        if index < 0:
+            return
+        if self._log_dock.isVisible() and self._log_stack.currentIndex() == index:
+            self._log_dock.hide()
+        else:
+            self.show_log_page(index)
 
     def _refresh_command_log(self) -> None:
         self.command_view.setPlainText(self.command_log.text())
@@ -426,6 +464,7 @@ class ShellMixin(QMainWindow):
             lbl.setTextFormat(Qt.TextFormat.RichText)
             row.addWidget(lbl)
             self._step_lights[key] = lbl
+        self.statusBar().addPermanentWidget(self._log_tabs)
         self.statusBar().addPermanentWidget(lights)
         self.statusBar().addPermanentWidget(self.cancel_btn)
         self.statusBar().addPermanentWidget(self.progress)
@@ -556,9 +595,10 @@ class ShellMixin(QMainWindow):
             "back-trajectory (tdump) output, and join them onto this data."
         )
         self.transport_btn.clicked.connect(self.open_transport_studio)
+        # The studios side by side, then what is done with a result.
         h.addWidget(self.data_btn)
         h.addWidget(self.transport_btn)
+        h.addWidget(self.scm_btn)
         h.addWidget(self.exp_csv)
         h.addWidget(self.exp_html)
-        h.addWidget(self.scm_btn)
         return bar

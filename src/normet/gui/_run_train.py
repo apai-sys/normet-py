@@ -21,6 +21,11 @@ from ._lists import _fill_checklist
 log = logging.getLogger(__name__)
 
 
+#: modStats' columns and subsets, as the Model tab's table names them.
+_STATS_HEADER = {"set": "Subset", "p_level": "Significance"}
+_STATS_SET = {"training": "Training", "testing": "Testing", "all": "All"}
+
+
 class TrainRunMixin(QMainWindow):
     def _run_train(self) -> None:
         if not self._check_data():
@@ -157,6 +162,9 @@ class TrainRunMixin(QMainWindow):
             set(self.trained_features[:4]),
         )
         self._reset_pdp_toggle_buttons()
+        # The meteorological decomposition's groups: the model's variables, each in the
+        # group it had (a config read before training applies now).
+        self.decom_groups.set_variables([f for f in self.trained_features if f not in TIME_VARS])
         # Offer every trained variable (incl. the auto-added time features)
         # for resampling; default to Met only — the standard deweathering
         # choice, which keeps trend/seasonality in the normalised series.
@@ -172,9 +180,7 @@ class TrainRunMixin(QMainWindow):
             self._render_model_tab()
         self._sync_enabled()
         self.tabs.setCurrentWidget(self.tab_model)
-        self.statusBar().showMessage(
-            "Model trained — check its quality, then run Step 2 (normalisation)."
-        )
+        self.statusBar().showMessage("Model trained — check its quality, then normalise.")
         log.info("Training finished")
 
     def _render_model_tab(self) -> None:
@@ -191,8 +197,13 @@ class TrainRunMixin(QMainWindow):
             stats = modStats(self.df_prep, self.model).round(3)
             self.results["train"] = stats
             tbl = stats.reset_index() if stats.index.name or stats.index.nlevels > 1 else stats
-            header = [str(c) for c in tbl.columns]
-            rows = [[v for v in row] for row in tbl.itertuples(index=False)]
+            # The table in words, not modStats' column names: the subset a row is about
+            # and the stars' column (the metrics' own abbreviations stay).
+            header = [_STATS_HEADER.get(str(c), str(c)) for c in tbl.columns]
+            rows = [
+                [_STATS_SET.get(v, v) if isinstance(v, str) else v for v in row]
+                for row in tbl.itertuples(index=False)
+            ]
         except Exception:
             log.exception("modStats failed")
 
@@ -306,6 +317,7 @@ class TrainRunMixin(QMainWindow):
             ],
             header=header,
             rows=rows,
+            own_words=True,
         )
         self._log_history("train", f"R2={r2:.3f}")
 

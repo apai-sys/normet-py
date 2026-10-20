@@ -1,7 +1,10 @@
 """The Data and Columns boxes: loading a table and choosing what to model.
 
-The first two steps of the left panel, with everything that reacts to them --
-the CSV loader, the drag-and-drop handlers and the target series preview.
+The left panel's Data page, with everything that reacts to it -- the table loader
+(:func:`normet.io.read_time_series`: text, Excel, Parquet, Feather or JSON, its times
+however written, put on UTC from the time zone chosen), the examples (``._examples``,
+offered under File → Load Example and on the welcome, as cume offers its own), the
+drag-and-drop handlers and the target series preview.
 A mixin of :class:`~.main_window.MainWindow`: the widgets it creates are
 attributes of the window, which is how the run handlers reach them.
 """
@@ -15,6 +18,7 @@ import pandas as pd
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QComboBox,
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
@@ -27,39 +31,106 @@ from PySide6.QtWidgets import (
 )
 
 from normet import style as S
-from normet.utils._time import to_datetime_coerced
+from normet.io.tables import TABLE_SUFFIXES
 
 from . import _settings, commandlog
 from ._constants import MET_DEFAULTS
-from ._lists import _checked_items, _fill_checklist, _set_all
+from ._lists import ALL_TIP, _checked_items, _fill_checklist, _toggle_all
 from ._widgets import NoWheelComboBox, hint_label
 
 log = logging.getLogger(__name__)
 
+#: What Open Data… offers, by kind.
+TABLE_FILTER = (
+    "Tables (*.csv *.txt *.tsv *.dat *.gz *.xlsx *.xlsm *.xls *.parquet *.feather *.json);;"
+    "CSV and text (*.csv *.txt *.tsv *.dat *.gz);;Excel (*.xlsx *.xlsm *.xls);;"
+    "Parquet, Feather, JSON (*.parquet *.feather *.json);;All files (*)"
+)
+
+#: The clocks a table can be kept on: (what the list shows, the IANA zone). The
+#: meteorology joined to a table -- ERA5, Open-Meteo, HYSPLIT -- is on UTC.
+ZONES: tuple[tuple[str, str], ...] = (
+    ("UTC (as recorded)", "UTC"),
+    ("UK — Europe/London (GMT/BST)", "Europe/London"),
+    ("Central Europe — Europe/Paris (CET/CEST)", "Europe/Paris"),
+    ("China — Asia/Shanghai (UTC+8)", "Asia/Shanghai"),
+    ("Hong Kong — Asia/Hong_Kong (UTC+8)", "Asia/Hong_Kong"),
+    ("Taiwan — Asia/Taipei (UTC+8)", "Asia/Taipei"),
+    ("Japan — Asia/Tokyo (UTC+9)", "Asia/Tokyo"),
+    ("Korea — Asia/Seoul (UTC+9)", "Asia/Seoul"),
+    ("India — Asia/Kolkata (UTC+5:30)", "Asia/Kolkata"),
+    ("US Eastern — America/New_York", "America/New_York"),
+    ("US Central — America/Chicago", "America/Chicago"),
+    ("US Mountain — America/Denver", "America/Denver"),
+    ("US Pacific — America/Los_Angeles", "America/Los_Angeles"),
+    ("Australia East — Australia/Sydney", "Australia/Sydney"),
+    ("UTC+8, no summer time — Etc/GMT-8", "Etc/GMT-8"),
+    ("UTC−5, no summer time — Etc/GMT+5", "Etc/GMT+5"),
+)
+ZONE_PREF = "data_time_zone"
+
 
 class InputsMixin(QMainWindow):
     def _build_data_box(self) -> QGroupBox:
-        """Data: open a CSV, or load the bundled example."""
+        """Data: open a table, and the clock its times are kept on. The examples are under
+        File → Load Example and on the welcome, as cume's are."""
+        from PySide6.QtCore import QSettings
+
         box = QGroupBox("Data")
         dv = QVBoxLayout(box)
-        file_row = QHBoxLayout()
-        file_row.setContentsMargins(0, 0, 0, 0)
-        self.file_btn = QPushButton("Open CSV…")
+        self.file_btn = QPushButton("Open Data…")
         self.file_btn.setToolTip(
-            "Load a time series CSV with a 'date' column.\nYou can also drag && drop a file onto the window."
+            "Load a time series: CSV or other delimited text, Excel, Parquet, Feather or "
+            "JSON, with its times in a column (date, datetime, timestamp, time …) or in "
+            "year, month, day and hour columns, written in any of the usual ways. You can "
+            "also drop a file onto the window."
         )
         self.file_btn.clicked.connect(self._open_csv)
-        self.example_btn = QPushButton("Load example")
-        self.example_btn.setToolTip(
-            "Generate a one-year synthetic air-quality + meteorology dataset\nso you can try every step immediately."
-        )
-        self.example_btn.clicked.connect(self.load_example)
-        file_row.addWidget(self.file_btn)
-        file_row.addWidget(self.example_btn)
-        dv.addLayout(file_row)
+        dv.addWidget(self.file_btn)
         self.file_label = hint_label("No data loaded", small=False)
         dv.addWidget(self.file_label)
+        zone_row = QHBoxLayout()
+        zone_row.setContentsMargins(0, 0, 0, 0)
+        zone_row.addWidget(QLabel("Time zone"))
+        self.zone_combo = NoWheelComboBox()
+        # Its width from the panel, not from its longest zone: the list opens wider.
+        self.zone_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.zone_combo.setMinimumContentsLength(10)
+        for text, zone in ZONES:
+            self.zone_combo.addItem(text, zone)
+        self.zone_combo.setToolTip(
+            "The clock the analysis keeps, and its figures and tables show: the site's local "
+            "time, or UTC. A table's times written without an offset are taken to be on it; "
+            "times written with one (+08:00) are put on it. The hour and weekday the model "
+            "learns from are then the site's own, so a rush hour stays at its hour through "
+            "summer time. Meteorology and trajectories fetched on UTC (the Data and "
+            "Transport Studios) are put on this clock as they are joined."
+        )
+        kept = str(QSettings("apai-sys", "normet-gui").value(ZONE_PREF, "UTC"))
+        self.zone_combo.setCurrentIndex(max(0, self.zone_combo.findData(kept)))
+        self.zone_combo.currentIndexChanged.connect(self._zone_changed)
+        zone_row.addWidget(self.zone_combo, 1)
+        dv.addLayout(zone_row)
+        self.dates_label = hint_label("")
+        self.dates_label.setVisible(False)
+        dv.addWidget(self.dates_label)
+        #: The file the table on screen was read from, read again when the zone changes.
+        self._data_path: str | None = None
         return box
+
+    def _zone(self) -> str:
+        return str(self.zone_combo.currentData() or "UTC")
+
+    def _zone_changed(self, _index: int) -> None:
+        """Another clock chosen: kept for the next session, and the open file read again
+        on it (the model and results go with the old times)."""
+        from PySide6.QtCore import QSettings
+
+        QSettings("apai-sys", "normet-gui").setValue(ZONE_PREF, self._zone())
+        if self._data_path is not None and self.df_raw is not None:
+            self.load_csv(self._data_path)
 
     def _build_columns_box(self) -> QGroupBox:
         """Columns: the target series and the predictors ticked for the model."""
@@ -81,14 +152,12 @@ class InputsMixin(QMainWindow):
         cv.addWidget(self.feature_list)
         btn_row = QHBoxLayout()
         b_all = QPushButton("All")
-        b_none = QPushButton("None")
+        b_all.setToolTip(ALL_TIP)
         b_met = QPushButton("Met only")
         b_met.setToolTip("Tick only the recognised meteorological variables.")
-        b_all.clicked.connect(lambda: _set_all(self.feature_list, True))
-        b_none.clicked.connect(lambda: _set_all(self.feature_list, False))
+        b_all.clicked.connect(lambda: _toggle_all(self.feature_list))
         b_met.clicked.connect(self._check_met_only)
         btn_row.addWidget(b_all)
-        btn_row.addWidget(b_none)
         btn_row.addWidget(b_met)
         cv.addLayout(btn_row)
         cv.addWidget(
@@ -99,49 +168,73 @@ class InputsMixin(QMainWindow):
         return box
 
     def _open_csv(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Open time-series CSV", "", "CSV files (*.csv *.csv.gz)"
-        )
+        path, _ = QFileDialog.getOpenFileName(self, "Open data", "", TABLE_FILTER)
         if path:
             self.load_csv(path, remember=True)
 
-    def load_example(self) -> None:
-        from ._examples import make_deweather_example
+    def load_example(self, key: str = "synthetic") -> None:
+        """An example (``._examples.EXAMPLES``), opened with its target and predictors set
+        as its source sets them."""
+        from ._examples import EXAMPLES
 
-        df = make_deweather_example()
-        self._ingest(df, "Example data (synthetic, 1 year hourly)")
-        self._log_command(commandlog.load_example())
+        ex = EXAMPLES[key]
+        df = ex.load()
+        self._data_path = None
+        self._ingest(df, ex.title)
+        self._show_dates(None)
+        if ex.target in df.columns:
+            self.target_combo.setCurrentText(ex.target)
+        if ex.features is not None:
+            numeric = [self.feature_list.item(i).text() for i in range(self.feature_list.count())]
+            _fill_checklist(self.feature_list, numeric, set(ex.features))
+        self._log_command(commandlog.load_example(ex))
         self.statusBar().showMessage(
-            "Example loaded — target PM2.5 with met features preselected. Click ▶ Train model."
+            f"{ex.title}: set up as {ex.source} — check the target and features, then "
+            "▶ Train model."
         )
 
     def load_csv(self, path: str, remember: bool = False) -> None:
-        """Load *path* into the Data tab and populate the column selectors."""
-        try:
-            df = pd.read_csv(path)
-        except Exception as exc:
-            QMessageBox.critical(self, "Failed to read CSV", str(exc))
-            return
+        """Load the table at *path* (any file :func:`normet.io.read_time_series` reads)
+        into the Data tab, its times on UTC from the time zone chosen, and populate the
+        column selectors."""
+        from normet.io import read_time_series
 
-        date_col = next((c for c in df.columns if c.lower() == "date"), None)
-        if date_col is None:
+        try:
+            df = read_time_series(path, zone=self._zone())
+        except ValueError as exc:
             QMessageBox.warning(
                 self,
-                "No date column",
-                "The CSV must contain a 'date' column with timestamps.\n\n"
-                "For synthetic-control panel data, use the SCM Studio instead "
-                "(Analysis → Synthetic Control).",
+                "No times found",
+                f"{exc}\n\nFor synthetic-control panel data, use the SCM Studio instead "
+                "(Analysis → Synthetic Control (SCM) Studio).",
             )
             return
-        df[date_col] = to_datetime_coerced(df[date_col])
-        df = df.rename(columns={date_col: "date"})
-
+        except Exception as exc:  # noqa: BLE001 - a file pandas cannot read, said as it is
+            QMessageBox.critical(self, "Failed to read the file", str(exc))
+            return
+        self._data_path = path
         self._ingest(df, os.path.basename(path))
-        self._log_command(commandlog.open_csv(os.path.abspath(path), date_col))
+        self._show_dates(df)
+        self._log_command(commandlog.open_table(os.path.abspath(path), self._zone()))
         if remember:
             _settings.add_recent(path)
             self._rebuild_recent_menu()
-        log.info("Loaded %s (%d rows)", path, len(df))
+        log.info("Loaded %s (%d rows): times %s", path, len(df), df.attrs.get("normet_dates"))
+
+    def _show_dates(self, df: pd.DataFrame | None) -> None:
+        """How the table's times were read, under the file's name -- and, where some could
+        not be, how many."""
+        if df is None:
+            self.dates_label.setVisible(False)
+            return
+        how = df.attrs.get("normet_dates", "")
+        bad = int(df["date"].isna().sum())
+        parts = ["Times", *how.split(" · ")] if how else []
+        if bad:
+            parts.append(f"{bad:,} could not be read and are left empty")
+        text = " · ".join(parts)
+        self.dates_label.setText(text)
+        self.dates_label.setVisible(bool(text))
 
     def _ingest(self, df: pd.DataFrame, label: str) -> None:
         self.df_raw = df
@@ -151,9 +244,10 @@ class InputsMixin(QMainWindow):
         self.trained_features = []
         self.results.clear()
         self._multiscale_raw = None
-        self.tab_model.show_message("Train a model (Step 1) to see its quality here.")
+        self.tab_model.show_message("Train a model to see its quality here.")
 
-        span = f"{df['date'].min():%Y-%m-%d} → {df['date'].max():%Y-%m-%d}"
+        # The clock the times are on: every figure and table after this one keeps it.
+        span = f"{df['date'].min():%Y-%m-%d} → {df['date'].max():%Y-%m-%d} ({self._zone()})"
         self.file_label.setText(f"{label}\n{len(df):,} rows × {df.shape[1]} columns")
         self.file_label.setStyleSheet("")
         self.table_model.set_dataframe(df)
@@ -190,7 +284,7 @@ class InputsMixin(QMainWindow):
         self._draw_data_preview()
         self.tabs.setCurrentIndex(0)
         self.statusBar().showMessage(
-            "Data loaded — check the target and features, then ▶ Train model (Step 1)."
+            "Data loaded — check the target and features, then ▶ Train model."
         )
 
     def _target_changed(self, _text: str) -> None:
@@ -233,14 +327,14 @@ class InputsMixin(QMainWindow):
     def dragEnterEvent(self, event) -> None:  # noqa: N802
         md = event.mimeData()
         if md.hasUrls() and any(
-            u.toLocalFile().lower().endswith((".csv", ".csv.gz")) for u in md.urls()
+            u.toLocalFile().lower().endswith(TABLE_SUFFIXES) for u in md.urls()
         ):
             event.acceptProposedAction()
 
     def dropEvent(self, event) -> None:  # noqa: N802
         for u in event.mimeData().urls():
             p = u.toLocalFile()
-            if p.lower().endswith((".csv", ".csv.gz")):
+            if p.lower().endswith(TABLE_SUFFIXES):
                 self.load_csv(p, remember=True)
                 break
 

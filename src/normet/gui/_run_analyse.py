@@ -16,7 +16,7 @@ from normet import style as S
 
 from . import _chronos
 from ._constants import TIME_VARS
-from ._lists import _checked_items, parse_groups
+from ._lists import _checked_items
 
 log = logging.getLogger(__name__)
 
@@ -28,7 +28,7 @@ class AnalyseRunMixin(QMainWindow):
         resample_vars = self._selected_norm_vars()
         if not resample_vars:
             self.notify(
-                "Tick at least one variable to resample in Step 2 (usually the meteorological ones).",
+                "Tick at least one variable to resample under Normalise (usually the meteorological ones).",
                 key="need-resample-vars",
             )
             return
@@ -174,7 +174,7 @@ class AnalyseRunMixin(QMainWindow):
         if method == "meteorology":
             met = [f for f in self.trained_features if f not in TIME_VARS]
             try:
-                groups = parse_groups(self.decom_groups.text(), met)
+                groups = self.decom_groups.groups(met)
             except ValueError as exc:
                 QMessageBox.warning(self, "Groups", str(exc))
                 return
@@ -342,7 +342,7 @@ class AnalyseRunMixin(QMainWindow):
             return
         if "normalise" not in self.results:
             self.notify(
-                "Multi-scale decomposition needs Y_∞ from Step 2 (Normalise) as its "
+                "Multi-scale decomposition needs Y_∞ from the normalisation as its "
                 "full-record baseline — run Normalise, then come back here.",
                 key="need-normalise",
                 actions=(("Run normalisation", self._run_normalise),),
@@ -407,7 +407,7 @@ class AnalyseRunMixin(QMainWindow):
             return
         variables = _checked_items(self.pdp_vars)
         if not variables:
-            self.notify("Tick at least one variable in Step 5.", key="need-pdp-vars")
+            self.notify("Tick at least one variable for the PDP.", key="need-pdp-vars")
             return
         from normet import pdp
 

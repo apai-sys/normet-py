@@ -50,6 +50,18 @@ def _plain_call(args, kwargs) -> dict:  # noqa: ANN001
     return out
 
 
+#: The run history's steps (``_log_history``), as its table names them.
+_TASK_WORDS = {
+    "load": "Load",
+    "train": "Train",
+    "normalise": "Normalise",
+    "decompose": "Decompose",
+    "rolling": "Rolling",
+    "multiscale": "Multi-scale",
+    "pdp": "PDP",
+}
+
+
 class SessionMixin(QMainWindow):
     #: Which result each tab shows, for Export.
     _TAB_KEYS = {
@@ -298,11 +310,16 @@ class SessionMixin(QMainWindow):
         else:
             cols = ["time", "task", "target", "backend", "rows", "detail"]
             tbl = QTableWidget(len(recs), len(cols))
-            tbl.setHorizontalHeaderLabels(cols)
+            tbl.setHorizontalHeaderLabels(["Time", "Task", "Target", "Backend", "Rows", "Detail"])
             tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+            from .uilang import tr
+
             for i, rec in enumerate(reversed(recs)):  # newest first
                 for j, col in enumerate(cols):
-                    tbl.setItem(i, j, QTableWidgetItem(str(rec.get(col, ""))))
+                    value = str(rec.get(col, ""))
+                    if col == "task":  # the step, in the window's words
+                        value = tr(_TASK_WORDS.get(value, value))
+                    tbl.setItem(i, j, QTableWidgetItem(value))
             tbl.resizeColumnsToContents()
             lay.addWidget(tbl)
         clr = QPushButton("Clear history")

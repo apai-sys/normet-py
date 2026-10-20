@@ -229,6 +229,8 @@ class SavedResultsMixin(QMainWindow):
             return
         self._restoring = True
         try:
+            self._data_path = None  # not a file the time zone can read again
+            self._show_dates(None)
             self._ingest(df, bundle.get("label") or "restored session")
             config = bundle.get("config") or {}
             self.apply_config(config)

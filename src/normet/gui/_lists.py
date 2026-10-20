@@ -39,6 +39,19 @@ def _set_all(widget: QListWidget, checked: bool) -> None:
         widget.item(i).setCheckState(state)
 
 
+#: The tooltip of an All button that ticks and unticks by turns.
+ALL_TIP = "Tick every one; once all are ticked, untick every one."
+
+
+def _toggle_all(widget: QListWidget) -> None:
+    """Every item ticked -- or, where every one is ticked already, every one unticked: one
+    All button does what an All and a None did."""
+    every = widget.count() > 0 and all(
+        widget.item(i).checkState() == Qt.CheckState.Checked for i in range(widget.count())
+    )
+    _set_all(widget, not every)
+
+
 def parse_groups(text: str, variables: list[str]) -> dict[str, list[str]] | None:
     """``"local: t2m, blh; wind: u10, v10"`` as ``{"local": [...], "wind": [...]}``;
     None for an empty box. Raises ValueError, in words for the user, on a group

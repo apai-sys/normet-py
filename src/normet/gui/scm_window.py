@@ -42,7 +42,6 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
-    QScrollArea,
     QSplitter,
     QTabWidget,
     QVBoxLayout,
@@ -52,6 +51,7 @@ from PySide6.QtWidgets import (
 from normet import style as S
 from normet.utils._time import to_datetime_coerced
 
+from ._lists import ALL_TIP, _toggle_all
 from ._widgets import (
     CanvasTab,
     NoWheelComboBox,
@@ -153,6 +153,35 @@ def _checked(widget: QListWidget) -> list[str]:
     ]
 
 
+#: The SCM Studio's examples: key -> (title, what it is).
+SCM_EXAMPLES = {
+    "ulez": (
+        "London ULEZ, monthly NO₂ (2017–2020)",
+        "The normet paper's case study: London Marylebone Road against UK traffic sites, "
+        "the Ultra Low Emission Zone from April 2019.",
+    ),
+    "synthetic": (
+        "Synthetic weekly SO₂ panel (2015–2016)",
+        "A ~35 % step-down in the treated unit ('2+26 cities') from 2015-10-23 -- "
+        "reproduces the tutorial.",
+    ),
+}
+
+#: The fit's numbers (normet's SCM result keys), as the Fit tab's table names them.
+_FIT_WORDS = {
+    "pre_n": "Pre-period points",
+    "pre_rmse": "Pre-period RMSE",
+    "pre_mae": "Pre-period MAE",
+    "pre_r2": "Pre-period R²",
+    "post_n": "Post-period points",
+    "att": "Mean effect (ATT)",
+    "att_cum": "Cumulative effect",
+    "post_rmse": "Post-period RMSE",
+    "hhi": "Donor concentration (HHI)",
+    "effective_n_donors": "Effective number of donors",
+}
+
+
 class SCMWindow(QMainWindow):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -195,31 +224,39 @@ class SCMWindow(QMainWindow):
         self.cancel_btn.clicked.connect(self._abandon)
         self.statusBar().addPermanentWidget(self.cancel_btn)
         self.statusBar().addPermanentWidget(self.progress)
-        self.statusBar().showMessage("Load a long panel CSV (date, unit, outcome) or the example.")
+        self.statusBar().showMessage(
+            "Open a long panel (date, unit, outcome), or load an example from the File menu."
+        )
+        self._build_menu()
 
         self._sync_enabled()
 
+    def _build_menu(self) -> None:
+        """File: open a panel, the examples (as the main window's), close."""
+        fm = self.menuBar().addMenu("&File")
+        act = fm.addAction("&Open Data…", self._open_csv)
+        act.setShortcut("Ctrl+O")
+        ex_menu = fm.addMenu("Load &Example")
+        for key, (title, tip) in SCM_EXAMPLES.items():
+            act = ex_menu.addAction(title, lambda key=key: self.load_example(key))
+            act.setToolTip(tip)
+        ex_menu.setToolTipsVisible(True)
+        fm.addSeparator()
+        fm.addAction("&Close", self.close).setShortcut("Ctrl+W")
+
     # ------------------------------------------------------------- left panel
     def _build_panel(self) -> QWidget:
-        panel = QWidget()
-        v = QVBoxLayout(panel)
-
         # ---- Data
         data_box = QGroupBox("Panel data")
         dv = QVBoxLayout(data_box)
-        row = QHBoxLayout()
-        b_open = QPushButton("Open CSV…")
-        b_open.setToolTip("A long panel: one row per (date, unit) with the outcome in a column.")
-        b_open.clicked.connect(self._open_csv)
-        b_example = QPushButton("Load example")
-        b_example.setToolTip(
-            "Synthetic weekly SO₂ panel with a ~35 % step-down in the treated\n"
-            "unit ('2+26 cities') from 2015-10-23 — reproduces the tutorial."
+        b_open = QPushButton("Open Data…")
+        b_open.setToolTip(
+            "A long panel: one row per (date, unit) with the outcome in a column -- CSV or "
+            "other delimited text, Excel, Parquet, Feather or JSON. The examples are under "
+            "File → Load Example."
         )
-        b_example.clicked.connect(self.load_example)
-        row.addWidget(b_open)
-        row.addWidget(b_example)
-        dv.addLayout(row)
+        b_open.clicked.connect(self._open_csv)
+        dv.addWidget(b_open)
         self.use_main_btn = QPushButton("Use main-window data")
         self.use_main_btn.setEnabled(False)
         self.use_main_btn.setToolTip(
@@ -229,7 +266,6 @@ class SCMWindow(QMainWindow):
         dv.addWidget(self.use_main_btn)
         self.file_label = hint_label("No panel loaded", small=False)
         dv.addWidget(self.file_label)
-        v.addWidget(data_box)
 
         # ---- Columns
         col_box = QGroupBox("Columns")
@@ -249,7 +285,6 @@ class SCMWindow(QMainWindow):
         self.date_combo.currentTextChanged.connect(self._columns_changed)
         self.unit_combo.currentTextChanged.connect(self._columns_changed)
         self.outcome_combo.currentTextChanged.connect(self._redraw_panel_tab)
-        v.addWidget(col_box)
 
         # ---- Design
         design_box = QGroupBox("Design")
@@ -274,14 +309,10 @@ class SCMWindow(QMainWindow):
         self.donor_list.setMaximumHeight(170)
         self.donor_list.setToolTip("Untreated units used to build the synthetic counterfactual.")
         gf.addRow(self.donor_list)
-        dbrow = QHBoxLayout()
         b_all = QPushButton("All")
-        b_none = QPushButton("None")
-        b_all.clicked.connect(lambda: self._set_donors(True))
-        b_none.clicked.connect(lambda: self._set_donors(False))
-        dbrow.addWidget(b_all)
-        dbrow.addWidget(b_none)
-        gf.addRow(dbrow)
+        b_all.setToolTip(ALL_TIP)
+        b_all.clicked.connect(lambda: _toggle_all(self.donor_list))
+        gf.addRow(b_all)
         from . import _chronos
 
         chronos_ok, chronos_why = _chronos.chronos_availability()
@@ -310,7 +341,6 @@ class SCMWindow(QMainWindow):
         keep.addWidget(self.sim_tick_btn)
         gf.addRow(keep)
         self._similarity: pd.DataFrame | None = None
-        v.addWidget(design_box)
 
         # ---- Estimator
         est_box = QGroupBox("Estimator")
@@ -347,7 +377,6 @@ class SCMWindow(QMainWindow):
         )
         self.fit_btn.clicked.connect(self._run_fit)
         ef.addRow(self.fit_btn)
-        v.addWidget(est_box)
 
         # ---- Inference
         inf_box = QGroupBox("Inference")
@@ -401,9 +430,7 @@ class SCMWindow(QMainWindow):
         )
         self.all_btn.clicked.connect(self._run_all_units)
         inf.addRow(self.all_btn)
-        v.addWidget(inf_box)
 
-        v.addStretch(1)
         self._run_buttons = [
             self.fit_btn,
             self.placebo_space_btn,
@@ -414,12 +441,18 @@ class SCMWindow(QMainWindow):
 
         self._backend_changed(self.backend_combo.currentText())
 
-        scroll = QScrollArea()
-        scroll.setWidget(panel)
-        scroll.setWidgetResizable(True)
-        scroll.setFixedWidth(390)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        return scroll
+        # A page per step, as the main window's (._pages.StepPanel).
+        from ._pages import StepPanel
+
+        self.panel = StepPanel(
+            [
+                ("Data", (data_box, col_box)),
+                ("Design", (design_box,)),
+                ("Estimator", (est_box,)),
+                ("Inference", (inf_box,)),
+            ]
+        )
+        return self.panel
 
     def _build_action_bar(self) -> QWidget:
         bar = QWidget()
@@ -480,19 +513,25 @@ class SCMWindow(QMainWindow):
             self._ingest(self._main_df.copy(), "main-window data")
 
     def _open_csv(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Open panel CSV", "", "CSV files (*.csv *.csv.gz)"
-        )
+        from normet.io.tables import read_table
+
+        from ._panel_inputs import TABLE_FILTER
+
+        path, _ = QFileDialog.getOpenFileName(self, "Open panel data", "", TABLE_FILTER)
         if not path:
             return
         try:
-            df = pd.read_csv(path)
-        except Exception as exc:
-            QMessageBox.critical(self, "Failed to read CSV", str(exc))
+            df = read_table(path)
+        except Exception as exc:  # noqa: BLE001 - a file pandas cannot read, said as it is
+            QMessageBox.critical(self, "Failed to read the file", str(exc))
             return
         self._ingest(df, os.path.basename(path))
 
-    def load_example(self) -> None:
+    def load_example(self, key: str = "synthetic") -> None:
+        """An example panel (``SCM_EXAMPLES``), set up as its source sets it up."""
+        if key == "ulez":
+            self._load_ulez()
+            return
         from ._examples import (
             SCM_EXAMPLE_CUTOFF,
             SCM_EXAMPLE_OUTCOME,
@@ -507,6 +546,29 @@ class SCMWindow(QMainWindow):
         self.cutoff_edit.setDate(QDate.fromString(SCM_EXAMPLE_CUTOFF, "yyyy-MM-dd"))
         self.statusBar().showMessage(
             "Example loaded — '2+26 cities' steps down ~35 % after 2015-10-23. Click ▶ Run synthetic control."
+        )
+
+    def _load_ulez(self) -> None:
+        """The normet paper's ULEZ design (its README's): monthly deweathered NO₂, January
+        2017 to February 2020 (before COVID-19), London Marylebone Road (MY1) treated from
+        April 2019, the traffic sites with a complete record as donors."""
+        import normet as nm
+
+        df = nm.datasets.load_scm().query("'2017-01-01' <= date < '2020-03-01'")
+        df = df[df["type"].str.contains("Traffic")]
+        counts = df.dropna(subset=["NO2_dw"]).groupby("code").size()
+        donors = [c for c in counts[counts == df["date"].nunique()].index if c != "MY1"]
+        df = df[df["code"].isin([*donors, "MY1"])].reset_index(drop=True)
+        self._ingest(df, SCM_EXAMPLES["ulez"][0])
+        self.unit_combo.setCurrentText("code")
+        self.outcome_combo.setCurrentText("NO2_dw")
+        self._columns_changed()
+        self.treated_combo.setCurrentText("MY1")
+        self.cutoff_edit.setDate(QDate(2019, 4, 1))
+        self._redraw_panel_tab()
+        self.statusBar().showMessage(
+            f"ULEZ design: MY1 against {len(donors)} traffic-site donors, cutoff April 2019. "
+            "Click ▶ Run synthetic control."
         )
 
     def _ingest(self, df: pd.DataFrame, label: str) -> None:
@@ -597,11 +659,6 @@ class SCMWindow(QMainWindow):
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(Qt.CheckState.Checked)
             self.donor_list.addItem(item)
-
-    def _set_donors(self, checked: bool) -> None:
-        state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
-        for i in range(self.donor_list.count()):
-            self.donor_list.item(i).setCheckState(state)
 
     def _backend_changed(self, backend: str) -> None:
         is_ml = backend == "mlscm"
@@ -895,14 +952,14 @@ class SCMWindow(QMainWindow):
                 "hhi",
                 "effective_n_donors",
             ]
-            header = ["metric", "value"]
+            header = ["Metric", "Value"]
             rows = [
-                [k, f"{d[k]:.3f}" if isinstance(d.get(k), float) else d.get(k)]
+                [_FIT_WORDS.get(k, k), f"{d[k]:.3f}" if isinstance(d.get(k), float) else d.get(k)]
                 for k in keys
                 if k in d
             ]
             if shuffled_r2 is not None:
-                rows.append(["pre_r2, shuffled", f"{shuffled_r2:.3f}"])
+                rows.append(["Pre-period R², donors shuffled", f"{shuffled_r2:.3f}"])
             lines = ["Next: run the Inference tools (left) to test significance."]
             if backend == "scm":
                 lines.insert(
@@ -911,7 +968,9 @@ class SCMWindow(QMainWindow):
                     "say which donors the synthetic unit is made of.",
                 )
 
-        self.tab_fit.show_result(fig, verdict=verdict, lines=lines, header=header, rows=rows)
+        self.tab_fit.show_result(
+            fig, verdict=verdict, lines=lines, header=header, rows=rows, own_words=True
+        )
         self._show_tab(self.tab_fit, result.get("synthetic"))
         no_check = shuffled_r2 is not None and shuffled_r2 >= NO_CHECK_R2
         self.statusBar().showMessage(
@@ -1220,7 +1279,7 @@ class SCMWindow(QMainWindow):
                 f"{self.cutoff_edit.date().toString('yyyy-MM-dd')} only. Similar dynamics, "
                 "not levels: the synthetic control still sets each donor's weight.",
             ],
-            header=[str(unit_col), "similarity"],
+            header=[str(unit_col), "Similarity"],
             rows=[[u, f"{v:.3f}"] for u, v in sim.head(15).itertuples(index=False)],
         )
         self._show_tab(self.tab_sim, sim)

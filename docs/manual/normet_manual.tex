@@ -609,34 +609,45 @@ is made of.}
 parameter panel folded away and the Assistant (Chapter~\ref{ch:assistant}) open beside the
 results. \emph{Expand Panel} on the action bar, or Ctrl+B, brings the panel out;
 \tab{View $\rightarrow$ Assistant} closes the Assistant. Under
-\emph{Start with a time series} are three buttons --- \emph{Open CSV\ldots}, \emph{Load
-example} and \emph{Ask the Assistant} --- and cards for the ways in: the two examples, the
+\emph{Start with a time series} are two buttons --- \emph{Open Data\ldots} and \emph{Ask
+the Assistant} --- and cards for the ways in: the examples, the
 five tables opened most recently (each with its folder, size and the date it last
 changed; one that has since moved is greyed out), and the two places data can come from
 without a file of your own, the Data Studio and the Transport Studio. A card with nothing
-to list is left out. Dropping a \code{.csv} or \code{.csv.gz} file anywhere on the window
-opens it.
+to list is left out. Dropping a table file (Section~\ref{sec:input}) anywhere on the
+window opens it.
 
 \screenshot{ui_welcome.png}{The window as it opens: the welcome on the \tab{Data} tab, the
 action bar above the tabs (\emph{Expand Panel} first), the Assistant on the right and the
 log at the bottom. The parameter panel is folded away until it is needed.}{fig:welcome}
 
 \section{The examples}\label{sec:examples}
+As in cume, the examples are under \tab{File $\rightarrow$ Load Example} and on the
+welcome's \emph{Examples} card; each opens with its target and predictors set as its
+source sets them.
 \begin{description}
-  \item[De-weathering] (\emph{Load example}, or \tab{File $\rightarrow$ Load Example
-        Data}) A synthetic year of hourly data generated on the fly: \PMtwo{}, PM\textsubscript{10},
+  \item[London Marylebone Road \NOtwo{} (2020)] The \nm{} paper's de-weathering case
+        study: hourly \NOtwo{} at a kerbside site with ERA5 meteorology, January to August
+        2020, the UK's COVID-19 lockdown in it (\code{load\_my1()} below). This manual's
+        main-window figures are made from it.
+  \item[London Marylebone Road \PMtwo{} (2020)] The paper's transport-aware case: hourly
+        \PMtwo{} at the same site, its own wind and temperature with ERA5's other fields
+        (\code{load\_my1\_pm25()}).
+  \item[Synthetic site, one year hourly] A synthetic year of hourly data generated on the fly: \PMtwo{}, PM\textsubscript{10},
         \NOtwo{}, O\textsubscript{3}, SO\textsubscript{2} and CO with ERA5-style
         meteorology (\code{u10}, \code{v10}, \code{t2m}, \code{d2m}, \code{blh},
         \code{sp}, \code{ssrd}, \code{tcc}, \code{tp}, \code{rh2m}, \code{ws},
         \code{wd}). The pollutants mix a seasonal cycle, a rush-hour cycle and a
         dependence on wind speed, so every step has something to show. The target is set
         to \PMtwo{} and the meteorology ticked.
-  \item[Synthetic control] (the welcome's card) Opens the SCM Studio with a weekly panel
-        of 31 units, in which the unit ``2+26 cities'' has its SO\textsubscript{2} cut by
-        about 35\,\% from 2015-10-23 and every other unit is a clean donor.
+  \item[Synthetic control panel] Opens the SCM Studio with its own example; the SCM
+        Studio's \tab{File $\rightarrow$ Load Example} has two (Chapter~\ref{ch:scm}): the
+        paper's London ULEZ panel and a synthetic weekly panel of 31 units, in which the
+        unit ``2+26 cities'' has its SO\textsubscript{2} cut by about 35\,\% from 2015-10-23
+        and every other unit is a clean donor.
 \end{description}
-The real records of the \nm{} model-description paper ship with the package and are
-loaded in a script; this manual's figures are made from the first two.
+The real records of the \nm{} model-description paper ship with the package; in a script
+they are loaded with:
 \begin{center}\small
 \begin{tabular}{@{}lp{7.0cm}p{3.2cm}@{}}
 \toprule
@@ -650,27 +661,23 @@ Loader & Contents & Used for \\
 \bottomrule
 \end{tabular}
 \end{center}
-To open MY1 in the window, write it to a CSV first:
-\begin{lstlisting}[language=Python]
-import normet as nm
-nm.datasets.load_my1().to_csv("my1.csv", index=False)
-\end{lstlisting}
 Sources: UK AURN (Defra, Open Government Licence v3.0); ERA5 (Copernicus Climate Change
 Service); HYSPLIT (NOAA ARL).
 
 \section{A first analysis}
 \begin{enumerate}\nosep
-  \item \tab{Load data.} \emph{Open CSV\ldots} and choose a table with a \code{date}
-        column, the pollutant and its meteorology (Chapter~\ref{ch:data}). Bring the
+  \item \tab{Load data.} \emph{Open Data\ldots} and choose a table with its times, the
+        pollutant and its meteorology (Chapter~\ref{ch:data}); set the \emph{Time zone} the
+        site keeps (Section~\ref{sec:clock}). Bring the
         parameter panel out with \emph{Expand Panel} (Ctrl+B), or ask the Assistant.
   \item \tab{Choose the columns.} Check the target and tick the predictors
         (Section~\ref{sec:columns}).
-  \item \tab{Train} (Step~1) and read the \tab{Model} tab: is the held-out fit good
+  \item \tab{Train} and read the \tab{Model} tab: is the held-out fit good
         enough to normalise with? (Chapter~\ref{ch:train})
-  \item \tab{Normalise} (Step~2) and compare the normalised series with the observed
+  \item \tab{Normalise} and compare the normalised series with the observed
         (Chapter~\ref{ch:normalise}).
-  \item \tab{Decompose} (Step~3), \tab{Rolling} (Step~4) and \tab{Partial dependence}
-        (Step~5) as the question needs (Chapters~\ref{ch:decompose}--\ref{ch:pdp}).
+  \item \tab{Decompose}, \tab{Rolling} and \tab{Partial dependence} as the question
+        needs (Chapters~\ref{ch:decompose}--\ref{ch:pdp}).
   \item \tab{Keep the result:} export the tables, an HTML report and the session as a
         script (Chapter~\ref{ch:export}).
 \end{enumerate}
@@ -678,9 +685,11 @@ Service); HYSPLIT (NOAA ARL).
 % ============================ 5. THE INTERFACE ================================
 \chapter{The interface}\label{ch:ui}
 
-The main window has a scrolling \emph{parameter panel} on the left and \emph{result tabs}
-on the right. The panel walks down the workflow --- Data, Columns, then Steps~1 to~5 ---
-and each step has its own \emph{Run} button beside the settings that govern it. Results
+The main window has a \emph{parameter panel} on the left and \emph{result tabs} on the
+right. The panel has a page for each step of the workflow, chosen from the bar at its top
+--- \tab{Data}, \tab{Model}, \tab{Normalise}, \tab{Decompose}, \tab{Rolling} and
+\tab{PDP} --- and each step has its own \emph{Run} button beside the settings that govern
+it. Results
 land in the tab of the same step, which comes to the front when the step finishes. The
 panel starts folded away, leaving the width to the results and the Assistant;
 \emph{Collapse / Expand Panel} on the action bar (Ctrl+B) folds it and brings it back. The
@@ -688,25 +697,25 @@ window can be narrowed to about 740 pixels with the panel folded: the action bar
 wraps onto a second row.
 
 \section{The parameter panel}
+Its pages, and what each holds (a page's first box goes untitled, the tab naming it):
 \begin{description}\nosep
-  \item[Data] \emph{Open CSV\ldots} and \emph{Load example}, and under them the file's
-        name with its rows and columns.
-  \item[Columns] The target and the predictors (Section~\ref{sec:columns}).
-  \item[Step 1 $\cdot$ Train model] Backend, split, training fraction, time budget (or
-        search trials), estimators, seed; for Chronos-2 the device and fine-tuning
-        instead (Chapter~\ref{ch:train}).
-  \item[Step 2 $\cdot$ Normalise] The variables resampled, the number of samples, CPU
-        cores and the quantile band (Chapter~\ref{ch:normalise}).
-  \item[Step 3 $\cdot$ Decompose] Emission or meteorology; for meteorology the
-        attribution and the groups (Chapter~\ref{ch:decompose}).
-  \item[Step 4 $\cdot$ Rolling] Window, step and samples (Section~\ref{sec:rollingui}).
-  \item[Multi-scale decomposition] Three window widths (Section~\ref{sec:multiscaleui}).
-  \item[Step 5 $\cdot$ Partial dependence] Variables and grid points
-        (Chapter~\ref{ch:pdp}).
+  \item[Data] \emph{Open Data\ldots}, the file's name with its rows and columns, the
+        \emph{Time zone} its times are kept on and how they were read
+        (Section~\ref{sec:input}); then \emph{Columns}: the target and the predictors
+        (Section~\ref{sec:columns}).
+  \item[Model] Backend, split, training fraction, time budget (or search trials),
+        estimators, seed; for Chronos-2 the device and fine-tuning instead
+        (Chapter~\ref{ch:train}).
+  \item[Normalise] The variables resampled, the number of samples, CPU cores and the
+        quantile band (Chapter~\ref{ch:normalise}).
+  \item[Decompose] Emission or meteorology; for meteorology the attribution and the
+        groups (Chapter~\ref{ch:decompose}). Under it \emph{Multi-scale decomposition}:
+        three window widths (Section~\ref{sec:multiscaleui}).
+  \item[Rolling] Window, step and samples (Section~\ref{sec:rollingui}).
+  \item[PDP] Variables and grid points (Chapter~\ref{ch:pdp}).
 \end{description}
-At the foot, \emph{Save config} and \emph{Load config} write and read every setting of
-the panel as JSON (the target and predictors included, the data not), and
-\emph{History} lists the runs made, newest first.
+The panel is as wide as its widest page needs. A configuration of the panel is saved and
+read from the \tab{File} menu (Section~\ref{sec:config}).
 
 \section{Result tabs}
 \begin{center}\small
@@ -715,12 +724,12 @@ the panel as JSON (the target and predictors included, the data not), and
 Tab & Shows & Filled by \\
 \midrule
 Data        & a preview of the target, the table, its size, span and missing values & loading \\
-Model       & verdict, statistics table, parity plot, feature importance & Step 1 \\
-Normalise   & observed and normalised series, the quantile band, their cycles & Step 2 \\
-Decompose   & the emission or meteorological components, the cycles & Step 3 \\
-Rolling     & the mean of the rolling windows, with their spread & Step 4 \\
+Model       & verdict, statistics table, parity plot, feature importance & Train model \\
+Normalise   & observed and normalised series, the quantile band, their cycles & Run normalisation \\
+Decompose   & the emission or meteorological components, the cycles & Run decomposition \\
+Rolling     & the mean of the rolling windows, with their spread & Run rolling normalisation \\
 Multi-scale & the scale-space cascade and the energy in each band & Multi-scale \\
-PDP         & one partial-dependence panel per variable & Step 5 \\
+PDP         & one partial-dependence panel per variable & Compute PDP \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -748,11 +757,11 @@ record's resolution. A series is drawn broken where the record has a gap (an int
 over five times its usual step), not joined across it by a straight line.
 
 \section{The action bar}
-Above the tabs: \emph{Collapse / Expand Panel}, \emph{Get UK data} (the Data Studio,
-Section~\ref{sec:datastudio}),
-\emph{Transport Studio} (Section~\ref{sec:transport}), \emph{Export result CSV} (the
-current tab's table), \emph{HTML report} (the current tab's result as a report with its
-provenance) and \emph{SCM Studio} (Chapter~\ref{ch:scm}).
+Above the tabs: \emph{Collapse / Expand Panel}; the studios side by side ---
+\emph{Get UK data} (the Data Studio, Section~\ref{sec:datastudio}), \emph{Transport
+Studio} (Section~\ref{sec:transport}) and \emph{SCM Studio} (Chapter~\ref{ch:scm}); then
+what is done with a result --- \emph{Export result CSV} (the current tab's table) and
+\emph{HTML report} (the current tab's result as a report with its provenance).
 
 \section{Run buttons}
 \begin{center}\small
@@ -765,7 +774,7 @@ Fine-tune Chronos-2   & Chronos-2 loaded         & \code{finetune} \\
 Run normalisation     & a model, one variable to resample & \code{normalise} \\
 Run decomposition     & a model                  & \code{decompose} \\
 Run rolling normalisation & an AutoML model      & \code{rolling} \\
-Multi-scale decomposition & an AutoML model, Step 2's result & \code{rolling} $\times 3$ \\
+Multi-scale decomposition & an AutoML model, a normalisation & \code{rolling} $\times 3$ \\
 Compute PDP           & an AutoML model, one variable ticked & \code{pdp} \\
 \bottomrule
 \end{tabular}
@@ -779,7 +788,7 @@ and its result is discarded. Each step's call is added to the command log when i
 succeeds (Section~\ref{sec:commandlog}).
 
 A step asked for before what it needs --- normalising before a model is trained, a
-multi-scale run before Step~2 --- is answered by a \emph{notice} above the results, not a
+multi-scale run before the normalisation --- is answered by a \emph{notice} above the results, not a
 dialog: it says what is missing and carries the step that answers it on a button
 (\emph{Train model}, \emph{Run normalisation}); \(\times\) puts it away, and it goes by itself
 once the step has been taken. At the right of the status bar a light per step --- Data,
@@ -792,8 +801,8 @@ has a result.
 \toprule
 Menu & Command & Shortcut \\
 \midrule
-File     & Open CSV\ldots                       & Ctrl+O \\
-         & Load Example Data                    & \\
+File     & Open Data\ldots                      & Ctrl+O \\
+         & Load Example (the examples, SCM's)   & \\
          & Get UK Data (AQ networks + met)\ldots & Ctrl+D \\
          & Open Recent (eight tables)           & \\
          & Save Results\ldots{} / Load Results\ldots & Ctrl+S \\
@@ -805,9 +814,9 @@ File     & Open CSV\ldots                       & Ctrl+O \\
          & Report Language: As the Window, English, Chinese & \\
          & Save Session as Script\ldots         & \\
          & Save Config\ldots{} / Load Config\ldots & \\
+         & Run History\ldots                    & \\
 View     & Command Palette\ldots                & Ctrl+K \\
          & Collapse / Expand Panel              & Ctrl+B \\
-         & Run History\ldots                    & \\
          & Log, Command Log                     & \\
          & Assistant                            & Ctrl+Shift+A \\
          & Appearance: Follow System, Light, Dark & \\
@@ -826,11 +835,13 @@ menu command and every result tab; type a few letters of one and press Return.
 \tab{Help $\rightarrow$ User Manual} (F1) opens this manual in the window's language.
 
 \section{Docks}
-The \emph{Log} dock at the bottom streams \nm{}'s log: what each step did, how many rows,
-FLAML's chosen estimator and its hyperparameters, how many windows a rolling run made.
-When a task fails, its full traceback is written here and its last line shown in a
-dialog. The \emph{Command Log} shares the dock (Section~\ref{sec:commandlog}); the
-\emph{Assistant} opens on the right (Chapter~\ref{ch:assistant}).
+The dock at the bottom holds two pages, chosen from the tabs at the left of the status
+bar: the \emph{Log} streams \nm{}'s log --- what each step did, how many rows, FLAML's
+chosen estimator and its hyperparameters, how many windows a rolling run made --- and the
+\emph{Command Log} the calls that repeat the session (Section~\ref{sec:commandlog}). A
+click on the tab already open folds the dock away; a click on either brings it back. When
+a task fails, its full traceback is written to the Log and its last line shown in a
+dialog. The \emph{Assistant} opens on the right (Chapter~\ref{ch:assistant}).
 
 \section{Appearance and language}\label{sec:appearance}
 The window and its figures follow the system's light or dark appearance;
@@ -849,7 +860,7 @@ report (Section~\ref{sec:commandlog}) is written in the window's language too, o
 one \tab{File $\rightarrow$ Report Language} chooses: its headings, labels and figure.
 
 % ============================ 6. COLUMNS AND TRAINING =========================
-\chapter{Training a model (Step 1)}\label{ch:train}
+\chapter{Training a model}\label{ch:train}
 
 \section{The table and its columns}\label{sec:columns}
 A table opened in the main window needs a column called \code{date} (any case) whose
@@ -860,17 +871,18 @@ meteorology:
 \begin{center}\small
 \code{u10 v10 d2m t2m blh sp ssrd tcc tp rh2m ws wd temp rh pressure}
 \end{center}
-(matched without regard to case). \emph{All}, \emph{None} and \emph{Met only} set the
-ticks at once. The target is never a predictor, even when ticked. The four calendar
+(matched without regard to case). \emph{All} ticks every predictor --- and, once all are
+ticked, unticks every one --- and \emph{Met only} ticks the meteorology alone. The target is never a predictor, even when ticked. The four calendar
 variables are added to every model automatically and are not listed.
 
 \note{A meteorological column under another name is not recognised and must be ticked by
-hand --- in MY1, \code{atmos\_pres}. The same applies to Step~2's \emph{Met only}
+hand --- in MY1, \code{atmos\_pres}. The same applies to the \tab{Normalise} page's \emph{Met only}
 (Chapter~\ref{ch:normalise}).}
 
-\screenshot{ui_data.png}{MY1 opened: 5,793 hourly rows of 11 columns from 2020-01-01 to
-2020-08-31, with no missing values. The target, \NOtwo{}, was recognised; the nine
-meteorological predictors are ticked (\code{atmos\_pres} by hand). The tab previews the
+\screenshot{ui_data.png}{MY1 opened from \tab{File $\rightarrow$ Load Example}: 5,793
+hourly rows of 11 columns from 2020-01-01 to 2020-08-31, with no missing values. The
+example sets the paper's target, \NOtwo{}, and its nine meteorological predictors
+(\code{atmos\_pres} among them, a name the window does not recognise). The tab previews the
 target series and lists the table.}{fig:data}
 
 \section{Settings}
@@ -925,12 +937,12 @@ autoregressing, and a de-weathered series from it would be meaningless).
 \code{peft}); \emph{full} updates all 119~million parameters and overfits a single site
 more easily. \emph{Steps} sets the optimiser steps (300). The tuned weights replace the
 model for the session; normalise again to use them, or load Chronos-2 again to go back.
-On the Chronos-2 backend, Steps~4 and~5 and the emission decomposition are disabled,
-and the multi-scale decomposition, built on Step~4, does not apply
+On the Chronos-2 backend, rolling, partial dependence and the emission decomposition
+are disabled, and the multi-scale decomposition, built on rolling, does not apply
 (Section~\ref{sec:chronos}).
 
 % ============================ 7. NORMALISATION ================================
-\chapter{Normalising (Step 2)}\label{ch:normalise}
+\chapter{Normalising}\label{ch:normalise}
 
 \begin{description}\nosep
   \item[Resample vars] Every variable the model was trained on, the four calendar
@@ -954,7 +966,7 @@ above is shown at. In a script: \code{nm.cycle\_profiles(result, ["observed",
 "normalised"])}.
 
 \screenshot{ui_normalise.png}{MY1 normalised with 300 draws of all nine meteorological
-variables, shown as daily means. The normalised series (vermilion) falls in the third week
+variables, shown as daily means. The normalised series (red) falls in the third week
 of March, the lockdown, which the weather does not explain. Beneath, its cycles: the
 normalised series keeps the rush hours and the weekday--weekend difference --- the
 calendar is held at its observed values --- with less of the observed series' spread.}{fig:normalise}
@@ -986,10 +998,10 @@ predictors --- returns something close to the observed series, which looks like 
 de-weathered series with nothing to remove. Read the \tab{Model} tab first.}
 
 % ============================ 8. DECOMPOSITION ================================
-\chapter{Decomposing (Step 3)}\label{ch:decompose}
+\chapter{Decomposing}\label{ch:decompose}
 
 \section{By time scale: the emission decomposition}
-With \emph{Method} set to \emph{emission}, Step~3 runs the nested normalisation of
+With \emph{Method} set to \emph{emission}, the decomposition runs the nested normalisation of
 Section~\ref{sec:emission} and plots the normalised series with its trend, seasonal,
 weekly, diurnal and short-term components, each with its standard deviation $\sigma$
 (Figure~\ref{fig:emission}). The line above the figure names the component with the
@@ -1007,15 +1019,19 @@ because it shrank after the lockdown, as rush-hour traffic did; the weekly cycle
 ($\sigma = 3.36$) dips at the weekend.}{fig:emission}
 
 \section{By variable: the meteorological decomposition}
-With \emph{Method} set to \emph{meteorology}, Step~3 splits observed $-$ normalised among
+With \emph{Method} set to \emph{meteorology}, the decomposition splits observed $-$ normalised among
 the meteorological variables (Section~\ref{sec:metdecomp}). Two more settings are
 enabled:
 \begin{description}\nosep
   \item[Attribution] \emph{sequential}, \emph{shapley}, or \emph{auto} (Shapley when groups
         are given, else sequential).
-  \item[Groups] Optional named groups, typed as \code{name: var, var; name: var, \ldots}.
-        Every meteorological variable trained on must be in exactly one group, or the
-        window says which are missing before anything runs.
+  \item[Groups] A table of the meteorological variables the model was trained on, each
+        with its group: \emph{Wind}, \emph{Temperature and humidity}, \emph{Boundary
+        layer and pressure}, \emph{Sky and rain}, or a name typed in. \emph{Suggest
+        groups} puts each recognised variable in its group; \emph{Each alone} clears
+        them. A variable left without a group is a contribution of its own. A group's
+        rows are tinted in one colour, and the line under the table says how many
+        contributions the grouping makes.
 \end{description}
 The figure shows met\_total and one panel per variable or group, with a ranking of their
 $\sigma$ beside \code{met\_noise}, the part the model does not reproduce
@@ -1031,14 +1047,14 @@ The decomposition runs $k+1$ normalisations sequentially or $2^k$ by Shapley, ea
 \emph{Samples} draws, so its cost grows quickly with the number of variables. Ten
 variables by Shapley is 1024 normalisations: group them. Unlike the normalisation, the
 meteorological decomposition always resamples every meteorological variable trained on;
-it does not follow Step~2's list.
+it does not follow the \tab{Normalise} page's list.
 
 % ============================ 9. ROLLING ======================================
-\chapter{Rolling and multi-scale (Step 4)}\label{ch:rolling}
+\chapter{Rolling and multi-scale}\label{ch:rolling}
 
 \section{Rolling normalisation}\label{sec:rollingui}
 \emph{Window} (14~d), \emph{Step} (7~d) and \emph{Samples} (100) set the windows of
-Section~\ref{sec:rolling}; the variables resampled are Step~2's. The tab shows the mean of
+Section~\ref{sec:rolling}; the variables resampled are the \tab{Normalise} page's. The tab shows the mean of
 the overlapping windows at each time, with $\pm 1$ standard deviation across them where
 two or more overlap (Figure~\ref{fig:rolling}). The result table, exported, has one column
 per window.
@@ -1050,8 +1066,8 @@ fortnight.}{fig:rolling}
 \section{Multi-scale decomposition}\label{sec:multiscaleui}
 The multi-scale box runs rolling normalisations at three widths --- \emph{Fast} (14~d),
 \emph{Meso} (90~d) and \emph{Slow} (365~d) by default --- and differences them against each
-other and against Step~2's series (Section~\ref{sec:multiscale}); so Step~2 must have
-been run first. It uses Step~4's \emph{Samples} and costs about three rolling runs. The
+other and against the normalised series (Section~\ref{sec:multiscale}); so the
+normalisation must have been run first. It uses the \tab{Rolling} page's \emph{Samples} and costs about three rolling runs. The
 verdict names the band with the most energy ($\sigma$); a band that could not be computed
 is named in the notes, with why.
 
@@ -1061,7 +1077,7 @@ synoptic band carries the most ($D_\text{fast}$, $\sigma \approx 3.0$), then the
 and the slow.}{fig:multiscale}
 
 % ============================ 10. PDP =========================================
-\chapter{Partial dependence (Step 5)}\label{ch:pdp}
+\chapter{Partial dependence}\label{ch:pdp}
 
 After training, the variable list holds every predictor and the calendar variables, with
 the first four ticked. \emph{Time variables} and \emph{Met only} toggle those groups;
@@ -1086,8 +1102,9 @@ a confidence interval for the curve.
 The synthetic-control workflow takes a different input --- a long panel of many units
 --- so it has a window of its own, opened from \emph{SCM Studio} on the action bar,
 \tab{Analysis $\rightarrow$ Synthetic Control (SCM) Studio} (Ctrl+Shift+S) or the
-welcome's example card. It is laid out as the main window is: the panel on the left
-(Panel data, Columns, Design, Estimator, Inference), result tabs on the right
+welcome's example card. It is laid out as the main window is: the panel on the left,
+its pages chosen from a bar --- \tab{Data} (the panel data and its columns),
+\tab{Design}, \tab{Estimator}, \tab{Inference} --- result tabs on the right
 (\tab{Panel}, \tab{Fit}, \tab{Placebo Space}, \tab{Placebo Time}, \tab{Uncertainty},
 \tab{All Units}, \tab{Similarity}), and \emph{Export current tab data} above them. The
 method is described in Section~\ref{sec:scmtheory}.
@@ -1096,7 +1113,9 @@ This chapter's figures reproduce the ULEZ case study of the \nm{} paper: the Lon
 Low Emission Zone, launched on 8~April 2019, evaluated at Marylebone Road (MY1) on
 monthly de-weathered \NOtwo{}, with traffic sites elsewhere in the UK as donors. To keep
 COVID-19 out of the post-period the panel ends in February~2020, and only traffic sites
-with a complete record are kept: 53 donors over 38 months. In a script:
+with a complete record are kept: 53 donors over 38 months. The SCM Studio's
+\tab{File $\rightarrow$ Load Example $\rightarrow$ London ULEZ} sets this design up; in a
+script:
 \begin{lstlisting}[language=Python]
 import normet as nm
 scm_df = nm.datasets.load_scm()
@@ -1109,7 +1128,8 @@ df.to_csv("ulez_panel.csv", index=False)
 \end{lstlisting}
 
 \section{Panel data and columns}
-\emph{Open CSV\ldots} reads a long table: one row per unit and date. \emph{Use
+\emph{Open Data\ldots} (also \tab{File $\rightarrow$ Open Data\ldots}) reads a long
+table, in any of the formats of Section~\ref{sec:input}: one row per unit and date. \emph{Use
 main-window data} takes the main window's table, when it has a unit column. The
 \emph{Date} column is guessed from its name, the \emph{Unit} column as the first
 non-numeric column with between 3 and a quarter as many distinct values as rows, and the
@@ -1223,18 +1243,39 @@ monthly).}{fig:scmbands}
 \chapter{Getting data in}\label{ch:data}
 
 \section{Input format}\label{sec:input}
-The main window reads a CSV (or \code{.csv.gz}) with:
+\emph{Open Data\ldots} (Ctrl+O) reads, as cume does, CSV and other delimited text
+(\code{.csv}, \code{.tsv}, \code{.txt}, \code{.dat}; comma, semicolon, tab, bar or space, a
+decimal comma, UTF-8 or a Windows code page --- each told from the file), any of them
+gzipped, Excel (\code{.xlsx}, \code{.xlsm}, \code{.xls}), Parquet, Feather and JSON. The table needs:
 \begin{itemize}\nosep
-  \item a column named \code{date} (any case), whose values parse as dates and times ---
-        ISO~8601 is safest; mixed time-zone offsets are read as UTC;
+  \item its times: a column named \code{date}, \code{datetime}, \code{time},
+        \code{timestamp} (any case, or their Chinese words), a date
+        column with a time-of-day column beside it, or \code{year}, \code{month},
+        \code{day} (and \code{hour}) columns;
   \item the pollutant(s), numeric;
   \item the meteorology and any other predictors, numeric.
 \end{itemize}
-One row per timestamp, hourly or coarser. A table of several sites in one file belongs
-in the SCM Studio, or in a script with \code{do\_all\_multisite}. A table without a
-\code{date} column is refused, with a pointer to the SCM Studio for panel data. Missing
-values are allowed: rows without a target are dropped, missing predictors filled
-(Section~\ref{sec:prepare}).
+The times may be written in any of the usual ways: ISO~8601, \code{31/01/2020 13:00}
+(day first) or \code{01/31/2020} (month first) --- the order told from the values, and
+said under the file's name when they do not tell ---, \code{31.01.2020},
+Chinese year--month--day writing, \code{2020013113}, Unix seconds or Excel's serial days. How they
+were read is shown under the file's name. One row per timestamp, hourly or coarser. A
+table of several sites in one file belongs in the SCM Studio, or in a script with
+\code{do\_all\_multisite}. A table without times is refused, with a pointer to the SCM
+Studio for panel data. Missing values are allowed: rows without a target are dropped,
+missing predictors filled (Section~\ref{sec:prepare}).
+
+\section{The clock: time zone}\label{sec:clock}
+The \emph{Time zone} under the file's name is the clock the analysis keeps and its
+figures and tables show: the site's local time, or UTC (the default). Times written
+without an offset are taken to be on it, as a monitoring network's local-time record is;
+times written with one (\code{+08:00}, \code{Z}) are put on it. The hour and the weekday
+the model learns from are then the site's own --- a rush hour stays at its hour through
+summer time. Meteorology and trajectories fetched on UTC (the Data and Transport Studios)
+are put on this clock as they are joined, so an hour of ERA5 meets the hour of the
+measurement it belongs to. The choice is kept for the next session; changing it reads the
+open file again. In a script, \code{nm.io.read\_time\_series(path, zone=\ldots)} reads a
+table the same way.
 
 \section{Data Studio: UK air quality and meteorology}\label{sec:datastudio}
 \emph{Get UK data} (Ctrl+D) assembles a model-ready table without leaving the app
@@ -1251,8 +1292,9 @@ values are allowed: rows without a target are dropped, missing predictors filled
   \item \textbf{Meteorology.} Open-Meteo's ERA5 archive (no key), the Copernicus CDS
         (needs \code{\textasciitilde/.cdsapirc}), or none. Open-Meteo adds \code{t2m},
         \code{d2m}, \code{rh2m}, \code{sp}, \code{tcc}, \code{tp}, \code{ssrd},
-        \code{ws}, \code{wd}, \code{u10} and \code{v10} --- names Step~1 recognises as
-        meteorology.
+        \code{ws}, \code{wd}, \code{u10} and \code{v10} --- names the \emph{Columns} box
+        recognises as meteorology. They come on UTC and are put on the window's clock
+        (Section~\ref{sec:clock}) as they are joined.
   \item \textbf{Fetch \& merge} downloads the hourly measurements and the meteorology for
         the site's coordinates and joins them on the hour. \tab{Preview} and
         \tab{Table} show the result; \emph{Save merged CSV\ldots} writes it and
@@ -1299,7 +1341,9 @@ time step, with GDAS1 meteorology it downloads or ARL files already on disk.
 \paragraph{Joining.} \emph{Send to main window} joins the features onto the open table:
 each row takes the latest trajectory that has \emph{already arrived}, within one release
 interval --- a nearest-time join would give 04:00 the 06:00 trajectory, air that has not
-yet arrived --- and the new \code{traj\_*} columns are ticked as predictors in Step~1.
+yet arrived --- and the new \code{traj\_*} columns are ticked as predictors. The
+trajectories' times, UTC as HYSPLIT writes them, are put on the window's clock first
+(Section~\ref{sec:clock}); the studio is given the table's times in UTC to start them from.
 
 \screenshot{ui_transport.png}{The two days of \code{tdump} files that ship with \nm{},
 built for receptor MY1: 9 features for 8 receptor times, released every six hours.
@@ -1359,9 +1403,8 @@ repeat them.}{fig:commandlog}
 The session behind this manual's figures saves as (paths shortened, imports and the
 multi-scale and partial-dependence calls left out):
 \begin{lstlisting}[language=Python]
-# 21:09:36  Open CSV
-df = pd.read_csv('my1.csv')
-df['date'] = to_datetime_coerced(df['date'])
+# 21:09:36  Load example: London Marylebone Road NO2 (2020)
+df = nm.datasets.load_my1()
 
 # 21:10:09  Train model
 df_prep, model = build_model(df, 'NO2', backend='flaml',
@@ -1380,8 +1423,10 @@ normalised = normalise(df_prep, model,
 # 21:10:22  Decompose
 decomposition = decompose(df_prep, model, method='meteorology',
                           covariates=[...the same 13...], n_samples=100,
-                          groups={'wind': ['ws', 'wd'], 'thermo': ['temp', 'RH'],
-                                  'mixing': ['blh', 'atmos_pres'], 'sky': ['tcc', 'tp', 'ssrd']})
+                          groups={'Wind': ['ws', 'wd'],
+                                  'Temperature and humidity': ['temp', 'RH'],
+                                  'Boundary layer and pressure': ['atmos_pres', 'blh'],
+                                  'Sky and rain': ['tcc', 'tp', 'ssrd']})
 
 # 21:10:25  Rolling normalisation
 rolled = rolling(df_prep, model, covariates=[...],
@@ -1394,32 +1439,51 @@ model itself can differ slightly, since FLAML's search is bounded by wall-clock 
 
 \section{Figures for publication}\label{sec:print}
 A figure on screen is drawn at the tab's size; shrunk into a journal's 89~mm column its
-lettering shrinks with it. \emph{For print\ldots}, on every figure's toolbar,
-lays the figure out again at the printed width with its text in points, and shows it at
-that size (Figure~\ref{fig:print}):
+lettering shrinks with it. \emph{For print\ldots}, on every figure's toolbar, lays the
+figure out again at the size the journal prints it, each text at the size its guide gives
+that kind of text --- a title, an axis label, a tick label, a legend --- with the margins
+and the ticks worked out anew for that size, not scaled to it (Figure~\ref{fig:print}):
 \begin{description}\nosep
-  \item[Journal] Nature single (89~mm) or double column (183~mm); Elsevier single (90~mm),
-        1.5 (140~mm) or double (190~mm); ACS single (3.25~in) or double (7~in); or custom.
-  \item[Width, Height, Lettering] The printed size, and the text size in points.
-  \item[Resolution] 300, 600 or 1200~dpi, for PNG and TIFF.
-  \item[Legend] Where it sits (or drag it), its text size, its columns, its frame.
-  \item[Lines and panels] Line width and marker size, and panel letters (a, (a), A, (A)).
+  \item[Journal] Elsevier, Nature, Copernicus (ACP, AMT, \ldots) or ACS (ES\&T), each with
+        what its own artwork guide asks, and a link to that guide.
+  \item[Width] The journal's columns (Nature 89 or 183~mm; Elsevier 90, 140 or 190~mm;
+        ACS 3.33 or 7~in; Copernicus at least 80~mm), or a width of your own. A figure of
+        one column of panels starts at the narrowest, panels side by side at the widest.
+  \item[Height] As the figure needs --- its own proportion, raised until every panel has
+        at least 12~mm for its data, within the journal's greatest height --- or set.
+  \item[Panel labels] None, a~b~c, (a)~(b)~(c), A~B~C or (A)~(B)~(C), bold or not, from any
+        letter (a figure that is panels c and d of a composite starts at c); each column of
+        panels has its letters in a line.
+  \item[Line width, Marker size] The data lines' stroke; a time series takes round
+        markers when the size is raised. Reference lines keep theirs.
+  \item[Legend] Where it sits (or drag it), its text size, its columns, its frame. A legend
+        laid out in a row wider than the printed figure is given fewer columns.
+  \item[Formulas] Written as chemistry writes them: NO$_2$, PM$_{2.5}$, SO$_4^{2-}$.
+  \item[Titles] The figure's and the panels' titles are left to the caption, as journals
+        ask; ticked, they are drawn.
+  \item[Raster resolution] 300, 600 or 1200~dpi, for TIFF and PNG.
 \end{description}
-Under the settings, \emph{What the guide asks} reads the figure as it is laid out against
-the journal's guide: its width and height, its smallest text (Nature asks for 5~pt at
-least and 7~pt at most, Elsevier 7~pt, ACS 8~pt), tick labels that run into one another,
-and the face it is set in; each check is ticked or crossed and read again as the settings
-change. The preview is shown at its actual printed size or fitted to the window. The
-journal, lettering, resolution, panel letters and zoom are kept for the next figure.
-Double-click a title, an axis label or a tick's numbers on the preview to edit it.
-\emph{Save\ldots} writes PNG, PDF, SVG, TIFF or EPS at exactly the width chosen, on a
-white page. Nothing is kept: when the dialog closes the figure goes back to its tab as it
-was. The widths are those the publishers' artwork guides give; check the journal's
-current guide before submitting.
+Under the settings, the checks read the figure as it is laid out against the journal's
+guide: its width and height, its smallest text and its smallest sub- or superscript
+(Nature asks for 5~pt at least and 7~pt at most, Elsevier 7~pt, ACS 8~pt), the face it is
+drawn in (Arial or Helvetica where the guide names them), tick labels that run into one
+another, and how many panels it has (ACS: four at most); a check the figure fails is shown
+in red, and all are read again as the settings change. The preview fits the window, or
+shows the figure at its actual printed size. On the preview, double-click a title, an axis
+label or a panel letter to edit its text and size, a tick's numbers to size and turn them
+(and give that tick a text of its own), the legend to place it, or a colour bar to put it
+on another side of its panel; drag the legend or a colour bar where it reads best.
+\emph{Save\ldots} writes the formats the journal takes --- PDF, EPS or SVG with the text
+kept as editable text and the fonts embedded, TIFF or PNG at the resolution chosen --- at
+exactly the size shown, on a white page. While the dialog is open the figure is in the
+report's language (File $\rightarrow$ Report Language). When it closes the figure goes back
+to its tab as it was; the journal, width, panel labels, formulas and resolution are kept
+for the next figure. Check the journal's current guide before submitting.
 
-\screenshot{ui_print.png}{The normalised series laid out for a single Nature column: 89 by
-46~mm, 7~pt lettering, 300~dpi, shown at its printed size, beside what Nature's guide
-asks of it.}{fig:print}
+\screenshot{ui_print.png}{The normalised series laid out for a Nature double column:
+183~mm wide, its panels lettered, beside what Nature's guide asks of it --- a subscript
+at 4.9~pt, below the 5~pt Nature asks, is the one check it fails: Nature's 7~pt ceiling
+leaves no room for more.}{fig:print}
 
 \section{Saving and reopening a session}\label{sec:saved}
 \tab{File $\rightarrow$ Save Results\ldots} (Ctrl+S) writes the session to one file
@@ -1451,11 +1515,11 @@ the panel as it stands, and in the window's language. Check it against what you 
 the FLAML model and its held-out fit, and each step that was run, with its
 references.}{fig:methods}
 
-\section{Configurations and history}
-\emph{Save config} writes every setting of the panel to JSON --- target, predictors,
-backend, split, budget, estimators, seed, and every step's settings --- and \emph{Load
-config} sets the panel from one; the data are not part of it. \emph{History} (\tab{View
-$\rightarrow$ Run History}) lists every run with its time, task, target, backend, rows and a
+\section{Configurations and history}\label{sec:config}
+\tab{File $\rightarrow$ Save Config\ldots} writes every setting of the panel to JSON ---
+target, predictors, backend, split, budget, estimators, seed, and every step's settings
+--- and \tab{Load Config\ldots} sets the panel from one; the data are not part of it.
+\tab{File $\rightarrow$ Run History\ldots} lists every run with its time, task, target, backend, rows and a
 detail (the held-out $R^2$ for a training run, the samples for a normalisation).
 
 % ============================ 14. ASSISTANT ===================================
@@ -1661,17 +1725,17 @@ text size and the report's language are kept in the settings store with the rest
         budget, or add estimators. Normalising with a poor model returns little more than
         the observed series.
   \item[A meteorological column is not ticked] Only the names in
-        Section~\ref{sec:columns} are recognised; tick others by hand, in Step~1 and in
-        Step~2.
+        Section~\ref{sec:columns} are recognised; tick others by hand, on the \tab{Data}
+        and \tab{Normalise} pages.
   \item[Exact Shapley values over $k$ features need $2^k$ normalisations] More than ten
         variables by Shapley: give groups, or use sequential attribution.
-  \item[``every meteorological model feature must be in exactly one group''] The groups
-        must cover every meteorological predictor trained on, each once; the message
-        names the missing ones.
+  \item[``\ldots{} not among the variables trained on''] A group (from a configuration
+        read in) names a variable the model was not trained on; the message names it.
   \item[``'rdata' is required but not installed''] \emph{Find stations} reads the UK
         archives with \code{rdata}, part of the \code{data} extra:
         \code{pip install "normet[data]"}. The installers include it.
-  \item[Multi-scale says to run Step 2 first] It differences against Step~2's series.
+  \item[Multi-scale asks for the normalisation first] It differences against the
+        normalised series.
   \item[A multi-scale band was skipped] Its width leaves fewer than two windows on the
         record; lower it.
   \item[Rolling and PDP are disabled] They need an AutoML model; the Chronos-2 backend
