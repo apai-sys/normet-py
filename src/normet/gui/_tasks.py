@@ -58,14 +58,12 @@ class TaskMixin(QMainWindow):
         self.cancel_btn.setEnabled(busy)
 
     def _task_started(self, name: str) -> None:
-        self.progress.setRange(0, 0)
-        self.statusBar().showMessage(f"Running: {name}…")
+        # The status bar and the progress bar are the task clock's (._clock).
         for b in self._run_buttons:
             b.setEnabled(False)
         self.cancel_btn.setEnabled(True)
 
     def _task_finished(self) -> None:
-        self.progress.setRange(0, 1)
         self._sync_enabled()
         self.autosave_session()  # File -> Reopen Last Session, should the window go
 

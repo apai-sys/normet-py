@@ -19,6 +19,7 @@ import pandas as pd
 
 from ..exceptions import ConfigError, DataError, ModelError
 from ..model.predict import ml_predict
+from ..utils import progress
 from ..utils._config import resolve_config
 from ..utils.logging import get_logger
 from ..utils.prepare import check_data, process_date
@@ -568,6 +569,7 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
         )
 
         for b_idx, batch_seeds in enumerate(seeds_batched):
+            progress.report(b_idx, len(seeds_batched))
             b_size = len(batch_seeds)
 
             # Build prediction DataFrame without materialising the full n_samples × n_rows frame
