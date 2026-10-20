@@ -72,6 +72,8 @@ class TaskClock(QObject):
 
     def expect(self, seconds: float) -> None:
         """The task runs to a time budget: its share done is the time against it."""
+        if not self._timer.isActive():
+            return  # no task running to time (it has ended, or never started)
         self._budget = seconds if seconds > 0 else None
         self._show()
 
