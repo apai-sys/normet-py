@@ -45,6 +45,8 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg  # noqa: E402
 from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
+from normet import window_columns  # noqa: E402
+
 # The window's language, set here and not left to the system's: an English build on a
 # machine whose system is Chinese draws the English manual's figures in English still.
 LANG = os.environ.setdefault("NORMET_UI_LANGUAGE", "en")
@@ -207,7 +209,7 @@ def main_figures(app):
     win.roll_samples.setValue(50)
     win._run_rolling()
     rolled = win.results["rolling"]
-    print("  windows:", sum(c.startswith("rolling_") for c in rolled.columns))
+    print("  windows:", len(window_columns(rolled)))
     grab(win, "ui_rolling.png")
 
     print("multi-scale")

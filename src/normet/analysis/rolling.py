@@ -3,12 +3,14 @@
 
 Provides :func:`rolling`, which normalises a sliding window of the data
 against a model and returns one normalised series per window, plus
-:class:`RollingConfig`.
+:class:`RollingConfig` and :func:`window_columns`, which picks those series out
+of the result.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -24,6 +26,20 @@ from ..utils.prepare import add_date_variables, process_date
 from .normalise import normalise
 
 log = get_logger(__name__)
+
+_WINDOW_COLUMN = re.compile(r"window_\d+")
+
+
+def window_column(i: int, total: int) -> str:
+    """The column of window *i* (counted from 1) of *total*: ``window_01``,
+    ``window_02``, ..., padded to the width of *total* so the names sort in the
+    windows' order."""
+    return f"window_{i:0{max(2, len(str(total)))}d}"
+
+
+def window_columns(df: pd.DataFrame) -> list[str]:
+    """The window columns of a :func:`rolling` result, in the windows' order."""
+    return [c for c in df.columns if isinstance(c, str) and _WINDOW_COLUMN.fullmatch(c)]
 
 
 @dataclass
@@ -75,7 +91,8 @@ def rolling(
 
     For each window of ``window_days`` days, stepped every ``rolling_every``
     days, the data in that window is normalised against *model* and the
-    result is appended as a ``rolling_<i>`` column.
+    result is appended as a column of its own: ``window_01`` for the first window,
+    ``window_02`` for the second, and so on (:func:`window_column`).
 
     Parameters
     ----------
@@ -94,8 +111,9 @@ def rolling(
     Returns
     -------
     pandas.DataFrame
-        Indexed by ``date`` with column ``observed`` and one
-        ``rolling_<i>`` column of normalised values per window.
+        Indexed by ``date`` with column ``observed`` and one ``window_<i>``
+        column of normalised values per window, counted from 1 and zero-padded
+        (``window_01``, ``window_02``, ...); :func:`window_columns` lists them.
     """
     _cfg = _resolve_rolling_config(
         config=config,
@@ -199,11 +217,12 @@ def rolling(
         mask = (d_floor >= start_day) & (d_floor < end_excl)
         dfa = df_work.loc[mask]
 
+        name = window_column(i, total)
         if len(dfa) < 2:
             (log.info if _cfg.verbose else log.debug)(
-                "%s: window %d skipped (not enough rows).",
+                "%s: %s skipped (not enough rows).",
                 pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
-                i - 1,
+                name,
             )
             continue
 
@@ -227,14 +246,14 @@ def rolling(
                     resample_df=dfa,
                     memory_save=_cfg.memory_save,
                 )
-            result[f"rolling_{i - 1}"] = df_norm["normalised"]
+            result[name] = df_norm["normalised"]
         except Exception as e:
             start_str = start_day.strftime("%Y-%m-%d")
             end_str = (end_excl - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
             log.warning(
-                "%s: error in window %d [%s..%s]: %s",
+                "%s: error in %s [%s..%s]: %s",
                 pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
-                i - 1,
+                name,
                 start_str,
                 end_str,
                 e,
@@ -245,8 +264,8 @@ def rolling(
             s1 = (end_excl - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
             (log.info if _cfg.verbose else log.debug)(
                 "window %d/%d [%s..%s] %s",
-                i - 1,
-                total - 1,
+                i,
+                total,
                 s0,
                 s1,
                 _progress_str(i, total, t0),

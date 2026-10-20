@@ -94,6 +94,7 @@ from .analysis import (
     normalise_auto,
     pdp,
     rolling,
+    window_columns,
 )
 
 # --- Synthetic control ---
@@ -179,6 +180,7 @@ __all__ = [
     "normalise",
     "normalise_auto",
     "rolling",
+    "window_columns",
     "pdp",
     "decom_emi",
     "decom_met",

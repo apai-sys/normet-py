@@ -4,7 +4,7 @@ from .decomposition import DecomposeConfig, decom_emi, decom_met, decompose
 from .events import anomaly_scores, detect_events
 from .normalise import NormaliseConfig, normalise, normalise_auto
 from .pdp import pdp
-from .rolling import RollingConfig, rolling
+from .rolling import RollingConfig, rolling, window_columns
 
 __all__ = [
     "DecomposeConfig",
@@ -17,6 +17,7 @@ __all__ = [
     "decompose",
     "pdp",
     "rolling",
+    "window_columns",
     "detect_events",
     "anomaly_scores",
 ]

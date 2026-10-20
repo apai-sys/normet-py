@@ -65,7 +65,7 @@ def rolling_mean_series(
         too short for even one window, or too short for :data:`MIN_WINDOWS`
         overlapping ones.
     """
-    from normet import rolling
+    from normet import rolling, window_columns
 
     span_days = (df_prep["date"].max() - df_prep["date"].min()).total_seconds() / 86400.0 + 1
     if span_days < window_days:
@@ -87,7 +87,7 @@ def rolling_mean_series(
         n_cores=n_cores,
         seed=seed,
     )
-    cols = [c for c in res.columns if c.startswith("rolling_")]
+    cols = window_columns(res)
     if len(cols) < MIN_WINDOWS:
         return (
             None,

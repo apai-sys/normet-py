@@ -14,7 +14,7 @@ import pytest
 
 # Import module and get the actual module object from sys.modules
 import normet.analysis.rolling
-from normet.analysis.rolling import rolling
+from normet.analysis.rolling import rolling, window_column, window_columns
 
 rolling_mod = sys.modules["normet.analysis.rolling"]
 
@@ -115,13 +115,22 @@ def test_rolling_runs_successfully(rolling_df, monkeypatch):
 
     # Check that observed is returned
     assert "observed" in result.columns
-    # Check that rolling windows (rolling_0, rolling_1, etc.) are present
-    rolling_cols = [c for c in result.columns if c.startswith("rolling_")]
-    assert len(rolling_cols) > 0
+    # One column per window, counted from 1: windows start on days 1, 6, 11, 16, 21.
+    assert window_columns(result) == [f"window_0{i}" for i in range(1, 6)]
     # Length should match the input
     assert len(result) == len(rolling_df)
     # Check index matches
     assert (result.index == rolling_df["date"]).all()
+
+
+def test_window_names_count_from_one_and_sort_in_order():
+    assert [window_column(i, 9) for i in (1, 2, 9)] == ["window_01", "window_02", "window_09"]
+    # Past 99 windows the padding widens, so the names still sort as the windows run.
+    names = [window_column(i, 120) for i in (1, 10, 100, 120)]
+    assert names == ["window_001", "window_010", "window_100", "window_120"]
+    assert sorted(names) == names
+    df = pd.DataFrame(columns=["observed", "window_01", "window_02", "window_days", "x"])
+    assert window_columns(df) == ["window_01", "window_02"]
 
 
 def test_rolling_with_training(rolling_df, monkeypatch):
@@ -141,8 +150,7 @@ def test_rolling_with_training(rolling_df, monkeypatch):
     )
 
     assert "observed" in result.columns
-    rolling_cols = [c for c in result.columns if c.startswith("rolling_")]
-    assert len(rolling_cols) > 0
+    assert len(window_columns(result)) > 0
 
 
 def test_rolling_no_features_raises_error(rolling_df):
@@ -174,8 +182,7 @@ def test_rolling_extracts_features_from_model(rolling_df, monkeypatch):
     )
 
     assert "observed" in result.columns
-    rolling_cols = [c for c in result.columns if c.startswith("rolling_")]
-    assert len(rolling_cols) > 0
+    assert len(window_columns(result)) > 0
 
 
 def test_rolling_no_features_model_without_features(rolling_df):
