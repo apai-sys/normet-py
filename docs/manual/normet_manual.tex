@@ -817,7 +817,7 @@ File     & Open Data\ldots                      & Ctrl+O \\
          & Run History\ldots                    & \\
 View     & Command Palette\ldots                & Ctrl+K \\
          & Collapse / Expand Panel              & Ctrl+B \\
-         & Log, Command Log                     & \\
+         & Log\ldots, Command Log\ldots       & \\
          & Assistant                            & Ctrl+Shift+A \\
          & Appearance: Follow System, Light, Dark & \\
          & Language: Follow System, English, Chinese & \\
@@ -834,14 +834,14 @@ menu command and every result tab; type a few letters of one and press Return.
 \tab{Help $\rightarrow$ Keyboard Shortcuts} lists every shortcut, read from the menus;
 \tab{Help $\rightarrow$ User Manual} (F1) opens this manual in the window's language.
 
-\section{Docks}
-The dock at the bottom holds two pages, chosen from the tabs at the left of the status
-bar: the \emph{Log} streams \nm{}'s log --- what each step did, how many rows, FLAML's
-chosen estimator and its hyperparameters, how many windows a rolling run made --- and the
-\emph{Command Log} the calls that repeat the session (Section~\ref{sec:commandlog}). A
-click on the tab already open folds the dock away; a click on either brings it back. When
-a task fails, its full traceback is written to the Log and its last line shown in a
-dialog. The \emph{Assistant} opens on the right (Chapter~\ref{ch:assistant}).
+\section{The log and the Assistant}
+\tab{View $\rightarrow$ Log\ldots} opens \nm{}'s log in a window of its own, which can
+stay open beside the main window: what each step did, how many rows, FLAML's chosen
+estimator and its hyperparameters, how many windows a rolling run made.
+\tab{View $\rightarrow$ Command Log\ldots} opens the calls that repeat the session
+(Section~\ref{sec:commandlog}). When a task fails, its full traceback is written to the
+Log and its last line shown in a dialog. The \emph{Assistant} takes the right of the
+window, its whole height (Chapter~\ref{ch:assistant}).
 
 \section{Appearance and language}\label{sec:appearance}
 The window and its figures follow the system's light or dark appearance;
@@ -1391,7 +1391,7 @@ north-east.}{fig:polar}
 \section{The command log}\label{sec:commandlog}
 Every step that decides a result --- opening a table, training, normalising,
 decomposing, a rolling run, a multi-scale run, partial dependence --- is written to
-\tab{View $\rightarrow$ Command Log} as the \nm{} call that does the same, with the
+\tab{View $\rightarrow$ Command Log\ldots} as the \nm{} call that does the same, with the
 arguments the window actually used. An entry is written only once its task has
 succeeded, from the call that was made, not from what the panel shows now.
 \emph{Copy} puts the log on the clipboard, \emph{Save as Script\ldots} (also \tab{File
@@ -1538,7 +1538,10 @@ The conversation reads as a chat does: your messages on the right, the replies a
 Markdown reads (code shaded, tables ruled), each tool the Assistant calls one quiet line
 --- its dot grey while it runs, green when it answered, red when it was refused, the
 refusal under it --- whose result opens with a click. Ctrl/Cmd $+$ and $-$ (or the wheel
-with the key held) size its text, and Ctrl/Cmd 0 resets it; the size is kept.
+with the key held) size its text, and Ctrl/Cmd 0 resets it; the size is kept. You write
+in the rounded box at its foot, which grows with what you write: Enter sends, Shift+Enter
+starts a new line. \emph{Send}, \emph{Stop} and \emph{New chat}, which starts the
+conversation again, are inside the box.
 
 Where it helps most is what to model and how to read the result. It \emph{proposes} a
 target and predictors as a card with an \emph{Apply} button, saying what it left out and

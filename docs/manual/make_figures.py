@@ -227,12 +227,11 @@ def main_figures(app):
     grab(win, "ui_pdp.png")
 
     print("command log")
-    win.show_log_page(1)
-    win.tabs.setCurrentWidget(win.tab_norm)
-    grab(win, "ui_command_log.png")
+    win.show_log_page(1)  # View → Command Log…: a window of its own
+    grab(win._log_windows[1], "ui_command_log.png")
+    win._log_windows[1].close()
     # The script names the temporary CSV, so it is printed, not kept beside the figures.
     print(win.command_log.script())
-    win.show_log_page(0)
 
     print("print dialog")
     from normet.gui.printview import PrintDialog
