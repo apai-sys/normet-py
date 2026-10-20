@@ -7,6 +7,18 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ## [Unreleased]
 
 ### Added
+- **GUI in Chinese** (View → Language: Follow System / English / 中文), ported
+  from cume: every label, button, menu, tab, tooltip and dialog is translated
+  as it is set, figures' texts as they are drawn, while the code still reads
+  the English back. Data's own words (column names, backends, file names) and
+  the Assistant conversation stay as written.
+- **GUI: a Resolution selector** on the Data preview, Normalise, Decompose and
+  Rolling tabs (as recorded / hourly / daily / weekly / monthly / yearly):
+  the figure is redrawn from period means; the result and its export do not
+  change. Steps finer than the record's own are disabled.
+- **GUI opens as cume does**: the parameter panel folded (◀ Collapse /
+  ▶ Expand Panel, Ctrl+B) and the Assistant open beside the results.
+
 - **`join_trajectory_features`** (`normet.io`, `normet`): joins a trajectory
   feature table onto a panel the way the module docstring recommends, so
   scripts and the GUI no longer each write their own `merge_asof`. A row takes
@@ -49,6 +61,20 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
     set; panels lettered; a title, label or tick's numbers edited by
     double-clicking. Every change is undone when the dialog closes.
 
+### Changed
+- **GUI start-up**: the packaged app keeps matplotlib's font cache between
+  launches (PyInstaller's runtime hook rebuilt it every time, ~20 s on
+  macOS), shows a splash before loading normet, and `import normet` no longer
+  loads scipy.stats or scikit-learn (~1 s); they and flaml are imported in the
+  background once the window is up.
+- **GUI: the figure toolbar as cume's** — 16 pt icons tinted for the theme,
+  the bar in the window's colours, and *For print…* (was *Export for
+  Publication…*) before the pointer's read-out.
+- **GUI: the window can be narrowed** — the result tabs' minimum width no
+  longer held it at ~1050 px (~1570 px with the Assistant open): the action
+  buttons wrap, the welcome text and cards reflow, and the Assistant's top row
+  shrinks. Tabs are named without ①②③ numbers.
+
 ### Internal
 - **The GUI's left panel is built one workflow step at a time.**
   `_build_param_panel` had grown to 420 lines, one straight run of layout from
@@ -79,6 +105,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   trajectory window each had their own copy, identical down to the margins.
 
 ### Fixed
+- **Packaged app: Data → Find stations failed with "'rdata' is required but
+  not installed"**. The data downloaders (requests, cdsapi, rdata) are
+  imported by name at run time, which PyInstaller cannot see, and the build
+  did not install the `data` extra; both are fixed, and `build_dmg.sh` stops
+  if they are missing.
 - **Dates whose UTC offsets differ are read as UTC.** Local time across a
   daylight-saving change (`+00:00` in winter, `+01:00` in summer) has no one
   time zone to keep: pandas 3 refused such a CSV at load ("Mixed timezones

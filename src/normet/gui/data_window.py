@@ -408,10 +408,10 @@ class DataWindow(QMainWindow):
         sl.addWidget(
             hint_label("Click 🔍 Find stations to fill this table, then select the site to use.")
         )
-        self.tabs.addTab(st_tab, "① Stations")
+        self.tabs.addTab(st_tab, "Stations")
 
         self.tab_preview = CanvasTab("Fetch data to preview the merged table here.")
-        self.tabs.addTab(self.tab_preview, "② Preview")
+        self.tabs.addTab(self.tab_preview, "Preview")
 
         pv_tab = QWidget()
         pl = QVBoxLayout(pv_tab)
@@ -421,7 +421,7 @@ class DataWindow(QMainWindow):
         self.preview_table = QTableWidget()
         self.preview_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         pl.addWidget(self.preview_table, 1)
-        self.tabs.addTab(pv_tab, "③ Table")
+        self.tabs.addTab(pv_tab, "Table")
         return self.tabs
 
     # ---------------------------------------------------------------- helpers

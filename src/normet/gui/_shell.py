@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
 
 from . import _settings, commandlog, theme
 from ._constants import DOCS_URL
-from ._widgets import CanvasTab
+from ._widgets import CanvasTab, FlowLayout
 from .dataframe_model import DataFrameModel
 from .welcome import Welcome
 from .workers import QtLogHandler
@@ -74,6 +74,8 @@ class ShellMixin(QMainWindow):
         self._palette_action = vm.addAction("&Command Palette…", self.show_command_palette)
         self._palette_action.setShortcut("Ctrl+K")
         vm.addSeparator()
+        act = vm.addAction("Collapse / Expand &Panel", lambda: self.toggle_panel())
+        act.setShortcut("Ctrl+B")
         vm.addAction("Run &History…", self.show_history)
         vm.addSeparator()
         vm.addAction(self._log_dock.toggleViewAction())
@@ -96,6 +98,16 @@ class ShellMixin(QMainWindow):
             )
             group.addAction(act)
         appearance.setEnabled(theme.can_set_appearance())
+        from . import uilang
+
+        language = vm.addMenu("&Language")
+        group = QActionGroup(self)
+        for code, label in (("system", "Follow System"), *uilang.LANGUAGES.items()):
+            act = language.addAction(label)
+            act.setCheckable(True)
+            act.setChecked(code == uilang.choice())
+            act.triggered.connect(lambda _checked=False, c=code: uilang.set_choice(c))
+            group.addAction(act)
 
         am = mb.addMenu("&Analysis")
         act = am.addAction("Synthetic Control (SCM) Studio…", self.open_scm_studio)
@@ -162,28 +174,28 @@ class ShellMixin(QMainWindow):
         self.data_summary.setWordWrap(True)
         dl.addWidget(self.data_summary)
         self.data_preview = CanvasTab("The target series preview appears here once data is loaded.")
-        self.data_preview.setMaximumHeight(280)
+        self.data_preview.setMaximumHeight(320)  # its Resolution row included
         dl.addWidget(self.data_preview)
         self.table_model = DataFrameModel()
         self.table_view = QTableView()
         self.table_view.setModel(self.table_model)
         dl.addWidget(self.table_view, 1)
-        self.tabs.addTab(data_tab, "① Data")
+        self.tabs.addTab(data_tab, "Data")
 
         self.tab_model = CanvasTab("Train a model (Step 1) to see its quality here.")
-        self.tabs.addTab(self.tab_model, "② Model")
+        self.tabs.addTab(self.tab_model, "Model")
         self.tab_norm = CanvasTab(
             "Run Step 2 to see observed vs. meteorologically normalised series."
         )
-        self.tabs.addTab(self.tab_norm, "③ Normalise")
+        self.tabs.addTab(self.tab_norm, "Normalise")
         self.tab_decom = CanvasTab(
             "Run Step 3 to see the decomposition — emission splits the "
             "normalised series into time scales; meteorology splits "
             "observed − normalised by met variable."
         )
-        self.tabs.addTab(self.tab_decom, "④ Decompose")
+        self.tabs.addTab(self.tab_decom, "Decompose")
         self.tab_roll = CanvasTab("Run Step 4 to see the rolling normalisation.")
-        self.tabs.addTab(self.tab_roll, "⑤ Rolling")
+        self.tabs.addTab(self.tab_roll, "Rolling")
         self.tab_multiscale = CanvasTab(
             "Run Step 2 (Normalise) then Multi-scale decomposition to see "
             "how meteorological residuals split across fast/meso/slow "
@@ -191,7 +203,7 @@ class ShellMixin(QMainWindow):
         )
         self.tabs.addTab(self.tab_multiscale, "Multi-scale")
         self.tab_pdp = CanvasTab("Run Step 5 to see partial-dependence curves.")
-        self.tabs.addTab(self.tab_pdp, "⑥ PDP")
+        self.tabs.addTab(self.tab_pdp, "PDP")
         self._sync_welcome()
         return self.tabs
 
@@ -281,6 +293,22 @@ class ShellMixin(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.assistant)
         self.assistant.hide()
 
+    def toggle_panel(self, show: bool | None = None) -> None:
+        """Fold the parameter panel away, or bring it back (``show`` forces one)."""
+        if show is None:
+            show = self.param_panel.isHidden()
+        self.param_panel.setVisible(show)
+        self.panel_btn.setText("◀ Collapse Panel" if show else "▶ Expand Panel")
+
+    def start_layout(self) -> None:
+        """The layout the window opens in, as cume's does: the parameter panel
+        folded away and the Assistant beside the results. Expand Panel (Ctrl+B)
+        brings the panel back; View → Assistant closes the Assistant."""
+        self.toggle_panel(False)
+        self.show_assistant()
+        width = max(self.assistant.minimumSizeHint().width(), 400)
+        self.resizeDocks([self.assistant], [width], Qt.Orientation.Horizontal)
+
     def show_assistant(self) -> None:
         self.assistant.show()
         self.assistant.raise_()
@@ -334,8 +362,14 @@ class ShellMixin(QMainWindow):
 
     def _build_action_bar(self) -> QWidget:
         bar = QWidget()
-        h = QHBoxLayout(bar)
+        # Wraps onto a second row when the window is narrow: in one row the
+        # five buttons held the window at least ~1050 px wide.
+        h = FlowLayout(bar, spacing=6)
         h.setContentsMargins(4, 0, 4, 0)
+        self.panel_btn = QPushButton("◀ Collapse Panel")
+        self.panel_btn.setToolTip("Fold the parameter panel away or bring it back (Ctrl+B / ⌘B).")
+        self.panel_btn.clicked.connect(lambda: self.toggle_panel())
+        h.addWidget(self.panel_btn)
         self.exp_csv = QPushButton("⬇  Export result CSV")
         self.exp_csv.setToolTip("Export the current tab's result table as CSV.")
         self.exp_csv.clicked.connect(self._export_current)
@@ -370,5 +404,4 @@ class ShellMixin(QMainWindow):
         h.addWidget(self.exp_csv)
         h.addWidget(self.exp_html)
         h.addWidget(self.scm_btn)
-        h.addStretch(1)
         return bar

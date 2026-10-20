@@ -297,7 +297,7 @@ def test_multiscale_button_gating_and_tab_mapping(qapp):
 
         assert win.tabs.tabText(5) == "Multi-scale"
         assert win._TAB_KEYS[5] == "multiscale"
-        assert win.tabs.tabText(6) == "⑥ PDP"
+        assert win.tabs.tabText(6) == "PDP"
     finally:
         win.close()
 

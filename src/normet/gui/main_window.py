@@ -144,6 +144,7 @@ class MainWindow(
         scroll.setWidgetResizable(True)
         scroll.setFixedWidth(390)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.param_panel = scroll  # folded and unfolded by toggle_panel (._shell)
         return scroll
 
     def _build_config_row(self) -> QHBoxLayout:

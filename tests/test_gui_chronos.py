@@ -112,10 +112,8 @@ def test_step3_on_chronos(chronos_win, qapp, monkeypatch):
     assert seen["groups"] == {"thermal": ["t2m", "blh"], "wind": ["u10", "v10"]}
     assert "attribution" not in seen  # auto: the library's own default
     assert seen["model"] is w.model and "decompose" in w.results
-    assert (
-        "2 groups (shapley attribution)"
-        in w.tab_decom.findChildren(__import__("PySide6.QtWidgets").QtWidgets.QLabel)[0].text()
-    )
+    labels = w.tab_decom.findChildren(__import__("PySide6.QtWidgets").QtWidgets.QLabel)
+    assert any("2 groups (shapley attribution)" in lbl.text() for lbl in labels)
 
     # A bad group is said before anything runs.
     w.decom_groups.setText("thermal: t2m, rain")

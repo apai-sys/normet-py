@@ -54,6 +54,11 @@ for pkg in ("flaml", "lightgbm", "xgboost", "shapely"):
     binaries += b
     hiddenimports += h
 hiddenimports += ["shapefile"]
+# The data downloaders (Data → Download …, e.g. UK-AIR "Find stations") import
+# requests / cdsapi / rdata through normet.utils.require(), i.e. by name at run
+# time, which PyInstaller's import scan cannot see. Name them, or the frozen app
+# says "'rdata' is required but not installed" although the build env had it.
+hiddenimports += ["requests", "cdsapi", "rdata"]
 
 a = Analysis(
     [os.path.join(SPECPATH, "launcher.py")],  # noqa: F821

@@ -12,7 +12,7 @@ import datetime as _dt
 import os
 from collections.abc import Callable, Sequence
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from ._widgets import FlowLayout
@@ -38,6 +38,31 @@ def file_line(path: str) -> str:
         return os.path.dirname(path)
     day = _dt.date.fromtimestamp(st.st_mtime).isoformat()
     return f"{os.path.basename(os.path.dirname(path))} · {_size(st.st_size)} · {day}"
+
+
+class _Paragraph(QLabel):
+    """A wrapped label that asks for :attr:`WIDEST` px and can make do with
+    :attr:`NARROWEST`: laid out centred, it gets its asked width when there is
+    room and is squeezed (and wraps onto more lines) when there is not."""
+
+    WIDEST, NARROWEST = 520, 240
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        return QSize(self.WIDEST, self.heightForWidth(self.WIDEST))
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        return QSize(self.NARROWEST, super().minimumSizeHint().height())
+
+
+class _CardsHost(QWidget):
+    """Holds the cards' flow: asks for one row of all of them, makes do
+    with one card's width (the cards then wrap onto more rows)."""
+
+    wanted = 0
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        w = max(self.wanted, self.minimumSizeHint().width())
+        return QSize(w, self.heightForWidth(w))
 
 
 class Card(QFrame):
@@ -112,16 +137,16 @@ class Welcome(QWidget):
         title.setStyleSheet("font-size:18px; font-weight:600;")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         outer.addWidget(title)
-        said = QLabel(
+        said = _Paragraph(
             "Open a CSV with a 'date' column, a pollutant and its meteorology — or drop one "
             "onto the window."
         )
         said.setWordWrap(True)
         said.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        # A width it is laid out at, not only a most: a wrapped label given a
-        # maximum alone is laid out at its one-line height.
-        said.setFixedWidth(520)
-        said.setMinimumHeight(said.heightForWidth(520))
+        # 520 px wide where there is room, narrower (and taller) where there is
+        # not: a fixed width held the whole window at least ~1050 px wide.
+        self._said = said
+        said.setMinimumHeight(said.heightForWidth(_Paragraph.WIDEST))
         outer.addWidget(said, 0, Qt.AlignmentFlag.AlignHCenter)
         outer.addSpacing(8)
         row = QHBoxLayout()
@@ -142,12 +167,22 @@ class Welcome(QWidget):
         row.addStretch(1)
         outer.addLayout(row)
         outer.addSpacing(20)
-        self._cards_host = QWidget()
+        self._cards_host = _CardsHost()
         self._row = FlowLayout(self._cards_host, spacing=12)
         self._row.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(self._cards_host, 0, Qt.AlignmentFlag.AlignHCenter)
         outer.addStretch(2)
         self.cards: dict[str, Card] = {}
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        """Room for the paragraph's lines at the width it now gets."""
+        m = self.layout().contentsMargins()
+        w = max(
+            _Paragraph.NARROWEST,
+            min(_Paragraph.WIDEST, event.size().width() - m.left() - m.right()),
+        )
+        self._said.setMinimumHeight(self._said.heightForWidth(w))
+        super().resizeEvent(event)
 
     def refresh(self, recent: Sequence[str]) -> None:
         """The cards again, from what there is now: *recent* is the tables'
@@ -200,4 +235,6 @@ class Welcome(QWidget):
             self._row.addWidget(c)
         self._row.invalidate()
         width = len(self.cards) * CARD_WIDTH + (len(self.cards) - 1) * 12
-        self._cards_host.setMinimumWidth(min(width, 3 * CARD_WIDTH + 24))
+        # Asked for, not required: a minimum width here held the window wide.
+        self._cards_host.wanted = min(width, 3 * CARD_WIDTH + 24)
+        self._cards_host.updateGeometry()

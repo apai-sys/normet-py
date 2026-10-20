@@ -8,7 +8,6 @@ from typing import Any, cast
 
 import numpy as np
 import pandas as pd
-from scipy import stats as _stats
 
 from .logging import get_logger
 
@@ -134,6 +133,8 @@ def _stats_from_arrays(
     p_val = np.nan
     if ("r" in statistic) or ("R2" in statistic):
         try:
+            from scipy import stats as _stats  # deferred: ~0.8 s to import
+
             r_val, p_val = _stats.pearsonr(yhat, yobs)
         except Exception:
             r_val, p_val = (np.nan, np.nan)
