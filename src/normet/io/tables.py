@@ -1,7 +1,7 @@
 """A time series from a table file, whatever form the file and its times take.
 
 The window's *Open Data…* reads with :func:`read_time_series`, and a session script
-repeats the same call. Ported in part from cume (``cume.preprocess.read_csv_table``).
+repeats the same call.
 
     TABLE_SUFFIXES             the files read: text, Excel, Parquet, Feather, JSON
     read_table(path)           the file as a DataFrame

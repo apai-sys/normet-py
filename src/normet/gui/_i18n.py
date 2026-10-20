@@ -1,6 +1,6 @@
 """The catalogue engine behind the window's languages (:mod:`.uilang`).
 
-Ported from cume (``cume.i18n``). A text is translated through a catalogue of
+A text is translated through a catalogue of
 English templates and their translations (:mod:`.ui_zh` for Chinese). A
 template is the English text with ``{n0}``, ``{n1}``, ... where a number stands
 (12, 0.35, -1.2e-3) and ``{s0}``, ``{s1}``, ... where a name, a list or other

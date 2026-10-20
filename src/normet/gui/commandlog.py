@@ -1,6 +1,6 @@
 """What the window did, written as the normet calls that do the same.
 
-Adapted from the cume app's command log. Every action that decides a result
+Every action that decides a result
 -- opening a table, training, normalising, decomposing, a rolling run, partial
 dependence -- is recorded as the call that performs it, so an analysis done by
 clicking can be repeated, changed and handed on as a script.

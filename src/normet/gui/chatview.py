@@ -1,4 +1,4 @@
-"""The Assistant's conversation, set as cume's panel sets one (``cume_qt.chatview``).
+"""The Assistant's conversation, as the panel sets it out.
 
 The analyst's messages sit in a rounded bubble on the right, as wide as their words; the
 replies read as their Markdown does, in the window's own font and size -- headings bold at

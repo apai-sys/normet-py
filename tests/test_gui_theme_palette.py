@@ -181,7 +181,7 @@ def test_toolbar_icons_follow_the_theme(qapp):
 
     toolbar = ThemedToolbar(FigureCanvasQTAgg(Figure()))
     home = toolbar._actions["home"]
-    assert toolbar.iconSize().width() == ThemedToolbar.ICON  # cume's 16 pt
+    assert toolbar.iconSize().width() == ThemedToolbar.ICON  # 16 pt
 
     def ink():
         img = home.icon().pixmap(24, 24).toImage()

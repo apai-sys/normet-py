@@ -2,7 +2,7 @@
 which no API key gives: Claude Code (a Claude plan), Codex (ChatGPT), Google
 Antigravity's agy (Google AI Pro) or GitHub Copilot's CLI (a Copilot plan).
 
-Adapted from the cume app's. The agent brings its own loop and model; what it
+The agent brings its own loop and model; what it
 is given are the window's tools, the same the API models get
 (:class:`normet.gui.assistant.WindowTools`), served by the window over MCP's
 HTTP transport on 127.0.0.1 with a token drawn per window
@@ -76,7 +76,7 @@ NOTE = (
     "Do not use a terminal, files or a browser for this work."
 )
 
-#: What agy reports when its model stream broke (seen by the cume app, repeatedly):
+#: What agy reports when its model stream broke (seen repeatedly):
 #: the turn ends on this line. A message ending so is asked once more on its own.
 STREAM_INTERRUPTED = "The stream was interrupted. Please continue the task you were working on."
 

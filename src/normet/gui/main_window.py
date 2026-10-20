@@ -2,7 +2,7 @@
 
 Design language: a parameter panel on the left walks the user through the
 workflow a page per step (Data → Model → Normalise → Decompose → Rolling →
-PDP, chosen from a bar above them, as cume's are), each step with its own
+PDP, chosen from a bar above them), each step with its own
 prominent "▶ Run" button; results land in tabs on the right, which auto-activate when a run
 finishes.  Verdict banners (green / amber / red) summarise quality at a
 glance; every long computation runs on a background thread; the bottom dock
@@ -112,14 +112,14 @@ class MainWindow(
         self.statusBar().showMessage("Open data, or load an example from the File menu, to begin.")
 
     # --------------------------------------------------------- left panel
-    #: The left panel's pages, each a step of the workflow (as cume's are): one column
+    #: The left panel's pages, each a step of the workflow: one column
     #: holding every box was four screens long, and the run a step needed was a scroll
     #: away from the settings it reads.
     PANEL_PAGES = ("Data", "Model", "Normalise", "Decompose", "Rolling", "PDP")
 
     def _build_param_panel(self) -> QWidget:
         """The left column: a page per workflow step, chosen from a bar above them
-        (:class:`._pages.StepPanel`, as cume's).
+        (:class:`._pages.StepPanel`).
 
         Each box is built by its own method below, so a step's controls stay
         findable by name rather than by scrolling through four hundred lines

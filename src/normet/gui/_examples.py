@@ -1,4 +1,4 @@
-"""The example data sets the window offers, and how each is set up (as cume's are).
+"""The example data sets the window offers, and how each is set up.
 
 File → Load Example and the welcome's Examples card list :data:`EXAMPLES`: the normet
 paper's own case studies at London Marylebone Road (MY1), real AURN observations with

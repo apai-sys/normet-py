@@ -1,5 +1,5 @@
 """The window in Chinese: the English templates of the window's texts and their
-translations (:mod:`.uilang`), written as cume's are -- ``{n0}``, ``{n1}``, ...
+translations (:mod:`.uilang`), written as templates -- ``{n0}``, ``{n1}``, ...
 where a number stands, ``{s0}``, ``{s1}``, ... where a name, a list or other
 free text does. A text no template matches stays English; ``NORMET_UI_AUDIT``
 lists them.
@@ -927,7 +927,7 @@ INNER.update(
     }
 )
 # For print (normet.gui.printview, normet.figstyle): the dialog, the journals' guides and
-# what they ask, read from the figure -- cume's own words where cume has them.
+# what they ask, read from the figure.
 TEXTS.update(
     {
         "Figure for Print": "打印用图",

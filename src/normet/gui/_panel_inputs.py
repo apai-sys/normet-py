@@ -3,7 +3,7 @@
 The left panel's Data page, with everything that reacts to it -- the table loader
 (:func:`normet.io.read_time_series`: text, Excel, Parquet, Feather or JSON, its times
 however written, put on UTC from the time zone chosen), the examples (``._examples``,
-offered under File → Load Example and on the welcome, as cume offers its own), the
+offered under File → Load Example and on the welcome), the
 drag-and-drop handlers and the target series preview.
 A mixin of :class:`~.main_window.MainWindow`: the widgets it creates are
 attributes of the window, which is how the run handlers reach them.
@@ -73,7 +73,7 @@ ZONE_PREF = "data_time_zone"
 class InputsMixin(QMainWindow):
     def _build_data_box(self) -> QGroupBox:
         """Data: open a table, and the clock its times are kept on. The examples are under
-        File → Load Example and on the welcome, as cume's are."""
+        File → Load Example and on the welcome."""
         from PySide6.QtCore import QSettings
 
         box = QGroupBox("Data")
