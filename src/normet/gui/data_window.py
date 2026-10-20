@@ -87,7 +87,6 @@ NETWORKS: dict[str, str] = {
 
 MET_OPEN_METEO = "Open-Meteo (ERA5, no key needed)"
 MET_CDS = "Copernicus CDS (needs ~/.cdsapirc)"
-MET_NONE = "None (air quality only)"
 
 
 def _find_stations(pollutants: list[str], source: str) -> pd.DataFrame:
@@ -343,7 +342,7 @@ class DataWindow(QMainWindow):
         mf = QFormLayout(met_box)
         mf.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.met_combo = NoWheelComboBox()
-        self.met_combo.addItems([MET_OPEN_METEO, MET_CDS, MET_NONE])
+        self.met_combo.addItems([MET_OPEN_METEO, MET_CDS])
         self.met_combo.setToolTip(
             "Hourly meteorology at the station coordinates.\n"
             "Open-Meteo serves the ERA5 archive without registration;\n"
