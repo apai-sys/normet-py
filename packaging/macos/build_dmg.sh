@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build normet.app with PyInstaller and package it into a compressed DMG.
+# Build Normet.app from packaging/normet_gui.spec and package it into a compressed DMG.
 #
 # Usage:  packaging/macos/build_dmg.sh [python]
 # The optional argument selects the interpreter whose environment holds
@@ -21,30 +21,13 @@ VERSION="$("$PY" -c 'import importlib.metadata as m; print(m.version("normet"))'
 echo "==> Building $APP_NAME $VERSION with $("$PY" --version 2>&1)"
 cd "$REPO"
 
-"$PY" -m PyInstaller "$REPO/packaging/launcher.py" \
-    --name "$APP_NAME" \
-    --windowed \
+# The shared spec, so the app carries what the other platforms do (the manuals) and
+# what only a Mac bundle needs (its Info.plist, with the languages it speaks).
+"$PY" -m PyInstaller "$REPO/packaging/normet_gui.spec" \
     --noconfirm \
     --clean \
     --distpath "$DIST" \
-    --workpath "$REPO/build/pyinstaller" \
-    --specpath "$REPO/build/pyinstaller" \
-    --icon "$REPO/packaging/assets/normet.icns" \
-    --osx-bundle-identifier "org.apai-sys.normet" \
-    --collect-submodules normet \
-    --collect-all flaml \
-    --collect-all lightgbm \
-    --collect-binaries xgboost \
-    --collect-data xgboost \
-    --collect-all shapely \
-    --hidden-import shapefile \
-    --hidden-import requests \
-    --hidden-import cdsapi \
-    --hidden-import rdata \
-    --add-data "$REPO/packaging/assets/normet.png:packaging/assets" \
-    --exclude-module tkinter \
-    --exclude-module IPython \
-    --exclude-module pytest
+    --workpath "$REPO/build/pyinstaller"
 
 APP="$DIST/$APP_NAME.app"
 [ -d "$APP" ] || { echo "ERROR: $APP not produced"; exit 1; }
