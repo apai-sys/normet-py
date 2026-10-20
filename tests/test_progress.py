@@ -120,6 +120,27 @@ def test_the_status_bar_says_how_far_a_task_has_come_and_how_long_it_took(qapp):
         win.close()
 
 
+def test_once_a_result_is_in_the_clock_writes_no_more_over_its_line(qapp, monkeypatch):
+    from normet.gui import _clock
+    from normet.gui.main_window import MainWindow
+
+    win = MainWindow()
+    try:
+        clock, now, bar = win.task_clock, [100.0], win.statusBar()
+        monkeypatch.setattr(_clock.time, "monotonic", lambda: now[0])
+        clock.start("normalise")
+        now[0] += 3
+        clock.settle()  # the result is in; the step writes its line
+        bar.showMessage("Done.")
+        now[0] += 5
+        clock.report(0.9)  # a late report: no tick, no line over "Done."
+        assert bar.currentMessage() == "Done."
+        clock.stop()  # the time it took, not counting the wait for the end
+        assert bar.currentMessage() == "Done. · took 3 s"
+    finally:
+        win.close()
+
+
 def test_the_time_left_comes_once_there_is_enough_to_go_on(qapp, monkeypatch):
     from normet.gui import _clock
     from normet.gui.main_window import MainWindow
