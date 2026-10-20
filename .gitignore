@@ -160,3 +160,6 @@ notebooks/*.sbatch
 ci_check_*.out
 ci_check_*.err
 logs/
+
+# A local AI assistant's workspace (WorkBuddy): its notes, not the project's.
+.workbuddy-ai/
