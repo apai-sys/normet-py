@@ -14,7 +14,7 @@ import os
 import re
 import sys
 
-from PyInstaller.utils.hooks import collect_all, collect_submodules
+from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules
 
 REPO = os.path.dirname(SPECPATH)  # noqa: F821 — SPECPATH is injected by PyInstaller
 
@@ -42,6 +42,8 @@ hiddenimports += collect_submodules("normet")
 hiddenimports += collect_submodules("matplotlib.backends")
 
 datas = [(os.path.join(SPECPATH, "assets", "normet.png"), "packaging/assets")]  # noqa: F821
+# The example datasets (File → Examples) ship inside the package.
+datas += collect_data_files("normet")
 # Help → User Manual opens the manual in the window's language, from the bundle.
 for _book in ("normet_manual.pdf", "normet_manual_zh.pdf"):
     _path = os.path.join(REPO, "docs", "manual", _book)
