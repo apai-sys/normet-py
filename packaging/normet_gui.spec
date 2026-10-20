@@ -100,7 +100,7 @@ if sys.platform == "darwin":
             "CFBundleDisplayName": "Normet",
             "CFBundleShortVersionString": APP_VERSION,
             "CFBundleVersion": APP_VERSION,
-            # The languages the app speaks (as cume's): without them macOS takes the
+            # The languages the app speaks: without them macOS takes the
             # app for English-only and draws its own panels and menu items in English
             # on a Chinese system -- they follow the system only where it is one of these.
             "CFBundleDevelopmentRegion": "en",

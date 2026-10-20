@@ -1,7 +1,5 @@
 """The command palette (Ctrl+K, ⌘K on a Mac): every menu command and every
 result tab, found by typing a few letters of its name.
-
-Adapted from the cume desktop app's palette.
 """
 
 from __future__ import annotations

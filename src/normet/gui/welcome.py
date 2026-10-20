@@ -1,7 +1,7 @@
 """What the Data tab shows before a table is open: the ways in.
 
 A title and the main buttons (open a CSV, load the example), and under them
-cards adapted from the cume desktop app's welcome: the examples, the tables
+cards: the examples, the tables
 opened lately with their folder, size and date, and where else data comes
 from (the UK data studio, HYSPLIT trajectories).
 """

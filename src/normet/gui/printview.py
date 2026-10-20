@@ -2,7 +2,7 @@
 lettering its guide asks for (:mod:`normet.figstyle`), shown at that size -- fitted to
 the window as it opens, or its actual size on the screen -- beside what the guide asks of
 it, read from the figure as drawn; saved as it is shown, a raster file at the resolution
-chosen. Ported from cume (``cume_qt.printview``).
+chosen.
 
 - the journal (Elsevier, Nature, Copernicus, ACS), its column widths or a width of one's
   own, and the height the figure needs or one set;

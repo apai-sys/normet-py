@@ -1,7 +1,7 @@
 """The window in Chinese, run by tests/test_gui_uilang.py in a process of its own.
 
 Installing .uilang wraps Qt's text setters for the rest of the process; kept
-out of the test run's own process, as cume does (tests/_uilang_smoke.py there).
+out of the test run's own process.
 It also exits as the app does, wrappers installed, so a crash at shutdown
 shows as this process failing.
 """

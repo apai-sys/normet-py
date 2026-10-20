@@ -1,5 +1,5 @@
 """Figures for print: laid out at the size a journal prints them, in the lettering its
-guide asks for. Ported from cume (``cume.figstyle``).
+guide asks for.
 
 On screen a figure is drawn at the size its tab gives it -- 12 in wide, say -- and a
 journal prints it at a column's width: scaled down, its 7 pt tick labels come out at 4.

@@ -1,4 +1,4 @@
-"""Figures for print (normet.figstyle, after cume's): formulas written as chemistry writes
+"""Figures for print (normet.figstyle): formulas written as chemistry writes
 them, a figure laid out at a journal's column width in its lettering and put back as it
 was, its panels lettered, what the journal's guide asks read from the figure as drawn,
 and the file written at its size exactly with its fonts embedded."""

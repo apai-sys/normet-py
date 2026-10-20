@@ -1,6 +1,6 @@
 """A figure style of the kind journals ask for, shared by every figure normet draws.
 
-Ported from cume (``cume.style``, ``cume.figstyle``, ``cume.plotting``). What it sets is
+What it sets is
 what Nature Portfolio's, Science's, ACP's and ES&T's guides for figures have in common: a
 sans-serif face embedded as TrueType (Type 42), 7 to 8.5 pt text, 0.6 pt axes with ticks
 outward, legends without a frame, colours a colour-blind reader can tell apart (Okabe and
@@ -44,7 +44,7 @@ PALETTE: list[str] = [
     "#AA4499",  # magenta
 ]
 
-# What a colour stands for, the same in every figure -- cume's (``cume.plotting``): what
+# What a colour stands for, the same in every figure: what
 # was measured in the system blue, what a model makes of it in the system red, a third
 # series in green; the palette is for categories (sources, variables, sites), one each.
 OBSERVED = "#007AFF"  # a measured series
@@ -335,7 +335,7 @@ def colorbar(fig: Any, mappable: Any, ax: Any, label: str | None = None, **kwarg
 # -- series -----------------------------------------------------------------------------
 
 #: An interval this many times a record's median spacing is a gap in it, where a series
-#: is drawn broken rather than joined across (cume's rule): an hourly record's missing
+#: is drawn broken rather than joined across: an hourly record's missing
 #: days are, a day-to-day wobble in a sampler's schedule is not.
 GAP_SPACINGS = 5.0
 
