@@ -168,6 +168,7 @@ class TrainRunMixin(QMainWindow):
         # The meteorological decomposition's groups: the model's variables, each in the
         # group it had (a config read before training applies now).
         self.decom_groups.set_variables([f for f in self.trained_features if f not in TIME_VARS])
+        self.param_panel.refit()  # the table's names may need the panel wider
         # Offer every trained variable (incl. the auto-added time features)
         # for resampling; default to Met only — the standard deweathering
         # choice, which keeps trend/seasonality in the normalised series.

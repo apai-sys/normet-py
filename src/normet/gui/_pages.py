@@ -13,6 +13,7 @@ from collections.abc import Sequence
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtWidgets import (
     QGroupBox,
+    QLayout,
     QScrollArea,
     QSizePolicy,
     QStackedWidget,
@@ -70,17 +71,32 @@ class StepPanel(QWidget):
             self.stack.widget(i).setSizePolicy(
                 QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred
             )
+        self._least = least
+        #: The width the panel opens at, and the least it is let go to: a
+        #: minimum the splitter starts at, not a fixed width -- fixed, the splitter's
+        #: wider slot was left as a gap between the panel and the results.
+        self.least_width = self._width_needed()
+        self.setMinimumWidth(self.least_width)
+        self.show_index(0)
+
+    def _width_needed(self) -> int:
         need = max(
             max(self.stack.widget(i).minimumSizeHint().width() for i in range(self.stack.count())),
             self.bar.minimumSizeHint().width(),
         )
         bar_width = self.scroll.verticalScrollBar().sizeHint().width() or 15
-        #: The width the panel opens at, and the least it is let go to: a
-        #: minimum the splitter starts at, not a fixed width -- fixed, the splitter's
-        #: wider slot was left as a gap between the panel and the results.
-        self.least_width = max(need + bar_width + 4, least)
-        self.setMinimumWidth(self.least_width)
-        self.show_index(0)
+        return max(need + bar_width + 4, self._least)
+
+    def refit(self) -> None:
+        """A page's contents have changed what they need (a table filled once a model is
+        trained): the panel widens to it, should it need more; it never narrows."""
+        for layout in self.stack.findChildren(QLayout):
+            layout.invalidate()  # a page out of view keeps the sizes it last measured
+        need = self._width_needed()
+        if need > self.least_width:
+            self.least_width = need
+            self.setMinimumWidth(need)
+            self.updateGeometry()
 
     def sizeHint(self) -> QSize:  # noqa: N802 - Qt's
         return QSize(self.least_width, super().sizeHint().height())

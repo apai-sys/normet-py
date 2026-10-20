@@ -15,7 +15,7 @@ and write it as before.
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -54,6 +54,15 @@ PRESETS: dict[str, tuple[str, ...]] = {
 }
 #: What the Group column shows for a variable left alone.
 ALONE = ""
+
+
+def _from_start(box: QComboBox) -> None:
+    """A group's name read from its start where the cell is too narrow for all of it
+    (one typed in), the whole of it on the pointer."""
+    edit = box.lineEdit()
+    if edit is not None and not edit.hasFocus():
+        edit.setCursorPosition(0)
+    box.setToolTip(box.currentText())
 
 
 def suggested_group(name: str) -> str:
@@ -120,9 +129,27 @@ class GroupEditor(QWidget):
             box.addItem(ALONE)
             box.addItems(list(PRESETS))
             box.setCurrentText(self._groups.get(name, ALONE))
+            _from_start(box)
             box.currentTextChanged.connect(lambda text, name=name: self._chosen(name, text))
+            box.currentTextChanged.connect(lambda _text, box=box: _from_start(box))
             self.table.setCellWidget(r, 1, box)
         self._paint()
+        self.updateGeometry()  # its width: the variables' names and the groups'
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt's
+        """Wide enough for the longest variable name beside the longest group's: a
+        narrower table cut the group's name short, showing its end (``oundary layer and
+        pressure``)."""
+        hint = super().minimumSizeHint()
+        t = self.table
+        names = max(t.sizeHintForColumn(0), t.horizontalHeader().sectionSizeHint(0))
+        probe = QComboBox()
+        probe.setEditable(True)
+        probe.addItems([*PRESETS, *self._groups.values()])
+        probe.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        groups = probe.sizeHint().width()
+        bar = t.verticalScrollBar().sizeHint().width()
+        return QSize(max(hint.width(), names + groups + bar + 2 * t.frameWidth()), hint.height())
 
     def _chosen(self, name: str, group: str) -> None:
         group = group.strip()
