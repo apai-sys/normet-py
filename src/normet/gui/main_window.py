@@ -98,8 +98,8 @@ class MainWindow(
         self.runner.record = self._record_task
 
         self._build_central()
-        self._build_log_dock()
-        self._build_command_log_dock()
+        self._build_log()
+        self._build_command_log()
         self._build_assistant()
         self._build_status_bar()
         self._build_menu()
