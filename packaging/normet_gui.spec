@@ -79,6 +79,10 @@ a = Analysis(
     excludes=[
         "tkinter", "IPython", "pytest",
         "PyQt5", "PyQt6", "PySide2",
+        # NVIDIA's multi-GPU library (452 MB on Linux), which xgboost's Linux wheel
+        # pulls in. xgboost opens it only for distributed GPU training and goes on
+        # without it otherwise.
+        "nvidia",
     ],
     noarchive=False,
 )
