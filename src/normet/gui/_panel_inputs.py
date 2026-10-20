@@ -150,6 +150,7 @@ class InputsMixin(QMainWindow):
         self.chronos_check = None
         self.trained_features = []
         self.results.clear()
+        self._multiscale_raw = None
         self.tab_model.show_message("Train a model (Step 1) to see its quality here.")
 
         span = f"{df['date'].min():%Y-%m-%d} → {df['date'].max():%Y-%m-%d}"
@@ -216,7 +217,9 @@ class InputsMixin(QMainWindow):
 
         def render(d: pd.DataFrame):
             fig, ax = plt.subplots(figsize=(8, 2.2))
-            ax.plot(d.index, d[target].values, lw=0.5 if len(d) > 1500 else 0.9, color=S.OBSERVED)
+            S.line(
+                ax, d.index, d[target].values, lw=0.5 if len(d) > 1500 else 0.9, color=S.OBSERVED
+            )
             ax.set_ylabel(S.formula(target))
             if isinstance(d.index, pd.DatetimeIndex):
                 S.format_time_axis(ax)
@@ -224,10 +227,8 @@ class InputsMixin(QMainWindow):
             S.grid(ax)
             return fig
 
-        # A dense record is first shown as daily means; the selector changes it.
-        self.data_preview.show_timeseries(
-            render, s.to_frame(target), default="Daily" if len(s) > 20_000 else None
-        )
+        # A dense record is first shown as daily means (CanvasTab); the selector changes it.
+        self.data_preview.show_timeseries(render, s.to_frame(target))
 
     def dragEnterEvent(self, event) -> None:  # noqa: N802
         md = event.mimeData()

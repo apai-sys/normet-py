@@ -716,8 +716,8 @@ Tab & Shows & Filled by \\
 \midrule
 Data        & a preview of the target, the table, its size, span and missing values & loading \\
 Model       & verdict, statistics table, parity plot, feature importance & Step 1 \\
-Normalise   & observed and normalised series, with the quantile band & Step 2 \\
-Decompose   & the emission or meteorological components & Step 3 \\
+Normalise   & observed and normalised series, the quantile band, their cycles & Step 2 \\
+Decompose   & the emission or meteorological components, the cycles & Step 3 \\
 Rolling     & the mean of the rolling windows, with their spread & Step 4 \\
 Multi-scale & the scale-space cascade and the energy in each band & Multi-scale \\
 PDP         & one partial-dependence panel per variable & Step 5 \\
@@ -741,8 +741,11 @@ dated on the bottom panel only.
 figure: \emph{As recorded}, \emph{Hourly}, \emph{Daily}, \emph{Weekly}, \emph{Monthly}
 or \emph{Yearly}. A coarser step redraws the figure from the means of each period, which
 makes a long hourly record readable; steps finer than the record's own are greyed out.
-Only the display changes: the result, its table and its export stay at the record's
-resolution.
+A record finer than daily and longer than 2,000 points opens as daily means --- months of
+hours drawn as they are are a solid band --- and the choice made on a tab is kept for its
+next result. Only the display changes: the result, its table and its export stay at the
+record's resolution. A series is drawn broken where the record has a gap (an interval
+over five times its usual step), not joined across it by a straight line.
 
 \section{The action bar}
 Above the tabs: \emph{Collapse / Expand Panel}, \emph{Get UK data} (the Data Studio,
@@ -775,6 +778,14 @@ free at once, but the computation cannot be interrupted, so it finishes in the b
 and its result is discarded. Each step's call is added to the command log when it
 succeeds (Section~\ref{sec:commandlog}).
 
+A step asked for before what it needs --- normalising before a model is trained, a
+multi-scale run before Step~2 --- is answered by a \emph{notice} above the results, not a
+dialog: it says what is missing and carries the step that answers it on a button
+(\emph{Train model}, \emph{Run normalisation}); \(\times\) puts it away, and it goes by itself
+once the step has been taken. At the right of the status bar a light per step --- Data,
+Model, Normalised, Decomposed, Rolling, Multi-scale, PDP --- turns green when that step
+has a result.
+
 \section{Menus and shortcuts}
 \begin{center}\small
 \begin{tabular}{@{}lll@{}}
@@ -785,8 +796,13 @@ File     & Open CSV\ldots                       & Ctrl+O \\
          & Load Example Data                    & \\
          & Get UK Data (AQ networks + met)\ldots & Ctrl+D \\
          & Open Recent (eight tables)           & \\
+         & Save Results\ldots{} / Load Results\ldots & Ctrl+S \\
+         & Reopen Last Session                  & \\
+         & Load Session Script\ldots            & \\
+         & Methods Paragraph\ldots              & \\
          & Export Current Result\ldots          & Ctrl+E \\
          & Export HTML Report\ldots             & \\
+         & Report Language: As the Window, English, Chinese & \\
          & Save Session as Script\ldots         & \\
          & Save Config\ldots{} / Load Config\ldots & \\
 View     & Command Palette\ldots                & Ctrl+K \\
@@ -797,12 +813,17 @@ View     & Command Palette\ldots                & Ctrl+K \\
          & Appearance: Follow System, Light, Dark & \\
          & Language: Follow System, English, Chinese & \\
 Analysis & Synthetic Control (SCM) Studio\ldots & Ctrl+Shift+S \\
-Help     & Documentation, About Normet          & \\
+         & Polar Plot\ldots                     & \\
+Help     & User Manual                          & F1 \\
+         & Keyboard Shortcuts\ldots             & \\
+         & Documentation, About Normet          & \\
 \bottomrule
 \end{tabular}
 \end{center}
 On macOS, Ctrl is the Command key. The \emph{command palette} (Ctrl+K) lists every
 menu command and every result tab; type a few letters of one and press Return.
+\tab{Help $\rightarrow$ Keyboard Shortcuts} lists every shortcut, read from the menus;
+\tab{Help $\rightarrow$ User Manual} (F1) opens this manual in the window's language.
 
 \section{Docks}
 The \emph{Log} dock at the bottom streams \nm{}'s log: what each step did, how many rows,
@@ -823,7 +844,9 @@ immediate --- menus, buttons, tabs, tooltips, verdicts and the figures' titles, 
 month names are written again in the language chosen, and a figure is saved as it is
 shown. The data's own words (column names, site codes), the log, the command log's code
 and the Assistant's conversation stay as they were written. On macOS the system's own
-menu items (Services, Hide, Quit) follow the new language from the next start.
+menu items (Services, Hide, Quit) follow the new language from the next start. An HTML
+report (Section~\ref{sec:commandlog}) is written in the window's language too, or in the
+one \tab{File $\rightarrow$ Report Language} chooses: its headings, labels and figure.
 
 % ============================ 6. COLUMNS AND TRAINING =========================
 \chapter{Training a model (Step 1)}\label{ch:train}
@@ -868,7 +891,10 @@ and fills the \tab{Model} tab (Figure~\ref{fig:model}). The verdict is read from
 held-out $R^2$: 0.7 or above is a good fit, 0.5 to 0.7 moderate, below 0.5 poor. The table
 is \code{modStats} for the training rows, the testing rows and all rows
 (Section~\ref{sec:modstats}); the parity plot shows the held-out rows against the
-prediction; the bars are the model's feature importance (split counts for LightGBM).
+prediction, square, with the 1:1 line and, in its corner, the number of rows, the slope of
+predicted on observed (below 1: the extremes are pulled in) and the mean bias --- as a
+density of hexagons where the rows run to thousands; the bars are the model's feature
+importance (split counts for LightGBM).
 
 \screenshot{ui_model.png}{MY1 trained with FLAML (LightGBM, 30~s budget, random split):
 on the 1,448 held-out hours $R^2 = 0.883$ and RMSE $= 8.66$~\ugm{}, against $0.976$ on
@@ -919,11 +945,19 @@ and the multi-scale decomposition, built on Step~4, does not apply
         the draws and shade the outer band.
 \end{description}
 
+Beneath the series, the observed and normalised series are averaged by the hour of the
+day, the day of the week and the month, each mean with its 95\,\% confidence interval ---
+the record's cycles, as openair's \code{timeVariation} draws them, and how much of each
+the weather moved. A cycle the record cannot show (the hours of a daily record) is left
+out; the cycles are averaged from the record as it is, whatever resolution the series
+above is shown at. In a script: \code{nm.cycle\_profiles(result, ["observed",
+"normalised"])}.
+
 \screenshot{ui_normalise.png}{MY1 normalised with 300 draws of all nine meteorological
-variables. The normalised series (red) keeps the diurnal and weekly cycles --- the
-calendar is held at its observed values --- while the weather-driven peaks of the observed
-series (blue) are averaged out. The step down in the third week of March is the
-lockdown: the weather does not explain it.}{fig:normalise}
+variables, shown as daily means. The normalised series (vermilion) falls in the third week
+of March, the lockdown, which the weather does not explain. Beneath, its cycles: the
+normalised series keeps the rush hours and the weekday--weekend difference --- the
+calendar is held at its observed values --- with less of the observed series' spread.}{fig:normalise}
 
 The line above the figure gives the number of timestamps, draws and resampled variables,
 and the mean of normalised $-$ observed over the record: here $-0.26$~\ugm{}, since over
@@ -959,14 +993,18 @@ With \emph{Method} set to \emph{emission}, Step~3 runs the nested normalisation 
 Section~\ref{sec:emission} and plots the normalised series with its trend, seasonal,
 weekly, diurnal and short-term components, each with its standard deviation $\sigma$
 (Figure~\ref{fig:emission}). The line above the figure names the component with the
-largest $\sigma$.
+largest $\sigma$. On a record finer than daily, the diurnal and weekly components are
+drawn on the right as their cycles --- the component's mean by hour of day and by day of
+week, shaded between its 25th and 75th percentiles --- rather than as months of
+oscillation.
 
 \screenshot{ui_decompose_emission.png}{The emission decomposition of MY1 (100 draws per
 normalisation; baseline 43.1~\ugm{}). The lockdown appears as a step in both the trend
 ($\sigma = 9.56$) and the seasonal component ($\sigma = 4.74$): a one-off event is not a
-season, and the record is too short to tell them apart. The diurnal cycle is the largest
-($\sigma = 9.92$) and shrinks after the lockdown, as rush-hour traffic did; the weekly cycle
-($\sigma = 3.36$) dips each weekend.}{fig:emission}
+season, and the record is too short to tell them apart. The diurnal cycle (right) is the
+largest ($\sigma = 9.92$): low before 05:00, high through the working day, its spread wide
+because it shrank after the lockdown, as rush-hour traffic did; the weekly cycle
+($\sigma = 3.36$) dips at the weekend.}{fig:emission}
 
 \section{By variable: the meteorological decomposition}
 With \emph{Method} set to \emph{meteorology}, Step~3 splits observed $-$ normalised among
@@ -1029,7 +1067,10 @@ After training, the variable list holds every predictor and the calendar variabl
 the first four ticked. \emph{Time variables} and \emph{Met only} toggle those groups;
 \emph{Grid points} (50) sets the resolution. Each panel shows the curve
 (\code{pdp\_mean}) with a band of $\pm$ \code{pdp\_std}, the spread of the predictions
-across the training rows at that value (Section~\ref{sec:pdptheory}).
+across the training rows at that value (Section~\ref{sec:pdptheory}). The short ticks
+along the bottom are the variable's deciles in the training data: where they are far
+apart --- a curve's ends --- the data are few. A variable of a few whole values (the hour,
+the weekday) is drawn as steps, a point on each value.
 
 \screenshot{ui_pdp.png}{Partial dependence of the MY1 model: \NOtwo{} falls as wind
 speed rises and as the boundary layer deepens from its shallowest, rises above about
@@ -1272,6 +1313,18 @@ random split a tree model uses them as a time stamp and its test $R^2$ is inflat
 decomposition two groups, \code{local} and \code{transport}
 (Section~\ref{sec:metdecomp}).}
 
+\section{Polar plot: where a pollutant comes from}\label{sec:polar}
+\tab{Analysis $\rightarrow$ Polar Plot\ldots} draws a variable of the open table by wind
+direction and speed, as openair's \code{polarPlot} does (Figure~\ref{fig:polar}): its
+mean, median, 95th percentile or maximum in bins of 10$^\circ$ of direction and of speed,
+on a compass, north at the top. The wind columns are found by name (\code{ws} and
+\code{wd}), else made from \code{u10} and \code{v10}, and can be chosen. In a script:
+\code{nm.polar\_plot(df, target="NO2", ws\_col="ws", wd\_col="wd")}.
+
+\screenshot{ui_polar.png}{Mean \NOtwo{} at MY1 by wind direction and speed: highest with
+winds from the south and south-west, lowest with winds from the north and
+north-east.}{fig:polar}
+
 % ============================ 13. EXPORT ======================================
 \chapter{Exporting and reproducing}\label{ch:export}
 
@@ -1352,6 +1405,12 @@ that size (Figure~\ref{fig:print}):
   \item[Legend] Where it sits (or drag it), its text size, its columns, its frame.
   \item[Lines and panels] Line width and marker size, and panel letters (a, (a), A, (A)).
 \end{description}
+Under the settings, \emph{What the guide asks} reads the figure as it is laid out against
+the journal's guide: its width and height, its smallest text (Nature asks for 5~pt at
+least and 7~pt at most, Elsevier 7~pt, ACS 8~pt), tick labels that run into one another,
+and the face it is set in; each check is ticked or crossed and read again as the settings
+change. The preview is shown at its actual printed size or fitted to the window. The
+journal, lettering, resolution, panel letters and zoom are kept for the next figure.
 Double-click a title, an axis label or a tick's numbers on the preview to edit it.
 \emph{Save\ldots} writes PNG, PDF, SVG, TIFF or EPS at exactly the width chosen, on a
 white page. Nothing is kept: when the dialog closes the figure goes back to its tab as it
@@ -1359,7 +1418,38 @@ was. The widths are those the publishers' artwork guides give; check the journal
 current guide before submitting.
 
 \screenshot{ui_print.png}{The normalised series laid out for a single Nature column: 89 by
-46~mm, 7~pt lettering, 300~dpi, shown at its printed size.}{fig:print}
+46~mm, 7~pt lettering, 300~dpi, shown at its printed size, beside what Nature's guide
+asks of it.}{fig:print}
+
+\section{Saving and reopening a session}\label{sec:saved}
+\tab{File $\rightarrow$ Save Results\ldots} (Ctrl+S) writes the session to one file
+(\code{.normet}): the table, the panel's settings, the model, every step's result and the
+command log. \tab{Load Results\ldots} reads one back into the window as it was --- each
+result is handed to its step's own handler, so its tab, verdict and figure are drawn again
+--- and a notice says what was restored. After each step that finishes, the window also
+keeps the session as \code{\textasciitilde/.normet/last\_session.normet};
+\tab{Reopen Last Session} reads it, should the window have been closed, or have crashed,
+before the results were saved. A Chronos-2 checkpoint is not written (it is the
+pretrained model, about 500~MB): load it again to go on. A session file is a Python pickle:
+open only one you or the window wrote.
+
+\tab{File $\rightarrow$ Load Session Script\ldots} runs a script the command log wrote
+(Section~\ref{sec:commandlog}) and brings its results into the window the same way: its
+table, model and results, and the panel set from the calls it made. The script is Python
+and runs as it is written, so the window asks first.
+
+\section{A Methods paragraph}\label{sec:methods}
+\tab{File $\rightarrow$ Methods Paragraph\ldots} writes what the session ran as a paper's
+Methods says it, ready to copy (Figure~\ref{fig:methods}): the record (its length, span and
+step), the model (backend, search, predictors, split and seed) and its held-out fit, then
+each step run --- the normalisation's draws and resampled variables, the decomposition, the
+rolling windows, the multi-scale widths, the partial-dependence variables --- with the
+references the methods rest on. It is written from each step's call as it ran, not from
+the panel as it stands, and in the window's language. Check it against what you did.
+
+\screenshot{ui_methods.png}{The Methods paragraph of this manual's session: the record,
+the FLAML model and its held-out fit, and each step that was run, with its
+references.}{fig:methods}
 
 \section{Configurations and history}
 \emph{Save config} writes every setting of the panel to JSON --- target, predictors,
@@ -1377,6 +1467,12 @@ again. It reads what the window holds --- the table, the model's held-out fit, t
 normalised series, the decomposition --- as \nm{}'s own readings of them, in text, and
 runs the window's steps the way their buttons do, so what it does appears on screen as
 your own runs do and goes into the command log.
+
+The conversation reads as a chat does: your messages on the right, the replies as their
+Markdown reads (code shaded, tables ruled), each tool the Assistant calls one quiet line
+--- its dot grey while it runs, green when it answered, red when it was refused, the
+refusal under it --- whose result opens with a click. Ctrl/Cmd $+$ and $-$ (or the wheel
+with the key held) size its text, and Ctrl/Cmd 0 resets it; the size is kept.
 
 Where it helps most is what to model and how to read the result. It \emph{proposes} a
 target and predictors as a card with an \emph{Apply} button, saying what it left out and
@@ -1546,13 +1642,15 @@ Recent tables (eight)        & \code{\textasciitilde/.normet/gui\_recent\_files.
 Run history                  & \code{\textasciitilde/.normet/gui\_run\_history.jsonl} \\
 Window geometry, appearance, language, Assistant model & the system's settings store (\code{apai-sys/normet-gui}) \\
 Font cache (installers)      & \code{\textasciitilde/.normet/matplotlib} \\
+The last session (after each step) & \code{\textasciitilde/.normet/last\_session.normet} \\
 Assistant API keys           & macOS keychain, service \code{normet} \\
 MCP jobs                     & \code{\$NORMET\_MCP\_HOME}, default \code{\textasciitilde/.normet/mcp} \\
 Chronos-2 weights            & the Hugging Face cache \\
 \bottomrule
 \end{tabular}
 \end{center}
-Nothing else is written unless you save it.
+Nothing else is written unless you save it. The print dialog's choices, the Assistant's
+text size and the report's language are kept in the settings store with the rest.
 
 \chapter{Troubleshooting}\label{app:trouble}
 \begin{description}
@@ -1594,6 +1692,10 @@ Nothing else is written unless you save it.
   \item[A task runs too long] \emph{Cancel} frees the window at once; the computation
         finishes in the background and its result is discarded. Lower the samples, the
         budget, or the number of variables decomposed.
+  \item[A notice asks for a step first] It names what is missing and carries the step on
+        a button; it goes by itself once the step has been taken.
+  \item[The window closed before the results were saved] \tab{File $\rightarrow$ Reopen
+        Last Session} brings back the session as it was after its last step.
   \item[The parameter panel is missing] It is folded away: \emph{Expand Panel} on the
         action bar, or Ctrl+B.
   \item[A task failed] The dialog shows its last line; the full traceback is in the

@@ -13,6 +13,9 @@ Ito's), and files written at 300 dpi.
     format_time_axis(ax)     concise date ticks: the year once, not on every tick
     outer_ticks(axes)        stacked panels: the time axis on the bottom one only
     zero_line(ax)            a thin reference line at y = 0
+    break_at_gaps(x, *ys)    a NaN put in each gap, so a line stops there
+    line(ax, x, y, ...)      a time series drawn broken at its gaps, as wide as it is dense
+    band(ax, x, lo, hi, ...) an interval shaded, broken at the same gaps
 
 The figures are drawn in the light colours; the window shows one on a dark theme by
 recolouring it (:mod:`normet.gui.theme`), and saves it light.
@@ -324,3 +327,75 @@ def colorbar(fig: Any, mappable: Any, ax: Any, label: str | None = None, **kwarg
     if label:
         cbar.set_label(label)
     return cbar
+
+
+# -- series -----------------------------------------------------------------------------
+
+#: An interval this many times a record's median spacing is a gap in it, where a series
+#: is drawn broken rather than joined across (cume's rule): an hourly record's missing
+#: days are, a day-to-day wobble in a sampler's schedule is not.
+GAP_SPACINGS = 5.0
+
+
+def break_at_gaps(x: Any, *ys: Any) -> tuple[Any, tuple[Any, ...]]:
+    """``x`` and each of ``ys`` with a NaN row put in every gap -- an interval over
+    GAP_SPACINGS times the median -- so a line or a band stops at the gap instead of
+    drawing a straight run across it. Returns them unchanged where there is no gap, or
+    where ``x`` is not ordered."""
+    import numpy as np
+    import pandas as pd
+
+    if len(x) < 3:
+        return x, ys
+    tz = None
+    try:
+        if isinstance(x, pd.DatetimeIndex) or np.issubdtype(np.asarray(x).dtype, np.datetime64):
+            idx = pd.DatetimeIndex(x)
+            tz = idx.tz
+            # UTC nanoseconds, a time zone or not.
+            t = idx.as_unit("ns").to_numpy(dtype="datetime64[ns]").view(np.int64)
+            is_time = True
+        else:
+            t = np.asarray(x).astype(float)
+            is_time = False
+    except (TypeError, ValueError):
+        return x, ys
+    step = np.diff(t)
+    if np.any(step < 0) or not np.any(step > 0):
+        return x, ys
+    gaps = np.flatnonzero(step > GAP_SPACINGS * np.median(step[step > 0]))
+    if not len(gaps):
+        return x, ys
+    mid = (t[gaps] + t[gaps + 1]) / 2.0
+    t_new = np.insert(t.astype(float), gaps + 1, mid)
+    x_new: Any
+    if is_time:
+        x_new = pd.DatetimeIndex(t_new.astype(np.int64))
+        if tz is not None:
+            x_new = x_new.tz_localize("UTC").tz_convert(tz)
+    else:
+        x_new = t_new
+    out = tuple(np.insert(np.asarray(y, dtype=float), gaps + 1, np.nan, axis=0) for y in ys)
+    return x_new, out
+
+
+def series_width(n: int, *, emphasis: bool = False) -> float:
+    """A line's width for a series of ``n`` points: hairlines for months of hours, fuller
+    for a short or averaged series; the series a figure is about a step wider."""
+    base = 0.5 if n > 1500 else 0.9 if n > 300 else 1.2
+    return base + (0.3 if emphasis else 0.0)
+
+
+def line(ax: Any, x: Any, y: Any, *, emphasis: bool = False, **kwargs: Any) -> Any:
+    """A series drawn broken at its gaps, as wide as it is dense (``lw`` overrides)."""
+    xs, (ys,) = break_at_gaps(x, y)
+    kwargs.setdefault("lw", series_width(len(xs), emphasis=emphasis))
+    return ax.plot(xs, ys, **kwargs)
+
+
+def band(ax: Any, x: Any, lo: Any, hi: Any, **kwargs: Any) -> Any:
+    """An interval shaded between ``lo`` and ``hi``, broken at the gaps a line breaks at."""
+    xs, (los, his) = break_at_gaps(x, lo, hi)
+    kwargs.setdefault("lw", 0)
+    kwargs.setdefault("alpha", 0.18)
+    return ax.fill_between(xs, los, his, **kwargs)

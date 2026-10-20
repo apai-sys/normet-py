@@ -27,11 +27,9 @@ class AnalyseRunMixin(QMainWindow):
             return
         resample_vars = self._selected_norm_vars()
         if not resample_vars:
-            QMessageBox.information(
-                self,
-                "No resample variables",
-                "Tick at least one variable to resample in Step 2 "
-                "(usually the meteorological ones).",
+            self.notify(
+                "Tick at least one variable to resample in Step 2 (usually the meteorological ones).",
+                key="need-resample-vars",
             )
             return
         if self._is_chronos():
@@ -81,14 +79,44 @@ class AnalyseRunMixin(QMainWindow):
         seeded = min(int(self.model.context_length), len(result)) if self._is_chronos() else 0
         projected = result.iloc[seeded:]
 
+        from normet.plotting import profile_axes, usable_cycles
+
+        # The cycles beneath the series: observed and normalised averaged by the hour of
+        # the day, the day of the week and the month -- what the weather moved and what
+        # it did not. From the record as it is, whatever resolution the series is shown at.
+        cycles = usable_cycles(projected.index) if len(projected) > 2 else []
+
         def render(d: pd.DataFrame):
-            ax = normalise_plot(
+            import matplotlib.pyplot as plt
+
+            fig = plt.figure(figsize=(8, 4.8 if cycles else 3), layout="constrained")
+            gs = fig.add_gridspec(
+                2 if cycles else 1,
+                max(1, len(cycles)),
+                height_ratios=[1.5, 1] if cycles else None,
+            )
+            ax = fig.add_subplot(gs[0, :])
+            normalise_plot(
                 d,
                 ci_low=qcols[0] if len(qcols) >= 2 else None,
                 ci_high=qcols[-1] if len(qcols) >= 2 else None,
                 ylabel=S.formula(target),
                 title=f"Meteorologically normalised {S.formula(target)}",
+                ax=ax,
             )
+            for j, cycle in enumerate(cycles):
+                axc = fig.add_subplot(gs[1, j])
+                profile_axes(axc, projected["observed"], cycle, color=S.OBSERVED, label="Observed")
+                profile_axes(
+                    axc,
+                    projected["normalised"],
+                    cycle,
+                    color=S.MODELLED,
+                    label="Normalised",
+                    emphasis=True,
+                )
+                if j == 0:
+                    axc.set_ylabel(S.formula(target))
             if seeded:
                 ax.axvspan(
                     result.index[0],
@@ -99,7 +127,7 @@ class AnalyseRunMixin(QMainWindow):
                     label="seeded (= observed)",
                 )
                 S.legend(ax, loc="upper right", ncols=4)
-            return ax
+            return fig
 
         n_rv = len(self._selected_norm_vars())
         lines = []
@@ -183,7 +211,8 @@ class AnalyseRunMixin(QMainWindow):
 
         try:
             if method == "emission":
-                render = functools.partial(DP.emission_figure, target=target)
+                # Its cycles from the record as it is, whatever resolution is shown.
+                render = functools.partial(DP.emission_figure, target=target, cycles_from=result)
                 d = DP.indexed_result(result)
                 comps = [(c, lbl) for c, lbl in DP.EMI_COMPONENTS if c in d.columns]
                 dominant = max(comps, key=lambda cl: d[cl[0]].std())[1] if comps else "n/a"
@@ -192,7 +221,7 @@ class AnalyseRunMixin(QMainWindow):
                     f"largest time-scale: {dominant}."
                 ]
             else:
-                render = functools.partial(DP.meteorology_figure, target=target)
+                render = functools.partial(DP.meteorology_figure, target=target, cycles_from=result)
                 d = DP.indexed_result(result)
                 contribs = DP.met_contribution_columns(d)
                 dominant = max(contribs, key=lambda c: d[c].std()) if contribs else "n/a"
@@ -213,7 +242,7 @@ class AnalyseRunMixin(QMainWindow):
             fig, ax = plt.subplots(figsize=(8, 3))
             for column in plot_df.columns:
                 if pd.api.types.is_numeric_dtype(plot_df[column]):
-                    ax.plot(plot_df.index, plot_df[column], lw=0.7, label=column)
+                    S.line(ax, plot_df.index, plot_df[column], lw=0.7, label=column)
             if isinstance(plot_df.index, pd.DatetimeIndex):
                 S.format_time_axis(ax)
             ax.margins(x=0)
@@ -271,7 +300,8 @@ class AnalyseRunMixin(QMainWindow):
         fig, ax = plt.subplots(figsize=(8, 3))
         dense = len(result) > 1500
         if "observed" in result.columns:
-            ax.plot(
+            S.line(
+                ax,
                 result.index,
                 result["observed"],
                 lw=0.5 if dense else 0.9,
@@ -280,16 +310,16 @@ class AnalyseRunMixin(QMainWindow):
                 label="observed",
             )
         if std.notna().any():
-            ax.fill_between(
+            S.band(
+                ax,
                 mean.index,
                 mean - std,
                 mean + std,
                 color=S.MODELLED,
-                alpha=0.18,
-                lw=0,
                 label="±1 SD across overlapping windows",
             )
-        ax.plot(
+        S.line(
+            ax,
             mean.index,
             mean.values,
             lw=0.8 if dense else 1.3,
@@ -311,11 +341,11 @@ class AnalyseRunMixin(QMainWindow):
         if not self._check_model():
             return
         if "normalise" not in self.results:
-            QMessageBox.information(
-                self,
-                "Run Step 2 first",
+            self.notify(
                 "Multi-scale decomposition needs Y_∞ from Step 2 (Normalise) as its "
                 "full-record baseline — run Normalise, then come back here.",
+                key="need-normalise",
+                actions=(("Run normalisation", self._run_normalise),),
             )
             return
         from normet.gui._multiscale import compute_multiscale
@@ -340,6 +370,8 @@ class AnalyseRunMixin(QMainWindow):
 
     def _multiscale_done(self, result: dict) -> None:
         from ._multiscale_plots import available_bands, multiscale_figure
+
+        self._multiscale_raw = result
 
         fig = multiscale_figure(result, target=self.target_combo.currentText())
         bands = available_bands(result)
@@ -375,7 +407,7 @@ class AnalyseRunMixin(QMainWindow):
             return
         variables = _checked_items(self.pdp_vars)
         if not variables:
-            QMessageBox.information(self, "No variables", "Tick at least one variable in Step 5.")
+            self.notify("Tick at least one variable in Step 5.", key="need-pdp-vars")
             return
         from normet import pdp
 
@@ -397,7 +429,9 @@ class AnalyseRunMixin(QMainWindow):
         # The tab names the figure; the shared y label says what is predicted.
         target = S.formula(self.target_combo.currentText())
         fig = _pdp_grid(
-            result, ylabel=f"Partial dependence of {target}" if target else "Partial dependence"
+            result,
+            ylabel=f"Partial dependence of {target}" if target else "Partial dependence",
+            data=self.df_prep,  # each variable's deciles along its axis
         )
         self.tab_pdp.show_result(fig)
         self.tabs.setCurrentWidget(self.tab_pdp)

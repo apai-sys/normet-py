@@ -183,3 +183,68 @@ def test_generate_html_does_not_retain_the_figures_it_creates(tmp_path):
     assert len(plt.get_fignums()) == before, "generate_html retained a figure it created"
     assert caller_fig.number in plt.get_fignums(), "a caller-owned figure was closed"
     plt.close("all")
+
+
+def _normalise_run():
+    dates = pd.date_range("2024-01-01", periods=20, freq="D")
+    result = pd.DataFrame(
+        {"observed": range(20), "normalised": [x * 1.1 for x in range(20)]}, index=dates
+    )
+    return make_run(result=result, kind="normalise", seed=7, config={"backend": "flaml"})
+
+
+def test_a_report_in_chinese(tmp_path):
+    """lang="zh": its headings, labels and footer in Chinese; the data's words as they are."""
+    content = generate_html(_normalise_run(), tmp_path / "zh.html", lang="zh").read_text("utf-8")
+    assert '<html lang="zh-CN">' in content
+    for words in (
+        "normet 报告——normalise",
+        "<h2>图</h2>",
+        "结果预览",
+        "溯源信息",
+        "随机种子",
+        "由 normet 于",
+    ):
+        assert words in content, words
+    assert "normalised" in content  # a column's name stays as it is
+    en = generate_html(_normalise_run(), tmp_path / "en.html").read_text("utf-8")
+    assert '<html lang="en">' in en and "Result preview" in en and "结果预览" not in en
+
+
+def test_a_report_figure_in_chinese():
+    """The figure's texts as the window writes them, where the machine has a Chinese face."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    from matplotlib.text import Text
+
+    from normet.gui._i18n import figure_font
+    from normet.plotting import normalise_plot
+    from normet.report import translate_figure
+
+    if figure_font("zh") is None:
+        pytest.skip("no face with Chinese characters on this machine")
+    dates = pd.date_range("2024-01-01", periods=60, freq="D")
+    df = pd.DataFrame({"observed": np.arange(60.0), "normalised": np.arange(60.0)}, index=dates)
+    ax = normalise_plot(df, title="Meteorologically normalised NO2", ylabel="NO2")
+    translate_figure(ax.figure, "zh")
+    texts = {t.get_text() for t in ax.figure.findobj(Text)}
+    assert "NO2 的气象归一化序列" in texts
+    assert {"观测", "归一化（去气象化）"} <= texts
+
+
+@needs_click
+def test_cli_report_in_chinese(tmp_path):
+    import joblib
+    from click.testing import CliRunner
+
+    from normet.cli import _build_cli
+
+    run_file = tmp_path / "run.joblib"
+    joblib.dump(_normalise_run(), run_file)
+    out = tmp_path / "r.html"
+    res = CliRunner().invoke(
+        _build_cli(), ["report", str(run_file), "--out", str(out), "--lang", "zh"]
+    )
+    assert res.exit_code == 0, res.output
+    assert "结果预览" in out.read_text("utf-8")

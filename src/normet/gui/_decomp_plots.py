@@ -83,31 +83,51 @@ def _lw(d: pd.DataFrame) -> float:
     return 0.5 if len(d) > 1500 else 0.9
 
 
+#: Emission components read better as a cycle than as a series: the component's value
+#: averaged by the hour of the day, by the day of the week.
+_CYCLE_OF = {"hour": "hour", "weekday": "weekday"}
+
+
 @S.styled
-def emission_figure(res: pd.DataFrame, target: str = "") -> Any:
-    """STL-style stack: normalised series on top, one time-scale per panel."""
+def emission_figure(
+    res: pd.DataFrame, target: str = "", cycles_from: pd.DataFrame | None = None
+) -> Any:
+    """STL-style stack: normalised series on top, one time-scale per panel. The diurnal
+    and weekly components, where the record is fine enough to show them, are drawn as
+    their cycles beside the stack -- the mean by hour of day and by day of week, with the
+    spread between the 25th and 75th percentiles -- rather than as months of oscillation
+    no eye can read. ``cycles_from``: the record the cycles are averaged from, where
+    ``res`` is shown at a coarser resolution (a day's means have no hours)."""
     import matplotlib.pyplot as plt
 
+    from normet.plotting import profile_axes, usable_cycles
+
     d = indexed_result(res)
+    full = indexed_result(cycles_from) if cycles_from is not None else d
     comps = [(col, label) for col, label in EMI_COMPONENTS if col in d.columns]
-    n = 1 + len(comps)
-    fig, axes = plt.subplots(
+    can = set(usable_cycles(full.index))
+    cyclic = [(c, lbl) for c, lbl in comps if _CYCLE_OF.get(c) in can]
+    stacked = [(c, lbl) for c, lbl in comps if (c, lbl) not in cyclic]
+    n = 1 + len(stacked)
+    fig = plt.figure(figsize=(8.5 if cyclic else 8, 1.15 * n + 0.6), layout="constrained")
+    gs = fig.add_gridspec(
         n,
-        1,
-        figsize=(8, 1.15 * n + 0.6),
-        sharex=True,
-        squeeze=False,
-        layout="constrained",
-        gridspec_kw={"height_ratios": [1.6] + [1] * len(comps)},
+        2 if cyclic else 1,
+        height_ratios=[1.6] + [1] * len(stacked),
+        width_ratios=[3, 1] if cyclic else None,
     )
-    axes = list(axes.ravel())
+    axes = [fig.add_subplot(gs[0, 0])]
+    for i in range(1, n):
+        axes.append(fig.add_subplot(gs[i, 0], sharex=axes[0]))
     lw = _lw(d)
     name = S.formula(target)
 
     ax = axes[0]
     if "observed" in d.columns:
-        ax.plot(d.index, d["observed"], lw=lw, color=OBS_COLOR, alpha=0.45, label="observed")
-    ax.plot(d.index, d["emi_total"], lw=lw + 0.2, color=NORM_COLOR, label="normalised (emi_total)")
+        S.line(ax, d.index, d["observed"], lw=lw, color=OBS_COLOR, alpha=0.45, label="observed")
+    S.line(
+        ax, d.index, d["emi_total"], lw=lw + 0.2, color=NORM_COLOR, label="normalised (emi_total)"
+    )
     base = float(d["emi_base"].iloc[0]) if "emi_base" in d.columns else float("nan")
     ax.set_title(
         f"Meteorologically normalised {name} — decomposed into time scales (baseline = {base:.1f})"
@@ -115,32 +135,46 @@ def emission_figure(res: pd.DataFrame, target: str = "") -> Any:
     ax.set_ylabel(name)
     S.legend(ax, loc="upper right", ncols=2)
 
-    for ax, (col, label) in zip(axes[1:], comps, strict=False):
+    for ax, (col, label) in zip(axes[1:], stacked, strict=False):
         series = d[col]
         if col == "date_unix" and "emi_base" in d.columns:
             series = series + d["emi_base"]  # trend shown as a level, not an anomaly
-            ax.plot(d.index, series, lw=1.0, color=COMP_COLOR)
+            S.line(ax, d.index, series, lw=1.0, color=COMP_COLOR)
         else:
             color = NOISE_COLOR if col == "emi_noise" else COMP_COLOR
-            ax.plot(d.index, series, lw=lw, color=color)
+            S.line(ax, d.index, series, lw=lw, color=color)
             S.zero_line(ax)
-        ax.set_title(f"{label}   σ = {d[col].std():.2f}")
+        # σ of the record as it is: a coarser view's means would understate it.
+        ax.set_title(f"{label}   σ = {full[col].std():.2f}")
 
     _time_series_axes(axes, d.index)
     fig.align_ylabels(axes)
+
+    # The cycles, one panel each down the right-hand column.
+    if cyclic:
+        side = gs[:, 1].subgridspec(len(cyclic), 1)
+        for i, (col, label) in enumerate(cyclic):
+            axc = fig.add_subplot(side[i, 0])
+            profile_axes(axc, full[col], _CYCLE_OF[col], color=COMP_COLOR, band="iqr")
+            S.zero_line(axc)
+            axc.set_title(f"{label}   σ = {full[col].std():.2f}")
     return fig
 
 
 @S.styled
-def meteorology_figure(res: pd.DataFrame, target: str = "", top_k: int = 5) -> Any:
-    """Total met influence + strongest contributions + influence ranking."""
+def meteorology_figure(
+    res: pd.DataFrame, target: str = "", top_k: int = 5, cycles_from: pd.DataFrame | None = None
+) -> Any:
+    """Total met influence + strongest contributions + influence ranking. ``cycles_from``:
+    the record the σ are read from, where ``res`` is shown at a coarser resolution."""
     import matplotlib.pyplot as plt
 
     d = indexed_result(res)
+    full = indexed_result(cycles_from) if cycles_from is not None else d
     contribs = met_contribution_columns(d)
-    sigma = {c: float(d[c].std()) for c in contribs}
-    if "met_noise" in d.columns:
-        sigma["met_noise"] = float(d["met_noise"].std())
+    sigma = {c: float(full[c].std()) for c in contribs}
+    if "met_noise" in full.columns:
+        sigma["met_noise"] = float(full["met_noise"].std())
     top = sorted(contribs, key=lambda c: sigma[c], reverse=True)[:top_k]
 
     n_left = 1 + len(top)
@@ -150,16 +184,16 @@ def meteorology_figure(res: pd.DataFrame, target: str = "", top_k: int = 5) -> A
     name = S.formula(target)
 
     ax0 = fig.add_subplot(gs[0, 0])
-    ax0.plot(d.index, d["met_total"], lw=lw, color=S.INK)
+    S.line(ax0, d.index, d["met_total"], lw=lw, color=S.INK)
     S.zero_line(ax0)
     ax0.set_title(
         f"Meteorological influence on {name}: observed − normalised   "
-        f"σ = {d['met_total'].std():.2f}"
+        f"σ = {full['met_total'].std():.2f}"
     )
     left = [ax0]
     for i, col in enumerate(top, start=1):
         ax = fig.add_subplot(gs[i, 0], sharex=ax0)
-        ax.plot(d.index, d[col], lw=lw, color=COMP_COLOR)
+        S.line(ax, d.index, d[col], lw=lw, color=COMP_COLOR)
         S.zero_line(ax)
         ax.set_title(f"{col}   σ = {sigma[col]:.2f}")
         left.append(ax)

@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 
 import pandas as pd
-from PySide6.QtWidgets import QMainWindow, QMessageBox
+from PySide6.QtWidgets import QMainWindow
 
 from normet import style as S
 
@@ -70,12 +70,13 @@ class TrainRunMixin(QMainWindow):
         """
         met = [f for f in features if f not in TIME_VARS]
         if not met:
-            QMessageBox.information(
-                self,
-                "No covariates",
+            self.notify(
                 "Chronos-2 conditions on meteorology through its covariate channel. "
                 "Tick at least one meteorological feature — without any, the run is a "
                 "plain forecast, not a de-weathering.",
+                key="chronos-covariates",
+                kind="warn",
+                actions=(("Met only", self._check_met_only),),
             )
             return
         self._pending_features = features
@@ -207,13 +208,42 @@ class TrainRunMixin(QMainWindow):
             test = self.df_prep
         obs = test["value"].to_numpy()
         pred = np.asarray(ml_predict(self.model, test))
-        ax1.scatter(
-            obs, pred, s=5, alpha=0.35, color=S.OBSERVED, edgecolors="none", rasterized=True
-        )
         lo, hi = min(obs.min(), pred.min()), max(obs.max(), pred.max())
         pad = 0.03 * (hi - lo)
         lims = [lo - pad, hi + pad]
+        if len(obs) > 2000:
+            # Thousands of points are a blot as dots: their density, on a log scale.
+            hb = ax1.hexbin(
+                obs,
+                pred,
+                gridsize=45,
+                bins="log",
+                mincnt=1,
+                cmap="Blues",
+                extent=(*lims, *lims),
+                linewidths=0,
+                rasterized=True,
+            )
+            S.colorbar(fig, hb, ax1, label="Count")
+        else:
+            ax1.scatter(
+                obs, pred, s=5, alpha=0.35, color=S.OBSERVED, edgecolors="none", rasterized=True
+            )
         ax1.plot(lims, lims, color=S.INK, lw=0.7, ls=(0, (4, 3)), label="1:1")
+        # The fit beside the R² and RMSE in the title: how many points, the slope of
+        # predicted on observed (below 1: the extremes are pulled in) and the mean bias.
+        slope = float(np.polyfit(obs, pred, 1)[0]) if len(obs) > 1 else float("nan")
+        ax1.text(
+            0.97,
+            0.04,
+            f"n = {len(obs):,}\nslope = {slope:.2f}\nbias = {float((pred - obs).mean()):+.2f}",
+            transform=ax1.transAxes,
+            ha="right",
+            va="bottom",
+            fontsize=S.SMALL_SIZE + 0.5,
+            color=S.INK,
+            linespacing=1.3,
+        )
         ax1.set_xlim(lims)
         ax1.set_ylim(lims)
         ax1.set_aspect("equal", adjustable="box")

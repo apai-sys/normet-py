@@ -47,6 +47,7 @@ from ._panel_inputs import InputsMixin
 from ._panel_train import TrainPanelMixin
 from ._run_analyse import AnalyseRunMixin
 from ._run_train import TrainRunMixin
+from ._saved import SavedResultsMixin
 from ._session import SessionMixin
 from ._shell import ShellMixin
 from ._studios import StudiosMixin
@@ -64,6 +65,7 @@ class MainWindow(
     AnalyseRunMixin,
     TaskMixin,
     SessionMixin,
+    SavedResultsMixin,
     StudiosMixin,
     ShellMixin,
 ):
@@ -78,11 +80,20 @@ class MainWindow(
         self.model: object | None = None
         self.trained_features: list[str] = []
         self.results: dict[str, pd.DataFrame] = {}
+        #: The multi-scale run as it came back (its series and notes), for a saved session.
+        self._multiscale_raw: dict | None = None
+        self._restoring = False  # a saved session being read back: no history, no autosave
+        #: Each step's call as it ran (its plain arguments), by function name: the Methods
+        #: paragraph is written from these, not from the panel as it stands.
+        self._ran: dict[str, dict] = {}
+        #: A session script being run: its calls and its file's name (._saved).
+        self._pending_script: tuple[dict, str] = ({}, "")
         #: Chronos-2's covariate-sensitivity check of the model loaded: (numbers, verdict).
         self.chronos_check: tuple[dict, tuple[str, str]] | None = None
         self._scm_window = None
         self._data_window = None
         self._transport_window = None
+        self._polar_window = None
 
         self.runner = TaskRunner(self)
         self.runner.started.connect(self._task_started)

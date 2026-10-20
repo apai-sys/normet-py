@@ -215,7 +215,19 @@ def test_saved_at_exactly_the_printed_width_on_a_white_page(qapp):
     assert buf.getvalue()[:4] == b"%PDF"
 
 
-def test_the_dialog_previews_and_follows_its_preset(qapp):
+@pytest.fixture
+def fresh_print_prefs():
+    """The dialog keeps its choices for the next figure: each test starts from none,
+    and leaves none behind."""
+    from PySide6.QtCore import QSettings
+
+    prefs = QSettings("apai-sys", "normet-gui")
+    prefs.remove("print")
+    yield
+    prefs.remove("print")
+
+
+def test_the_dialog_previews_and_follows_its_preset(qapp, fresh_print_prefs):
     from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 
     from normet.gui._widgets import ThemedToolbar
@@ -269,7 +281,7 @@ def _state(fig):
     return tuple(fig.get_size_inches()), fig.dpi, texts, lines, legends, fig.get_layout_engine()
 
 
-def test_finishing_touches_are_made_and_undone(qapp, tmp_path):
+def test_finishing_touches_are_made_and_undone(qapp, tmp_path, fresh_print_prefs):
     from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
     from matplotlib.colors import to_hex
     from PIL import Image
@@ -322,7 +334,7 @@ def test_finishing_touches_are_made_and_undone(qapp, tmp_path):
     assert len(a.texts) == 0 and len(b.texts) == 0  # the panel letters gone
 
 
-def test_a_double_click_finds_what_it_is_on(qapp, monkeypatch):
+def test_a_double_click_finds_what_it_is_on(qapp, monkeypatch, fresh_print_prefs):
     from matplotlib.backend_bases import MouseEvent
     from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 
@@ -357,3 +369,35 @@ def test_a_double_click_finds_what_it_is_on(qapp, monkeypatch):
     assert dlg._legend_under(at(a.get_legend())) is not None
     dlg.reject()
     assert b.yaxis.label.get_text() == "met part"
+
+
+def test_the_dialog_checks_the_guide_zooms_and_remembers(qapp, fresh_print_prefs):
+    """What the journal's guide asks is read from the figure as laid out; the preview
+    fits the window or shows the printed size; the choices are kept for the next one."""
+    from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+
+    from normet.gui.printview import SCREEN_DPI, PrintDialog
+
+    fig, _ = _figure()
+    canvas = FigureCanvasQTAgg(fig)
+    dlg = PrintDialog(canvas)
+    dlg.font.setValue(7.0)
+    found = dict((what.split(" ")[0], ok) for ok, what in dlg.findings)
+    assert found["89"] and found["Smallest"]  # 89 mm in a Nature column, 7 pt >= 5 pt
+    assert "Largest" in found  # Nature sets a ceiling too
+    dlg.font.setValue(4.0)  # below Nature's 5 pt
+    assert not dict((w.split(" ")[0], ok) for ok, w in dlg.findings)["Smallest"]
+    assert "✗" in dlg.checks.text()
+
+    dlg.zoom.setCurrentText("Fit to window")
+    fitted = dlg.canvas.width()
+    dlg.zoom.setCurrentText("Actual size")
+    assert dlg.canvas.width() == round(89 / 25.4 * SCREEN_DPI) != fitted
+
+    dlg.preset.setCurrentText("Elsevier: double column (190 mm)")
+    dlg.font.setValue(8.0)
+    dlg.reject()
+    again = PrintDialog(FigureCanvasQTAgg(_figure()[0]))
+    assert again.preset.currentText() == "Elsevier: double column (190 mm)"
+    assert again.font.value() == 8.0 and again.width.value() == 190.0
+    again.reject()
