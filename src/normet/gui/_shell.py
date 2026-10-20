@@ -421,6 +421,9 @@ class ShellMixin(QMainWindow):
         from .assistant import AssistantDock
 
         self.assistant = AssistantDock(self)
+        # The Assistant the window's whole height on the right; the log below the
+        # results only, not under the Assistant too.
+        self.setCorner(Qt.Corner.BottomRightCorner, Qt.DockWidgetArea.RightDockWidgetArea)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.assistant)
         self.assistant.hide()
 
