@@ -113,8 +113,11 @@ class AnalysePanelMixin(QMainWindow):
         from ._groups import GroupEditor
 
         # The variables in named groups (meteorology only): a contribution per group.
+        # Shown only for meteorology; the emission decomposition has no use for it.
+        self._decom_form = df_
         self.decom_groups = GroupEditor()
-        df_.addRow(QLabel("Groups"))
+        self._decom_groups_label = QLabel("Groups")
+        df_.addRow(self._decom_groups_label)
         df_.addRow(self.decom_groups)
         self.decom_method.currentTextChanged.connect(self._decom_method_changed)
         self.decom_samples = NoWheelSpinBox()
@@ -280,4 +283,5 @@ class AnalysePanelMixin(QMainWindow):
     def _decom_method_changed(self, method: str) -> None:
         on = method == "meteorology"
         self.decom_attribution.setEnabled(on)
-        self.decom_groups.setEnabled(on)
+        self._decom_form.setRowVisible(self._decom_groups_label, on)
+        self._decom_form.setRowVisible(self.decom_groups, on)
