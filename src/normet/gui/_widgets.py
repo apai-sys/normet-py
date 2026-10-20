@@ -508,6 +508,9 @@ class CanvasTab(QWidget):
         #: The time-series result being shown (see :meth:`show_timeseries`).
         self._series: tuple[Callable[[pd.DataFrame], Any], pd.DataFrame, dict[str, Any]] | None
         self._series = None
+        #: Several results the tab can show, one at a time (see :meth:`show_views`):
+        #: the selector's label, each result by name, and the one shown.
+        self._views: tuple[str, dict[str, tuple[Any, ...]], str] | None = None
         #: The resolution chosen on this tab (a RESOLUTIONS label), or None
         #: for the default each result asks for.
         self._resolution: str | None = None
@@ -548,6 +551,7 @@ class CanvasTab(QWidget):
             plt.close(self.canvas.figure)
         self.canvas = None
         self._series = None
+        self._views = None
 
     # --------------------------------------------------------------- content
     def show_message(self, *lines: str) -> None:
@@ -580,6 +584,21 @@ class CanvasTab(QWidget):
         to :meth:`show_result` (verdict, lines, ...) and are kept as they are.
         """
         self._series = (render, data, {"_default": default, **kwargs})
+        self._views = None
+        self._draw_series()
+
+    def show_views(
+        self,
+        views: dict[str, tuple[Callable[[pd.DataFrame], Any], pd.DataFrame, dict[str, Any]]],
+        current: str,
+        label: str = "Method",
+    ) -> None:
+        """Several time-series results on one tab, each ``(render, data, kwargs)`` as
+        :meth:`show_timeseries` takes them; a selector named *label* beside
+        *Resolution* picks the one drawn, and the resolution holds across them."""
+        render, data, kwargs = views[current]
+        self._series = (render, data, {"_default": None, **kwargs})
+        self._views = (label, views, current)
         self._draw_series()
 
     def _usable_resolutions(self, data: pd.DataFrame) -> list[tuple[str, str | None, bool]]:
@@ -622,6 +641,24 @@ class CanvasTab(QWidget):
         bar = QWidget()
         row = QHBoxLayout(bar)
         row.setContentsMargins(4, 2, 4, 0)
+        views = self._views
+        if views is not None and len(views[1]) > 1:
+            title, results, shown = views
+            row.addWidget(QLabel(title))
+            pick = NoWheelComboBox()
+            pick.addItems(list(results))
+            pick.setCurrentText(shown)
+            pick.setToolTip("Which of the results to draw.")
+
+            def picked(key: str) -> None:
+                render_, data_, kwargs_ = results[key]
+                self._series = (render_, data_, {"_default": None, **kwargs_})
+                self._views = (title, results, key)
+                QTimer.singleShot(0, self._draw_series)
+
+            pick.currentTextChanged.connect(picked)
+            row.addWidget(pick)
+            row.addSpacing(12)
         row.addWidget(QLabel("Resolution"))
         combo = NoWheelComboBox()
         for name, _rule, ok in options:
@@ -660,7 +697,7 @@ class CanvasTab(QWidget):
             combo.blockSignals(False)
         series = self._series
         self.show_result(fig, top_widget=bar, **kwargs)
-        self._series = series
+        self._series, self._views = series, views
 
     def show_result(
         self,

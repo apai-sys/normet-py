@@ -58,6 +58,12 @@ class SavedResultsMixin(QMainWindow):
             "trained_features": list(self.trained_features),
             "results": {k: v for k, v in self.results.items() if k in _STEPS},
             "multiscale": getattr(self, "_multiscale_raw", None),
+            # Both methods' decompositions where both ran on this model.
+            "decompositions": {
+                method: view[1]
+                for method, view in self._decom_views.items()
+                if self._decom_model is self.model
+            },
             "commands": list(self.command_log.entries),
             "ran": dict(self._ran),  # what the Methods paragraph is written from
         }
@@ -246,9 +252,12 @@ class SavedResultsMixin(QMainWindow):
                     if res is None:
                         continue
                     if step == "decompose":
-                        self.decom_method.setCurrentText(
-                            "meteorology" if "met_total" in res.columns else "emission"
-                        )
+                        method = "meteorology" if "met_total" in res.columns else "emission"
+                        # The other method's first, so the one last run is the one shown.
+                        for other, earlier in (bundle.get("decompositions") or {}).items():
+                            if other != method:
+                                self._decompose_done(earlier)
+                        self.decom_method.setCurrentText(method)
                     getattr(self, f"_{step}_done")(res)
                 if bundle.get("multiscale") is not None:
                     self._multiscale_done(bundle["multiscale"])
