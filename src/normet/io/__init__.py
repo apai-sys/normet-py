@@ -1,10 +1,20 @@
-"""I/O adapters for non-tabular data sources."""
+"""I/O adapters: data sources, and table files read as time series."""
 
 from .eea import EEA_POLLUTANT_CODES, fetch_eea_data
 from .era5 import ERA5_AQ_VARIABLES_DEFAULT, fetch_era5_timeseries
 from .gdas import ARL_GDAS1_BASE_URL, fetch_gdas1, gdas1_filenames
 from .openaq import fetch_openaq_measurements, openaq_locations, openaq_sensors
 from .openmeteo import OPENMETEO_HOURLY_DEFAULT, fetch_openmeteo_timeseries
+from .tables import (
+    TABLE_SUFFIXES,
+    clock_to_utc,
+    find_dates,
+    on_clock,
+    parse_dates,
+    read_table,
+    read_time_series,
+    utc_to_clock,
+)
 from .trajectory import (
     ALL_DIAGNOSTICS,
     build_trajectory_features,
@@ -17,6 +27,14 @@ from .trajectory import (
 from .ukaq import UKAQ_SOURCES, fetch_ukaq_measurements, list_ukaq_stations
 
 __all__ = [
+    "TABLE_SUFFIXES",
+    "read_table",
+    "read_time_series",
+    "find_dates",
+    "parse_dates",
+    "on_clock",
+    "clock_to_utc",
+    "utc_to_clock",
     "fetch_openaq_measurements",
     "openaq_locations",
     "openaq_sensors",

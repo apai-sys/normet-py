@@ -568,3 +568,201 @@ def test_the_window_stamp_is_not_shown_as_the_reply():
         == "The table has 8 rows."
     )
     assert unstamp("No stamp [Window now: here] stays.") == "No stamp [Window now: here] stays."
+
+
+# -- full automatic: the turn worked to the chain's end (ported from cume) ----------------
+class _Box:
+    """WindowTools as _ChatThread sees it: one tool, the window's thread being this one."""
+
+    def __init__(self, tool):
+        self.stop, self.called, self.win = threading.Event(), set(), None
+        self._tool = tool
+
+    def _gui(self, fn):
+        return fn()
+
+    def tools(self):
+        return [self._tool]
+
+
+def _scripted_chat(monkeypatch, replies, left, auto=True):
+    """A _ChatThread on a model giving *replies* in turn (an Exception raised), the chain's
+    steps left read from ``left()``; its events and failures kept."""
+    from types import SimpleNamespace
+
+    from normet.gui import assistant as A
+
+    monkeypatch.setattr(A, "auto_on", lambda: auto)
+    monkeypatch.setattr(A, "state_text", lambda win: "test")
+    monkeypatch.setattr(A, "chain_left", lambda win, called: left())
+    monkeypatch.setattr(A, "AUTO_RETRY_WAIT", 0.0)
+    queue = list(replies)
+
+    def policy(messages, tools):
+        r = queue.pop(0)
+        if isinstance(r, Exception):
+            raise r
+        return r
+
+    def check() -> str:
+        """Read the checks."""
+        return "the checks"
+
+    c = A._ChatThread.__new__(A._ChatThread)
+    c.model, c.box = llm.FakeModel(policy), _Box(llm.as_tool(check))
+    c.messages = [{"role": "user", "content": "全自动分析这张表。"}]
+    events, failed = [], []
+    c.event, c.failed = SimpleNamespace(emit=events.append), SimpleNamespace(emit=failed.append)
+    return c, events, failed
+
+
+def _told(c):
+    return [m["content"] for m in c.messages if m["role"] == "user"][1:]
+
+
+def test_full_automatic_tells_a_model_that_stops_short_to_go_on(monkeypatch):
+    from normet.gui import assistant as A
+
+    state = {"left": ["train", "normalise"]}
+    c, events, failed = _scripted_chat(
+        monkeypatch,
+        [
+            llm.Reply("I will train next.", [], {}),  # stops short
+            llm.Reply("", [llm.Call("1", "check", {})], {}),
+            llm.Reply("Done.", [], {}),
+        ],
+        lambda: state["left"],
+    )
+    real = c.box._tool.fn
+    c.box._tool = llm.Tool(
+        c.box._tool.name,
+        c.box._tool.description,
+        c.box._tool.schema,
+        lambda: (state.update(left=[]), real())[1],
+    )
+    c.run()
+    told = _told(c)
+    assert len(told) == 1 and "Still to do, in order" in told[0], told
+    assert A.CHAIN_TEXT["train"] in told[0] and A.CHAIN_TEXT["normalise"] in told[0]
+    assert "check" in c.box.called and not failed
+    notes = [e["text"] for e in events if e["type"] == "note"]
+    assert notes == [
+        "Full automatic: not finished, so it goes on -- left: training, the normalisation."
+    ]
+
+
+def test_full_automatic_lets_a_turn_end_once_the_window_stops_moving(monkeypatch):
+    from normet.gui import assistant as A
+
+    c, events, failed = _scripted_chat(
+        monkeypatch, [llm.Reply(f"cannot {i}", [], {}) for i in range(10)], lambda: ["train"]
+    )
+    c.run()
+    assert len(_told(c)) == A.AUTO_STALLS and not failed
+
+
+def test_full_automatic_calls_the_model_again_after_a_failure_and_an_empty_reply(monkeypatch):
+    c, events, failed = _scripted_chat(
+        monkeypatch,
+        [RuntimeError("HTTP 503"), llm.Reply("", [], {}), llm.Reply("ok", [], {})],
+        lambda: [],
+    )
+    c.run()
+    assert [e["type"] for e in events if e["type"] == "note"] == ["note"] and not failed
+    assert any("empty" in t for t in _told(c))
+    assert c.messages[-1] == {"role": "assistant", "text": "ok", "calls": [], "reasoning": None}
+
+
+def test_without_full_automatic_a_turn_ends_where_the_model_ends_it(monkeypatch):
+    c, events, failed = _scripted_chat(
+        monkeypatch, [RuntimeError("HTTP 503")], lambda: ["train"], auto=False
+    )
+    c.run()
+    assert failed == ["RuntimeError: HTTP 503"] and c.messages[-1]["role"] == "assistant"
+    c, events, failed = _scripted_chat(
+        monkeypatch, [llm.Reply("stop here", [], {})], lambda: ["train"], auto=False
+    )
+    c.run()
+    assert _told(c) == [] and not [e for e in events if e["type"] == "note"]
+
+
+def test_the_chain_left_is_read_off_the_window(win, qapp):
+    from normet.gui import assistant as A
+
+    assert A.chain_left(win, set()) == []  # no table: nothing to start from
+    win.load_example()
+    assert A.chain_left(win, set()) == list(A.CHAIN)
+    assert A.chain_left(win, {"inspect_data", "propose_setup"}) == [
+        "train",
+        "normalise",
+        "decompose",
+    ]
+
+
+def test_full_automatic_applies_the_set_up_at_once(win, qapp, monkeypatch):
+    from normet.gui import assistant as A
+
+    win.load_example()
+    assert "Full automatic is on" not in A.system_prompt()
+    win.assistant.auto_btn.setChecked(True)
+    assert A.auto_on() and "full automatic is on" in A.state_text(win)
+    prompt = A.system_prompt()
+    assert "Full automatic is on" in prompt and "stop and let the analyst answer" not in prompt
+    said = win.assistant.tools.propose_setup("PM2.5", ["ws", "wd"], "wind only", 0.6)
+    assert said.startswith("Applied at once")
+    assert A._checked(win.feature_list) == ["ws", "wd"]
+    win.assistant.auto_btn.setChecked(False)
+    assert not A.auto_on()
+    said = win.assistant.tools.propose_setup("PM2.5", ["t2m"], "warmth", 0.5)
+    assert "Stop here" in said and A._checked(win.feature_list) == ["ws", "wd"]
+
+
+def test_full_automatic_carries_a_lazy_model_through_the_window(win, qapp, monkeypatch):
+    """End to end in the panel: a model that does one step a turn and stops is told
+    what is left each time, and the window ends up trained, normalised and decomposed."""
+    pytest.importorskip("lightgbm")
+    from normet.gui import assistant as A
+
+    win.load_example()
+    win.df_raw = win.df_raw.iloc[: 24 * 45].reset_index(drop=True)
+    win.backend_combo.setCurrentText("lightgbm")
+    win.budget_spin.setValue(3)
+    win.norm_samples.setValue(5)
+    win.decom_samples.setValue(5)
+    dock = win.assistant
+    dock.auto_btn.setChecked(True)
+    step = {
+        "data": llm.Call("d", "inspect_data", {}),
+        "setup": llm.Call(
+            "s",
+            "propose_setup",
+            {
+                "target": "PM2.5",
+                "features": ["ws", "wd", "t2m", "blh"],
+                "reasons": "met",
+                "confidence": 0.7,
+            },
+        ),
+        "train": llm.Call("t", "train", {}),
+        "normalise": llm.Call("n", "normalise", {"resample_vars": ["ws", "wd", "t2m", "blh"]}),
+        "decompose": llm.Call("c", "decompose", {"method": "emission"}),
+    }
+    done = []
+
+    def lazy(messages, tools):
+        last = messages[-1]
+        if last["role"] == "tool":  # one step a turn, then it stops short
+            return llm.Reply("Done that one.", [], {})
+        text = last["content"]
+        name = next((s for s in A.CHAIN if A.CHAIN_TEXT[s] in text), "data")
+        done.append(name)
+        return llm.Reply("", [step[name]], {})
+
+    monkeypatch.setattr(dock, "_model", lambda: llm.FakeModel(lazy))
+    dock.send("Analyse this table, all of it.")
+    _wait(qapp, lambda: not dock.busy() and not dock.working.isVisible(), timeout=600)
+    assert done == list(A.CHAIN), done
+    assert win.model is not None and {"normalise", "decompose"} <= set(win.results)
+    assert A.chain_left(win, dock.tools.called) == []
+    nudges = [m for m in dock.messages if m["role"] == "user"][1:]
+    assert len(nudges) == len(A.CHAIN) - 1

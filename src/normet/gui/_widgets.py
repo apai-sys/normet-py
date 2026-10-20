@@ -19,6 +19,7 @@ toolbar saves is always in the figure's own light colours.
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Callable
 from typing import Any
 
@@ -147,6 +148,57 @@ def as_figure(obj: Any):
     if fig is None and hasattr(obj, "get_figure"):
         fig = obj.get_figure()
     return fig if fig is not None else plt.gcf()
+
+
+@functools.cache
+def _canvas_class() -> type:
+    """FullWidthCanvas, made on first use: matplotlib's Qt canvas is imported with it."""
+    from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+    from shiboken6 import isValid
+
+    class FullWidthCanvas(FigureCanvasQTAgg):
+        """A canvas that draws only what is seen, and covers its whole widget (cume's).
+
+        A canvas on a tab nobody has opened has nothing to show, and drawing it costs as
+        much as drawing the one on screen: after each step every tab's figure was drawn,
+        the hidden ones too. So a hidden canvas keeps its draw until it is shown, and
+        draws once then.
+
+        On resize matplotlib sets the figure to width/dpi inches, and for some widths
+        that round trip lands just under the integer in binary floating point (9.04 x
+        100 comes back 903.9999999999999), so Agg renders one column short and the
+        widget's right-most pixel keeps whatever was there. A ten-millionth of an inch
+        makes the product land on the integer."""
+
+        _draw_held = False
+
+        def draw_idle(self) -> None:
+            if not self.isVisible():
+                self._draw_held = True
+                return
+            super().draw_idle()
+
+        def showEvent(self, event: Any) -> None:  # noqa: N802
+            super().showEvent(event)
+            if self._draw_held:
+                self._draw_held = False
+                super().draw_idle()
+
+        def _draw_idle(self) -> None:
+            # A draw queued for a canvas deleted meanwhile (its figure made again).
+            if not isValid(self):
+                return
+            super()._draw_idle()
+
+        def resizeEvent(self, event: Any) -> None:  # noqa: N802
+            super().resizeEvent(event)
+            ratio = self.device_pixel_ratio
+            w, h = self.width() * ratio, self.height() * ratio
+            if w > 0 and h > 0:
+                dpi = self.figure.dpi
+                self.figure.set_size_inches(w / dpi + 1e-9, h / dpi + 1e-9, forward=False)
+
+    return FullWidthCanvas
 
 
 def adaptive_layout(fig: Any) -> None:
@@ -544,6 +596,18 @@ class CanvasTab(QWidget):
             out.append((label, rule, ok))
         return out
 
+    #: A finer-than-daily record of more points than this opens as daily means: months
+    #: of hours drawn as they are are a solid band no line can be read in.
+    DENSE_POINTS = 2000
+
+    def _dense_default(self, data: pd.DataFrame) -> str:
+        """The resolution a result opens at: daily means for a dense sub-daily record,
+        else as recorded. The selector changes it, and keeps what is chosen."""
+        idx = _time_index(data)
+        if idx is not None and len(idx) > self.DENSE_POINTS and _step_seconds(idx) < 86400:
+            return "Daily"
+        return "As recorded"
+
     def _draw_series(self) -> None:
         if self._series is None:
             return
@@ -551,7 +615,7 @@ class CanvasTab(QWidget):
         kwargs = {k: v for k, v in opts.items() if k != "_default"}
         options = self._usable_resolutions(data)
         usable = {label: rule for label, rule, ok in options if ok}
-        label = self._resolution or opts.get("_default") or "As recorded"
+        label = self._resolution or opts.get("_default") or self._dense_default(data)
         if label not in usable:
             label = "As recorded"
 
@@ -608,6 +672,7 @@ class CanvasTab(QWidget):
         rows: list[list[Any]] | None = None,
         export_fn: Any = None,
         top_widget: QWidget | None = None,
+        own_words: bool = False,
     ) -> None:
         """Show a verdict banner + notes + compact table + figure.
 
@@ -621,13 +686,14 @@ class CanvasTab(QWidget):
             Plain informational lines shown under the verdict.
         header, rows
             A compact table (e.g. diagnostics) shown above the figure.
+        own_words
+            The table's cells are the window's words (a subset's name), not the data's:
+            translated as the window is (``uilang.translate_cells``).
         export_fn
             Callback for a "⬇ Export data (CSV)" button.
         top_widget
             Arbitrary control row inserted at the very top (e.g. selectors).
         """
-        from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
-
         self.clear()
         if top_widget is not None:
             self._layout.addWidget(top_widget)
@@ -655,6 +721,10 @@ class CanvasTab(QWidget):
             for r, row in enumerate(rows):
                 for c, val in enumerate(row):
                     table.setItem(r, c, QTableWidgetItem(str(val)))
+            if own_words:
+                from .uilang import translate_cells
+
+                translate_cells(table)
             table.setMaximumHeight(160)
             table.resizeColumnsToContents()
             self._layout.addWidget(table)
@@ -665,9 +735,9 @@ class CanvasTab(QWidget):
             from .uilang import figure_texts
 
             figure_texts(fig)  # in the window's language; the English kept to go back
-            self.canvas = FigureCanvasQTAgg(fig)
+            self.canvas = _canvas_class()(fig)
             self._layout.addWidget(ThemedToolbar(self.canvas, self))
             self._layout.addWidget(self.canvas, 1)
-            self.canvas.draw()
+            self.canvas.draw_idle()  # now if the tab is in view, else when it comes into view
         else:
             self._layout.addStretch(1)

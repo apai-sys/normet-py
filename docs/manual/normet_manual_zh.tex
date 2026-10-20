@@ -500,28 +500,35 @@ Chronos-2 是一个预训练的时间序列基础模型。\nm{} 不经训练直�
 \section{打开表格之前的窗口}
 \nm{} 启动时停在\tab{数据}标签页上，尚未载入任何数据（图~\ref{fig:welcome}）；参数面板
 收起，助手（第\ref{ch:assistant}章）在结果旁边打开。操作栏上的\emph{展开面板}或 Ctrl+B
-把参数面板展开；\tab{视图 $\rightarrow$ 助手}关闭助手。在\emph{从时间序列开始}下面有三个
-按钮——\emph{打开 CSV…}、\emph{载入示例}和\emph{询问助手}——以及几张入口卡片：两个示例、
+把参数面板展开；\tab{视图 $\rightarrow$ 助手}关闭助手。在\emph{从时间序列开始}下面有两个
+按钮——\emph{打开数据…}和\emph{询问助手}——以及几张入口卡片：示例、
 最近打开的五张表（各附文件夹、大小和最后修改日期；之后被移动过的会变灰），以及无需自备文件
-就能获取数据的两处：数据工作室和传输工作室。没有内容可列的卡片会被省略。把 \code{.csv} 或
-\code{.csv.gz} 文件拖到窗口任意位置即可打开它。
+就能获取数据的两处：数据工作室和传输工作室。没有内容可列的卡片会被省略。把表格文件
+（第~\ref{sec:input}~节）拖到窗口任意位置即可打开它。
 
 \screenshot{ui_welcome.png}{启动时的窗口：\tab{数据}标签页上的欢迎页，标签页上方的操作栏
 （第一个按钮是\emph{展开面板}），右侧的助手和底部的日志。参数面板收起，需要时再展开。}{fig:welcome}
 
 \section{示例}\label{sec:examples}
+与 cume 一样，示例放在\tab{文件 $\rightarrow$ 载入示例}和欢迎页的\emph{示例}卡片上；每个
+示例打开时，目标和预测变量都按其来源的设定勾选好。
 \begin{description}
-  \item[去气象化]（\emph{载入示例}，或\tab{文件 $\rightarrow$ 载入示例数据}）即时生成的
-        一年合成逐时数据：\PMtwo{}、PM\textsubscript{10}、\NOtwo{}、O\textsubscript{3}、
+  \item[伦敦 Marylebone Road \NOtwo{}（2020）] \nm{} 论文的去气象化案例：一个路边站点的逐时
+        \NOtwo{} 及 ERA5 气象，2020 年 1 至 8 月，其中包含英国的 COVID-19 封控（即下表的
+        \code{load\_my1()}）。本手册主窗口的图都由它生成。
+  \item[伦敦 Marylebone Road \PMtwo{}（2020）] 论文中考虑传输的案例：同一站点的逐时
+        \PMtwo{}，配以本站的风和温度以及 ERA5 的其他字段（\code{load\_my1\_pm25()}）。
+  \item[合成站点，一年逐时] 即时生成的一年合成逐时数据：\PMtwo{}、PM\textsubscript{10}、\NOtwo{}、O\textsubscript{3}、
         SO\textsubscript{2} 和 CO，以及 ERA5 风格的气象（\code{u10}、\code{v10}、
         \code{t2m}、\code{d2m}、\code{blh}、\code{sp}、\code{ssrd}、\code{tcc}、\code{tp}、
         \code{rh2m}、\code{ws}、\code{wd}）。污染物混合了季节循环、早晚高峰循环和对风速的
         依赖，所以每一步都有东西可看。目标设为 \PMtwo{}，气象已勾选。
-  \item[合成控制]（欢迎页上的卡片）打开 SCM 工作室，载入一个 31 个单元的周数据面板，其中
-        单元“2+26 cities”的 SO\textsubscript{2} 自 2015-10-23 起被削减约 35\,\%，其他单元
-        都是干净的供体。
+  \item[合成控制面板] 打开 SCM 工作室并载入它自己的示例；SCM 工作室的\tab{文件
+        $\rightarrow$ 载入示例}下有两个（第\ref{ch:scm}章）：论文中的伦敦 ULEZ 面板，以及
+        一个 31 个单元的合成周数据面板，其中单元“2+26 cities”的 SO\textsubscript{2} 自
+        2015-10-23 起被削减约 35\,\%，其他单元都是干净的供体。
 \end{description}
-\nm{} 模型描述论文中的真实记录随包提供，在脚本中载入；本手册的图由其中前两个生成。
+\nm{} 模型描述论文中的真实记录随包提供；在脚本中这样载入：
 \begin{center}\small
 \begin{tabular}{@{}lp{7.0cm}p{3.2cm}@{}}
 \toprule
@@ -535,52 +542,48 @@ Chronos-2 是一个预训练的时间序列基础模型。\nm{} 不经训练直�
 \bottomrule
 \end{tabular}
 \end{center}
-要在窗口中打开 MY1，先把它写成 CSV：
-\begin{lstlisting}[language=Python]
-import normet as nm
-nm.datasets.load_my1().to_csv("my1.csv", index=False)
-\end{lstlisting}
 数据来源：英国 AURN（Defra，Open Government Licence v3.0）；ERA5（Copernicus 气候变化服务）；
 HYSPLIT（NOAA ARL）。
 
 \section{第一次分析}
 \begin{enumerate}\nosep
-  \item \tab{载入数据。}\emph{打开 CSV…}，选择一张含 \code{date} 列、污染物及其气象的表
-        （第\ref{ch:data}章）。用\emph{展开面板}（Ctrl+B）展开参数面板，或者询问助手。
+  \item \tab{载入数据。}\emph{打开数据…}，选择一张含时间、污染物及其气象的表
+        （第\ref{ch:data}章）；设定站点所用的\emph{时区}（第~\ref{sec:clock}~节）。用\emph{展开面板}（Ctrl+B）展开参数面板，或者询问助手。
   \item \tab{选择列。}检查目标，勾选预测变量（第~\ref{sec:columns}~节）。
-  \item \tab{训练}（第 1 步），阅读\tab{模型}标签页：留出集上的拟合是否足以用来归一化？
+  \item \tab{训练}，阅读\tab{模型}标签页：留出集上的拟合是否足以用来归一化？
         （第\ref{ch:train}章）
-  \item \tab{归一化}（第 2 步），比较归一化序列与观测序列（第\ref{ch:normalise}章）。
-  \item 按问题需要进行\tab{分解}（第 3 步）、\tab{滚动}（第 4 步）和\tab{部分依赖}
-        （第 5 步）（第\ref{ch:decompose}--\ref{ch:pdp}章）。
+  \item \tab{归一化}，比较归一化序列与观测序列（第\ref{ch:normalise}章）。
+  \item 按问题需要进行\tab{分解}、\tab{滚动}和\tab{部分依赖}
+        （第\ref{ch:decompose}--\ref{ch:pdp}章）。
   \item \tab{保存结果：}导出表格、HTML 报告，并把会话保存为脚本（第\ref{ch:export}章）。
 \end{enumerate}
 
 % ============================ 5. THE INTERFACE ================================
 \chapter{界面}\label{ch:ui}
 
-主窗口左侧是可滚动的\emph{参数面板}，右侧是\emph{结果标签页}。参数面板沿着工作流程往下排列
-——数据、列，然后是第 1 到第 5 步——每一步在决定它的设置旁边都有自己的\emph{运行}按钮。结果
+主窗口左侧是\emph{参数面板}，右侧是\emph{结果标签页}。参数面板按工作流程每一步分成一页，
+从面板顶部的标签栏选择——\tab{数据}、\tab{模型}、\tab{归一化}、\tab{分解}、\tab{滚动}和
+\tab{PDP}——每一步在决定它的设置旁边都有自己的\emph{运行}按钮。结果
 落在同名步骤的标签页里，该步骤完成时这个标签页会切到前面。参数面板启动时是收起的，把宽度
 留给结果和助手；操作栏上的\emph{折叠 / 展开面板}（Ctrl+B）收起和展开它。参数面板收起时，
 窗口可以缩窄到约 740 像素：此时操作栏会折成两行。
 
 \section{参数面板}
+各页及其中的内容（每页第一个框不再加标题，由标签名说明）：
 \begin{description}\nosep
-  \item[数据] \emph{打开 CSV…}和\emph{载入示例}，下方是文件名及其行数和列数。
-  \item[列] 目标和预测变量（第~\ref{sec:columns}~节）。
-  \item[第 1 步 $\cdot$ 训练模型] 后端、划分、训练集比例、时间预算（或搜索次数）、
-        估计器、随机种子；Chronos-2 则换成设备和微调（第\ref{ch:train}章）。
-  \item[第 2 步 $\cdot$ 归一化] 重采样的变量、样本数、CPU 核心数和分位数带
-        （第\ref{ch:normalise}章）。
-  \item[第 3 步 $\cdot$ 分解] 排放或气象；气象分解还有归因方式和分组
-        （第\ref{ch:decompose}章）。
-  \item[第 4 步 $\cdot$ 滚动] 窗口、步长和样本数（第~\ref{sec:rollingui}~节）。
-  \item[多尺度分解] 三种窗口宽度（第~\ref{sec:multiscaleui}~节）。
-  \item[第 5 步 $\cdot$ 部分依赖] 变量和网格点数（第\ref{ch:pdp}章）。
+  \item[数据] \emph{打开数据…}、文件名及其行数和列数、时间所用的\emph{时区}以及时间是怎样
+        读取的（第~\ref{sec:input}~节）；其下是\emph{列}：目标和预测变量
+        （第~\ref{sec:columns}~节）。
+  \item[模型] 后端、划分、训练集比例、时间预算（或搜索次数）、估计器、随机种子；Chronos-2
+        则换成设备和微调（第\ref{ch:train}章）。
+  \item[归一化] 重采样的变量、样本数、CPU 核心数和分位数带（第\ref{ch:normalise}章）。
+  \item[分解] 排放或气象；气象分解还有归因方式和分组（第\ref{ch:decompose}章）。其下是
+        \emph{多尺度分解}：三种窗口宽度（第~\ref{sec:multiscaleui}~节）。
+  \item[滚动] 窗口、步长和样本数（第~\ref{sec:rollingui}~节）。
+  \item[PDP] 变量和网格点数（第\ref{ch:pdp}章）。
 \end{description}
-底部的\emph{保存配置}和\emph{载入配置}把参数面板的每一项设置写成 JSON 或从 JSON 读回
-（包括目标和预测变量，不包括数据）；\emph{历史}列出已做的运行，最新的在前。
+参数面板的宽度取最宽一页所需。参数面板的配置从\tab{文件}菜单保存和载入
+（第~\ref{sec:config}~节）。
 
 \section{结果标签页}
 \begin{center}\small
@@ -589,12 +592,12 @@ HYSPLIT（NOAA ARL）。
 标签页 & 显示 & 由谁填充 \\
 \midrule
 数据     & 目标的预览、表格、大小、时间跨度和缺失值 & 载入 \\
-模型     & 评估结论、统计表、散点对比图、特征重要性 & 第 1 步 \\
-归一化   & 观测序列和归一化序列，以及分位数带 & 第 2 步 \\
-分解     & 排放分量或气象分量 & 第 3 步 \\
-滚动     & 各滚动窗口的均值及其离散度 & 第 4 步 \\
+模型     & 评估结论、统计表、散点对比图、特征重要性 & 训练模型 \\
+归一化   & 观测序列和归一化序列、分位数带及其周期 & 运行归一化 \\
+分解     & 排放分量或气象分量，以及周期 & 运行分解 \\
+滚动     & 各滚动窗口的均值及其离散度 & 运行滚动归一化 \\
 多尺度   & 尺度空间级联和各频带的能量 & 多尺度 \\
-PDP      & 每个变量一幅部分依赖图 & 第 5 步 \\
+PDP      & 每个变量一幅部分依赖图 & 计算 PDP \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -609,13 +612,16 @@ PDP      & 每个变量一幅部分依赖图 & 第 5 步 \\
 \paragraph{时间分辨率。}\tab{数据}、\tab{归一化}、\tab{分解}和\tab{滚动}标签页上的时间
 序列图上方有一个\emph{时间分辨率}选择器：\emph{原始}、\emph{逐时}、\emph{日均}、\emph{周均}、
 \emph{月均}或\emph{年均}。选择更粗的步长时，图按每个时段的均值重画，长的逐时记录因此更易读；
-比记录本身更细的步长呈灰色。改变的只是显示：结果、结果表及其导出仍保持记录本身的分辨率。
+比记录本身更细的步长呈灰色。比逐日更细、点数超过 2,000 的记录默认按日均显示——几个月的逐时
+数据原样画出来只是一条实心的带——在某个标签页上做的选择会沿用到它的下一个结果。改变的只是
+显示：结果、结果表及其导出仍保持记录本身的分辨率。记录中有空缺（间隔超过通常步长的五倍）时，
+曲线在空缺处断开，而不是用一条直线连过去。
 
 \section{操作栏}
-标签页上方依次是：\emph{折叠 / 展开面板}、\emph{获取英国数据}（数据工作室，
-第~\ref{sec:datastudio}~节）、\emph{传输工作室}（第~\ref{sec:transport}~节）、
-\emph{导出结果 CSV}（当前标签页的表）、\emph{HTML 报告}（当前标签页的结果，连同其溯源信息
-生成报告）和 \emph{SCM 工作室}（第\ref{ch:scm}章）。
+标签页上方依次是：\emph{折叠 / 展开面板}；并排的几个工作室——\emph{获取英国数据}（数据
+工作室，第~\ref{sec:datastudio}~节）、\emph{传输工作室}（第~\ref{sec:transport}~节）和
+\emph{SCM 工作室}（第\ref{ch:scm}章）；然后是对结果的操作——\emph{导出结果 CSV}（当前
+标签页的表）和\emph{HTML 报告}（当前标签页的结果，连同其溯源信息生成报告）。
 
 \section{运行按钮}
 \begin{center}\small
@@ -628,7 +634,7 @@ PDP      & 每个变量一幅部分依赖图 & 第 5 步 \\
 运行归一化            & 一个模型，至少一个重采样变量 & \code{normalise} \\
 运行分解              & 一个模型                 & \code{decompose} \\
 运行滚动归一化        & 一个 AutoML 模型         & \code{rolling} \\
-多尺度分解            & 一个 AutoML 模型，第 2 步的结果 & \code{rolling} $\times 3$ \\
+多尺度分解            & 一个 AutoML 模型，一次归一化 & \code{rolling} $\times 3$ \\
 计算 PDP              & 一个 AutoML 模型，至少勾选一个变量 & \code{pdp} \\
 \bottomrule
 \end{tabular}
@@ -638,40 +644,56 @@ PDP      & 每个变量一幅部分依赖图 & 第 5 步 \\
 \emph{取消}可用。取消会\emph{放弃}该任务：窗口立刻空出来，但计算无法中断，它会在后台跑完，
 结果被丢弃。每一步的调用在成功时被加入命令日志（第~\ref{sec:commandlog}~节）。
 
+在前提还不具备时要求运行某一步——模型还没训练就归一化，归一化之前就运行多尺度——窗口不弹
+对话框，而是在结果上方显示一条\emph{通知}：说明缺什么，并把能解决它的那一步放在按钮上
+（\emph{训练模型}、\emph{运行归一化}）；\(\times\) 可以关掉它，那一步完成后它也会自行消失。
+状态栏右侧每一步有一盏灯——数据、模型、归一化、分解、滚动、多尺度、PDP——那一步有了结果就
+变绿。
+
 \section{菜单和快捷键}
 \begin{center}\small
 \begin{tabular}{@{}lll@{}}
 \toprule
 菜单 & 命令 & 快捷键 \\
 \midrule
-文件     & 打开 CSV…                            & Ctrl+O \\
-         & 载入示例数据                         & \\
+文件     & 打开数据…                            & Ctrl+O \\
+         & 载入示例（各示例、SCM 的示例）       & \\
          & 获取英国数据（空气质量网络 + 气象）… & Ctrl+D \\
          & 最近打开（八张表）                   & \\
+         & 保存结果… / 载入结果…                & Ctrl+S \\
+         & 重新打开上次会话                     & \\
+         & 载入会话脚本…                        & \\
+         & 方法段落…                            & \\
          & 导出当前结果…                        & Ctrl+E \\
          & 导出 HTML 报告…                      & \\
+         & 报告语言：跟随界面、English、中文    & \\
          & 将会话保存为脚本…                    & \\
          & 保存配置… / 载入配置…                & \\
+         & 运行历史…                            & \\
 视图     & 命令面板…                            & Ctrl+K \\
          & 折叠 / 展开面板                      & Ctrl+B \\
-         & 运行历史…                            & \\
          & 日志、命令日志                       & \\
          & 助手                                 & Ctrl+Shift+A \\
          & 外观：跟随系统、浅色、深色           & \\
          & 语言：跟随系统、English、中文        & \\
 分析     & 合成控制（SCM）工作室…               & Ctrl+Shift+S \\
-帮助     & 文档、关于 Normet                    & \\
+         & 风向玫瑰图…                          & \\
+帮助     & 用户手册                             & F1 \\
+         & 键盘快捷键…                          & \\
+         & 文档、关于 Normet                    & \\
 \bottomrule
 \end{tabular}
 \end{center}
 在 macOS 上，Ctrl 即 Command 键。\emph{命令面板}（Ctrl+K）列出每一条菜单命令和每一个结果
-标签页；输入其中几个字母再按回车即可。
+标签页；输入其中几个字母再按回车即可。\tab{帮助 $\rightarrow$ 键盘快捷键}从菜单中读出并列出
+每一个快捷键；\tab{帮助 $\rightarrow$ 用户手册}（F1）按界面语言打开本手册。
 
 \section{停靠窗}
-底部的\emph{日志}停靠窗实时显示 \nm{} 的日志：每一步做了什么、多少行、FLAML 选中的估计器
-及其超参数、一次滚动运行生成了多少窗口。任务失败时，完整的回溯写在这里，最后一行显示在
-对话框中。\emph{命令日志}与它共用停靠窗（第~\ref{sec:commandlog}~节）；\emph{助手}在右侧
-打开（第\ref{ch:assistant}章）。
+底部的停靠窗有两页，从状态栏左端的标签选择：\emph{日志}实时显示 \nm{} 的日志——每一步做了
+什么、多少行、FLAML 选中的估计器及其超参数、一次滚动运行生成了多少窗口——\emph{命令日志}
+是能重复本次会话的调用（第~\ref{sec:commandlog}~节）。再点一次已打开的标签会收起停靠窗，
+点任一标签又会展开。任务失败时，完整的回溯写在日志里，最后一行显示在对话框中。
+\emph{助手}在右侧打开（第\ref{ch:assistant}章）。
 
 \section{外观和语言}\label{sec:appearance}
 窗口及其图跟随系统的浅色或深色外观；\tab{视图 $\rightarrow$ 外观}可以固定其中一种。深色
@@ -682,10 +704,11 @@ PDP      & 每个变量一幅部分依赖图 & 第 5 步 \\
 选择会保留到下次启动。切换立即生效——菜单、按钮、标签页、工具提示、评估结论，以及图的标题、
 坐标轴标签和月份名，都会用所选语言重新写出，图按显示的样子保存。数据自身的文字（列名、站点
 代码）、日志、命令日志里的代码和助手的对话保持原样。在 macOS 上，系统自带的菜单项（服务、
-隐藏、退出）从下次启动起跟随新语言。
+隐藏、退出）从下次启动起跟随新语言。HTML 报告（第~\ref{sec:commandlog}~节）也用界面语言
+写出，或者用\tab{文件 $\rightarrow$ 报告语言}所选的语言：它的标题、标签和图。
 
 % ============================ 6. COLUMNS AND TRAINING =========================
-\chapter{训练模型（第 1 步）}\label{ch:train}
+\chapter{训练模型}\label{ch:train}
 
 \section{表格及其列}\label{sec:columns}
 在主窗口中打开的表需要一个名为 \code{date}（不区分大小写）、取值能解析为日期的列；其他每个
@@ -694,15 +717,15 @@ O3、SO2、CO、NOx），预测变量预设为被识别为气象的列：
 \begin{center}\small
 \code{u10 v10 d2m t2m blh sp ssrd tcc tp rh2m ws wd temp rh pressure}
 \end{center}
-（匹配时不区分大小写）。\emph{全部}、\emph{无}和\emph{仅气象}一次性设置勾选。目标即使被
+（匹配时不区分大小写）。\emph{全部}勾选所有预测变量——已全部勾选时再点一次则全部取消——\emph{仅气象}只勾选气象变量。目标即使被
 勾选也从不作为预测变量。四个日历变量自动加入每个模型，不在列表中列出。
 
 \note{用其他名字命名的气象列不会被识别，必须手动勾选——在 MY1 中就是 \code{atmos\_pres}。
-第 2 步的\emph{仅气象}也是如此（第\ref{ch:normalise}章）。}
+\tab{归一化}页上的\emph{仅气象}也是如此（第\ref{ch:normalise}章）。}
 
-\screenshot{ui_data.png}{打开 MY1：2020-01-01 至 2020-08-31 共 5,793 个逐时行、11 列，
-无缺失值。目标 \NOtwo{} 被识别出来；九个气象预测变量已勾选（\code{atmos\_pres} 为手动
-勾选）。标签页预览目标序列并列出表格。}{fig:data}
+\screenshot{ui_data.png}{从\tab{文件 $\rightarrow$ 载入示例}打开 MY1：2020-01-01 至
+2020-08-31 共 5,793 个逐时行、11 列，无缺失值。示例设好了论文的目标 \NOtwo{} 及其九个气象
+预测变量（其中 \code{atmos\_pres} 的名字窗口不认识）。标签页预览目标序列并列出表格。}{fig:data}
 
 \section{设置}
 \begin{description}\nosep
@@ -720,8 +743,9 @@ O3、SO2、CO、NOx），预测变量预设为被识别为气象的列：
 \emph{训练模型}运行 \code{build\_model}——准备数据、划分和搜索——并填充\tab{模型}标签页
 （图~\ref{fig:model}）。评估结论依据留出集的 $R^2$：0.7 及以上为拟合良好，0.5 到 0.7 为
 一般，低于 0.5 为差。表格是训练行、测试行和全部行的 \code{modStats}
-（第~\ref{sec:modstats}~节）；散点对比图显示留出行的观测与预测；条形图是模型的特征重要性
-（LightGBM 为分裂次数）。
+（第~\ref{sec:modstats}~节）；散点对比图显示留出行的观测与预测，呈正方形，附 1:1 线，角上
+标出行数、预测对观测的回归斜率（小于 1：极值被拉向中间）和平均偏差——行数上千时改用六边形
+密度图；条形图是模型的特征重要性（LightGBM 为分裂次数）。
 
 \screenshot{ui_model.png}{用 FLAML（LightGBM，30~s 预算，随机划分）训练 MY1：在 1,448 个
 留出小时上 $R^2 = 0.883$、RMSE $= 8.66$~\ugm{}，而在 4,345 个训练小时上为 $0.976$。风向和
@@ -745,11 +769,11 @@ O3、SO2、CO、NOx），预测变量预设为被识别为气象的列：
 \emph{微调 Chronos-2} 让已载入的检查点适应本站点自己的记录：\emph{lora} 训练小型适配器，
 不动基础权重（需要 \code{peft}）；\emph{full} 更新全部 1.19 亿个参数，更容易对单个站点
 过拟合。\emph{步数}设置优化器步数（300）。微调后的权重在本次会话中替换原模型；重新归一化
-才会用上它们，重新载入 Chronos-2 即可恢复。在 Chronos-2 后端上，第 4、5 步和排放分解被
-禁用，建立在第 4 步之上的多尺度分解也不适用（第~\ref{sec:chronos}~节）。
+才会用上它们，重新载入 Chronos-2 即可恢复。在 Chronos-2 后端上，滚动、部分依赖和排放分解
+被禁用，建立在滚动之上的多尺度分解也不适用（第~\ref{sec:chronos}~节）。
 
 % ============================ 7. NORMALISATION ================================
-\chapter{归一化（第 2 步）}\label{ch:normalise}
+\chapter{归一化}\label{ch:normalise}
 
 \begin{description}\nosep
   \item[重采样变量] 模型训练所用的每个变量，包括四个日历变量。勾选的变量被重采样（其影响
@@ -761,9 +785,15 @@ O3、SO2、CO、NOx），预测变量预设为被识别为气象的列：
   \item[5--95\,\% 分位数带] 同时返回抽样的第 5、25、75 和 95 百分位，并给外侧带上色。
 \end{description}
 
-\screenshot{ui_normalise.png}{用全部九个气象变量、300 次抽样归一化 MY1。归一化序列（红）
-保留了日变化和星期循环——日历保持观测值——而观测序列（蓝）中由天气驱动的峰值被平均掉。
-三月第三周的台阶式下降是封控：天气解释不了它。}{fig:normalise}
+序列下方，观测序列和归一化序列按一天中的小时、星期几和月份取平均，每个均值附 95\,\% 置信
+区间——即记录的周期，就像 openair 的 \code{timeVariation} 那样，也显示了天气让每个周期
+变动了多少。记录无法显示的周期（逐日记录的小时）会被省略；周期总是按记录本身计算，与上方
+序列显示的分辨率无关。用脚本表示：\code{nm.cycle\_profiles(result, ["observed",
+"normalised"])}。
+
+\screenshot{ui_normalise.png}{用全部九个气象变量、300 次抽样归一化 MY1，按日均显示。归一化
+序列（红色）在三月第三周下降，那是封控，天气解释不了它。下方是它的周期：归一化序列保留了
+早晚高峰和工作日与周末的差别——日历保持观测值——离散度则小于观测序列。}{fig:normalise}
 
 图上方的一行给出时刻数、抽样次数和重采样变量数，以及整条记录上归一化 $-$ 观测的均值：这里
 是 $-0.26$~\ugm{}，因为八个月下来天气的影响大致相互抵消。月均值讲述了图中的故事：
@@ -788,26 +818,31 @@ O3、SO2、CO、NOx），预测变量预设为被识别为气象的列：
 \tab{模型}标签页。}
 
 % ============================ 8. DECOMPOSITION ================================
-\chapter{分解（第 3 步）}\label{ch:decompose}
+\chapter{分解}\label{ch:decompose}
 
 \section{按时间尺度：排放分解}
-把\emph{方法}设为 \emph{emission} 时，第 3 步运行第~\ref{sec:emission}~节的嵌套归一化，
+把\emph{方法}设为 \emph{emission} 时，分解运行第~\ref{sec:emission}~节的嵌套归一化，
 画出归一化序列及其趋势、季节、星期、日变化和短期分量，每个分量附其标准差 $\sigma$
-（图~\ref{fig:emission}）。图上方的一行指出 $\sigma$ 最大的分量。
+（图~\ref{fig:emission}）。图上方的一行指出 $\sigma$ 最大的分量。对比逐日更细的记录，
+日变化和星期分量画在右侧，以周期表示——该分量按一天中的小时和星期几取的平均，25 至 75 百
+分位之间加阴影——而不是几个月的振荡曲线。
 
 \screenshot{ui_decompose_emission.png}{MY1 的排放分解（每次归一化 100 次抽样；基准
 43.1~\ugm{}）。封控同时表现为趋势（$\sigma = 9.56$）和季节分量（$\sigma = 4.74$）中的
-台阶：一次性事件不是季节，而记录太短，无法把二者分开。日变化最大（$\sigma = 9.92$），
-并在封控后减弱，就像早晚高峰的交通一样；星期循环（$\sigma = 3.36$）每到周末下降。}{fig:emission}
+台阶：一次性事件不是季节，而记录太短，无法把二者分开。日变化（右）最大
+（$\sigma = 9.92$）：05:00 前低，工作时间高，离散度大是因为它在封控后减弱了，就像早晚高峰
+的交通一样；星期循环（$\sigma = 3.36$）在周末下降。}{fig:emission}
 
 \section{按变量：气象分解}
-把\emph{方法}设为 \emph{meteorology} 时，第 3 步把观测 $-$ 归一化分摊到各个气象变量上
+把\emph{方法}设为 \emph{meteorology} 时，分解把观测 $-$ 归一化分摊到各个气象变量上
 （第~\ref{sec:metdecomp}~节）。另有两项设置可用：
 \begin{description}\nosep
   \item[归因方式] \emph{sequential}（顺序）、\emph{shapley}，或 \emph{auto}（给了分组时用
         Shapley，否则用顺序）。
-  \item[分组] 可选的命名分组，写作 \code{name: var, var; name: var, \ldots}。每个训练用到的
-        气象变量必须恰好属于一个分组，否则窗口会在运行前指出缺了哪些。
+  \item[分组] 一张表，列出模型训练用到的气象变量及其分组：\emph{风}、\emph{温度与湿度}、
+        \emph{边界层与气压}、\emph{云、辐射与降水}，或自己输入的名字。\emph{建议分组}把
+        每个能识别的变量放进它的分组；\emph{各自单列}清除分组。没有分组的变量单独作为一项
+        贡献。同一分组的行用同一种颜色标出，表下的一行说明这样分组得到多少项贡献。
 \end{description}
 图中显示 met\_total，以及每个变量或分组一幅子图，并在 \code{met\_noise}（模型没有再现的
 部分）旁边给出它们 $\sigma$ 的排序（图~\ref{fig:metdecomp}）。
@@ -819,23 +854,23 @@ $\sigma = 16.79$~\ugm{}）按精确 Shapley 值（16 个联盟）分摊到四个
 
 分解在顺序归因下运行 $k+1$ 次归一化，在 Shapley 归因下运行 $2^k$ 次，每次\emph{样本数}次
 抽样，所以开销随变量数迅速增长。十个变量用 Shapley 就是 1024 次归一化：请分组。与归一化
-不同，气象分解总是重采样训练用到的每一个气象变量；它不跟随第 2 步的列表。
+不同，气象分解总是重采样训练用到的每一个气象变量；它不跟随\tab{归一化}页上的列表。
 
 % ============================ 9. ROLLING ======================================
-\chapter{滚动与多尺度（第 4 步）}\label{ch:rolling}
+\chapter{滚动与多尺度}\label{ch:rolling}
 
 \section{滚动归一化}\label{sec:rollingui}
-\emph{窗口}（14~d）、\emph{步长}（7~d）和\emph{样本数}（100）设置第~\ref{sec:rolling}~节
-的窗口；重采样的变量就是第 2 步的那些。标签页显示每个时刻重叠窗口的均值，两个及以上窗口
+\emph{窗口}（14~天）、\emph{步长}（7~天）和\emph{样本数}（100）设置第~\ref{sec:rolling}~节
+的窗口；重采样的变量就是\tab{归一化}页上的那些。标签页显示每个时刻重叠窗口的均值，两个及以上窗口
 重叠处附带它们之间 $\pm 1$ 个标准差（图~\ref{fig:rolling}）。导出的结果表每个窗口一列。
 
 \screenshot{ui_rolling.png}{MY1 的滚动归一化：33 个两周窗口，每周开始一个，每个 50 次抽样。
 每个窗口只去掉在它自己那两周内变化的天气。}{fig:rolling}
 
 \section{多尺度分解}\label{sec:multiscaleui}
-多尺度一栏以三种宽度运行滚动归一化——默认\emph{快窗口}（14~d）、\emph{中窗口}（90~d）和
-\emph{慢窗口}（365~d）——并让它们相互之间以及与第 2 步的序列求差（第~\ref{sec:multiscale}~节）；
-所以必须先运行第 2 步。它使用第 4 步的\emph{样本数}，开销约为三次滚动运行。评估结论指出能量
+多尺度一栏以三种宽度运行滚动归一化——默认\emph{快窗口}（14~天）、\emph{中窗口}（90~天）和
+\emph{慢窗口}（365~天）——并让它们相互之间以及与归一化序列求差（第~\ref{sec:multiscale}~节）；
+所以必须先运行归一化。它使用\tab{滚动}页上的\emph{样本数}，开销约为三次滚动运行。评估结论指出能量
 （$\sigma$）最大的频带；无法计算的频带会在说明中列出，并附原因。
 
 \screenshot{ui_multiscale.png}{MY1 在 14、60 和 120~天下的多尺度分解（默认的 365 天比这条
@@ -843,11 +878,13 @@ $\sigma = 16.79$~\ugm{}）按精确 Shapley 值（16 个联盟）分摊到四个
 $\sigma \approx 3.0$），其次是季节内和慢频带。}{fig:multiscale}
 
 % ============================ 10. PDP =========================================
-\chapter{部分依赖（第 5 步）}\label{ch:pdp}
+\chapter{部分依赖}\label{ch:pdp}
 
 训练后，变量列表包含每个预测变量和日历变量，前四个已勾选。\emph{时间变量}和\emph{仅气象}
 切换这两组；\emph{网格点数}（50）设置曲线的精细程度。每幅子图显示曲线（\code{pdp\_mean}）
 及 $\pm$ \code{pdp\_std} 的带，即该取值下各训练行预测值的离散度（第~\ref{sec:pdptheory}~节）。
+底部的短刻度是该变量在训练数据中的十分位数：刻度稀疏处——曲线的两端——数据很少。只取少数
+几个整数值的变量（小时、星期几）画成阶梯，每个取值一个点。
 
 \screenshot{ui_pdp.png}{MY1 模型的部分依赖：\NOtwo{} 随风速增大而下降，随边界层从最浅处
 加深而下降，在约 20\,$^\circ$C 以上上升，并跟随交通的一天——05:00 前低，07:00 到 17:00
@@ -860,15 +897,16 @@ $\sigma \approx 3.0$），其次是季节内和慢频带。}{fig:multiscale}
 
 合成控制流程的输入不同——由许多单元组成的长面板——所以它有自己的窗口，可从操作栏上的
 \emph{SCM 工作室}、\tab{分析 $\rightarrow$ 合成控制（SCM）工作室}（Ctrl+Shift+S）或欢迎页
-的示例卡片打开。它的布局与主窗口相同：左侧是参数面板（面板数据、列、设计、估计器、推断），
-右侧是结果标签页（\tab{面板}、\tab{拟合}、\tab{空间安慰剂}、\tab{时间安慰剂}、
+的示例卡片打开。它的布局与主窗口相同：左侧是参数面板，各页从顶部的标签栏选择——
+\tab{数据}（面板数据及其列）、\tab{设计}、\tab{估计器}、\tab{推断}——右侧是结果标签页（\tab{面板}、\tab{拟合}、\tab{空间安慰剂}、\tab{时间安慰剂}、
 \tab{不确定性}、\tab{全部单元}、\tab{相似度}），上方是\emph{导出当前标签页数据}。方法见
 第~\ref{sec:scmtheory}~节。
 
 本章的图重现了 \nm{} 论文中的 ULEZ 案例：伦敦超低排放区（ULEZ）于 2019 年 4 月 8 日启用，
 在 Marylebone Road（MY1）上用月均去气象化 \NOtwo{} 评估，以英国其他地方的交通站点为供体。
 为了让 COVID-19 不进入干预后时段，面板截止于 2020 年 2 月，并且只保留记录完整的交通站点：
-38 个月、53 个供体。用脚本表示：
+38 个月、53 个供体。SCM 工作室的\tab{文件 $\rightarrow$ 载入示例 $\rightarrow$ 伦敦超低
+排放区}会设好这个设计；用脚本表示：
 \begin{lstlisting}[language=Python]
 import normet as nm
 scm_df = nm.datasets.load_scm()
@@ -881,7 +919,8 @@ df.to_csv("ulez_panel.csv", index=False)
 \end{lstlisting}
 
 \section{面板数据和列}
-\emph{打开 CSV…}读取一张长表：每个单元每个日期一行。主窗口的表有单元列时，\emph{使用主窗口
+\emph{打开数据…}（也可用\tab{文件 $\rightarrow$ 打开数据…}）读取一张长表，格式可以是
+第~\ref{sec:input}~节中的任何一种：每个单元每个日期一行。主窗口的表有单元列时，\emph{使用主窗口
 数据}会取用它。\emph{日期}列按列名猜测；\emph{单元}列取第一个非数值、且不同取值个数在 3 到
 行数四分之一之间的列；\emph{结果变量}取名字以 \code{wn} 结尾的数值列（论文表格中的去气象化
 序列），否则取第一个数值列。三者都请检查。
@@ -975,16 +1014,33 @@ MY1 一样好，所以只有它的干预前 $R^2$ 不予解读。经典 SCM 根�
 \chapter{导入数据}\label{ch:data}
 
 \section{输入格式}\label{sec:input}
-主窗口读取的 CSV（或 \code{.csv.gz}）应包含：
+\emph{打开数据…}（Ctrl+O）与 cume 一样，能读取 CSV 及其他分隔文本（\code{.csv}、
+\code{.tsv}、\code{.txt}、\code{.dat}；逗号、分号、制表符、竖线或空格分隔，小数逗号，UTF-8
+或 Windows 代码页——都从文件本身判断），以及它们的 gzip 压缩文件、Excel（\code{.xlsx}、
+\code{.xlsm}、\code{.xls}）、Parquet、Feather 和 JSON。表中需要有：
 \begin{itemize}\nosep
-  \item 一个名为 \code{date}（不区分大小写）的列，其值能解析为日期和时间——ISO~8601 最稳妥；
-        混合的时区偏移按 UTC 读取；
+  \item 时间：一个名为 \code{date}、\code{datetime}、\code{time}、\code{timestamp}（不区分
+        大小写，也可以是\code{日期}、\code{时间}）的列，一个日期列加旁边的时刻列，或者
+        \code{year}、\code{month}、\code{day}（以及 \code{hour}）几列；
   \item 污染物，数值型；
   \item 气象及其他预测变量，数值型。
 \end{itemize}
-每个时刻一行，逐时或更粗。一个文件里有多个站点的表应放到 SCM 工作室，或在脚本中用
-\code{do\_all\_multisite} 处理。没有 \code{date} 列的表会被拒绝，并提示面板数据请用 SCM
-工作室。允许有缺失值：没有目标的行被删除，缺失的预测变量被填补（第~\ref{sec:prepare}~节）。
+时间可以用任何常见写法：ISO~8601、\code{31/01/2020 13:00}（日在前）或
+\code{01/31/2020}（月在前）——顺序从数值判断，无法判断时会在文件名下说明——、
+\code{31.01.2020}、\code{2020年1月31日 13时}、\code{2020013113}、Unix 秒数或 Excel 的序列
+日数。时间是怎样读取的，显示在文件名下方。每个时刻一行，逐时或更粗。一个文件里有多个站点的
+表应放到 SCM 工作室，或在脚本中用 \code{do\_all\_multisite} 处理。没有时间的表会被拒绝，并
+提示面板数据请用 SCM 工作室。允许有缺失值：没有目标的行被删除，缺失的预测变量被填补
+（第~\ref{sec:prepare}~节）。
+
+\section{时钟：时区}\label{sec:clock}
+文件名下方的\emph{时区}是分析所用、图和表所显示的时钟：站点的当地时间，或 UTC（默认）。
+没有写偏移的时间被当作这个时钟上的时间，监测网络按当地时间记录的数据就是这样；写了偏移的
+（\code{+08:00}、\code{Z}）则换算到这个时钟上。这样模型学到的小时和星期几就是站点自己的
+——早晚高峰在夏令时期间也停在它原来的钟点。以 UTC 获取的气象和轨迹（数据工作室和传输工作室）
+在合并时换到这个时钟上，于是每个小时的 ERA5 与它所属的那个小时的测量值对上。这个选择会保留
+到下次会话；更改它会重新读取已打开的文件。在脚本中，
+\code{nm.io.read\_time\_series(path, zone=\ldots)} 以同样的方式读表。
 
 \section{数据工作室：英国空气质量和气象}\label{sec:datastudio}
 \emph{获取英国数据}（Ctrl+D）无需离开应用即可拼出一张可建模的表（图~\ref{fig:datastudio}）：
@@ -999,7 +1055,8 @@ MY1 一样好，所以只有它的干预前 $R^2$ 不予解读。经典 SCM 根�
   \item \textbf{气象。}Open-Meteo 的 ERA5 档案（无需密钥）、Copernicus CDS（需要
         \code{\textasciitilde/.cdsapirc}），或不要气象。Open-Meteo 会加入 \code{t2m}、
         \code{d2m}、\code{rh2m}、\code{sp}、\code{tcc}、\code{tp}、\code{ssrd}、\code{ws}、
-        \code{wd}、\code{u10} 和 \code{v10}——都是第 1 步识别为气象的名字。
+        \code{wd}、\code{u10} 和 \code{v10}——都是\emph{列}一栏识别为气象的名字。它们以 UTC
+        给出，合并时换到窗口的时钟上（第~\ref{sec:clock}~节）。
   \item \textbf{获取并合并}下载逐时测量值和站点坐标处的气象，按小时合并。\tab{预览}和
         \tab{表格}显示结果；\emph{保存合并的 CSV…}把它写出，\emph{发送到主窗口}在主窗口
         中打开它。
@@ -1037,7 +1094,9 @@ GeoJSON 或 Shapefile 文件的多边形（\code{geo} 扩展）。每个区域�
 
 \paragraph{合并。}\emph{发送到主窗口}把特征合并到已打开的表上：每一行取\emph{已经到达}的
 最近一条轨迹，且在一个释放间隔之内——按最近时间合并会把 06:00 的轨迹给 04:00，那是还没
-到达的空气——新的 \code{traj\_*} 列在第 1 步中被勾选为预测变量。
+到达的空气——新的 \code{traj\_*} 列被勾选为预测变量。轨迹的时间按 HYSPLIT 的写法是
+UTC，合并前先换到窗口的时钟上（第~\ref{sec:clock}~节）；传输工作室拿到的是表格时间的 UTC，
+从它出发计算轨迹。
 
 \screenshot{ui_transport.png}{\nm{} 自带的两天 \code{tdump} 文件，为受体点 MY1 构建：8 个
 受体时刻、9 个特征，每六小时释放一次。2020 年 1 月 1--2 日，来流方向从东（80$^\circ$）
@@ -1047,6 +1106,16 @@ GeoJSON 或 Shapefile 文件的多边形（\code{geo} 扩展）。每个区域�
 时间戳使用，测试集 $R^2$ 因而虚高（第~\ref{sec:split}~节）。请用 \code{month\_ts} 评判考虑
 传输的模型。要把 \PMtwo{} 分成本地天气和传输两部分贡献，请给气象分解两个分组：\code{local}
 和 \code{transport}（第~\ref{sec:metdecomp}~节）。}
+
+\section{风向玫瑰图：污染物从哪里来}\label{sec:polar}
+\tab{分析 $\rightarrow$ 风向玫瑰图…}按风向和风速画出已打开表中的一个变量，就像 openair 的
+\code{polarPlot}（图~\ref{fig:polar}）：在每 10$^\circ$ 风向和每档风速的格子里取均值、中位数、
+第 95 百分位数或最大值，画在罗盘上，北在上方。风速风向列按名字识别（\code{ws} 和 \code{wd}），
+否则由 \code{u10} 和 \code{v10} 计算，也可以手动选择。用脚本表示：
+\code{nm.polar\_plot(df, target="NO2", ws\_col="ws", wd\_col="wd")}。
+
+\screenshot{ui_polar.png}{MY1 的 \NOtwo{} 均值随风向和风速的分布：南风和西南风时最高，北风和
+东北风时最低。}{fig:polar}
 
 % ============================ 13. EXPORT ======================================
 \chapter{导出与重现}\label{ch:export}
@@ -1073,9 +1142,8 @@ GeoJSON 或 Shapefile 文件的多边形（\code{geo} 扩展）。每个区域�
 
 本手册各图背后的会话保存为（路径已缩短，省略了导入语句以及多尺度和部分依赖的调用）：
 \begin{lstlisting}[language=Python]
-# 21:09:36  Open CSV
-df = pd.read_csv('my1.csv')
-df['date'] = to_datetime_coerced(df['date'])
+# 21:09:36  Load example: London Marylebone Road NO2 (2020)
+df = nm.datasets.load_my1()
 
 # 21:10:09  Train model
 df_prep, model = build_model(df, 'NO2', backend='flaml',
@@ -1094,8 +1162,10 @@ normalised = normalise(df_prep, model,
 # 21:10:22  Decompose
 decomposition = decompose(df_prep, model, method='meteorology',
                           covariates=[...the same 13...], n_samples=100,
-                          groups={'wind': ['ws', 'wd'], 'thermo': ['temp', 'RH'],
-                                  'mixing': ['blh', 'atmos_pres'], 'sky': ['tcc', 'tp', 'ssrd']})
+                          groups={'Wind': ['ws', 'wd'],
+                                  'Temperature and humidity': ['temp', 'RH'],
+                                  'Boundary layer and pressure': ['atmos_pres', 'blh'],
+                                  'Sky and rain': ['tcc', 'tp', 'ssrd']})
 
 # 21:10:25  Rolling normalisation
 rolled = rolling(df_prep, model, covariates=[...],
@@ -1107,26 +1177,67 @@ rolled = rolling(df_prep, model, covariates=[...],
 
 \section{投稿用图}\label{sec:print}
 屏幕上的图按标签页的大小绘制；缩进期刊 89~mm 的栏宽后，文字也随之缩小。每幅图工具栏上的
-\emph{投稿用图…}按印刷宽度重新排版，文字以磅为单位，并按该尺寸显示（图~\ref{fig:print}）：
+\emph{投稿用图…}按期刊印刷的尺寸重新排版：每种文字——标题、坐标轴标签、刻度标签、图例——取
+期刊指南给出的字号，边距和刻度按该尺寸重新计算，而不是简单缩放（图~\ref{fig:print}）：
 \begin{description}\nosep
-  \item[期刊] Nature 单栏（89~mm）或双栏（183~mm）；Elsevier 单栏（90~mm）、1.5 栏
-        （140~mm）或双栏（190~mm）；ACS 单栏（3.25~in）或双栏（7~in）；或自定义。
-  \item[宽度、高度、字号] 印刷尺寸，以及以磅为单位的文字大小。
-  \item[分辨率] 300、600 或 1200~dpi，用于 PNG 和 TIFF。
-  \item[图例] 位置（或直接拖动）、文字大小、列数、边框。
-  \item[线条与子图] 线宽和标记大小，以及子图字母（a、(a)、A、(A)）。
+  \item[期刊] Elsevier、Nature、Copernicus（ACP、AMT 等）或 ACS（ES\&T），各自带有其插图
+        指南的要求和指南链接。
+  \item[宽度] 期刊的栏宽（Nature 89 或 183~mm；Elsevier 90、140 或 190~mm；ACS 3.33 或
+        7~in；Copernicus 至少 80~mm），或自定义宽度。只有一列子图的图从最窄的栏宽开始，
+        并排子图从最宽的开始。
+  \item[高度] 按图的需要——保持图自身的比例，并加高到每个子图的数据区至少 12~mm，不超过
+        期刊的最大高度——或手动设定。
+  \item[子图标签] 无、a~b~c、(a)~(b)~(c)、A~B~C 或 (A)~(B)~(C)，可选粗体，可从任意字母起
+        （组合图中的 c、d 两幅从 c 起）；同一列子图的字母对齐。
+  \item[线宽、标记大小] 数据线的线宽；加大标记时，时间序列会加上圆形标记。参考线保持原样。
+  \item[图例] 位置（或直接拖动）、文字大小、列数、边框。排成一行而宽于印刷图的图例会自动
+        减少列数。
+  \item[分子式] 按化学写法书写：NO$_2$、PM$_{2.5}$、SO$_4^{2-}$。
+  \item[标题] 整图和各子图的标题按期刊惯例留给图注；勾选后画出。
+  \item[栅格分辨率] 300、600 或 1200~dpi，用于 TIFF 和 PNG。
 \end{description}
-在预览上双击标题、坐标轴标签或刻度数字即可编辑。\emph{保存…}按所选宽度精确写出 PNG、PDF、
-SVG、TIFF 或 EPS，白色底。什么都不会被保留：对话框关闭后，图恢复为它在标签页中的样子。这些
-宽度取自各出版社的插图指南；投稿前请查阅期刊的最新指南。
+设置下方的检查按期刊指南读取当前排版的图：宽度和高度、最小文字和最小上下标（Nature 要求
+至少 5~pt、至多 7~pt，Elsevier 为 7~pt，ACS 为 8~pt）、所用字体（指南指定 Arial 或
+Helvetica 时）、相互重叠的刻度标签，以及子图数量（ACS 最多四个）；未通过的检查显示为红色，
+设置改变时全部重新检查。预览可以适应窗口，或按实际印刷尺寸显示。在预览上双击标题、坐标轴
+标签或子图字母可编辑其文字和字号；双击刻度数字可调整其字号和角度（并为该刻度单独设定文字）；
+双击图例可设置其位置，双击色标可把它移到子图的另一侧；图例和色标也可以直接拖到最易读的位置。
+\emph{保存…}写出期刊接受的格式——PDF、EPS 或 SVG（文字保留为可编辑文字，字体嵌入），TIFF
+或 PNG 按所选分辨率——尺寸与显示的完全一致，白色底。对话框打开时，图中文字使用报告语言
+（文件 $\rightarrow$ 报告语言）。关闭后图恢复为它在标签页中的样子；期刊、宽度、子图标签、
+分子式和分辨率会保留给下一幅图。投稿前请查阅期刊的最新指南。
 
-\screenshot{ui_print.png}{为 Nature 单栏排版的归一化序列：89 $\times$ 46~mm，7~pt 文字，
-300~dpi，按印刷尺寸显示。}{fig:print}
+\screenshot{ui_print.png}{为 Nature 双栏排版的归一化序列：宽 183~mm，子图已标字母，旁边是
+Nature 指南对它的要求——唯一未通过的是 4.9~pt 的下标，低于 Nature 要求的 5~pt：Nature 的
+7~pt 上限已不留余地。}{fig:print}
 
-\section{配置和历史}
-\emph{保存配置}把参数面板的每一项设置写成 JSON——目标、预测变量、后端、划分、预算、估计器、
-随机种子，以及每一步的设置——\emph{载入配置}从 JSON 设置参数面板；数据不在其中。
-\emph{历史}（\tab{视图 $\rightarrow$ 运行历史}）列出每次运行的时间、任务、目标、后端、行数
+\section{保存与重新打开会话}\label{sec:saved}
+\tab{文件 $\rightarrow$ 保存结果…}（Ctrl+S）把会话写进一个文件（\code{.normet}）：表格、参数
+面板的设置、模型、每一步的结果和命令日志。\tab{载入结果…}把它原样读回窗口——每个结果交给
+它那一步自己的处理函数，所以标签页、评估结论和图都会重新画出——并以一条通知说明恢复了什么。
+每完成一步，窗口还会把会话另存为 \code{\textasciitilde/.normet/last\_session.normet}；
+窗口在结果保存之前被关闭或崩溃时，\tab{重新打开上次会话}可以把它读回来。Chronos-2 检查点不
+写入（它是预训练模型，约 500~MB）：要继续请重新载入。会话文件是 Python pickle：只打开你自己
+或本窗口写出的文件。
+
+\tab{文件 $\rightarrow$ 载入会话脚本…}运行命令日志写出的脚本（第~\ref{sec:commandlog}~节），
+并以同样的方式把结果带回窗口：它的表格、模型和结果，以及按它所做的调用设置好的参数面板。
+脚本是 Python，会按原样运行，所以窗口会先询问。
+
+\section{方法段落}\label{sec:methods}
+\tab{文件 $\rightarrow$ 方法段落…}把本次会话运行的内容写成论文方法部分的表述，可直接复制
+（图~\ref{fig:methods}）：记录（长度、时间跨度和步长）、模型（后端、搜索、预测变量、划分和
+随机种子）及其在留出集上的拟合，然后是运行过的每一步——归一化的抽样次数和重采样变量、分解、
+滚动窗口、多尺度宽度、部分依赖的变量——并附上方法所依据的参考文献。它依据每一步实际运行时
+的调用写成，而不是参数面板当前的状态，并使用界面语言。请对照你实际所做的核对。
+
+\screenshot{ui_methods.png}{本手册会话的方法段落：记录、FLAML 模型及其留出集拟合，以及运行
+过的每一步，并附参考文献。}{fig:methods}
+
+\section{配置和历史}\label{sec:config}
+\tab{文件 $\rightarrow$ 保存配置…}把参数面板的每一项设置写成 JSON——目标、预测变量、后端、
+划分、预算、估计器、随机种子，以及每一步的设置——\tab{载入配置…}从 JSON 设置参数面板；
+数据不在其中。\tab{文件 $\rightarrow$ 运行历史…}列出每次运行的时间、任务、目标、后端、行数
 和一项细节（训练运行为留出集 $R^2$，归一化为抽样次数）。
 
 % ============================ 14. ASSISTANT ===================================
@@ -1137,9 +1248,23 @@ SVG、TIFF 或 EPS，白色底。什么都不会被保留：对话框关闭后�
 东西：表格、模型在留出集上的拟合、归一化序列、分解；并像按钮那样运行窗口的步骤，所以它做的
 事和你自己的运行一样出现在屏幕上，也进入命令日志。
 
+对话的样子和聊天一样：你的消息在右侧，回复按 Markdown 显示（代码加底色，表格画线），助手
+调用的每个工具占安静的一行——运行中圆点为灰色，返回后变绿，被拒绝时变红并在下面写出原因——
+点一下即可展开它返回的内容。Ctrl/Cmd $+$ 和 $-$（或按住该键滚动滚轮）调整文字大小，Ctrl/Cmd 0
+复原；所选大小会被记住。
+
 它最能帮上忙的是建模对象的选择和结果的解读。它以一张带\emph{应用}按钮的卡片\emph{提议}目标
 和预测变量，说明它排除了什么以及为什么；在你点击“应用”之前，参数面板不会有任何改变，并且
 只有在你同意之后它才会训练或归一化。它被要求只引用工具返回的数字。
+
+\section{全自动}\label{sec:autoassistant}
+\emph{密钥…}旁边的\emph{自动}让助手不必等你确认，与 cume 的助手一样。打开后，它提出的目标
+和预测变量立即应用（卡片上显示\emph{已应用}），并按窗口的顺序一路完成分析——数据、设定、
+训练、归一化、分解——每一步的结果出来就读取。模型在还有步骤没做时停下，会被告知还剩什么并
+继续，最多八次；连续两次提醒都没有进展就结束这一轮，免得做不了某一步的模型原地打转。调用
+模型失败或回复为空时会重新请求，最多两次。每次提醒和重试都在对话中留一行说明。随时可以点
+\emph{停止}结束；这个选择会保留到下次会话，按钮箭头下的\emph{全自动会做什么…}也有这些说明。
+命令行智能体同样会立即应用设定，并在它自己的循环允许的范围内完成整个流程。
 
 \section{选择模型}
 \begin{description}
@@ -1293,13 +1418,15 @@ SCM 后端                       & scm & scm \\
 运行历史                       & \code{\textasciitilde/.normet/gui\_run\_history.jsonl} \\
 窗口几何、外观、语言、助手模型 & 系统的设置存储（\code{apai-sys/normet-gui}） \\
 字体缓存（安装包）             & \code{\textasciitilde/.normet/matplotlib} \\
+上次会话（每步之后）           & \code{\textasciitilde/.normet/last\_session.normet} \\
 助手 API 密钥                  & macOS 钥匙串，服务名 \code{normet} \\
 MCP 任务                       & \code{\$NORMET\_MCP\_HOME}，默认 \code{\textasciitilde/.normet/mcp} \\
 Chronos-2 权重                 & Hugging Face 缓存 \\
 \bottomrule
 \end{tabular}
 \end{center}
-除非你保存，否则不会写入其他任何东西。
+除非你保存，否则不会写入其他任何东西。投稿用图对话框的选择、助手的文字大小和报告语言与其他
+设置一起保存在设置存储中。
 
 \chapter{故障排除}\label{app:trouble}
 \begin{description}
@@ -1307,15 +1434,15 @@ Chronos-2 权重                 & Hugging Face 缓存 \\
         （多个单元）应放到 SCM 工作室。
   \item[模型的评估结论为红色] 预测变量解释不了目标。检查气象是否已勾选、与目标的时间基准
         是否一致，延长预算，或加入估计器。用差的模型归一化，得到的不过是观测序列而已。
-  \item[某个气象列没有被勾选] 只有第~\ref{sec:columns}~节中的名字会被识别；其他的请在第 1 步
-        和第 2 步中手动勾选。
+  \item[某个气象列没有被勾选] 只有第~\ref{sec:columns}~节中的名字会被识别；其他的请在\tab{数据}
+        页和\tab{归一化}页上手动勾选。
   \item[Exact Shapley values over $k$ features need $2^k$ normalisations] 用 Shapley 分解
         超过十个变量：请给出分组，或改用顺序归因。
-  \item[“every meteorological model feature must be in exactly one group”] 分组必须覆盖训练
-        用到的每个气象预测变量，且每个只出现一次；提示信息会列出缺少的那些。
+  \item[“……不在训练用到的变量之中”] 某个分组（来自读入的配置）列出了模型没有用来训练的
+        变量；提示信息会指出它。
   \item[“'rdata' is required but not installed”] \emph{查找站点}用 \code{rdata} 读取英国
         档案，它属于 \code{data} 扩展：\code{pip install "normet[data]"}。安装包已包含它。
-  \item[多尺度提示先运行第 2 步] 它要与第 2 步的序列求差。
+  \item[多尺度提示先运行归一化] 它要与归一化序列求差。
   \item[某个多尺度频带被跳过] 它的宽度使记录上的窗口少于两个；请调小。
   \item[滚动和 PDP 被禁用] 它们需要 AutoML 模型；Chronos-2 后端没有可供改变的响应面。
   \item[Chronos-2 呈灰色] 安装 \code{normet[foundation]}（微调还需 \code{normet[finetune]}）。
@@ -1329,6 +1456,9 @@ Chronos-2 权重                 & Hugging Face 缓存 \\
   \item[SCM：没有有效的伪干预日期] 干预后时段必须能放在真实干预日期之前，且其前有
         \emph{最短干预前时段}步；调小\emph{最短干预前时段}或\emph{安慰剂间隔}，或把干预
         日期往后移。
+  \item[通知要求先做某一步] 它说明缺什么，并把那一步放在按钮上；那一步完成后它会自行消失。
+  \item[窗口在结果保存之前关闭了] \tab{文件 $\rightarrow$ 重新打开上次会话}可以恢复最后一步
+        之后的会话。
   \item[参数面板不见了] 它被收起了：点击操作栏上的\emph{展开面板}，或按 Ctrl+B。
   \item[任务运行太久] \emph{取消}立刻释放窗口；计算在后台跑完，结果被丢弃。减少抽样次数、
         预算或分解的变量数。

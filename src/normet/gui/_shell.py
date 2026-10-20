@@ -12,7 +12,7 @@ import logging
 import os
 
 from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QActionGroup, QDesktopServices
+from PySide6.QtGui import QActionGroup, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QDockWidget,
@@ -38,28 +38,111 @@ from .welcome import Welcome
 from .workers import QtLogHandler
 
 
+def report_language_choice() -> str:
+    """File -> Report Language as chosen: "window" (the default), "en" or "zh"."""
+    from PySide6.QtCore import QSettings
+
+    c = str(QSettings("apai-sys", "normet-gui").value("report_language", "window"))
+    return c if c in ("window", "en", "zh") else "window"
+
+
+def set_report_language(choice: str) -> None:
+    from PySide6.QtCore import QSettings
+
+    QSettings("apai-sys", "normet-gui").setValue("report_language", choice)
+
+
+def report_language() -> str:
+    """The language a report is written in now: the choice, else the window's."""
+    choice = report_language_choice()
+    if choice != "window":
+        return choice
+    from . import uilang
+
+    return uilang.language()
+
+
+def _menu_actions(menu) -> list:  # noqa: ANN001
+    """A menu's actions, its submenus' included."""
+    out = []
+    for act in menu.actions():
+        try:
+            sub = act.menu()
+        except RuntimeError:  # an action a rebuilt menu (Open Recent) has let go
+            continue
+        if sub is not None:
+            out += _menu_actions(sub)
+        elif not act.isSeparator():
+            out.append(act)
+    return out
+
+
+#: The status bar's lights: (what has a result, its name).
+STEP_LIGHTS = (
+    ("data", "Data"),
+    ("model", "Model"),
+    ("normalise", "Normalised"),
+    ("decompose", "Decomposed"),
+    ("rolling", "Rolling"),
+    ("multiscale", "Multi-scale"),
+    ("pdp", "PDP"),
+)
+LIGHT_ON, LIGHT_OFF = "#34c759", "#aeaeb2"
+
+
 class ShellMixin(QMainWindow):
     def _build_menu(self) -> None:
         mb = self.menuBar()
 
         fm = mb.addMenu("&File")
-        act = fm.addAction("&Open CSV…", self._open_csv)
+        act = fm.addAction("&Open Data…", self._open_csv)
         act.setShortcut("Ctrl+O")
-        fm.addAction("Load &Example Data", self.load_example)
+        # The examples, each set up as its source sets it up (._examples), and the SCM
+        # Studio's own -- as cume lists its own under File → Load Example.
+        from ._examples import EXAMPLES
+
+        ex_menu = fm.addMenu("Load &Example")
+        for ex in EXAMPLES.values():
+            if ex.key == "synthetic":
+                ex_menu.addSeparator()
+            act = ex_menu.addAction(ex.title, lambda key=ex.key: self.load_example(key))
+            act.setToolTip(ex.description)
+        ex_menu.addSeparator()
+        act = ex_menu.addAction("Synthetic control panel (SCM Studio)", self.open_scm_example)
+        act.setToolTip("Opens the SCM Studio with its example panel loaded.")
+        ex_menu.setToolTipsVisible(True)
         act = fm.addAction("Get &UK Data (AQ networks + met)…", self.open_data_studio)
         act.setShortcut("Ctrl+D")
         self.recent_menu = fm.addMenu("Open &Recent")
         self._rebuild_recent_menu()
         fm.addSeparator()
+        act = fm.addAction("&Save Results…", self.save_results)
+        act.setShortcut("Ctrl+S")
+        fm.addAction("&Load Results…", lambda: self.load_results())
+        fm.addAction("Reopen &Last Session", self.reopen_last_session)
+        fm.addAction("Load Session S&cript…", lambda: self.load_session_script())
+        fm.addSeparator()
+        fm.addAction("&Methods Paragraph…", self.show_methods_paragraph)
         self._export_action = fm.addAction("&Export Current Result…", self._export_current)
         self._export_action.setShortcut("Ctrl+E")
         self._export_action.setEnabled(False)
         self._report_action = fm.addAction("Export &HTML Report…", self._export_html)
+        # The report's language: the window's unless chosen (kept between sessions).
+        rl = fm.addMenu("Report &Language")
+        group = QActionGroup(self)
+        kept = report_language_choice()
+        for code, label in (("window", "As the Window"), ("en", "English"), ("zh", "中文")):
+            act = rl.addAction(label)
+            act.setCheckable(True)
+            act.setChecked(code == kept)
+            act.triggered.connect(lambda _checked=False, c=code: set_report_language(c))
+            group.addAction(act)
         self._report_action.setEnabled(False)
         fm.addAction("Save Session as &Script…", self.save_script)
         fm.addSeparator()
         fm.addAction("Save Con&fig…", self.save_config)
         fm.addAction("Load Confi&g…", self.load_config)
+        fm.addAction("Run &History…", self.show_history)
         fm.addSeparator()
         act = fm.addAction("&Quit", self.close)
         act.setShortcut("Ctrl+Q")
@@ -76,12 +159,9 @@ class ShellMixin(QMainWindow):
         vm.addSeparator()
         act = vm.addAction("Collapse / Expand &Panel", lambda: self.toggle_panel())
         act.setShortcut("Ctrl+B")
-        vm.addAction("Run &History…", self.show_history)
         vm.addSeparator()
-        vm.addAction(self._log_dock.toggleViewAction())
-        act = self._command_dock.toggleViewAction()
-        act.setText("Command &Log")
-        vm.addAction(act)
+        vm.addAction("&Log", lambda: self.show_log_page(0))
+        vm.addAction("Command &Log", lambda: self.show_log_page(1))
         act = self.assistant.toggleViewAction()
         act.setText("&Assistant")
         act.setShortcut("Ctrl+Shift+A")
@@ -112,14 +192,30 @@ class ShellMixin(QMainWindow):
         am = mb.addMenu("&Analysis")
         act = am.addAction("Synthetic Control (SCM) Studio…", self.open_scm_studio)
         act.setShortcut("Ctrl+Shift+S")
+        am.addAction("&Polar Plot…", self.open_polar_plot)
 
         wm = mb.addMenu("&Window")
         wm.addAction("Minimize", self.showMinimized).setShortcut("Ctrl+M")
         wm.addAction("Zoom", self.showMaximized)
 
         hm = mb.addMenu("&Help")
+        act = hm.addAction("&User Manual", self.open_manual)
+        act.setShortcut("F1")
+        hm.addAction("&Keyboard Shortcuts…", self.show_shortcuts)
         hm.addAction("Documentation", lambda: QDesktopServices.openUrl(QUrl(DOCS_URL)))
         hm.addAction("&About Normet", self._about)
+
+    def notify(
+        self,
+        text: str,
+        *,
+        key: str | None = None,
+        actions: tuple = (),
+        kind: str = "info",
+    ) -> None:
+        """A notice above the results (.notices): what wants attention, with the step
+        that answers it on a button -- where a dialog would stop the window."""
+        self.notices.notify(key or text, text, actions, kind)
 
     def show_command_palette(self) -> None:
         """Every menu command and every tab, found by typing (Ctrl+K)."""
@@ -140,11 +236,19 @@ class ShellMixin(QMainWindow):
         rv = QVBoxLayout(right)
         rv.setContentsMargins(0, 4, 4, 0)
         rv.addWidget(self._build_action_bar())
+        from .notices import NoticeStack
+
+        # What wants attention, above the results: a step to take first, with its button.
+        self.notices = NoticeStack()
+        rv.addWidget(self.notices)
         rv.addWidget(self._build_tabs(), 1)
         splitter.addWidget(right)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([370, 1010])
+        # The panel opens as wide as its pages need (StepPanel.least_width), so it meets
+        # the results with no gap; dragged wider, it widens with the handle.
+        splitter.setCollapsible(0, False)
+        splitter.setSizes([self.param_panel.least_width, 1010])
         self.setCentralWidget(splitter)
 
     def _build_tabs(self) -> QTabWidget:
@@ -170,7 +274,7 @@ class ShellMixin(QMainWindow):
         outer.addWidget(self._data_parts, 1)
         dl = QVBoxLayout(self._data_parts)
         dl.setContentsMargins(0, 0, 0, 0)
-        self.data_summary = QLabel("Open a CSV (or load the example) to begin.")
+        self.data_summary = QLabel("Open data, or load an example from the File menu, to begin.")
         self.data_summary.setWordWrap(True)
         dl.addWidget(self.data_summary)
         self.data_preview = CanvasTab("The target series preview appears here once data is loaded.")
@@ -182,27 +286,27 @@ class ShellMixin(QMainWindow):
         dl.addWidget(self.table_view, 1)
         self.tabs.addTab(data_tab, "Data")
 
-        self.tab_model = CanvasTab("Train a model (Step 1) to see its quality here.")
+        self.tab_model = CanvasTab("Train a model to see its quality here.")
         self.tabs.addTab(self.tab_model, "Model")
         self.tab_norm = CanvasTab(
-            "Run Step 2 to see observed vs. meteorologically normalised series."
+            "Run the normalisation to see observed vs. meteorologically normalised series."
         )
         self.tabs.addTab(self.tab_norm, "Normalise")
         self.tab_decom = CanvasTab(
-            "Run Step 3 to see the decomposition — emission splits the "
+            "Run a decomposition to see it here — emission splits the "
             "normalised series into time scales; meteorology splits "
             "observed − normalised by met variable."
         )
         self.tabs.addTab(self.tab_decom, "Decompose")
-        self.tab_roll = CanvasTab("Run Step 4 to see the rolling normalisation.")
+        self.tab_roll = CanvasTab("Run the rolling normalisation to see it here.")
         self.tabs.addTab(self.tab_roll, "Rolling")
         self.tab_multiscale = CanvasTab(
-            "Run Step 2 (Normalise) then Multi-scale decomposition to see "
+            "Run the normalisation, then Multi-scale decomposition, to see "
             "how meteorological residuals split across fast/meso/slow "
             "timescales."
         )
         self.tabs.addTab(self.tab_multiscale, "Multi-scale")
-        self.tab_pdp = CanvasTab("Run Step 5 to see partial-dependence curves.")
+        self.tab_pdp = CanvasTab("Compute PDP to see partial-dependence curves.")
         self.tabs.addTab(self.tab_pdp, "PDP")
         self._sync_welcome()
         return self.tabs
@@ -216,19 +320,37 @@ class ShellMixin(QMainWindow):
         self._data_parts.setVisible(not empty)
 
     def _build_log_dock(self) -> None:
+        """The log and the command log: one dock at the foot, a page each, without a title
+        bar of its own -- its two tabs are on the status bar's line (``_log_tabs``)."""
+        from PySide6.QtWidgets import QStackedWidget, QTabBar
+
         dock = QDockWidget("Log", self)
+        dock.setObjectName("logDock")
         dock.setFeatures(
             QDockWidget.DockWidgetFeature.DockWidgetMovable
             | QDockWidget.DockWidgetFeature.DockWidgetFloatable
             | QDockWidget.DockWidgetFeature.DockWidgetClosable
         )
+        dock.setTitleBarWidget(QWidget())  # the tabs name it, on the status bar
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(5_000)
-        dock.setWidget(self.log_view)
-        dock.setMaximumHeight(160)
+        self._log_stack = QStackedWidget()
+        self._log_stack.addWidget(self.log_view)
+        dock.setWidget(self._log_stack)
+        dock.setMaximumHeight(180)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, dock)
         self._log_dock = dock
+        tabs = QTabBar()
+        tabs.setDocumentMode(True)
+        tabs.setDrawBase(False)
+        tabs.setExpanding(False)
+        tabs.setStyleSheet("QTabBar::tab { padding: 2px 10px; }")
+        tabs.addTab("Log")
+        tabs.addTab("Command Log")
+        tabs.setToolTip("Show the log or the command log; click the open one to fold it away.")
+        tabs.tabBarClicked.connect(self._log_tab_clicked)
+        self._log_tabs = tabs
 
         handler = QtLogHandler()
         handler.message.connect(self.log_view.appendPlainText)
@@ -242,8 +364,6 @@ class ShellMixin(QMainWindow):
         """View → Command Log: the session as the normet calls that repeat it."""
         from PySide6.QtGui import QFontDatabase
 
-        dock = QDockWidget("Command Log", self)
-        dock.setObjectName("commandLogDock")
         body = QWidget()
         v = QVBoxLayout(body)
         v.setContentsMargins(4, 4, 4, 4)
@@ -264,12 +384,23 @@ class ShellMixin(QMainWindow):
             row.addWidget(b)
         row.addStretch(1)
         v.addLayout(row)
-        dock.setWidget(body)
-        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, dock)
-        self.tabifyDockWidget(self._log_dock, dock)
-        self._log_dock.raise_()
-        self._command_dock = dock
+        self._log_stack.addWidget(body)
         self._refresh_command_log()
+
+    def show_log_page(self, index: int) -> None:
+        """The log (0) or the command log (1) in view, the dock opened if folded."""
+        self._log_stack.setCurrentIndex(index)
+        self._log_tabs.setCurrentIndex(index)
+        self._log_dock.show()
+
+    def _log_tab_clicked(self, index: int) -> None:
+        """A tab clicked: its page in view -- or, the page already open, the dock folded."""
+        if index < 0:
+            return
+        if self._log_dock.isVisible() and self._log_stack.currentIndex() == index:
+            self._log_dock.hide()
+        else:
+            self.show_log_page(index)
 
     def _refresh_command_log(self) -> None:
         self.command_view.setPlainText(self.command_log.text())
@@ -325,8 +456,35 @@ class ShellMixin(QMainWindow):
             "discarded when the background computation eventually finishes."
         )
         self.cancel_btn.clicked.connect(self._abandon_task)
+        # How far the analysis has come, one light per step (as cume's status bar).
+        self._step_lights: dict[str, QLabel] = {}
+        lights = QWidget()
+        row = QHBoxLayout(lights)
+        row.setContentsMargins(0, 0, 6, 0)
+        row.setSpacing(8)
+        for key, _name in STEP_LIGHTS:
+            lbl = QLabel()
+            lbl.setTextFormat(Qt.TextFormat.RichText)
+            row.addWidget(lbl)
+            self._step_lights[key] = lbl
+        self.statusBar().addPermanentWidget(self._log_tabs)
+        self.statusBar().addPermanentWidget(lights)
         self.statusBar().addPermanentWidget(self.cancel_btn)
         self.statusBar().addPermanentWidget(self.progress)
+        self._update_step_lights()
+
+    def _update_step_lights(self) -> None:
+        """Each step's light: green once it has a result, grey until then."""
+        done = {
+            "data": self.df_raw is not None,
+            "model": self.model is not None,
+            **{key: key in self.results for key, _ in STEP_LIGHTS[2:]},
+        }
+        for key, name in STEP_LIGHTS:
+            colour = LIGHT_ON if done[key] else LIGHT_OFF
+            lbl = self._step_lights[key]
+            lbl.setText(f'<span style="color:{colour}">●</span> {name}')
+            lbl.setToolTip(f"{name}: {'done' if done[key] else 'not run yet'}")
 
     def _rebuild_recent_menu(self) -> None:
         self.recent_menu.clear()
@@ -347,6 +505,47 @@ class ShellMixin(QMainWindow):
     def _clear_recent(self) -> None:
         _settings.clear_recent()
         self._rebuild_recent_menu()
+
+    def open_manual(self) -> None:
+        """Help -> User Manual: the PDF in the window's language (.manual)."""
+        from . import uilang
+        from .manual import manual_location
+
+        QDesktopServices.openUrl(manual_location(uilang.language()))
+
+    def show_shortcuts(self) -> None:
+        """Help -> Keyboard Shortcuts: every command with a shortcut, read from the menus."""
+        from PySide6.QtWidgets import QDialog, QTableWidget, QTableWidgetItem
+
+        rows = []
+        for top in self.menuBar().actions():
+            menu = top.menu()
+            if menu is None:
+                continue
+            for act in _menu_actions(menu):
+                try:
+                    key = act.shortcut().toString(QKeySequence.SequenceFormat.NativeText)
+                    name = act.text().replace("&", "")
+                except RuntimeError:  # an action a rebuilt menu (Open Recent) has let go
+                    continue
+                if key:
+                    rows.append((top.text().replace("&", ""), name, key))
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Keyboard shortcuts")
+        dlg.resize(520, 440)
+        lay = QVBoxLayout(dlg)
+        table = QTableWidget(len(rows), 3)
+        table.setHorizontalHeaderLabels(["Menu", "Command", "Shortcut"])
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.verticalHeader().setVisible(False)
+        for i, row in enumerate(rows):
+            for j, value in enumerate(row):
+                table.setItem(i, j, QTableWidgetItem(value))
+        table.resizeColumnsToContents()
+        table.horizontalHeader().setStretchLastSection(True)
+        lay.addWidget(table)
+        self._shortcuts_dialog = dlg
+        dlg.open()
 
     def _about(self) -> None:
         import normet
@@ -399,9 +598,10 @@ class ShellMixin(QMainWindow):
             "back-trajectory (tdump) output, and join them onto this data."
         )
         self.transport_btn.clicked.connect(self.open_transport_studio)
+        # The studios side by side, then what is done with a result.
         h.addWidget(self.data_btn)
         h.addWidget(self.transport_btn)
+        h.addWidget(self.scm_btn)
         h.addWidget(self.exp_csv)
         h.addWidget(self.exp_html)
-        h.addWidget(self.scm_btn)
         return bar

@@ -461,7 +461,14 @@ def _build_cli() -> Any:
         help="Output HTML or Markdown file path (.html or .md).",
     )
     @click.option("--title", default=None, help="Custom report title.")
-    def report_cmd(run_path: Path, out_path: Path, title: str | None) -> None:
+    @click.option(
+        "--lang",
+        type=click.Choice(["en", "zh"]),
+        default="en",
+        show_default=True,
+        help="The HTML report's language: its headings, labels and figure (zh: Chinese).",
+    )
+    def report_cmd(run_path: Path, out_path: Path, title: str | None, lang: str) -> None:
         from . import load_run
         from .report import generate_html, report_to_markdown
 
@@ -470,7 +477,7 @@ def _build_cli() -> Any:
         if out_path.suffix.lower() == ".md":
             path = report_to_markdown(run, out_path, title=title)
         else:
-            path = generate_html(run, out_path, title=title)
+            path = generate_html(run, out_path, title=title, lang=lang)
         click.echo(f"[report] wrote {path}")
 
     # ---- info ----

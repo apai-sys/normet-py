@@ -31,6 +31,8 @@ __all__ = [
     "normalise_plot",
     "plot_bayesian_scm",
     "time_series_plot",
+    "cycle_profiles",
+    "profile_axes",
 ]
 
 
@@ -141,9 +143,15 @@ def pdp_grid(
     figsize_per: tuple[float, float] = (3.2, 2.2),
     title: str | None = None,
     ylabel: str | None = "Partial dependence",
+    data: pd.DataFrame | None = None,
 ) -> Any:
     """
     Faceted grid of partial-dependence curves from :func:`normet.pdp`.
+
+    Where ``data`` (the table the model was trained on) is given, each panel marks the
+    variable's deciles along its x axis, as scikit-learn's display does: a curve where
+    the data are few -- its ends -- is read with that in mind. A variable of a few whole
+    values (an hour, a weekday) is drawn as steps with a point at each value.
 
     Parameters
     ----------
@@ -160,6 +168,8 @@ def pdp_grid(
         A title over the grid.
     ylabel : str, optional
         The prediction's label, once, beside the grid.
+    data : pandas.DataFrame, optional
+        The training table, for each variable's deciles.
 
     Returns
     -------
@@ -189,13 +199,31 @@ def pdp_grid(
     for k, var in enumerate(variables):
         ax = axes[k // cols, k % cols]
         sub = pdp_df[pdp_df["variable"] == var].sort_values("value")
+        x = pd.to_numeric(sub["value"], errors="coerce").to_numpy(dtype=float)
+        # A few whole values -- an hour, a weekday: steps, a point on each.
+        discrete = (
+            len(x) <= 31 and bool(np.all(np.isfinite(x))) and bool(np.allclose(x, np.round(x)))
+        )
+        step = "steps-mid" if discrete else "default"
         if "pdp_std" in sub.columns and sub["pdp_std"].notna().any():
             lo = sub["pdp_mean"] - sub["pdp_std"]
             hi = sub["pdp_mean"] + sub["pdp_std"]
-            ax.fill_between(sub["value"], lo, hi, color=S.COMPONENT, alpha=0.15, lw=0)
-        ax.plot(sub["value"], sub["pdp_mean"], lw=1.4, color=S.COMPONENT)
+            ax.fill_between(
+                x, lo, hi, color=S.COMPONENT, alpha=0.15, lw=0, step="mid" if discrete else None
+            )
+        ax.plot(
+            x,
+            sub["pdp_mean"],
+            lw=1.4,
+            color=S.COMPONENT,
+            drawstyle=step,
+            marker="o" if discrete else None,
+            ms=2.2,
+        )
+        if data is not None and var in data.columns:
+            _decile_rug(ax, data[var])
         ax.set_xlabel(str(var))
-        ax.margins(x=0)
+        ax.margins(x=0.02 if discrete else 0)
         S.grid(ax)
 
     # Hide unused axes
@@ -207,6 +235,26 @@ def pdp_grid(
     if title:
         fig.suptitle(title)
     return fig
+
+
+def _decile_rug(ax: Any, values: pd.Series) -> None:
+    """The variable's deciles as short ticks along the bottom of ``ax`` -- where the
+    data lie, so a curve where they are few is read with that in mind."""
+    v = pd.to_numeric(values, errors="coerce").dropna()
+    if v.empty:
+        return
+    deciles = np.unique(np.percentile(v, np.arange(10, 100, 10)))
+    ax.plot(
+        deciles,
+        np.zeros_like(deciles),
+        "|",
+        transform=ax.get_xaxis_transform(),
+        color=S.INK,
+        ms=6,
+        mew=0.7,
+        clip_on=False,
+        zorder=3,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -426,31 +474,25 @@ def normalise_plot(
     if ax is None:
         _, ax = plt.subplots(figsize=(8, 3), layout="constrained")
 
-    # A dense record (hourly over months) in thin lines; a short or averaged one fuller.
+    # A dense record (hourly over months) in thin lines; a short or averaged one fuller;
+    # either broken where the record has a gap.
     dense = len(df) > 1500
-    ax.plot(
+    S.line(
+        ax,
         df.index,
         df[observed_col],
         color=S.OBSERVED,
-        lw=0.5 if dense else 1.0,
         alpha=0.55 if dense else 0.8,
         label="Observed",
     )
     if ci_low and ci_high and ci_low in df.columns and ci_high in df.columns:
-        ax.fill_between(
-            df.index,
-            df[ci_low],
-            df[ci_high],
-            color=S.MODELLED,
-            alpha=0.18,
-            lw=0,
-            label="Uncertainty band",
-        )
-    ax.plot(
+        S.band(ax, df.index, df[ci_low], df[ci_high], color=S.MODELLED, label="Uncertainty band")
+    S.line(
+        ax,
         df.index,
         df[normalised_col],
+        emphasis=True,
         color=S.MODELLED,
-        lw=0.8 if dense else 1.4,
         label="Normalised (deweathered)",
     )
 
@@ -627,22 +669,15 @@ def time_series_plot(
         _, ax = plt.subplots(figsize=(8, 3), layout="constrained")
 
     if ci_low and ci_high and ci_low in df_plot.columns and ci_high in df_plot.columns:
-        ax.fill_between(
+        S.band(
+            ax,
             df_plot.index,
             df_plot[ci_low],
             df_plot[ci_high],
             color=color,
-            alpha=0.18,
-            lw=0,
             label="Uncertainty band",
         )
-    ax.plot(
-        df_plot.index,
-        df_plot[target],
-        color=color,
-        lw=0.6 if len(df_plot) > 1500 else 1.2,
-        label=S.formula(target),
-    )
+    S.line(ax, df_plot.index, df_plot[target], color=color, label=S.formula(target))
 
     ax.set_title(title or f"Time series of {S.formula(target)}")
     ax.set_ylabel(ylabel or S.formula(target))
@@ -652,3 +687,169 @@ def time_series_plot(
     S.grid(ax)
     S.legend(ax, loc="upper right")
     return ax
+
+
+# ---------------------------------------------------------------------------
+# Diurnal, weekly and seasonal profiles (openair's timeVariation)
+# ---------------------------------------------------------------------------
+
+#: The cycles a record can be averaged over: (name, how a timestamp is binned, the
+#: bins' tick labels, the axis label).
+CYCLES: dict[str, tuple[str, list[int], list[str] | None, str]] = {
+    "hour": ("hour", list(range(24)), None, "Hour of day"),
+    "weekday": (
+        "dayofweek",
+        list(range(7)),
+        ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+        "Day of week",
+    ),
+    "month": (
+        "month",
+        list(range(1, 13)),
+        ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
+        "Month",
+    ),
+}
+
+
+def usable_cycles(index: Any) -> list[str]:
+    """The cycles a record of this time index can show: the hour of day only when it
+    is finer than daily, the day of the week when finer than weekly, the month when it
+    spans two months or more."""
+    if not isinstance(index, pd.DatetimeIndex) or len(index) < 3:
+        return []
+    idx = index.sort_values()
+    step = float(np.median(np.diff(idx.asi8))) / 1e9
+    span = float((idx[-1] - idx[0]).total_seconds())
+    out = []
+    if step < 86400 * 0.99:
+        out.append("hour")
+    if step < 7 * 86400 * 0.99:
+        out.append("weekday")
+    if span >= 2 * 30 * 86400:
+        out.append("month")
+    return out
+
+
+def profile_axes(
+    ax: Any,
+    series: pd.Series,
+    cycle: str,
+    *,
+    color: str = S.OBSERVED,
+    label: str | None = None,
+    band: str = "ci",
+    emphasis: bool = False,
+) -> pd.DataFrame:
+    """One series' mean over a cycle (``hour``, ``weekday`` or ``month``) on ``ax``,
+    with a band: ``ci`` the mean's 95 % confidence interval, ``iqr`` the 25th-75th
+    percentiles, or ``none``. Returns the profile drawn (mean, low, high per bin)."""
+    attr, bins, names, xlabel = CYCLES[cycle]
+    s = pd.Series(np.asarray(series, dtype=float), index=series.index).dropna()
+    key = getattr(s.index, attr)
+    g = s.groupby(key)
+    prof = pd.DataFrame({"mean": g.mean(), "n": g.size()})
+    if band == "iqr":
+        prof["low"], prof["high"] = g.quantile(0.25), g.quantile(0.75)
+    elif band == "ci":
+        se = g.std() / np.sqrt(prof["n"].clip(lower=1))
+        prof["low"], prof["high"] = prof["mean"] - 1.96 * se, prof["mean"] + 1.96 * se
+    prof = prof.reindex(bins)
+    x = np.asarray(bins)
+    if band in ("ci", "iqr"):
+        ax.fill_between(x, prof["low"], prof["high"], color=color, alpha=0.18, lw=0)
+    ax.plot(
+        x,
+        prof["mean"],
+        color=color,
+        lw=1.4 if emphasis else 1.1,
+        marker="o",
+        ms=2.2,
+        label=label,
+    )
+    ax.set_xlabel(xlabel)
+    if cycle == "weekday" and names is not None:
+        ax.set_xticks(x, names)
+    elif cycle == "month":
+        ax.set_xticks(x, [str(m) for m in bins])  # 1-12: read alike in any language
+    else:
+        ax.set_xticks([0, 6, 12, 18, 23])
+    ax.set_xlim(x[0] - 0.4, x[-1] + 0.4)
+    S.grid(ax)
+    return prof
+
+
+@styled
+def cycle_profiles(
+    df: pd.DataFrame,
+    columns: Iterable[str],
+    *,
+    labels: Iterable[str] | None = None,
+    colors: Iterable[str] | None = None,
+    cycles: Iterable[str] | None = None,
+    band: str = "ci",
+    ylabel: str | None = None,
+    axes: Any | None = None,
+) -> Any:
+    """The mean of each column over the hour of the day, the day of the week and the
+    month -- a record's diurnal, weekly and seasonal cycles side by side, as openair's
+    ``timeVariation`` draws them -- with each mean's 95 % confidence interval (``band``:
+    ``ci``, ``iqr`` or ``none``).
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Indexed by time (or with a ``date`` column).
+    columns : iterable of str
+        The series to average, drawn in ``colors`` (the style's palette by default).
+    labels : iterable of str, optional
+        Their legend entries (the column names by default).
+    cycles : iterable of str, optional
+        Which of ``hour``, ``weekday``, ``month`` to draw; by default those the record
+        can show (:func:`usable_cycles`).
+    ylabel : str, optional
+        The left panel's y label.
+    axes : sequence of Axes, optional
+        Draw into these, one per cycle; a new figure otherwise.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+    """
+    import matplotlib.pyplot as plt
+
+    d = df.set_index(pd.to_datetime(df["date"])) if "date" in df.columns else df
+    cols = list(columns)
+    names = list(labels) if labels is not None else cols
+    cs = list(colors) if colors is not None else S.PALETTE
+    which = list(cycles) if cycles is not None else usable_cycles(d.index)
+    if not which:
+        raise ValueError("No cycle to draw: the record needs a time index.")
+    if axes is None:
+        fig, axes = plt.subplots(
+            1,
+            len(which),
+            figsize=(2.6 * len(which) + 0.4, 2.4),
+            layout="constrained",
+            squeeze=False,
+        )
+        axes = list(axes.ravel())
+    else:
+        axes = list(axes)
+        fig = axes[0].figure
+    for ax, cycle in zip(axes, which, strict=False):
+        for i, (col, name) in enumerate(zip(cols, names, strict=False)):
+            profile_axes(
+                ax,
+                d[col],
+                cycle,
+                color=cs[i % len(cs)],
+                label=name,
+                band=band,
+                emphasis=i == len(cols) - 1,
+            )
+    if ylabel:
+        axes[0].set_ylabel(ylabel)
+    if len(cols) > 1:
+        S.legend(axes[0], loc="best")
+    return fig

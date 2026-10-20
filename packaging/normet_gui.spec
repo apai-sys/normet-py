@@ -43,6 +43,11 @@ hiddenimports += collect_submodules("normet")
 hiddenimports += collect_submodules("matplotlib.backends")
 
 datas = [(os.path.join(SPECPATH, "assets", "normet.png"), "packaging/assets")]  # noqa: F821
+# Help → User Manual opens the manual in the window's language, from the bundle.
+for _book in ("normet_manual.pdf", "normet_manual_zh.pdf"):
+    _path = os.path.join(REPO, "docs", "manual", _book)
+    if os.path.exists(_path):
+        datas.append((_path, "docs/manual"))
 binaries = []
 # flaml/lightgbm are optional AutoML backends but normal enough to ship by
 # default. xgboost is not optional once flaml is: flaml.automl imports it at

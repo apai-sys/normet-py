@@ -155,25 +155,23 @@ class CommandLog:
 
 
 # -- the window's actions, as entries -------------------------------------------------------
-def open_csv(path: str, date_col: str) -> Entry:
-    """A CSV read as the window reads one: its date column parsed and named 'date'."""
-    code = [f"df = pd.read_csv({literal(path)})"]
-    if date_col != "date":
-        code.append(f"df = df.rename(columns={{{literal(date_col)}: 'date'}})")
-    code.append("df['date'] = to_datetime_coerced(df['date'])")
-    return Entry(
-        "Open CSV",
-        "\n".join(code),
-        imports=("import pandas as pd", "from normet.utils._time import to_datetime_coerced"),
-    )
+def open_table(path: str, zone: str | None = None) -> Entry:
+    """A table file read as the window reads one (:func:`normet.io.read_time_series`):
+    its times found, parsed and named 'date', and put on UTC from ``zone``."""
+    call = f"df = read_time_series({literal(path)}"
+    call += f", zone={literal(zone)})" if zone and zone.upper() != "UTC" else ")"
+    return Entry("Open data", call, imports=("from normet.io import read_time_series",))
 
 
-def load_example() -> Entry:
-    return Entry(
-        "Load example data",
-        "df = make_deweather_example()",
-        imports=("from normet.gui._examples import make_deweather_example",),
-    )
+def load_example(example: Any = None) -> Entry:
+    """An example as the window loads one (``._examples.EXAMPLES``); the synthetic site
+    where none is named."""
+    if example is None:
+        from ._examples import EXAMPLES
+
+        example = EXAMPLES["synthetic"]
+    title = "Load example data" if example.key == "synthetic" else f"Load example: {example.title}"
+    return Entry(title, example.code, imports=example.imports)
 
 
 def from_memory(label: str) -> Entry:

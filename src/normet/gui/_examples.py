@@ -1,11 +1,19 @@
-"""Bundled example data for the GUI, generated on the fly.
+"""The example data sets the window offers, and how each is set up (as cume's are).
+
+File → Load Example and the welcome's Examples card list :data:`EXAMPLES`: the normet
+paper's own case studies at London Marylebone Road (MY1), real AURN observations with
+ERA5 meteorology (:mod:`normet.datasets`), each opened with the target and the
+predictors the paper used ticked; and a synthetic site whose signals are known, made on
+the fly. The synthetic control panel has an example of its own, in the SCM Studio.
 
 Both generators are adapted from the tutorial notebooks' synthetic data
-(`notebooks/_synth.py`) so the GUI ships no CSV files: "Load example" is a
-one-click way to try every workflow immediately.
+(`notebooks/_synth.py`).
 """
 
 from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
@@ -159,3 +167,74 @@ def make_scm_example(
         if col not in ("date", "ID"):
             df[col] = df[col].clip(lower=0)
     return df
+
+
+@dataclass(frozen=True)
+class Example:
+    """One example: what it is, how it is read, and the columns it opens with ticked."""
+
+    key: str
+    title: str
+    description: str
+    source: str
+    target: str
+    #: The predictors ticked; None for the window's own choice (the recognised meteorology).
+    features: tuple[str, ...] | None
+    load: Callable[[], pd.DataFrame]
+    #: The lines a session script reads it with, and their imports.
+    code: str
+    imports: tuple[str, ...]
+
+
+def _my1() -> pd.DataFrame:
+    import normet as nm
+
+    return nm.datasets.load_my1()
+
+
+def _my1_pm25() -> pd.DataFrame:
+    import normet as nm
+
+    return nm.datasets.load_my1_pm25()
+
+
+EXAMPLES: dict[str, Example] = {
+    "my1": Example(
+        key="my1",
+        title="London Marylebone Road NO₂ (2020)",
+        description="Hourly NO₂ at a kerbside site with ERA5 meteorology, January to August "
+        "2020: the UK's COVID-19 lockdown falls in it.",
+        source="the normet paper's deweathering case study",
+        target="NO2",
+        # atmos_pres is meteorology under a name the window does not recognise.
+        features=("ws", "wd", "temp", "RH", "atmos_pres", "blh", "tcc", "tp", "ssrd"),
+        load=_my1,
+        code="df = nm.datasets.load_my1()",
+        imports=("import normet as nm",),
+    ),
+    "my1_pm25": Example(
+        key="my1_pm25",
+        title="London Marylebone Road PM2.5 (2020)",
+        description="Hourly PM2.5 at the same site, its own wind and temperature with ERA5's "
+        "other fields, January to August 2020.",
+        source="the normet paper's transport-aware case study",
+        target="pm25",
+        # The site's own ws/wd/temp; ERA5's copies of them (ws_era5, t2m, ...) left out.
+        features=("ws", "wd", "temp", "u10", "v10", "d2m", "blh", "sp", "ssrd", "tcc", "tp"),
+        load=_my1_pm25,
+        code="df = nm.datasets.load_my1_pm25()",
+        imports=("import normet as nm",),
+    ),
+    "synthetic": Example(
+        key="synthetic",
+        title="Synthetic site, one year hourly (normet)",
+        description="A year of hourly PM2.5 with ERA5-style meteorology, its seasonal, "
+        "rush-hour and wind signals known.",
+        source="normet's synthetic generator",
+        target="PM2.5",
+        features=None,
+        load=make_deweather_example,
+        code="df = make_deweather_example()",
+        imports=("from normet.gui._examples import make_deweather_example",),
+    ),
+}

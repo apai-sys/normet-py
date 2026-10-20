@@ -21,6 +21,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -29,14 +30,15 @@ from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import (
     QComboBox,
     QDockWidget,
-    QFrame,
     QHBoxLayout,
     QInputDialog,
     QLabel,
     QLineEdit,
+    QMenu,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
-    QScrollArea,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -45,6 +47,7 @@ from normet.agent import llm, readings
 from normet.agent.mcp_http import ToolServer
 
 from . import assistant_cli
+from .chatview import ChatView
 
 if TYPE_CHECKING:
     from .main_window import MainWindow
@@ -78,6 +81,21 @@ Each message starts with the window as it stands ([Window now: ...]).
 Answer in the language the analyst writes in. The panel shows Markdown; keep it short.
 """
 
+#: What SYSTEM says of a proposal waiting for the analyst, and what full automatic says
+#: instead (system_prompt).
+_ASKED = """\
+  Say what you left out and why. After proposing, stop and let the analyst answer.
+- Train, normalise or decompose only when the analyst has asked or agreed: each takes
+  time (training can take minutes), so say what you start before starting it.
+"""
+_AUTO = """\
+  Say what you left out and why. Full automatic is on: the set-up is applied the moment
+  you propose it, and no one is asked.
+- Work the chain to its end without waiting for a click: look at the data, propose the
+  set-up, train, normalise and decompose, reading each result as it comes (a step returns
+  its reading once it has ended). Say what ran and where it stands.
+"""
+
 #: The models offered: API models by provider:model, then the command-line agents.
 API_MODELS = (
     "anthropic:claude-sonnet-5-5",
@@ -86,9 +104,55 @@ API_MODELS = (
     "deepseek:deepseek-chat",
 )
 
+#: Full automatic (the panel's Auto, kept in the settings): what the Assistant proposes is
+#: applied at once, and a turn is worked to the chain's end (ported from cume's Assistant).
+AUTO_KEY = "assistant/auto"
+#: The model calls one round of tool use may make before the turn is looked at again.
+MAX_TURNS = 25
+#: Full automatic: the times in a row the model is told the chain is unfinished without
+#: the window moving, before its turn is let end; and the nudges a turn takes at most.
+AUTO_STALLS = 2
+AUTO_NUDGES = 8
+#: Full automatic: a failed or empty call to the model tried again this many times in a
+#: turn (after the provider's own retries, normet.agent.llm._post), this long apart, s.
+AUTO_RETRIES = 2
+AUTO_RETRY_WAIT = 20.0
+#: The chain full automatic works, in the window's order (chain_left).
+CHAIN = ("data", "setup", "train", "normalise", "decompose")
+#: What each step left takes, as the nudge says it.
+CHAIN_TEXT = {
+    "wait": "the step under way: wait_for_run",
+    "data": "the data looked at: inspect_data, with the target",
+    "setup": "the target and predictors: propose_setup (applied at once)",
+    "train": "the model: train, and say how well it fits the testing rows",
+    "normalise": "the normalisation: normalise",
+    "decompose": "the decomposition: decompose (method='meteorology' on chronos-2, where "
+    "the emission one is not available)",
+}
+#: How the panel names each step left, in its note.
+CHAIN_WORDS = {
+    "wait": "the run under way",
+    "data": "a look at the data",
+    "setup": "the set-up",
+    "train": "training",
+    "normalise": "the normalisation",
+    "decompose": "the decomposition",
+}
+
 
 def _settings() -> QSettings:
     return QSettings("apai-sys", "normet-gui")
+
+
+def auto_on() -> bool:
+    """Full automatic, as the panel's Auto last set it."""
+    return bool(_settings().value(AUTO_KEY, False, type=bool))
+
+
+def system_prompt() -> str:
+    """SYSTEM, with full automatic on what it says of proposals waiting for a click
+    replaced by what happens instead."""
+    return SYSTEM.replace(_ASKED, _AUTO) if auto_on() else SYSTEM
 
 
 # -- keys -------------------------------------------------------------------------------
@@ -177,6 +241,8 @@ class WindowTools:
     def __init__(self, win: MainWindow, dock: AssistantDock) -> None:
         self.win, self.dock = win, dock
         self.stop = threading.Event()
+        #: The tools called without error (full automatic's chain_left reads from it).
+        self.called: set[str] = set()
 
     def _gui(self, fn: Callable[[], Any]) -> Any:
         """*fn* run on the window's thread, its answer (or its exception) brought back."""
@@ -296,6 +362,20 @@ class WindowTools:
 
         return str(self._gui(read))
 
+    def wait_for_run(self, max_wait: float = 600.0) -> str:
+        """Wait for the step the window is running -- one the analyst started, or one
+        before -- to end (at most max_wait seconds), then say how the window stands."""
+        t0 = time.monotonic()
+        while self._gui(lambda: self.win.runner.busy):
+            if time.monotonic() - t0 > float(max_wait):
+                return (
+                    f"still running after {max_wait:.0f} s ({self.win.runner.task_name}); "
+                    "call wait_for_run again"
+                )
+            if self.stop.wait(0.5):
+                return "stopped by the analyst; the window's step carries on"
+        return "nothing is running. The window: " + self.window()
+
     def log(self, lines: int = 40) -> str:
         """The last lines of the window's log: what it ran, warnings and errors."""
         text = str(self._gui(lambda: self.win.log_view.toPlainText()))
@@ -339,7 +419,14 @@ class WindowTools:
             self.dock.pending_resample = resample
             return "Applied" + (f" ({', '.join(unknown)} not in the list)" if unknown else "")
 
-        self.dock.post_card.emit("Proposed set-up", body, apply)
+        if auto_on():
+            said = str(self._gui(apply))
+            self.dock.post_card.emit("Proposed set-up", body, apply, said)
+            return (
+                f"{said} at once (full automatic is on): the panel has the target and "
+                "predictors ticked. Go on with the chain."
+            )
+        self.dock.post_card.emit("Proposed set-up", body, apply, "")
         return "Shown to the analyst as a card with an Apply button. Stop here and let them answer."
 
     # steps
@@ -401,6 +488,7 @@ class WindowTools:
                 self.model_fit,
                 self.normalised,
                 self.decomposition,
+                self.wait_for_run,
                 self.log,
                 self.propose_setup,
                 self.train,
@@ -466,139 +554,44 @@ def state_text(win: MainWindow) -> str:
         parts.append(f"results: {', '.join(made)}")
     if win.runner.busy:
         parts.append(f"running: {win.runner.task_name}")
+    if auto_on():
+        parts.append("the Assistant's full automatic is on: what it proposes is applied at once")
     return "; ".join(parts)
+
+
+def chain_left(win: MainWindow, called: set[str]) -> list[str]:
+    """The steps of full automatic's chain (CHAIN) not yet done, read off the window and
+    the tools the model has called (``called``); "wait" first where a step is under way,
+    and [] where no table is open -- there is nothing to start from."""
+    if win.df_raw is None:
+        return []
+    trained = win.model is not None
+    done = {
+        "data": trained or "inspect_data" in called,
+        "setup": trained or "propose_setup" in called,
+        "train": trained,
+        "normalise": "normalise" in win.results,
+        "decompose": "decompose" in win.results,
+    }
+    left = [s for s in CHAIN if not done[s]]
+    if win.runner.busy:
+        left.insert(0, "wait")
+    return left
+
+
+def nudge_text(left: list[str], state: str) -> str:
+    """What full automatic tells a model that ended its turn with the chain unfinished."""
+    steps = "; ".join(CHAIN_TEXT[s] for s in left)
+    return (
+        "[Full automatic: the analysis is not finished, and no one will answer -- go on. "
+        f"Still to do, in order: {steps}. Window now: {state}. Carry on with the first. "
+        "Where a step cannot be done, say why in a line and go to the next; end once every "
+        "step is done or cannot be.]"
+    )
 
 
 # -- the conversation ---------------------------------------------------------------------
 _MUTED = "color: palette(placeholder-text);"
-
-
-class ChatView(QScrollArea):
-    """The conversation: the analyst's messages on the right, the replies as their
-    Markdown reads, each tool call one quiet line, a proposal a card with Apply."""
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setWidgetResizable(True)
-        self.setFrameShape(QFrame.Shape.NoFrame)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        host = QWidget()
-        self._lay = QVBoxLayout(host)
-        self._lay.setContentsMargins(8, 8, 8, 8)
-        self._lay.setSpacing(8)
-        self._lay.addStretch(1)
-        self.setWidget(host)
-        self._reply: QLabel | None = None
-        self._reply_text = ""
-        self.verticalScrollBar().rangeChanged.connect(
-            lambda _lo, hi: self.verticalScrollBar().setValue(hi)
-        )
-
-    def _add(self, w: QWidget, align: Qt.AlignmentFlag | None = None) -> None:
-        if align is None:
-            self._lay.insertWidget(self._lay.count() - 1, w)
-        else:
-            self._lay.insertWidget(self._lay.count() - 1, w, 0, align)
-
-    def clear(self) -> None:
-        while self._lay.count() > 1:
-            w = self._lay.takeAt(0).widget()
-            if w is not None:
-                w.hide()
-                w.deleteLater()
-        self._reply = None
-
-    @staticmethod
-    def _label(text: str, markdown: bool = False, keep: bool = True) -> QLabel:
-        lbl = QLabel(text)
-        # The analyst's and the model's own words (*keep*): left as written in any
-        # language the window is in (.uilang). A note is the window's own.
-        lbl.setProperty("normetKeepText", keep)
-        lbl.setWordWrap(True)
-        lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        if markdown:
-            lbl.setTextFormat(Qt.TextFormat.MarkdownText)
-            lbl.setOpenExternalLinks(True)
-        else:
-            lbl.setTextFormat(Qt.TextFormat.PlainText)
-        return lbl
-
-    def you(self, text: str) -> None:
-        lbl = self._label(text)
-        lbl.setStyleSheet(
-            "background: palette(alternate-base); border-radius: 10px; padding: 6px 10px;"
-        )
-        # As wide as its words, up to most of the panel: aligned right in the
-        # layout, a wrapped label is otherwise given its narrowest width and cut.
-        most = max(200, int(self.viewport().width() * 0.85))
-        widest = max(
-            lbl.fontMetrics().horizontalAdvance(line) for line in text.splitlines() or [""]
-        )
-        lbl.setFixedWidth(min(most, widest + 24))
-        self._add(lbl, Qt.AlignmentFlag.AlignRight)
-        self._reply = None
-
-    def reply(self, text: str, more: bool = False) -> None:
-        """The model's words: a new reply, or (*more*) added to the one being written."""
-        if not text.strip():
-            return
-        if more and self._reply is not None:
-            self._reply_text += text
-            self._reply.setText(self._reply_text)
-            return
-        self._reply_text = text
-        self._reply = self._label(text, markdown=True)
-        self._add(self._reply)
-
-    def tool(self, name: str, arguments: dict[str, Any]) -> QLabel:
-        args = ", ".join(f"{k}={v!r}" for k, v in arguments.items())
-        lbl = self._label(f"● {name}({args[:120]}{'…' if len(args) > 120 else ''})")
-        lbl.setStyleSheet(_MUTED + "font-size: 11px;")
-        self._add(lbl)
-        self._reply = None
-        return lbl
-
-    @staticmethod
-    def tool_done(lbl: QLabel, output: str, error: bool) -> None:
-        colour = "#ff3b30" if error else "#34c759"
-        lbl.setText(f"<span style='color:{colour}'>●</span> " + lbl.text()[2:].replace("<", "&lt;"))
-        lbl.setTextFormat(Qt.TextFormat.RichText)
-        lbl.setToolTip(output[:3000])
-
-    def note(self, text: str, error: bool = False) -> None:
-        lbl = self._label(text, keep=False)
-        lbl.setStyleSheet(("color: #ff3b30;" if error else _MUTED) + "font-size: 11px;")
-        self._add(lbl)
-        self._reply = None
-
-    def card(self, title: str, body: str, apply: Callable[[], str]) -> QPushButton:
-        frame = QFrame()
-        frame.setObjectName("proposal")
-        frame.setStyleSheet(
-            "#proposal { border: 1px solid palette(mid); border-radius: 8px; background: palette(base); }"
-        )
-        lay = QVBoxLayout(frame)
-        head = QLabel(title)
-        head.setProperty("normetKeepText", True)  # the model's words
-        head.setStyleSheet("font-weight: 600;")
-        lay.addWidget(head)
-        lay.addWidget(self._label(body, markdown=True))
-        btn = QPushButton("Apply")
-        btn.setStyleSheet("font-weight: 600;")
-
-        def clicked() -> None:
-            try:
-                said = apply()
-            except Exception as exc:  # noqa: BLE001 -- shown on the card
-                said = f"Could not apply: {exc}"
-            btn.setText(said)
-            btn.setEnabled(False)
-
-        btn.clicked.connect(clicked)
-        lay.addWidget(btn, 0, Qt.AlignmentFlag.AlignLeft)
-        self._add(frame)
-        self._reply = None
-        return btn
 
 
 class _Composer(QPlainTextEdit):
@@ -627,27 +620,97 @@ class _ChatThread(QThread):
         super().__init__()
         self.model, self.messages, self.box = model, messages, tools
 
+    def _on_event(self, e: dict[str, Any]) -> None:
+        if e["type"] == "tool" and not e["error"]:
+            self.box.called.add(e["name"])
+        self.event.emit(e)
+
+    def _note(self, text: str) -> None:
+        self.event.emit({"type": "note", "text": text})
+
+    def _left(self) -> list[str]:
+        """Full automatic's steps not yet done (chain_left), read on the window's thread."""
+        return list(self.box._gui(lambda: chain_left(self.box.win, self.box.called)))
+
+    def _again(self, failures: int, wait: float) -> bool:
+        """Full automatic: whether a failed or empty call to the model is made again --
+        after ``wait`` seconds, which the analyst's Stop cuts short."""
+        if not self.auto or failures > AUTO_RETRIES:
+            return False
+        self.box.stop.wait(wait)
+        return not self.box.stop.is_set()
+
     def run(self) -> None:
-        try:
-            llm.converse(
-                self.model,
-                self.box.tools(),
-                SYSTEM,
-                self.messages,
-                on_event=self.event.emit,
-                stop=self.box.stop,
+        """The analyst's message worked to the model's reply. With full automatic on (no
+        one to answer), as cume's Assistant does: a turn the model ends with the chain
+        unfinished (chain_left) is told what is left and goes on, until the window stops
+        moving (AUTO_STALLS) or AUTO_NUDGES nudges; a failed call to the model, or an
+        empty reply, is made again (AUTO_RETRIES)."""
+        self.auto = auto_on()
+        failures = nudges = stalls = 0
+        nudged: list[str] | None = None
+        while True:
+            try:
+                turn = llm.converse(
+                    self.model,
+                    self.box.tools(),
+                    system_prompt(),
+                    self.messages,
+                    max_turns=MAX_TURNS,
+                    on_event=self._on_event,
+                    stop=self.box.stop,
+                )
+            except Exception as exc:  # noqa: BLE001 -- shown in the panel
+                failures += 1
+                if self._again(failures, AUTO_RETRY_WAIT):
+                    self._note(
+                        f"The call to the model failed ({type(exc).__name__}: {exc}); full "
+                        "automatic tries again."
+                    )
+                    continue
+                # Every provider wants the turns to alternate: the model has the last word.
+                if self.messages and self.messages[-1]["role"] != "assistant":
+                    self.messages.append({"role": "assistant", "text": "(failed)", "calls": []})
+                self.failed.emit(f"{type(exc).__name__}: {exc}")
+                return
+            if not self.auto or turn.stopped == "stopped":
+                return
+            last = self.messages[-1] if self.messages else {}
+            if turn.stopped == "answered" and not (last.get("text") or "").strip():
+                failures += 1
+                if self._again(failures, 0.0):
+                    self.messages.append(
+                        {
+                            "role": "user",
+                            "content": "[Your reply was empty. Full automatic: go on with "
+                            "the analysis, a step at a time.]",
+                        }
+                    )
+                    continue
+                return
+            left = self._left() if nudges < AUTO_NUDGES else []
+            if not left:
+                return
+            # Told again only while the window moves: the same steps left at two nudges
+            # running is a model that cannot do them.
+            stalls = stalls + 1 if left == nudged else 0
+            if stalls >= AUTO_STALLS:
+                return
+            nudges += 1
+            nudged = left
+            state = str(self.box._gui(lambda: state_text(self.box.win)))
+            self.messages.append({"role": "user", "content": nudge_text(left, state)})
+            self._note(
+                "Full automatic: not finished, so it goes on -- left: "
+                + ", ".join(CHAIN_WORDS[s] for s in left)
+                + "."
             )
-        except Exception as exc:  # noqa: BLE001 -- shown in the panel
-            # Every provider wants the turns to alternate: the model has the last word.
-            if self.messages and self.messages[-1]["role"] != "assistant":
-                self.messages.append({"role": "assistant", "text": "(failed)", "calls": []})
-            self.failed.emit(f"{type(exc).__name__}: {exc}")
 
 
 class AssistantDock(QDockWidget):
     """The Assistant panel: a model, a conversation, proposals the analyst applies."""
 
-    post_card = Signal(str, str, object)
+    post_card = Signal(str, str, object, str)
     _tool_started = Signal(str, object)
     _tool_ended = Signal(str, str, bool)
 
@@ -691,6 +754,21 @@ class AssistantDock(QDockWidget):
             "Store this provider's API key in the macOS keychain (or for this session)."
         )
         self.key_btn.clicked.connect(self.ask_key)
+        # Full automatic: the button's own part is the switch; its menu says what it does.
+        self.auto_btn = QToolButton()
+        self.auto_btn.setText("Auto")
+        self.auto_btn.setCheckable(True)
+        self.auto_btn.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        self.auto_btn.setToolTip(
+            "Full automatic: the set-up the Assistant proposes is applied at once, and it "
+            "works the analysis through -- data, set-up, training, normalisation, "
+            "decomposition -- without waiting for you."
+        )
+        auto_menu = QMenu(self.auto_btn)
+        auto_menu.addAction("What full automatic does…", self._about_auto)
+        self.auto_btn.setMenu(auto_menu)
+        self.auto_btn.setChecked(auto_on())
+        self.auto_btn.toggled.connect(self._auto_chosen)
         self.new_btn = QPushButton("New")
         self.new_btn.setToolTip("Start a new conversation.")
         self.new_btn.clicked.connect(self.new_conversation)
@@ -708,6 +786,7 @@ class AssistantDock(QDockWidget):
         top.addWidget(self.model_box, 1)
         top.addWidget(self.effort_box)
         top.addWidget(self.key_btn)
+        top.addWidget(self.auto_btn)
         top.addWidget(self.new_btn)
         v.addLayout(top)
         self.view = ChatView()
@@ -829,7 +908,9 @@ class AssistantDock(QDockWidget):
         self._thread.start()
 
     def _on_event(self, e: dict[str, Any]) -> None:
-        if e["type"] == "model":
+        if e["type"] == "note":
+            self.view.note(e["text"])
+        elif e["type"] == "model":
             self.view.reply(unstamp(e.get("text") or ""))
             for c in e.get("calls") or []:
                 self._open_tools.append(self.view.tool(c["name"], c["arguments"]))
@@ -852,6 +933,31 @@ class AssistantDock(QDockWidget):
         self._working(False)
         self._open_tools.clear()
 
+    def _auto_chosen(self, on: bool) -> None:
+        _settings().setValue(AUTO_KEY, bool(on))
+        self.view.note(
+            "Full automatic on: what the Assistant proposes is applied at once, and it works "
+            "the analysis through."
+            if on
+            else "Full automatic off: proposals wait for Apply again."
+        )
+
+    def _about_auto(self) -> None:
+        QMessageBox.information(
+            self,
+            "Full automatic",
+            "With Auto on, the Assistant works without waiting for you:\n\n"
+            "• the target and predictors it proposes are applied at once;\n"
+            "• it goes through the analysis in the window's order -- the data, the set-up, "
+            "training, normalisation, decomposition -- reading each result;\n"
+            "• if it stops with steps left, it is told what is left and goes on (up to 8 "
+            "times; it stops when two reminders in a row change nothing);\n"
+            "• a failed or empty answer from the model is asked again, twice at most.\n\n"
+            "Stop ends it at any time. With an API model all of this applies; a command-line "
+            "agent has the set-up applied at once and works the chain as its own loop "
+            "allows.",
+        )
+
     def stop(self) -> None:
         self.tools.stop.set()
         if self._cli is not None:
@@ -862,6 +968,7 @@ class AssistantDock(QDockWidget):
             return
         self.messages.clear()
         self.pending_resample = []
+        self.tools.called.clear()
         self._close_cli()
         self.view.clear()
 
@@ -871,7 +978,7 @@ class AssistantDock(QDockWidget):
             if self._server is None:
                 self._server = ToolServer(
                     self.tools.tools,
-                    instructions=SYSTEM,
+                    instructions=system_prompt(),
                     on_call=lambda n, a: self._tool_started.emit(n, a),
                     on_result=lambda n, t, err: self._tool_ended.emit(n, t, err),
                 )
@@ -895,7 +1002,7 @@ class AssistantDock(QDockWidget):
             self._retried = False
         self._working(True)
         try:
-            self._cli.send(text, SYSTEM)
+            self._cli.send(text, system_prompt())
         except (OSError, RuntimeError) as exc:
             self.view.note(str(exc), error=True)
             self._idle()
@@ -912,7 +1019,7 @@ class AssistantDock(QDockWidget):
         ):
             self._retried = True
             self.view.note("The agent's stream was interrupted: asking it to continue.")
-            cli.send(assistant_cli.STREAM_INTERRUPTED, SYSTEM)
+            cli.send(assistant_cli.STREAM_INTERRUPTED, system_prompt())
             return
         self._retried = False
         self._idle()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import logging
 import os
+import sys
 
 import numpy as np
 import pandas as pd
@@ -43,6 +44,29 @@ def _restore_normet_logger():
     logger.handlers[:] = handlers
     logger.setLevel(level)
     logger.propagate = propagate
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Delete the windows the GUI tests left open while the QApplication still runs.
+
+    Left to the interpreter's exit, Python's wrappers and Qt's parents freed the same
+    windows in no fixed order: on Linux CI the run passed every test and then aborted
+    ("shared QObject was deleted directly", "corrupted double-linked list"). Closed
+    and deleted here, Qt frees each child before its parent.
+    """
+    if "PySide6.QtWidgets" not in sys.modules:
+        return
+    from PySide6.QtCore import QCoreApplication, QEvent
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    if app is None:
+        return
+    for w in QApplication.topLevelWidgets():
+        w.close()
+        w.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    QCoreApplication.processEvents()
 
 
 @pytest.fixture(scope="session")

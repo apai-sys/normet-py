@@ -37,3 +37,23 @@ def test_the_window_in_chinese():
         proc.stdout[-2000:],
         proc.stderr[-4000:],
     )
+
+
+def test_a_name_does_not_take_the_facts_after_it():
+    """A line of facts joined with " | ": a template's {s} ends at the bar, so each fact is
+    translated -- "Backend: {s0}" once took "lightgbm | features: 9 | rows: 5,793" whole,
+    and the two facts after it stayed English."""
+    from normet.gui import uilang
+
+    line = "Backend: lightgbm   |   features: 9   |   rows: 5,793"
+    assert uilang.tr(line, "zh") == "后端：lightgbm | 特征：9 | 行数：5,793"
+
+
+def test_a_unit_of_one_letter_is_translated():
+    """A spin box's " d" after 14, and a window's "14 d": one letter each, which the
+    two-letter test for text to translate once let through untranslated."""
+    from normet.gui import uilang
+
+    assert uilang.tr(" d", "zh") == " 天" and uilang.tr(" s", "zh") == " 秒"
+    assert uilang.tr("365 d", "zh") == "365 天"
+    assert uilang.tr("x", "zh") == "x"  # a letter the catalogue has no word for
