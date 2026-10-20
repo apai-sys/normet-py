@@ -126,8 +126,9 @@ TEXT_SIZE = RC["axes.labelsize"]
 SMALL_SIZE = 6.0
 
 
-def rc() -> dict[str, Any]:
-    """The style's rcParams."""
+def rc() -> Any:
+    """The style's rcParams, a dict. (Typed Any: matplotlib's newer stubs key rcParams by
+    a Literal of every name, which a dict built from strings cannot be.)"""
     from cycler import cycler
 
     out = dict(RC)
