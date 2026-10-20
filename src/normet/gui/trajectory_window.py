@@ -558,7 +558,7 @@ class TrajectoryWindow(QMainWindow):
         self.tab_features = CanvasTab(
             "Build trajectory features (left) to preview the transport\ndescriptors here."
         )
-        self.tabs.addTab(self.tab_features, "① Features")
+        self.tabs.addTab(self.tab_features, "Features")
         return self.tabs
 
     # ---------------------------------------------------------------- data

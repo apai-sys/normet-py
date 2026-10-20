@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import Ridge
+
+if TYPE_CHECKING:
+    from sklearn.linear_model import Ridge
 
 log = logging.getLogger(__name__)
 
@@ -141,6 +143,8 @@ class HarmonicCounterfactual:
         self.feature_names = list(X.columns)
 
         y = clean_s.values
+        from sklearn.linear_model import Ridge
+
         self.model = Ridge(alpha=self.alpha_ridge, fit_intercept=True)
         self.model.fit(X.values, y)
 

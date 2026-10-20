@@ -212,16 +212,19 @@ class InputsMixin(QMainWindow):
         # A date that did not parse has no place on the axis; with a time zone, one
         # NaT also stops matplotlib converting the whole axis.
         s = s[s.index.notna()]
-        note = ""
-        if len(s) > 20_000:
-            s = s.resample("D").mean()
-            note = " (daily means)"
-        fig, ax = plt.subplots(figsize=(9, 2.4))
-        ax.plot(s.index, s.values, lw=0.7, color="#2c7bb6")
-        ax.set_title(f"{target}{note}", fontsize=10, loc="left")
-        ax.grid(alpha=0.2)
-        fig.tight_layout()
-        self.data_preview.show_figure(fig)
+
+        def render(d: pd.DataFrame):
+            fig, ax = plt.subplots(figsize=(9, 2.4))
+            ax.plot(d.index, d[target].values, lw=0.7, color="#2c7bb6")
+            ax.set_title(target, fontsize=10, loc="left")
+            ax.grid(alpha=0.2)
+            fig.tight_layout()
+            return fig
+
+        # A dense record is first shown as daily means; the selector changes it.
+        self.data_preview.show_timeseries(
+            render, s.to_frame(target), default="Daily" if len(s) > 20_000 else None
+        )
 
     def dragEnterEvent(self, event) -> None:  # noqa: N802
         md = event.mimeData()
