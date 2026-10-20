@@ -245,7 +245,10 @@ class ShellMixin(QMainWindow):
         splitter.addWidget(right)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([370, 1010])
+        # The panel opens as wide as its pages need (StepPanel.least_width), so it meets
+        # the results with no gap; dragged wider, it widens with the handle.
+        splitter.setCollapsible(0, False)
+        splitter.setSizes([self.param_panel.least_width, 1010])
         self.setCentralWidget(splitter)
 
     def _build_tabs(self) -> QTabWidget:
@@ -271,7 +274,7 @@ class ShellMixin(QMainWindow):
         outer.addWidget(self._data_parts, 1)
         dl = QVBoxLayout(self._data_parts)
         dl.setContentsMargins(0, 0, 0, 0)
-        self.data_summary = QLabel("Open a CSV (or load the example) to begin.")
+        self.data_summary = QLabel("Open data, or load an example from the File menu, to begin.")
         self.data_summary.setWordWrap(True)
         dl.addWidget(self.data_summary)
         self.data_preview = CanvasTab("The target series preview appears here once data is loaded.")

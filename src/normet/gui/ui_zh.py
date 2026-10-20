@@ -1216,6 +1216,7 @@ TEXTS.update(
         "Full automatic: not finished, so it goes on -- left: {s0}.": "全自动：尚未完成，继续进行——还剩：{s0}。",
         "The call to the model failed ({s0}: {s1}); full automatic tries again.": "调用模型失败（{s0}：{s1}）；全自动将重试。",
         "Applied": "已应用",
+        "Open data, or load an example from the File menu, to begin.": "打开数据，或从“文件”菜单载入示例，即可开始。",
         "Applied ({s0} not in the list)": "已应用（列表中没有 {s0}）",
         "Proposed set-up": "提议的设定",
     }

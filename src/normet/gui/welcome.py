@@ -15,6 +15,7 @@ from collections.abc import Callable, Sequence
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
+from . import uilang
 from ._widgets import FlowLayout
 
 #: The most recent tables a card lists; File → Open Recent holds them all.
@@ -107,11 +108,13 @@ class Card(QFrame):
         sub = QLabel()
         sub.setStyleSheet("color: palette(placeholder-text); font-size: 11px;")
         sub.setToolTip(line)
-        # One line each, cut short with … where too long, the whole in the tooltip.
+        # One line each, cut short with … where too long, the whole in the tooltip --
+        # translated first, then cut (uilang.set_elided): cut first, the English matched
+        # no translation and stayed English.
         inner = CARD_WIDTH - 28
-        b.setText(b.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, inner))
+        uilang.set_elided(b, text, inner)
         sub.ensurePolished()
-        sub.setText(sub.fontMetrics().elidedText(line, Qt.TextElideMode.ElideRight, inner))
+        uilang.set_elided(sub, line, inner)
         n = self._lay.count() - 1  # before the stretch
         self._lay.insertWidget(n, b)
         self._lay.insertWidget(n + 1, sub)

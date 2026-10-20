@@ -209,7 +209,8 @@ class SCMWindow(QMainWindow):
         splitter.addWidget(right)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([370, 970])
+        splitter.setCollapsible(0, False)
+        splitter.setSizes([self.panel.least_width, 970])  # no gap: see StepPanel.least_width
         self.setCentralWidget(splitter)
 
         self.progress = QProgressBar()
