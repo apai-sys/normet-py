@@ -570,7 +570,7 @@ def test_the_window_stamp_is_not_shown_as_the_reply():
     assert unstamp("No stamp [Window now: here] stays.") == "No stamp [Window now: here] stays."
 
 
-# -- full automatic: the turn worked to the chain's end (ported from cume) ----------------
+# -- full automatic: the turn worked to the chain's end ---------------------------------
 class _Box:
     """WindowTools as _ChatThread sees it: one tool, the window's thread being this one."""
 

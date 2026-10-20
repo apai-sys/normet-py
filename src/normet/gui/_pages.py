@@ -1,5 +1,5 @@
-"""A window's left panel as pages, one per step, chosen from a bar above them (cume's
-design: ``cume_qt`` PANEL_PAGES). The main window and the SCM Studio both use it.
+"""A window's left panel as pages, one per step, chosen from a bar above them. The
+main window and the SCM Studio both use it.
 
 A page holds its boxes; the first box of each goes untitled, the page's tab naming it.
 The panel is as wide as its widest page needs, not a set number: a larger system font
@@ -75,7 +75,7 @@ class StepPanel(QWidget):
             self.bar.minimumSizeHint().width(),
         )
         bar_width = self.scroll.verticalScrollBar().sizeHint().width() or 15
-        #: The width the panel opens at, and the least it is let go to: as cume's, a
+        #: The width the panel opens at, and the least it is let go to: a
         #: minimum the splitter starts at, not a fixed width -- fixed, the splitter's
         #: wider slot was left as a gap between the panel and the results.
         self.least_width = max(need + bar_width + 4, least)

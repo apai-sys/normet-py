@@ -98,7 +98,7 @@ class ShellMixin(QMainWindow):
         act = fm.addAction("&Open Data…", self._open_csv)
         act.setShortcut("Ctrl+O")
         # The examples, each set up as its source sets it up (._examples), and the SCM
-        # Studio's own -- as cume lists its own under File → Load Example.
+        # Studio's own.
         from ._examples import EXAMPLES
 
         ex_menu = fm.addMenu("Load &Example")
@@ -432,7 +432,7 @@ class ShellMixin(QMainWindow):
         self.panel_btn.setText("◀ Collapse Panel" if show else "▶ Expand Panel")
 
     def start_layout(self) -> None:
-        """The layout the window opens in, as cume's does: the parameter panel
+        """The layout the window opens in: the parameter panel
         folded away and the Assistant beside the results. Expand Panel (Ctrl+B)
         brings the panel back; View → Assistant closes the Assistant."""
         self.toggle_panel(False)
@@ -456,7 +456,7 @@ class ShellMixin(QMainWindow):
             "discarded when the background computation eventually finishes."
         )
         self.cancel_btn.clicked.connect(self._abandon_task)
-        # How far the analysis has come, one light per step (as cume's status bar).
+        # How far the analysis has come, one light per step.
         self._step_lights: dict[str, QLabel] = {}
         lights = QWidget()
         row = QHBoxLayout(lights)

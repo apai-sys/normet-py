@@ -1,4 +1,4 @@
-"""The figure for print in the window (normet.gui.printview, after cume's): a tab's figure
+"""The figure for print in the window (normet.gui.printview): a tab's figure
 laid out at a journal's width in its lettering, finished where it stands, saved at its
 size, and given back to its tab as it was."""
 

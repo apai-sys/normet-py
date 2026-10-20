@@ -1,6 +1,6 @@
 """A Model Context Protocol server over HTTP for a list of :class:`~normet.agent.llm.Tool`.
 
-Adapted from the cume app's. The GUI serves the window's tools with it to a
+The GUI serves the window's tools with it to a
 command-line agent (Claude Code, Codex) that brings its own model and loop:
 on 127.0.0.1 only, with a token drawn per server that every request must
 carry, JSON responses and no event stream. The standard library only, so a

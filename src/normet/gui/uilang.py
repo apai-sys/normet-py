@@ -1,7 +1,7 @@
 """The window in the analyst's language: English, or Chinese -- the system's by default,
 View -> Language to choose (kept for the next session).
 
-Ported from cume (cume_qt.uilang). The window is written in English and translated where
+The window is written in English and translated where
 its texts are set -- a label's, a button's, a menu's and its actions', a tab's, a tooltip,
 a box's items, a group's title, a dialog's -- through a catalogue engine (._i18n) and the
 window's catalogue (.ui_zh). What the window's code reads back -- label.text(), combo.currentText(),
@@ -792,7 +792,7 @@ def _wrap_dialog_statics():
     a native file dialog's caption is not a widget of ours). A file dialog is the
     system's panel, its buttons and places in the system's language whatever the
     window's, so its caption is written in the system's language too: one panel, one
-    language (as cume's)."""
+    language."""
     from PySide6.QtWidgets import QFileDialog, QInputDialog
 
     for name in ("information", "warning", "critical", "question", "about"):
@@ -1176,7 +1176,7 @@ def set_choice(c: str):
 
 #: The app's languages (AppleLanguages) an earlier normet wrote to follow the window's
 #: choice: macOS's own panels and menu items now follow the system whatever the window's
-#: language (as cume's do), so these are taken away again. A value the analyst set
+#: language, so these are taken away again. A value the analyst set
 #: (System Settings -> Language & Region -> Applications) is not one of them and stays.
 _MAC_WRITTEN = (("zh-Hans", "en"), ("en", "zh-Hans"))
 

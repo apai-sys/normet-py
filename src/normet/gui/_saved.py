@@ -5,7 +5,7 @@ the command log -- written to one file (``.normet``, joblib) and read back into 
 window as it was: each result is handed to the step's own handler, so its tab, verdict
 and figure are drawn again exactly as the run drew them. After each step the session is
 also kept, off the GUI thread, as ``~/.normet/last_session.normet``, the safety net for a
-window closed or crashed before its results were saved (as cume keeps its last run).
+window closed or crashed before its results were saved.
 
 A Chronos-2 checkpoint is not written: it is the pretrained model, half a gigabyte, and
 is loaded again from its cache with *Load Chronos-2*. A file of this kind is a pickle:

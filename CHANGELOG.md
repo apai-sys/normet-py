@@ -7,7 +7,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ## [Unreleased]
 
 ### Added
-- **GUI: closer to cume's window and figures.**
+- **GUI: window and figures refined.**
   - *Cycles*: `normet.cycle_profiles` (and `plotting.profile_axes`) draws a
     record's mean by hour of day, day of week and month with 95 % confidence
     intervals, as openair's `timeVariation`. The Normalise tab shows observed
@@ -15,7 +15,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
     diurnal and weekly components as cycles beside the stack.
   - *Readable time series*: a sub-daily record of more than 2,000 points opens
     as daily means; every series is drawn broken at a gap (`style.line`,
-    `style.break_at_gaps`, as cume's), time zones kept.
+    `style.break_at_gaps`), time zones kept.
   - *Polar plot* (Analysis → Polar Plot…): a variable by wind direction and
     speed, wind columns found by name or made from u10/v10.
   - *For print* reads the figure against the journal's guide (width, height,
@@ -24,7 +24,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   - *PDP* panels mark each variable's deciles; whole-valued variables are steps.
     The parity plot becomes a hexbin density past 2,000 points, with n, slope
     and bias in its corner.
-  - Hidden tabs draw when shown (`FullWidthCanvas`, cume's), covering the
+  - Hidden tabs draw when shown (`FullWidthCanvas`), covering the
     widget exactly.
   - *Notices* above the results replace "do this first" dialogs, with the step
     on a button; the status bar has a light per step.
@@ -39,12 +39,12 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
     `normet report --lang zh`: the HTML report and its figure in Chinese.
   - *Help → User Manual* (F1) opens the bundled manual in the window's
     language; *Keyboard Shortcuts* lists them from the menus.
-  - The Assistant's conversation (`chatview`, after cume's): colours mixed from
+  - The Assistant's conversation (`chatview`): colours mixed from
     the palette (readable in dark mode), Markdown with shaded code and ruled
     tables, tool calls as one line whose result opens with a click, Ctrl/Cmd ±
     to size the text.
-- **GUI in Chinese** (View → Language: Follow System / English / 中文), ported
-  from cume: every label, button, menu, tab, tooltip and dialog is translated
+- **GUI in Chinese** (View → Language: Follow System / English / 中文): every
+  label, button, menu, tab, tooltip and dialog is translated
   as it is set, figures' texts as they are drawn, while the code still reads
   the English back. Data's own words (column names, backends, file names) and
   the Assistant conversation stay as written.
@@ -52,10 +52,9 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   Rolling tabs (as recorded / hourly / daily / weekly / monthly / yearly):
   the figure is redrawn from period means; the result and its export do not
   change. Steps finer than the record's own are disabled.
-- **GUI opens as cume does**: the parameter panel folded (◀ Collapse /
+- **GUI opens ready to work**: the parameter panel folded (◀ Collapse /
   ▶ Expand Panel, Ctrl+B) and the Assistant open beside the results.
-- **Figures in a journal style, as cume's** (`normet.style`, ported from
-  `cume.style` and `cume.figstyle`): 7–8.5 pt text, 0.6 pt axes with ticks
+- **Figures in a journal style** (`normet.style`): 7–8.5 pt text, 0.6 pt axes with ticks
   outward, frameless legends, slim colour bars, Okabe–Ito colours with one
   meaning each (observed blue, normalised/synthetic vermilion, context grey),
   formulas set as chemistry writes them (`formula`: NO₂, PM₂.₅, SO₄²⁻), and
@@ -68,7 +67,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   a 1:1 line, PDP panels share one y label, and figure texts carry their
   Chinese translations (a formula in a Chinese title is written NO₂).
 - **The user manual in Chinese** (`docs/manual/normet_manual_zh.pdf`), beside
-  the English one, as cume's: `normet_manual_zh.tex` is the English book
+  the English one: `normet_manual_zh.tex` is the English book
   translated label for label (tests/test_manual.py holds the two to the same
   chapters, sections, labels and screenshots), built by XeLaTeX with ctex, its
   screenshots of the window in Chinese in `figures_zh/`
@@ -125,7 +124,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   macOS), shows a splash before loading normet, and `import normet` no longer
   loads scipy.stats or scikit-learn (~1 s); they and flaml are imported in the
   background once the window is up.
-- **GUI: the figure toolbar as cume's** — 16 pt icons tinted for the theme,
+- **GUI: the figure toolbar** — 16 pt icons tinted for the theme,
   the bar in the window's colours, and *For print…* (was *Export for
   Publication…*) before the pointer's read-out.
 - **GUI: the window can be narrowed** — the result tabs' minimum width no
@@ -230,7 +229,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   them once, in the palette of the moment, so after switching themes with a
   window open they were white on the light bar. They are now drawn again when
   the palette changes.
-- **GUI: command log and figures for print** (adapted from the cume app's).
+- **GUI: command log and figures for print**.
   View → Command Log lists every action that decides a result as the normet
   call that repeats it -- opening a table, training, normalising,
   decomposing, rolling, partial dependence. An entry is written from the
@@ -242,8 +241,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   Elsevier, ACS presets, or custom) with its lettering in points, previews it
   at printed size, and saves PNG, TIFF, PDF, SVG or EPS on a white page at
   exactly that width.
-- **GUI: the Assistant** (View → Assistant, Ctrl+Shift+A; adapted from the
-  cume app's). A language model works in the window with ten tools: it reads
+- **GUI: the Assistant** (View → Assistant, Ctrl+Shift+A). A language model works in the window with ten tools: it reads
   the table, the model's fit, the normalised series and the decomposition
   (`normet.agent.readings`), and runs train, normalise and decompose as their
   buttons do. A proposed target and predictors come as a card the analyst
@@ -253,8 +251,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   the environment. It also runs on Claude Code or Codex signed in to the user's
   own plan, served the window's tools over MCP on 127.0.0.1
   (`normet.agent.mcp_http`) with no shell or files of their own.
-- **`normet-mcp` and `normet.agent`: normet for AI assistants** (adapted from
-  the cume app's agent layer). `normet.agent` is a tool layer with three parts:
+- **`normet-mcp` and `normet.agent`: normet for AI assistants**. `normet.agent` is a tool layer with three parts:
   - text readings of a table, a model's fit (`modStats` on the held-out rows,
     feature importance), a normalised series (means by year or month), a
     decomposition, a synthetic control (`scm_diagnostics`) and a
@@ -268,8 +265,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   ask the assistant to propose the predictors and the donor pool for the user
   to confirm, and to quote only numbers the tools return. Files are read only
   under `$NORMET_MCP_ROOTS`.
-- **GUI: light and dark appearance, command palette, welcome page** (adapted
-  from the cume desktop app). The window and its figures follow the system's
+- **GUI: light and dark appearance, command palette, welcome page**. The window and its figures follow the system's
   light/dark mode, or View → Appearance pins one (Qt 6.8+). Figures are still
   drawn in matplotlib's light colours and recoloured for a dark window; what
   the figure toolbar saves is always on a white page. Ctrl+K (⌘K) finds any

@@ -1,6 +1,6 @@
 """A language model calling normet's tools: the adapters, and the loop between them.
 
-Adapted from the cume app's. One loop, any model; the adapters speak the two
+One loop, any model; the adapters speak the two
 formats the providers share:
 
 - ``anthropic`` -- Anthropic's Messages API (Claude);

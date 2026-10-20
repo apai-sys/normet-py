@@ -608,7 +608,7 @@ def test_shuffled_pre_r2_flags_a_design_with_more_donors_than_pre_cutoff_dates(q
 
 
 def test_each_example_opens_set_up_as_its_source_sets_it(qapp):
-    """File → Load Example, as cume's: each example with its own target and predictors,
+    """File → Load Example: each example with its own target and predictors,
     and the Data box offers no example button of its own."""
     from normet.gui._examples import EXAMPLES
     from normet.gui.main_window import MainWindow, _checked_items
