@@ -11,6 +11,9 @@ synthetic counterfactual.
 
 from __future__ import annotations
 
+import contextlib
+import functools
+from collections.abc import Iterator
 from typing import Any
 
 import numpy as np
@@ -23,6 +26,49 @@ from .variants import _pivot_panel
 log = get_logger(__name__)
 
 __all__ = ["bayesian_scm"]
+
+#: A C++ program that needs the standard library headers and the linker, as
+#: pytensor's compiled ops do.
+_PROBE = "#include <vector>\nint main() { std::vector<int> v(1); return v[0]; }\n"
+
+
+@functools.cache
+def _compiler_broken() -> bool:
+    """Whether pytensor has a C++ compiler that cannot build its ops.
+
+    A compiler that is found but fails (stale headers, a linker flag the toolchain
+    no longer takes) stops every sample; with none at all pytensor already runs its
+    ops in Python."""
+    import pytensor
+    from pytensor.link.c.cmodule import GCC_compiler
+
+    if not pytensor.config.cxx:
+        return False
+    try:
+        return not GCC_compiler.try_compile_tmp(  # type: ignore[no-untyped-call]
+            _PROBE, tmp_prefix="normet_probe_"
+        )
+    except Exception:  # noqa: BLE001 - any failure to build means the compiler is unusable
+        return True
+
+
+@contextlib.contextmanager
+def _usable_backend() -> Iterator[None]:
+    """Run pytensor without its C compiler while inside, if that compiler is broken:
+    slower, but the sampler runs."""
+    if not _compiler_broken():
+        yield
+        return
+    import pytensor
+
+    log.warning(
+        "pytensor's C++ compiler (%s) cannot build its ops here; sampling in Python "
+        "instead, which is slower. Repair the compiler (e.g. reinstall the Xcode "
+        "Command Line Tools) for full speed.",
+        pytensor.config.cxx,
+    )
+    with pytensor.config.change_flags(cxx=""):
+        yield
 
 
 def bayesian_scm(
@@ -127,7 +173,7 @@ def bayesian_scm(
         chains,
     )
 
-    with pm.Model() as model:  # noqa: F841 — handle is used implicitly by the sampler
+    with _usable_backend(), pm.Model() as model:  # noqa: F841 — used implicitly by the sampler
         w = pm.Dirichlet("w", a=np_module.full(J, float(dirichlet_alpha)))
         sigma = pm.HalfNormal("sigma", sigma=float(sigma_prior))
         mu = pm.math.dot(X_pre, w)

@@ -149,3 +149,21 @@ def test_bayesian_scm_smoke(scm_panel):
     assert isinstance(syn, pd.DataFrame)
     for col in ("observed", "synthetic", "effect"):
         assert col in syn.columns, f"Missing column in synthetic: {col}"
+
+
+@requires_pymc
+def test_broken_compiler_samples_in_python(monkeypatch):
+    """A C++ compiler that cannot build pytensor's ops is set aside while sampling."""
+    import pytensor  # noqa: PLC0415
+
+    mod = importlib.import_module("normet.causal.bayesian_scm")
+
+    before = pytensor.config.cxx
+    monkeypatch.setattr(mod, "_compiler_broken", lambda: True)
+    with mod._usable_backend():
+        assert pytensor.config.cxx == ""
+    assert pytensor.config.cxx == before
+
+    monkeypatch.setattr(mod, "_compiler_broken", lambda: False)
+    with mod._usable_backend():
+        assert pytensor.config.cxx == before
