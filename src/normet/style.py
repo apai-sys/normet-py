@@ -4,7 +4,7 @@ Ported from cume (``cume.style``, ``cume.figstyle``, ``cume.plotting``). What it
 what Nature Portfolio's, Science's, ACP's and ES&T's guides for figures have in common: a
 sans-serif face embedded as TrueType (Type 42), 7 to 8.5 pt text, 0.6 pt axes with ticks
 outward, legends without a frame, colours a colour-blind reader can tell apart (Okabe and
-Ito's), and files written at 300 dpi.
+Ito's), and files written at 300 dpi. What it offers::
 
     rc()                     the style's rcParams (light)
     apply_style()            set them for the session (the window does, at start)
