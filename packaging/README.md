@@ -25,7 +25,7 @@ selects another one), plus Inno Setup 6:
 ## Local build (any OS, onedir — no installer wrapper)
 
 ```bash
-pip install -e ".[gui,flaml,lgb,geo]" pyinstaller
+pip install -e ".[gui,flaml,lgb,geo,data]" pyinstaller
 pyinstaller --noconfirm packaging/normet_gui.spec   # -> dist/Normet/
 ```
 
@@ -69,6 +69,16 @@ or manually from the Actions tab (`workflow_dispatch`).
   without it the app fails with *Module 'flaml.automl:AutoML' does not provide
   the requested attribute* for every estimator, not just the XGBoost ones.
   That is why the `flaml` extra is `flaml[automl]`.
+- requests + cdsapi + rdata (the `data` extra) are bundled for the Data →
+  Download tools (UK-AIR *Find stations*, ERA5, GDAS). normet imports them by
+  name at run time (`normet.utils.require`), which PyInstaller cannot see, so
+  the spec and `build_dmg.sh` name them as hidden imports — and they must be
+  installed in the build env, or the app reports *'rdata' is required but not
+  installed*.
+- Start-up: `launcher.py` keeps matplotlib's font cache in
+  `~/.normet/matplotlib/<bundle hash>` (PyInstaller's runtime hook otherwise
+  rebuilds it in a temp dir on every launch, ~20 s on macOS) and shows a
+  splash before `import normet`.
 - shapely + pyshp are bundled too, so Transport Studio's GeoJSON/Shapefile
   source-region loading works without a separate install.
 - Linux GUI apps occasionally miss system `xcb` libs at runtime on minimal

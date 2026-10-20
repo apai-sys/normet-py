@@ -509,8 +509,11 @@ class ChatView(QScrollArea):
         self._reply = None
 
     @staticmethod
-    def _label(text: str, markdown: bool = False) -> QLabel:
+    def _label(text: str, markdown: bool = False, keep: bool = True) -> QLabel:
         lbl = QLabel(text)
+        # The analyst's and the model's own words (*keep*): left as written in any
+        # language the window is in (.uilang). A note is the window's own.
+        lbl.setProperty("normetKeepText", keep)
         lbl.setWordWrap(True)
         lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         if markdown:
@@ -563,7 +566,7 @@ class ChatView(QScrollArea):
         lbl.setToolTip(output[:3000])
 
     def note(self, text: str, error: bool = False) -> None:
-        lbl = self._label(text)
+        lbl = self._label(text, keep=False)
         lbl.setStyleSheet(("color: #ff3b30;" if error else _MUTED) + "font-size: 11px;")
         self._add(lbl)
         self._reply = None
@@ -576,6 +579,7 @@ class ChatView(QScrollArea):
         )
         lay = QVBoxLayout(frame)
         head = QLabel(title)
+        head.setProperty("normetKeepText", True)  # the model's words
         head.setStyleSheet("font-weight: 600;")
         lay.addWidget(head)
         lay.addWidget(self._label(body, markdown=True))
@@ -690,6 +694,17 @@ class AssistantDock(QDockWidget):
         self.new_btn = QPushButton("New")
         self.new_btn.setToolTip("Start a new conversation.")
         self.new_btn.clicked.connect(self.new_conversation)
+        # The row is what decides how narrow the dock can go: by default the
+        # combos are as wide as their longest entry and Fusion's buttons 80 px,
+        # which held the dock at 510 px and the window at that much more.
+        for box in (self.model_box, self.effort_box):
+            box.setSizeAdjustPolicy(
+                QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+            )
+        self.model_box.setMinimumContentsLength(10)
+        self.effort_box.setMinimumContentsLength(4)
+        for btn in (self.key_btn, self.new_btn):
+            btn.setMinimumWidth(44)
         top.addWidget(self.model_box, 1)
         top.addWidget(self.effort_box)
         top.addWidget(self.key_btn)
@@ -718,7 +733,7 @@ class AssistantDock(QDockWidget):
         row.addWidget(self.send_btn)
         v.addLayout(row)
         self.setWidget(body)
-        self.setMinimumWidth(320)
+        self.setMinimumWidth(300)
 
         self.post_card.connect(self.view.card)
         self._tool_started.connect(self._on_tool_started)

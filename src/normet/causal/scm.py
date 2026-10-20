@@ -8,7 +8,6 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import RidgeCV
 
 from ..utils.logging import get_logger
 from ._common import pivot_panel, solve_simplex_weights
@@ -241,6 +240,9 @@ def scm(
         X_treated = np.hstack([X_treated, cov_df.loc[[treated_unit]].values])
 
     # --- Ridge helper over donors at each time t (using X from pre) ---
+    # Imported here, not at module level: sklearn costs ~0.5 s on `import normet`.
+    from sklearn.linear_model import RidgeCV
+
     if alphas is None:
         alphas = [i / 10 for i in range(1, 101)]  # 0.1..10
 

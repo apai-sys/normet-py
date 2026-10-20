@@ -103,11 +103,11 @@ def test_matches_ranks_prefix_then_name_then_place():
         Command("Open CSV…", "File", lambda: None),
         Command("Load Example Data", "File", lambda: None),
         Command("Example disabled", "File", lambda: None, enabled=False),
-        Command("② Model", "Tab", lambda: None),
+        Command("Model", "Tab", lambda: None),
     ]
     assert [c.text for c in matches(cmds, "exa")] == ["Load Example Data", "Example disabled"]
     assert [c.text for c in matches(cmds, "open")] == ["Open CSV…"]
-    assert [c.text for c in matches(cmds, "tab")] == ["② Model"]
+    assert [c.text for c in matches(cmds, "tab")] == ["Model"]
     assert matches(cmds, "") == cmds
 
 
@@ -121,7 +121,7 @@ def test_palette_lists_menus_and_tabs(qapp):
         assert {"Open CSV…", "Load Example Data", "Run History…"} <= names
         assert "Command Palette…" not in names
         tabs = tab_commands(win.tabs)
-        assert [c.text for c in tabs][:2] == ["① Data", "② Model"]
+        assert [c.text for c in tabs][:2] == ["Data", "Model"]
         tabs[1].run()
         assert win.tabs.currentWidget() is win.tab_model
 
