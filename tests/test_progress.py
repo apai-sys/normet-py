@@ -139,9 +139,13 @@ def test_once_a_result_is_in_the_clock_writes_no_more_over_its_line(qapp, monkey
         bar.showMessage("Done.")
         now[0] += 5
         clock.report(0.9)  # a late report: no tick, no line over "Done."
+        clock.expect(60)  # nor a budget given once the task is done
         assert bar.currentMessage() == "Done."
         clock.stop()  # the time it took, not counting the wait for the end
         assert bar.currentMessage() == "Done. · took 3 s"
+        assert win.progress.maximum() == 1 and win.progress.value() == 0
+        clock.expect(60)  # no task at all: the bar stays idle
+        assert win.progress.maximum() == 1 and bar.currentMessage() == "Done. · took 3 s"
     finally:
         win.close()
 
