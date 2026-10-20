@@ -6,18 +6,18 @@ named source regions, along-path rainfall/boundary-layer height) that join
 straight onto a date-indexed panel as extra predictors — see
 :mod:`normet.io.trajectory`.
 
-Two sections, in the same design language as the Data/SCM Studios:
+Two pages, as the main window's and the SCM Studio's steps (._pages.StepPanel):
 
-1. **Build features from tdump files** — parse existing HYSPLIT output. No
+1. **Trajectories: build features from tdump files** — parse existing HYSPLIT output. No
    external binary required. An optional site name tags the result with a
    'site' column, so batches from several receptors (processed one at a
    time) can all be sent to the main window and matched up correctly.
-2. **Run HYSPLIT (advanced)** — orchestrate ``hyts_std`` itself for one or
+2. **HYSPLIT (advanced)** — orchestrate ``hyts_std`` itself for one or
    more receptor sites, at a configurable time resolution, with GDAS1
    meteorology it downloads or ARL files already on disk. Needs a local
-   HYSPLIT install; most users will only need section 1.
+   HYSPLIT install; most users will only need the first page.
 
-Source regions (shared by both sections) accept either a manual bounding
+Source regions (on the first page, used by both) accept either a manual bounding
 box, or exact polygon boundaries loaded from a GeoJSON/Shapefile
 (``normet[geo]``) — see :func:`normet.io.trajectory.load_source_regions`.
 """
@@ -47,7 +47,6 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
-    QScrollArea,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -271,7 +270,7 @@ class TrajectoryWindow(QMainWindow):
         splitter.addWidget(right)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([380, 860])
+        splitter.setSizes([self.panel.least_width, 860])  # no gap: see StepPanel.least_width
         self.setCentralWidget(splitter)
 
         self.progress = QProgressBar()
@@ -283,22 +282,19 @@ class TrajectoryWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self.cancel_btn)
         self.statusBar().addPermanentWidget(self.progress)
         self.statusBar().showMessage(
-            "Add tdump files (or run HYSPLIT below), then ▶ Build trajectory features."
+            "Add tdump files (or run HYSPLIT on its page), then ▶ Build trajectory features."
         )
         self._sync_enabled()
 
     # ------------------------------------------------------------- left panel
     def _build_panel(self) -> QWidget:
-        panel = QWidget()
-        v = QVBoxLayout(panel)
-
-        # ---- Section 1: existing tdump files
-        tdump_box = QGroupBox("1 · Trajectory files (tdump)")
+        # ---- The Trajectories page: existing tdump files, source regions, build
+        tdump_box = QGroupBox()
         tv = QVBoxLayout(tdump_box)
         tv.addWidget(
             hint_label(
-                "HYSPLIT back-trajectory output — generate separately (hyts_std,\n"
-                "pysplit, splitr) or with section 2 below."
+                "HYSPLIT back-trajectory output — generate separately (hyts_std, "
+                "pysplit, splitr) or on the HYSPLIT page."
             )
         )
         self.tdump_list = QListWidget()
@@ -320,8 +316,8 @@ class TrajectoryWindow(QMainWindow):
         tv.addLayout(site_form)
         tv.addWidget(
             hint_label(
-                "If these tdump files are all for one receptor site, name it\n"
-                "as the main data's 'site' column does: each site's batch,\n"
+                "If these tdump files are all for one receptor site, name it "
+                "as the main data's 'site' column does: each site's batch, "
                 "built and sent one at a time, then fills only its own rows."
             )
         )
@@ -342,7 +338,6 @@ class TrajectoryWindow(QMainWindow):
         min_row.addWidget(self.build_min_spin)
         min_row.addStretch(1)
         tv.addWidget(wrap_row(min_row))
-        v.addWidget(tdump_box)
 
         # ---- Source regions (shared by build + run)
         region_box = QGroupBox("Source regions (optional)")
@@ -379,7 +374,6 @@ class TrajectoryWindow(QMainWindow):
         form = QFormLayout()
         form.addRow("Column prefix", self.prefix_edit)
         rv2.addLayout(form)
-        v.addWidget(region_box)
 
         self.build_btn = run_button(
             "▶  Build trajectory features",
@@ -388,15 +382,18 @@ class TrajectoryWindow(QMainWindow):
             "time over the source regions, along-path rainfall/BLH.",
         )
         self.build_btn.clicked.connect(self._run_build)
-        v.addWidget(self.build_btn)
+        build_box = QGroupBox()
+        build_box.setFlat(True)
+        QVBoxLayout(build_box).addWidget(self.build_btn)
 
-        # ---- Section 2: run HYSPLIT (advanced)
-        run_box = QGroupBox("2 · Run HYSPLIT (advanced, optional)")
+        # ---- The HYSPLIT page (advanced): run the trajectories here
+        run_box = QGroupBox()
         rf = QFormLayout(run_box)
         rf.addRow(
             hint_label(
-                "Needs a local HYSPLIT install (hyts_std) and ARL-format\n"
-                "meteorology. Most users only need section 1 above."
+                "Needs a local HYSPLIT install (hyts_std) and ARL-format "
+                "meteorology. Most users only need the Trajectories page. "
+                "Its source regions go into the features built here too."
             )
         )
         self.hysplit_exec_edit = QLineEdit()
@@ -425,7 +422,10 @@ class TrajectoryWindow(QMainWindow):
         gdas_date_row.addWidget(self.gdas_from)
         gdas_date_row.addWidget(QLabel("→"))
         gdas_date_row.addWidget(self.gdas_to)
-        rf.addRow("GDAS1 range", wrap_row(gdas_date_row))
+        # Its name above it, as Receptor sites' and Record diagnostics': beside it, the
+        # two dates held the page wider than the panel's other page.
+        rf.addRow(QLabel("GDAS1 range"))
+        rf.addRow(wrap_row(gdas_date_row))
         self.gdas_btn = QPushButton("⬇  Download GDAS1 for this range")
         self.gdas_btn.clicked.connect(self._run_download_gdas)
         self.met_files_btn = QPushButton("Use existing met files…")
@@ -434,10 +434,9 @@ class TrajectoryWindow(QMainWindow):
             "any other ARL archive) instead of downloading."
         )
         self.met_files_btn.clicked.connect(self._choose_met_files)
-        met_row = QHBoxLayout()
-        met_row.addWidget(self.gdas_btn)
-        met_row.addWidget(self.met_files_btn)
-        rf.addRow(wrap_row(met_row))
+        # One under the other: side by side they held the panel ~420 px wide.
+        rf.addRow(self.gdas_btn)
+        rf.addRow(self.met_files_btn)
         self.gdas_hint = hint_label("No met files yet: download GDAS1, or use existing ones.")
         rf.addRow(self.gdas_hint)
 
@@ -455,7 +454,7 @@ class TrajectoryWindow(QMainWindow):
         rf.addRow("", wrap_row(recv_btn_row))
         rf.addRow(
             hint_label(
-                "One or more (Name, Lat, Lon) rows. Each name tags its results\n"
+                "One or more (Name, Lat, Lon) rows. Each name tags its results "
                 "in a 'site' column: name them as the main data's 'site' does."
             )
         )
@@ -508,10 +507,11 @@ class TrajectoryWindow(QMainWindow):
                 diag_row.addWidget(cb)
             diag_row.addStretch(1)
             diag_col.addLayout(diag_row)
-        rf.addRow("Record diagnostics", wrap_row(diag_col))
+        rf.addRow(QLabel("Record diagnostics"))
+        rf.addRow(wrap_row(diag_col))
         rf.addRow(
             hint_label(
-                "Along-trajectory meteorology hyts_std writes into tdump —\n"
+                "Along-trajectory meteorology hyts_std writes into tdump — "
                 "feeds traj_rain_sum/blh_mean/rh_mean/pressure_mean/temp_mean."
             )
         )
@@ -528,17 +528,20 @@ class TrajectoryWindow(QMainWindow):
         )
         self.run_btn.clicked.connect(self._run_hysplit)
         rf.addRow(self.run_btn)
-        v.addWidget(run_box)
 
-        v.addStretch(1)
         self._run_buttons = [self.build_btn, self.gdas_btn, self.met_files_btn, self.run_btn]
 
-        scroll = QScrollArea()
-        scroll.setWidget(panel)
-        scroll.setWidgetResizable(True)
-        scroll.setFixedWidth(400)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        return scroll
+        # A page per step, as the main window's (._pages.StepPanel): as wide as its
+        # widest page needs, and the optional HYSPLIT run out of the way.
+        from ._pages import StepPanel
+
+        self.panel = StepPanel(
+            [
+                ("Trajectories", (tdump_box, region_box, build_box)),
+                ("HYSPLIT", (run_box,)),
+            ]
+        )
+        return self.panel
 
     def _build_action_bar(self) -> QWidget:
         bar = QWidget()

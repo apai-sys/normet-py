@@ -1323,9 +1323,10 @@ table on the right.}{fig:datastudio}
 \section{Transport Studio: back-trajectory predictors}\label{sec:transport}
 Local meteorology does not say where the air came from. The Transport Studio turns
 HYSPLIT back-trajectories into predictors that do, and joins them onto the table
-(Figure~\ref{fig:transport}).
+(Figure~\ref{fig:transport}). Its panel has two pages: \emph{Trajectories}, for files
+already made, and \emph{HYSPLIT}, for running them.
 
-\paragraph{1 $\cdot$ Trajectory files.} \emph{Add files\ldots} takes existing HYSPLIT
+\paragraph{Trajectory files.} \emph{Add files\ldots} takes existing HYSPLIT
 \code{tdump} files (no HYSPLIT installation is needed to read them). \emph{Site name}
 tags the result with a \code{site} column, so batches for several receptors, built one
 at a time, each fill only their own site's rows. \emph{Null trajectories shorter than}
@@ -1345,9 +1346,11 @@ each count an endpoint inside both.
 \code{traj\_resid\_}\emph{region} per region, and --- where the \code{tdump} carries
 them --- along-path rainfall, mixing depth, humidity, pressure and temperature.
 
-\paragraph{2 $\cdot$ Run HYSPLIT (advanced).} With a local \code{hyts\_std}, the studio can
-run the trajectories itself for a table of receptors, at a chosen height, hours back and
-time step, with GDAS1 meteorology it downloads or ARL files already on disk.
+\paragraph{HYSPLIT (advanced).} With a local \code{hyts\_std}, the studio can run the
+trajectories itself, on its \emph{HYSPLIT} page, for a table of receptors, at a chosen
+height, hours back and time step, with GDAS1 meteorology it downloads or ARL files already
+on disk. The features are built with the source regions set on the \emph{Trajectories}
+page.
 
 \paragraph{Joining.} \emph{Send to main window} joins the features onto the open table:
 each row takes the latest trajectory that has \emph{already arrived}, within one release

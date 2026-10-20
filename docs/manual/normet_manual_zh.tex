@@ -1077,9 +1077,10 @@ MY1 一样好，所以只有它的干预前 $R^2$ 不予解读。经典 SCM 根�
 
 \section{传输工作室：后向轨迹预测变量}\label{sec:transport}
 本地气象不会告诉你空气从哪里来。传输工作室把 HYSPLIT 后向轨迹转换成能说明这一点的预测
-变量，并把它们合并到表上（图~\ref{fig:transport}）。
+变量，并把它们合并到表上（图~\ref{fig:transport}）。它的面板有两页：\emph{轨迹}用于已有的
+轨迹文件，\emph{HYSPLIT} 用于自己运行轨迹。
 
-\paragraph{1 $\cdot$ 轨迹文件。}\emph{添加文件…}读入已有的 HYSPLIT \code{tdump} 文件（读取
+\paragraph{轨迹文件。}\emph{添加文件…}读入已有的 HYSPLIT \code{tdump} 文件（读取
 它们不需要安装 HYSPLIT）。\emph{站点名称}给结果加上一个 \code{site} 列，这样为多个受体点
 逐一构建的批次只填充各自站点的行。\emph{将短于此值的轨迹置空}（72~h）把因气象数据用完或
 空气离开区域而提前终止的轨迹置空，否则它们会被当成短程传输。
@@ -1095,9 +1096,9 @@ GeoJSON 或 Shapefile 文件的多边形（\code{geo} 扩展）。每个区域�
 \code{traj\_resid\_}\emph{区域名}，以及——在 \code{tdump} 中有这些数据时——沿途的降水、
 混合层高度、湿度、气压和温度。
 
-\paragraph{2 $\cdot$ 运行 HYSPLIT（高级）。}本地有 \code{hyts\_std} 时，工作室可以自己为一张
-受体点表运行轨迹，可选高度、回溯小时数和时间步长，气象用它下载的 GDAS1 或磁盘上已有的 ARL
-文件。
+\paragraph{HYSPLIT（高级）。}本地有 \code{hyts\_std} 时，工作室可以在 \emph{HYSPLIT} 页上
+自己为一张受体点表运行轨迹，可选高度、回溯小时数和时间步长，气象用它下载的 GDAS1 或磁盘上
+已有的 ARL 文件。特征用\emph{轨迹}页上设置的源区构建。
 
 \paragraph{合并。}\emph{发送到主窗口}把特征合并到已打开的表上：每一行取\emph{已经到达}的
 最近一条轨迹，且在一个释放间隔之内——按最近时间合并会把 06:00 的轨迹给 04:00，那是还没
