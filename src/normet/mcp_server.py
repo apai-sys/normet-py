@@ -1,5 +1,5 @@
 """normet as an MCP server: ``normet-mcp``, for Claude Desktop, Claude Code and
-any other MCP client, over stdio on this machine. Adapted from the cume app's.
+any other MCP client, over stdio on this machine.
 
 Install and register it::
 

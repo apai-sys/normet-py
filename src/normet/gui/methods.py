@@ -1,6 +1,6 @@
 """File -> Methods Paragraph: what the session ran, written as a paper's Methods says it.
 
-Ported in kind from cume (``cume.methods_paragraph``). The paragraph is written from the
+The paragraph is written from the
 calls the window made -- each step's arguments as it ran, kept when it succeeded
 (``ran``) -- never from the panel as it stands afterwards, and in the window's language
 (English or Chinese). Only what was run is said; the numbers are the run's own. It cites

@@ -1,6 +1,6 @@
 """Jobs: a ``normet`` command run in a child process, in a folder of its own.
 
-Adapted from the cume app's job store. A job's folder holds what it is and how
+A job's folder holds what it is and how
 it went, so a server started again finds its jobs where they were::
 
     job.json      what was asked: the kind, the command's arguments, the command line

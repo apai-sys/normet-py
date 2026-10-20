@@ -1,6 +1,6 @@
 """Light and dark appearance for the GUI, and the figures that follow it.
 
-Adapted from the cume desktop app's theme manager. The window follows the
+The window follows the
 system's appearance (macOS / Windows / Linux dark mode, through Qt's colour
 scheme) unless View → Appearance pins it to Light or Dark.
 
@@ -25,7 +25,7 @@ from PySide6.QtCore import QEvent, QObject, QSettings, Qt, Signal
 from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import QApplication
 
-#: The dark theme's figure colours (as the cume app's).
+#: The dark theme's figure colours.
 DARK = {
     "figure": "#1c1c1e",
     "axes": "#242426",

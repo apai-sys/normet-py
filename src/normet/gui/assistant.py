@@ -1,6 +1,6 @@
 """View → Assistant: a language model working with the analyst in the window.
 
-Adapted from the cume app's Assistant. The model reads what the window holds
+The model reads what the window holds
 -- the table, the model trained, the normalised series, the decomposition --
 through the readings the MCP server gives (:mod:`normet.agent.readings`), and
 runs the window's steps the way their buttons do, so what it does is on screen
@@ -105,7 +105,7 @@ API_MODELS = (
 )
 
 #: Full automatic (the panel's Auto, kept in the settings): what the Assistant proposes is
-#: applied at once, and a turn is worked to the chain's end (ported from cume's Assistant).
+#: applied at once, and a turn is worked to the chain's end.
 AUTO_KEY = "assistant/auto"
 #: The model calls one round of tool use may make before the turn is looked at again.
 MAX_TURNS = 25
@@ -642,7 +642,7 @@ class _ChatThread(QThread):
 
     def run(self) -> None:
         """The analyst's message worked to the model's reply. With full automatic on (no
-        one to answer), as cume's Assistant does: a turn the model ends with the chain
+        one to answer): a turn the model ends with the chain
         unfinished (chain_left) is told what is left and goes on, until the window stops
         moving (AUTO_STALLS) or AUTO_NUDGES nudges; a failed call to the model, or an
         empty reply, is made again (AUTO_RETRIES)."""

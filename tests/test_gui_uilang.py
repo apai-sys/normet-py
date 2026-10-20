@@ -61,8 +61,8 @@ def test_a_unit_of_one_letter_is_translated():
 
 def test_a_file_dialog_is_titled_in_the_systems_language(monkeypatch):
     """A file dialog is the system's panel, its buttons in the system's language: its
-    title too, whichever language the window is in (as cume's -- a Chinese title on
-    English buttons was asked against)."""
+    title too, whichever language the window is in (a Chinese title on English buttons
+    was asked against)."""
     from normet.gui import uilang
 
     monkeypatch.setattr(uilang, "system_language", lambda: "en")

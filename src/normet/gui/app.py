@@ -96,7 +96,7 @@ def main(argv: list[str] | None = None, *, splash: object | None = None) -> int:
     matplotlib.use("QtAgg")
     from normet.style import apply_style
 
-    apply_style()  # every figure in the journal style, as cume's; exports cropped tight
+    apply_style()  # every figure in the journal style; exports cropped tight
 
     existing = QApplication.instance()
     app = existing if isinstance(existing, QApplication) else QApplication(argv)
@@ -122,7 +122,7 @@ def main(argv: list[str] | None = None, *, splash: object | None = None) -> int:
     from .main_window import MainWindow
 
     window = MainWindow()
-    window.start_layout()  # panel folded, Assistant open -- as cume opens
+    window.start_layout()  # panel folded, Assistant open
     window.show()
     if splash is not None:
         splash.finish(window)  # type: ignore[attr-defined]

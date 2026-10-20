@@ -1,6 +1,6 @@
 """Shared widgets for the normet Qt GUI.
 
-Design language (borrowed from the cume desktop app): a scrollable parameter
+Design language: a scrollable parameter
 panel on the left with grouped, numbered workflow steps and prominent
 "▶ Run" buttons; result tabs on the right rendered on a :class:`CanvasTab`
 — a matplotlib figure with a navigation toolbar, optionally topped by a
@@ -46,7 +46,7 @@ from PySide6.QtWidgets import (
 
 from .theme import apply_figure_theme, light_figure, theme_manager
 
-#: Traffic-light palette for verdict banners (matches the cume app).
+#: Traffic-light palette for verdict banners.
 VERDICT_COLOR = {"ok": "#34c759", "warn": "#ff9500", "error": "#ff3b30"}
 
 #: Muted colour for secondary hints / file labels.
@@ -157,7 +157,7 @@ def _canvas_class() -> type:
     from shiboken6 import isValid
 
     class FullWidthCanvas(FigureCanvasQTAgg):
-        """A canvas that draws only what is seen, and covers its whole widget (cume's).
+        """A canvas that draws only what is seen, and covers its whole widget.
 
         A canvas on a tab nobody has opened has nothing to show, and drawing it costs as
         much as drawing the one on screen: after each step every tab's figure was drawn,
@@ -202,7 +202,7 @@ def _canvas_class() -> type:
 
 
 def adaptive_layout(fig: Any) -> None:
-    """Solve the figure's margins at every draw, not once at its design size (as cume's).
+    """Solve the figure's margins at every draw, not once at its design size.
 
     A one-off ``tight_layout()`` fixes the margins as fractions of the size the figure
     was made at; on a canvas of another shape they no longer leave the room its labels
@@ -219,7 +219,7 @@ def adaptive_layout(fig: Any) -> None:
 
 
 class ThemedToolbar(NavigationToolbar2QT):
-    """The figure toolbar, as cume's (``cume_qt._widgets.CumeToolbar``): icons
+    """The figure toolbar: icons
     16 pt and tinted for the theme, the bar in the window's own colours, Save
     writing the figure in its light colours, and *For print…* -- the figure at
     a journal's column width and lettering -- before the pointer's read-out."""

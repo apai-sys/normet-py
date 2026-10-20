@@ -1,5 +1,5 @@
 """normet for an AI agent: the tools an assistant drives normet with, and the
-jobs they run. Adapted from the cume app's agent layer.
+jobs they run.
 
 One layer, two front ends -- the MCP server (:mod:`normet.mcp_server`,
 ``normet-mcp``) and the GUI's Assistant -- and nothing here depends on MCP.

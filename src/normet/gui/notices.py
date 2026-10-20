@@ -1,8 +1,6 @@
 """Notice bars: a line above the results for what wants the user's attention, with the
 step that answers it on a button and a × to put it away -- where a dialog would stop the
 window until it was answered, or a status-bar message would be gone with the next one.
-
-Ported from cume (``cume_qt.notices``).
 """
 
 from __future__ import annotations
