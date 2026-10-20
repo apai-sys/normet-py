@@ -17,6 +17,7 @@ from __future__ import annotations
 import datetime
 import logging
 import os
+import re
 import threading
 from typing import Any
 
@@ -32,6 +33,20 @@ VERSION = 1
 SUFFIX = ".normet"
 #: The steps whose result is a table handed back to its handler, in the order they ran.
 _STEPS = ("normalise", "decompose", "rolling", "pdp")
+
+
+def _window_names(res: pd.DataFrame) -> pd.DataFrame:
+    """A rolling result with its windows named as :func:`normet.rolling` names them
+    now (``window_01``, ...): sessions saved before held them as ``rolling_0``, and so on."""
+    from normet.analysis.rolling import window_column
+
+    old = {
+        int(c[8:]): c for c in res.columns if isinstance(c, str) and re.fullmatch(r"rolling_\d+", c)
+    }
+    if not old:
+        return res
+    total = max(old) + 1
+    return res.rename(columns={c: window_column(i + 1, total) for i, c in old.items()})
 
 
 def last_session_path() -> str:
@@ -251,6 +266,8 @@ class SavedResultsMixin(QMainWindow):
                     res = results.get(step)
                     if res is None:
                         continue
+                    if step == "rolling":
+                        res = _window_names(res)
                     if step == "decompose":
                         method = "meteorology" if "met_total" in res.columns else "emission"
                         # The other method's first, so the one last run is the one shown.
