@@ -178,6 +178,7 @@ TEXTS = {
     "Weekly": "周均",
     "Monthly": "月均",
     "Yearly": "年均",
+    "Which of the results to draw.": "选择要绘制的结果。",
     "Draw the figure at this time step: each period's mean of every series (bands too). Only the figure changes; the result and its export do not.": "按此时间步长绘图：每个时段取各序列（包括置信带）的平均值。只改变图形，结果及其导出不变。",
     "Not coarser than the record's own time step, or too few points.": "不比数据自身的时间步长更粗，或数据点太少。",
     # -- Step 1: train ------------------------------------------------------------------------

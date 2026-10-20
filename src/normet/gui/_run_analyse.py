@@ -204,7 +204,7 @@ class AnalyseRunMixin(QMainWindow):
 
     def _decompose_done(self, result: pd.DataFrame) -> None:
         self.results["decompose"] = result
-        method = self.decom_method.currentText()
+        method = "meteorology" if "met_total" in result.columns else "emission"
         target = self.target_combo.currentText()
 
         from . import _decomp_plots as DP
@@ -233,7 +233,11 @@ class AnalyseRunMixin(QMainWindow):
                     f"met_total = observed − normalised, split across {len(contribs)} "
                     f"{what} ({how} attribution) — strongest: {dominant}."
                 ]
-            self.tab_decom.show_timeseries(render, result, lines=lines)
+            # Each method's last result from this model, a Method selector to switch.
+            if self._decom_model is not self.model:
+                self._decom_views, self._decom_model = {}, self.model
+            self._decom_views[method] = (render, result, {"lines": lines})
+            self.tab_decom.show_views(self._decom_views, method)
         except Exception:
             log.exception("Decomposition figure failed; falling back to a line plot")
             import matplotlib.pyplot as plt
@@ -372,8 +376,14 @@ class AnalyseRunMixin(QMainWindow):
         from ._multiscale_plots import available_bands, multiscale_figure
 
         self._multiscale_raw = result
+        target = self.target_combo.currentText()
+        series = {k: v for k, v in result.items() if isinstance(v, pd.Series)}
 
-        fig = multiscale_figure(result, target=self.target_combo.currentText())
+        def render(d: pd.DataFrame):
+            # The series at the resolution chosen; the bands' σ from the record as it is.
+            drawn = {**result, **{k: d[k] for k in series if k in d.columns}}
+            return multiscale_figure(drawn, target=target, sigma_from=result)
+
         bands = available_bands(result)
         lines = list(result.get("notes") or [])
 
@@ -391,12 +401,18 @@ class AnalyseRunMixin(QMainWindow):
                 "No band was computable — see the notes for why each scale was skipped.",
             )
 
-        self.tab_multiscale.show_result(fig, verdict=verdict, lines=lines)
+        if series:
+            self.tab_multiscale.show_timeseries(
+                render, pd.DataFrame(series), verdict=verdict, lines=lines
+            )
+        else:
+            self.tab_multiscale.show_result(
+                multiscale_figure(result, target=target), verdict=verdict, lines=lines
+            )
         self.tabs.setCurrentWidget(self.tab_multiscale)
 
-        export = {k: v for k, v in result.items() if isinstance(v, pd.Series)}
-        if export:
-            self.results["multiscale"] = pd.DataFrame(export)
+        if series:
+            self.results["multiscale"] = pd.DataFrame(series)
 
         self.statusBar().showMessage("Multi-scale decomposition done.")
         self._log_history("multiscale", f"{len(bands)}/3 bands computed")

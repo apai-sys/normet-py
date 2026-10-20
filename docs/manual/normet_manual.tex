@@ -746,7 +746,7 @@ at each level --- the year once, then the months --- with panels stacked on one 
 dated on the bottom panel only.
 
 \paragraph{Resolution.} The time series on the \tab{Data}, \tab{Normalise},
-\tab{Decompose} and \tab{Rolling} tabs have a \emph{Resolution} selector above the
+\tab{Decompose}, \tab{Rolling} and \tab{Multi-scale} tabs have a \emph{Resolution} selector above the
 figure: \emph{As recorded}, \emph{Hourly}, \emph{Daily}, \emph{Weekly}, \emph{Monthly}
 or \emph{Yearly}. A coarser step redraws the figure from the means of each period, which
 makes a long hourly record readable; steps finer than the record's own are greyed out.
@@ -754,7 +754,12 @@ A record finer than daily and longer than 2,000 points opens as daily means --- 
 hours drawn as they are are a solid band --- and the choice made on a tab is kept for its
 next result. Only the display changes: the result, its table and its export stay at the
 record's resolution. A series is drawn broken where the record has a gap (an interval
-over five times its usual step), not joined across it by a straight line.
+over five times its usual step), not joined across it by a straight line. The $\sigma$ a
+figure quotes are the record's, whatever step it is drawn at.
+
+When both an emission and a meteorological decomposition have been run on the model, the
+\tab{Decompose} tab keeps both: a \emph{Method} selector beside \emph{Resolution} switches
+between them, and a saved session brings both back.
 
 \section{The action bar}
 Above the tabs: \emph{Collapse / Expand Panel}; the studios side by side ---
