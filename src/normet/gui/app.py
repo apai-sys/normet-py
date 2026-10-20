@@ -106,6 +106,12 @@ def main(argv: list[str] | None = None, *, splash: object | None = None) -> int:
     app.setApplicationName("Normet")
     app.setApplicationDisplayName("Normet")
     app.setOrganizationName("apai-sys")
+    from PySide6.QtGui import QIcon
+
+    from ._widgets import app_icon_path
+
+    # Every window's icon on Windows and Linux; on macOS the Dock's while run from source.
+    app.setWindowIcon(QIcon(app_icon_path()))
     _install_excepthook()
 
     # The window's language, before anything is built: its texts are translated as

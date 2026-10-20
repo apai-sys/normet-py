@@ -19,7 +19,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
-    QMessageBox,
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
@@ -528,16 +527,62 @@ class ShellMixin(QMainWindow):
         dlg.open()
 
     def _about(self) -> None:
+        """Help → About: the app's icon, its name and version, what it does, and where
+        its documentation is."""
+        from PySide6.QtGui import QPixmap
+        from PySide6.QtWidgets import QDialog
+
         import normet
 
-        QMessageBox.about(
-            self,
-            "About Normet",
-            f"<b>normet {normet.__version__}</b><br>"
+        from ._widgets import app_icon_path
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("About Normet")
+        dlg.setMinimumWidth(380)
+        v = QVBoxLayout(dlg)
+        v.setContentsMargins(36, 30, 36, 30)
+        v.setSpacing(14)
+
+        icon = QLabel()
+        pix = QPixmap(app_icon_path())
+        if not pix.isNull():
+            ratio = dlg.devicePixelRatioF()  # sharp on a Retina screen
+            pix = pix.scaled(
+                round(96 * ratio),
+                round(96 * ratio),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            pix.setDevicePixelRatio(ratio)
+            icon.setPixmap(pix)
+        icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        v.addWidget(icon)
+
+        title = QLabel("Normet")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet("font-size: 15px; font-weight: 600;")
+        v.addWidget(title)
+
+        version = QLabel(f"Version {normet.__version__}")
+        version.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        version.setStyleSheet("font-size: 11px; color: gray;")
+        v.addWidget(version)
+
+        what = QLabel(
             "Normalisation, decomposition and counterfactual modelling "
-            "for environmental time series.<br>"
-            f'<a href="{DOCS_URL}">{DOCS_URL.removeprefix("https://")}</a>',
+            "for environmental time series."
         )
+        what.setWordWrap(True)
+        what.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        v.addWidget(what)
+
+        link = QLabel(f'<a href="{DOCS_URL}">{DOCS_URL.removeprefix("https://")}</a>')
+        link.setOpenExternalLinks(True)
+        link.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        v.addWidget(link)
+
+        self._about_dialog = dlg
+        dlg.open()
 
     def _build_action_bar(self) -> QWidget:
         bar = QWidget()

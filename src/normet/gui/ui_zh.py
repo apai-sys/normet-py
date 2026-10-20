@@ -65,7 +65,8 @@ TEXTS = {
     "Documentation": "文档",
     "&About Normet": "关于 Normet(&A)",
     "About Normet": "关于 Normet",
-    '<b>normet {s0}</b><br>Normalisation, decomposition and counterfactual modelling for environmental time series.<br><a href="{s1}">{s2}</a>': '<b>normet {s0}</b><br>环境时间序列的归一化、分解与反事实建模。<br><a href="{s1}">{s2}</a>',
+    "Version {s0}": "版本 {s0}",
+    "Normalisation, decomposition and counterfactual modelling for environmental time series.": "环境时间序列的归一化、分解与反事实建模。",
     # -- window titles -----------------------------------------------------------------
     "Normet — meteorological normalisation & counterfactual toolkit": "Normet — 气象归一化与反事实分析工具包",
     "Normet — Synthetic Control Studio": "Normet — 合成控制工作室",

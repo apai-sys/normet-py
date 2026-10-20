@@ -124,6 +124,13 @@ def toggle_button(text: str, tooltip: str = "") -> QPushButton:
     return btn
 
 
+def app_icon_path() -> str:
+    """The app's icon, a 256 px PNG shipped in the package (and so in the app)."""
+    from importlib.resources import files
+
+    return str(files("normet.gui").joinpath("assets", "normet.png"))
+
+
 def hint_label(text: str, small: bool = True) -> QLabel:
     """A muted, word-wrapped helper label."""
     lbl = QLabel(text)
