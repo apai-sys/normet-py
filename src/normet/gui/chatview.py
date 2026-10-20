@@ -20,7 +20,7 @@ import re
 from collections.abc import Callable
 from typing import Any
 
-from PySide6.QtCore import QEvent, QSettings, Qt
+from PySide6.QtCore import QEvent, QSettings, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QKeySequence, QPalette, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -107,7 +107,7 @@ def sheet(k: Look) -> str:
     """The conversation's style sheet, from its Look."""
     c = QColor.name
     return f"""
-QScrollArea#chatview {{ background: {c(k.ground)}; border: none; }}
+QScrollArea#chatview {{ background: {c(k.ground)}; border: none; border-radius: 10px; }}
 QScrollArea#chatview > QWidget#qt_scrollarea_viewport {{ background: transparent; }}
 QWidget#chat {{ background: transparent; }}
 QWidget#chat QLabel {{ color: {c(k.text)}; background: transparent; }}
@@ -124,6 +124,26 @@ QFrame#tool[clickable="true"]:hover {{ background: {c(k.hover)}; }}
 QPushButton#apply {{ background: {c(k.accent)}; color: {c(k.on_accent)}; border: none;
                      border-radius: 6px; padding: 4px 14px; font-weight: 600; }}
 QPushButton#apply:disabled {{ background: {c(k.border)}; color: {c(k.muted)}; }}
+"""
+
+
+def composer_sheet(k: Look) -> str:
+    """The box the analyst writes in, set to match: rounded, the buttons inside it."""
+    c = QColor.name
+    return f"""
+QFrame#composer {{ background: {c(k.ground)}; border: 1px solid {c(k.border)};
+                   border-radius: 10px; }}
+QFrame#composer[focus="true"] {{ border: 1px solid {c(k.accent)}; }}
+QPlainTextEdit#composer_input {{ background: transparent; border: none; color: {c(k.text)}; }}
+QPushButton#composer_send {{ background: {c(k.accent)}; color: {c(k.on_accent)}; border: none;
+                             border-radius: 6px; padding: 4px 14px; font-weight: 600; }}
+QPushButton#composer_send:hover {{ background: {c(k.accent.lighter(112))}; }}
+QPushButton#composer_send:disabled {{ background: {c(k.border)}; color: {c(k.muted)}; }}
+QPushButton#composer_stop, QPushButton#composer_new {{
+    background: transparent; color: {c(k.text)}; border: 1px solid {c(k.border)};
+    border-radius: 6px; padding: 4px 12px; }}
+QPushButton#composer_new:hover {{ background: {c(k.hover)}; }}
+QPushButton#composer_stop:disabled, QPushButton#composer_new:disabled {{ color: {c(k.faint)}; }}
 """
 
 
@@ -328,6 +348,9 @@ class ChatView(QScrollArea):
     """The conversation: the analyst's messages on the right, the replies as their
     Markdown reads, each tool call one quiet line, a proposal a card with Apply."""
 
+    #: The Look, after the palette or the text size changed: the box written in follows.
+    restyled = Signal(object)
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("chatview")
@@ -475,6 +498,7 @@ class ChatView(QScrollArea):
                     r.restyle(k)
             elif isinstance(w, QLabel):
                 w.setFont(k.font(k.small))
+        self.restyled.emit(k)
 
     def changeEvent(self, e: Any) -> None:  # noqa: N802
         super().changeEvent(e)

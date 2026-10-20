@@ -25,11 +25,12 @@ import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from PySide6.QtCore import QObject, QSettings, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QSettings, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import (
     QComboBox,
     QDockWidget,
+    QFrame,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -47,7 +48,7 @@ from normet.agent import llm, readings
 from normet.agent.mcp_http import ToolServer
 
 from . import assistant_cli
-from .chatview import ChatView
+from .chatview import ChatView, Look, composer_sheet
 
 if TYPE_CHECKING:
     from .main_window import MainWindow
@@ -732,7 +733,6 @@ class AssistantDock(QDockWidget):
 
         body = QWidget()
         v = QVBoxLayout(body)
-        v.setContentsMargins(6, 6, 6, 6)
         top = QHBoxLayout()
         self.model_box = QComboBox()
         self.model_box.setEditable(True)
@@ -769,9 +769,6 @@ class AssistantDock(QDockWidget):
         self.auto_btn.setMenu(auto_menu)
         self.auto_btn.setChecked(auto_on())
         self.auto_btn.toggled.connect(self._auto_chosen)
-        self.new_btn = QPushButton("New")
-        self.new_btn.setToolTip("Start a new conversation.")
-        self.new_btn.clicked.connect(self.new_conversation)
         # The row is what decides how narrow the dock can go: by default the
         # combos are as wide as their longest entry and Fusion's buttons 80 px,
         # which held the dock at 510 px and the window at that much more.
@@ -781,13 +778,19 @@ class AssistantDock(QDockWidget):
             )
         self.model_box.setMinimumContentsLength(10)
         self.effort_box.setMinimumContentsLength(4)
-        for btn in (self.key_btn, self.new_btn):
-            btn.setMinimumWidth(44)
+        self.key_btn.setMinimumWidth(44)
         top.addWidget(self.model_box, 1)
         top.addWidget(self.effort_box)
         top.addWidget(self.key_btn)
         top.addWidget(self.auto_btn)
-        top.addWidget(self.new_btn)
+        # One height across the row: the Auto button's popup indicator left it a few
+        # pixels shorter than Key… and the boxes.
+        row_h = max(
+            w.sizeHint().height()
+            for w in (self.model_box, self.effort_box, self.key_btn, self.auto_btn)
+        )
+        for w in (self.model_box, self.effort_box, self.key_btn, self.auto_btn):
+            w.setFixedHeight(row_h)
         v.addLayout(top)
         self.view = ChatView()
         v.addWidget(self.view, 1)
@@ -795,24 +798,43 @@ class AssistantDock(QDockWidget):
         self.working.setStyleSheet(_MUTED)
         self.working.hide()
         v.addWidget(self.working)
+        # The box the analyst writes in: rounded, growing with what is written, its
+        # buttons inside it.
+        self.composer_box = QFrame()
+        self.composer_box.setObjectName("composer")
+        box = QVBoxLayout(self.composer_box)
+        box.setContentsMargins(10, 6, 8, 6)
+        box.setSpacing(4)
         self.composer = _Composer()
+        self.composer.setObjectName("composer_input")
+        self.composer.setFrameShape(QFrame.Shape.NoFrame)
         self.composer.setPlaceholderText("Ask about the data, or what to model… (Enter sends)")
-        self.composer.setMaximumHeight(90)
         self.composer.send.connect(self.send)
-        v.addWidget(self.composer)
+        self.composer.textChanged.connect(self._fit_input)
+        self.composer.installEventFilter(self)
+        box.addWidget(self.composer)
         row = QHBoxLayout()
+        row.setSpacing(6)
         row.addStretch(1)
+        self.new_btn = QPushButton("New chat")
+        self.new_btn.setObjectName("composer_new")
+        self.new_btn.setToolTip("Start a new conversation.")
+        self.new_btn.clicked.connect(self.new_conversation)
         self.stop_btn = QPushButton("Stop")
+        self.stop_btn.setObjectName("composer_stop")
         self.stop_btn.setEnabled(False)
         self.stop_btn.clicked.connect(self.stop)
         self.send_btn = QPushButton("Send")
-        self.send_btn.setStyleSheet("font-weight: 600;")
+        self.send_btn.setObjectName("composer_send")
         self.send_btn.clicked.connect(self.send)
-        row.addWidget(self.stop_btn)
-        row.addWidget(self.send_btn)
-        v.addLayout(row)
+        for btn in (self.new_btn, self.stop_btn, self.send_btn):
+            row.addWidget(btn)
+        box.addLayout(row)
+        v.addWidget(self.composer_box)
         self.setWidget(body)
         self.setMinimumWidth(300)
+        self.view.restyled.connect(self._style_composer)
+        self._style_composer(self.view.look)
 
         self.post_card.connect(self.view.card)
         self._tool_started.connect(self._on_tool_started)
@@ -823,6 +845,37 @@ class AssistantDock(QDockWidget):
             "The Assistant reads what the window holds and runs its steps. It proposes a "
             "target and predictors as a card; nothing is applied until you click Apply."
         )
+
+    # -- the box written in -----------------------------------------------------------
+    def _style_composer(self, look: Look) -> None:
+        self.composer_box.setStyleSheet(composer_sheet(look))
+        self.composer.setFont(look.font())
+        self._fit_input()
+
+    def _fit_input(self) -> None:
+        """The box as tall as what is written in it: two lines to eight."""
+        lines = int(self.composer.document().documentLayout().documentSize().height())
+        margin = int(self.composer.document().documentMargin())
+        self.composer.setFixedHeight(
+            max(2, min(8, lines)) * self.composer.fontMetrics().lineSpacing() + 2 * margin + 4
+        )
+
+    def eventFilter(self, obj: QObject, ev: QEvent) -> bool:  # noqa: N802
+        box = getattr(self, "composer", None)  # events come while the dock is built
+        if (
+            box is not None
+            and obj is box
+            and ev.type()
+            in (
+                QEvent.Type.FocusIn,
+                QEvent.Type.FocusOut,
+            )
+        ):
+            # The box's edge in the accent colour while it is written in.
+            self.composer_box.setProperty("focus", ev.type() == QEvent.Type.FocusIn)
+            self.composer_box.style().unpolish(self.composer_box)
+            self.composer_box.style().polish(self.composer_box)
+        return super().eventFilter(obj, ev)
 
     # -- the model -------------------------------------------------------------------
     def _is_agent(self) -> bool:
