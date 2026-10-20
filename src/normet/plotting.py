@@ -4,7 +4,9 @@ Matplotlib-based plotting helpers for ``normet`` outputs.
 
 All public functions accept an optional ``ax``/``axes`` keyword so they can be
 composed into larger dashboards. None require optional dependencies — pure
-matplotlib + numpy.
+matplotlib + numpy. Each draws in :mod:`normet.style`'s journal style (the window's
+too): 7–8.5 pt text, thin axes with ticks outward, frameless legends, concise date
+ticks and Okabe–Ito colours.
 """
 
 from __future__ import annotations
@@ -15,6 +17,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from . import style as S
+from .style import styled
 from .utils.logging import get_logger
 
 log = get_logger(__name__)
@@ -33,6 +37,7 @@ __all__ = [
 # ---------------------------------------------------------------------------
 # Polar / wind-rose-style plots
 # ---------------------------------------------------------------------------
+@styled
 def polar_plot(
     df: pd.DataFrame,
     *,
@@ -103,31 +108,39 @@ def polar_plot(
     Theta, R = np.meshgrid(theta, r, indexing="ij")
 
     if ax is None:
-        fig, ax = plt.subplots(subplot_kw={"projection": "polar"}, figsize=(6, 6))
+        fig, ax = plt.subplots(
+            subplot_kw={"projection": "polar"}, figsize=(4.2, 3.6), layout="constrained"
+        )
     ax.set_theta_zero_location("N")  # type: ignore[union-attr]
-    mesh = ax.pcolormesh(Theta, R, Z, cmap=cmap, shading="auto")
+    ax.set_theta_direction(-1)  # type: ignore[union-attr]  # clockwise, as a compass reads
+    mesh = ax.pcolormesh(Theta, R, Z, cmap=cmap, shading="auto", rasterized=True)
+    ax.set_thetagrids(  # type: ignore[union-attr]
+        [0, 90, 180, 270], ["N", "E", "S", "W"]
+    )
+    ax.tick_params(axis="y", labelsize=S.SMALL_SIZE)
+    ax.grid(True, color="white", lw=0.4, alpha=0.6)
+    ax.spines["polar"].set_linewidth(S.RC["axes.linewidth"])
+    ax.set_rlabel_position(112.5)  # type: ignore[union-attr]
     if ax.figure is not None:
-        cbar = ax.figure.colorbar(mesh, ax=ax, pad=0.1, shrink=0.8)
-        cbar.set_label(f"{statistic}({target})")
-    ax.set_title(title or f"{target} by wind direction × speed")
-    try:
-        if ax.figure is not None:
-            ax.figure.tight_layout()  # type: ignore[union-attr]
-    except Exception:
-        pass
+        S.colorbar(
+            ax.figure, mesh, ax, label=f"{statistic} {S.formula(target)}", fraction=0.05, pad=0.1
+        )
+    ax.set_title(title or f"{S.formula(target)} by wind direction and speed")
     return ax
 
 
 # ---------------------------------------------------------------------------
 # PDP grid
 # ---------------------------------------------------------------------------
+@styled
 def pdp_grid(
     pdp_df: pd.DataFrame,
     *,
     cols: int = 3,
     sharey: bool = False,
-    figsize_per: tuple[float, float] = (4.0, 2.8),
+    figsize_per: tuple[float, float] = (3.2, 2.2),
     title: str | None = None,
+    ylabel: str | None = "Partial dependence",
 ) -> Any:
     """
     Faceted grid of partial-dependence curves from :func:`normet.pdp`.
@@ -141,8 +154,12 @@ def pdp_grid(
         Number of columns in the grid.
     sharey : bool, default False
         Share the y-axis across panels.
-    figsize_per : (float, float), default (4.0, 2.8)
+    figsize_per : (float, float), default (3.2, 2.2)
         Figure size per panel.
+    title : str, optional
+        A title over the grid.
+    ylabel : str, optional
+        The prediction's label, once, beside the grid.
 
     Returns
     -------
@@ -158,6 +175,7 @@ def pdp_grid(
     n = len(variables)
     if n == 0:
         raise ValueError("No variables in pdp_df.")
+    cols = max(1, min(cols, n))
     rows = (n + cols - 1) // cols
     fig, axes = plt.subplots(
         rows,
@@ -165,32 +183,36 @@ def pdp_grid(
         figsize=(figsize_per[0] * cols, figsize_per[1] * rows),
         sharey=sharey,
         squeeze=False,
+        layout="constrained",
     )
 
     for k, var in enumerate(variables):
         ax = axes[k // cols, k % cols]
         sub = pdp_df[pdp_df["variable"] == var].sort_values("value")
-        ax.plot(sub["value"], sub["pdp_mean"], lw=1.8, color="C0")
         if "pdp_std" in sub.columns and sub["pdp_std"].notna().any():
             lo = sub["pdp_mean"] - sub["pdp_std"]
             hi = sub["pdp_mean"] + sub["pdp_std"]
-            ax.fill_between(sub["value"], lo, hi, alpha=0.18, color="C0")
-        ax.set_title(var)
-        ax.grid(alpha=0.2)
+            ax.fill_between(sub["value"], lo, hi, color=S.COMPONENT, alpha=0.15, lw=0)
+        ax.plot(sub["value"], sub["pdp_mean"], lw=1.4, color=S.COMPONENT)
+        ax.set_xlabel(str(var))
+        ax.margins(x=0)
+        S.grid(ax)
 
     # Hide unused axes
     for k in range(n, rows * cols):
         axes[k // cols, k % cols].set_visible(False)
 
+    if ylabel:
+        fig.supylabel(ylabel)
     if title:
         fig.suptitle(title)
-    fig.tight_layout()
     return fig
 
 
 # ---------------------------------------------------------------------------
 # Decomposition stack plot
 # ---------------------------------------------------------------------------
+@styled
 def decomposition_stack(
     decomp_df: pd.DataFrame,
     *,
@@ -216,7 +238,7 @@ def decomposition_stack(
     exclude : iterable of str
         Column names to skip (defaults handle the SHAP convention).
     cmap : str, default "tab20"
-        Matplotlib colormap name.
+        Kept for compatibility; the contributions take the style's palette.
     title : str, optional
         Plot title.
     ax : matplotlib.axes.Axes, optional
@@ -236,27 +258,33 @@ def decomposition_stack(
         raise ValueError("No contribution columns found to stack.")
 
     if ax is None:
-        _, ax = plt.subplots(figsize=(11, 4))
+        _, ax = plt.subplots(figsize=(8, 3), layout="constrained")
     idx = decomp_df.index
     Y = decomp_df[contrib_cols].to_numpy(dtype=float).T
-    ax.stackplot(idx, Y, labels=contrib_cols, alpha=0.85, cmap=cmap)
-    ax.plot(idx, decomp_df[observed_col].to_numpy(), color="black", lw=1.2, label=observed_col)
+    colours = [S.PALETTE[i % len(S.PALETTE)] for i in range(len(contrib_cols))]
+    ax.stackplot(idx, Y, labels=contrib_cols, colors=colours, alpha=0.85, lw=0)
+    ax.plot(idx, decomp_df[observed_col].to_numpy(), color=S.INK, lw=0.8, label=observed_col)
     ax.set_title(title or "Decomposition")
     ax.set_ylabel("Contribution")
-    ax.grid(alpha=0.2)
-    ax.legend(loc="upper right", ncol=2, fontsize=8, frameon=False)
+    if isinstance(idx, pd.DatetimeIndex):
+        S.format_time_axis(ax)
+    ax.margins(x=0)
+    S.grid(ax)
+    S.legend(ax, loc="upper right", ncols=min(4, len(contrib_cols) + 1))
     return ax
 
 
 # ---------------------------------------------------------------------------
 # SCM dashboard
 # ---------------------------------------------------------------------------
+@styled
 def scm_dashboard(
     scm_result: Any,
     *,
     cutoff_date: str,
     diagnostics: dict | None = None,
     title: str = "SCM dashboard",
+    ylabel: str = "Outcome",
 ) -> Any:
     """Three-panel summary of a synthetic-control fit.
 
@@ -276,6 +304,8 @@ def scm_dashboard(
         Output of :func:`scm_diagnostics`. If given, the donor-weights panel
         uses its ``top_donors`` summary.
     title : str
+    ylabel : str, default "Outcome"
+        The outcome's name, on the top panel's y axis.
 
     Returns
     -------
@@ -291,51 +321,58 @@ def scm_dashboard(
     if synth is None or "effect" not in synth.columns:
         raise ValueError("`scm_result` must have a synthetic DataFrame with 'effect'.")
 
-    fig, (a1, a2, a3) = plt.subplots(
-        3, 1, figsize=(11, 8), gridspec_kw={"height_ratios": [3, 2, 2]}
-    )
+    fig = plt.figure(figsize=(8, 6), layout="constrained")
+    gs = fig.add_gridspec(3, 1, height_ratios=[3, 2, 2])
+    a1 = fig.add_subplot(gs[0])
+    a2 = fig.add_subplot(gs[1], sharex=a1)
+    a3 = fig.add_subplot(gs[2])
     cutoff_ts = pd.to_datetime(cutoff_date)
+    dated = isinstance(synth.index, pd.DatetimeIndex)
 
-    a1.plot(synth.index, synth["observed"], label="observed", lw=1.5)
-    a1.plot(synth.index, synth["synthetic"], label="synthetic", lw=1.5, ls="--")
-    a1.axvline(cutoff_ts, color="k", ls=":", lw=1)
+    a1.plot(synth.index, synth["observed"], label="observed", lw=1.2, color=S.OBSERVED)
+    a1.plot(synth.index, synth["synthetic"], label="synthetic", lw=1.2, ls="--", color=S.MODELLED)
+    S.cutoff_line(a1, cutoff_ts)
     a1.set_title(title)
-    a1.set_ylabel("Outcome")
-    a1.legend(frameon=False)
-    a1.grid(alpha=0.2)
+    a1.set_ylabel(ylabel)
+    S.legend(a1)
+    S.grid(a1)
 
-    a2.plot(synth.index, synth["effect"], color="tab:red", lw=1.5)
-    a2.axhline(0.0, color="k", lw=0.5)
-    a2.axvline(cutoff_ts, color="k", ls=":", lw=1)
-    a2.set_ylabel("Effect (observed - synthetic)")
-    a2.grid(alpha=0.2)
+    a2.plot(synth.index, synth["effect"], color=S.MODELLED, lw=1.2)
+    S.zero_line(a2)
+    S.cutoff_line(a2, cutoff_ts)
+    a2.set_ylabel("Effect (observed − synthetic)")
+    S.grid(a2)
+    if dated:
+        S.format_time_axis(a2)
+    S.outer_ticks([a1, a2])
 
     if diagnostics and diagnostics.get("top_donors"):
         td = diagnostics["top_donors"]
         names = [str(n) for n, _ in td][::-1]
         vals = [float(v) for _, v in td][::-1]
-        a3.barh(names, vals, color="tab:blue")
+        a3.barh(names, vals, color=S.NEUTRAL, height=0.6)
         a3.set_title(
             f"Top donors  |  HHI={diagnostics.get('hhi', float('nan')):.3f}  "
             f"|  effective_N={diagnostics.get('effective_n_donors', float('nan')):.1f}"
         )
         a3.set_xlabel("weight")
+        S.grid(a3, axis="x")
     elif weights is not None and len(weights) > 0:
         w = weights.sort_values(ascending=False).head(10)[::-1]
-        a3.barh([str(i) for i in w.index], w.values, color="tab:blue")
+        a3.barh([str(i) for i in w.index], w.values, color=S.NEUTRAL, height=0.6)
         a3.set_title("Top donor weights")
         a3.set_xlabel("weight")
+        S.grid(a3, axis="x")
     else:
-        a3.text(0.5, 0.5, "No donor weights available", ha="center", va="center")
+        a3.text(0.5, 0.5, "No donor weights available", ha="center", va="center", color=S.NEUTRAL)
         a3.axis("off")
-
-    fig.tight_layout()
     return fig
 
 
 # ---------------------------------------------------------------------------
 # Normalisation result plot (#26)
 # ---------------------------------------------------------------------------
+@styled
 def normalise_plot(
     result_df: pd.DataFrame,
     *,
@@ -387,31 +424,50 @@ def normalise_plot(
         df = df.resample(resample).mean()
 
     if ax is None:
-        _, ax = plt.subplots(figsize=(11, 4))
+        _, ax = plt.subplots(figsize=(8, 3), layout="constrained")
 
-    ax.plot(df.index, df[observed_col], color="#2c7bb6", lw=1.2, alpha=0.7, label="Observed")
-    ax.plot(df.index, df[normalised_col], color="#d7191c", lw=1.8, label="Normalised (deweathered)")
-
+    # A dense record (hourly over months) in thin lines; a short or averaged one fuller.
+    dense = len(df) > 1500
+    ax.plot(
+        df.index,
+        df[observed_col],
+        color=S.OBSERVED,
+        lw=0.5 if dense else 1.0,
+        alpha=0.55 if dense else 0.8,
+        label="Observed",
+    )
     if ci_low and ci_high and ci_low in df.columns and ci_high in df.columns:
         ax.fill_between(
             df.index,
             df[ci_low],
             df[ci_high],
-            color="#d7191c",
-            alpha=0.15,
+            color=S.MODELLED,
+            alpha=0.18,
+            lw=0,
             label="Uncertainty band",
         )
+    ax.plot(
+        df.index,
+        df[normalised_col],
+        color=S.MODELLED,
+        lw=0.8 if dense else 1.4,
+        label="Normalised (deweathered)",
+    )
 
     ax.set_title(title or "Observed vs. Normalised concentration")
     ax.set_ylabel(ylabel)
-    ax.grid(alpha=0.2)
-    ax.legend(frameon=False, fontsize=9)
+    if isinstance(df.index, pd.DatetimeIndex):
+        S.format_time_axis(ax)
+    ax.margins(x=0)
+    S.grid(ax)
+    S.legend(ax, loc="upper right", ncols=3)
     return ax
 
 
 # ---------------------------------------------------------------------------
 # Bayesian SCM posterior band plot (#29)
 # ---------------------------------------------------------------------------
+@styled
 def plot_bayesian_scm(
     result: Any,
     *,
@@ -465,57 +521,63 @@ def plot_bayesian_scm(
         a1 = ax
         a2 = None
     else:
-        fig, (a1, a2) = plt.subplots(2, 1, figsize=(11, 7), sharex=True)
+        fig, (a1, a2) = plt.subplots(2, 1, figsize=(8, 5), sharex=True, layout="constrained")
+    dated = isinstance(synth.index, pd.DatetimeIndex)
 
     # Panel 1: observed vs. synthetic
-    a1.plot(synth.index, synth["observed"], lw=1.5, label="Observed", color="#2c7bb6")
-    a1.plot(
-        synth.index,
-        synth["synthetic"],
-        lw=1.5,
-        ls="--",
-        label="Synthetic (posterior mean)",
-        color="#d7191c",
-    )
     if "synthetic_low" in synth.columns and "synthetic_high" in synth.columns:
         a1.fill_between(
             synth.index,
             synth["synthetic_low"],
             synth["synthetic_high"],
-            color="#d7191c",
-            alpha=0.15,
+            color=S.MODELLED,
+            alpha=0.18,
+            lw=0,
             label=f"{pct}% credible band",
         )
-    a1.axvline(cutoff_ts, color="k", ls=":", lw=1, label="Cutoff")
+    a1.plot(synth.index, synth["observed"], lw=1.2, label="Observed", color=S.OBSERVED)
+    a1.plot(
+        synth.index,
+        synth["synthetic"],
+        lw=1.2,
+        ls="--",
+        label="Synthetic (posterior mean)",
+        color=S.MODELLED,
+    )
+    S.cutoff_line(a1, cutoff_ts)
     a1.set_title(title)
     a1.set_ylabel("Outcome")
-    a1.legend(frameon=False, fontsize=9)
-    a1.grid(alpha=0.2)
+    S.legend(a1)
+    S.grid(a1)
+    if dated:
+        S.format_time_axis(a1)
 
     # Panel 2: effect path
     if a2 is not None:
-        a2.plot(synth.index, synth["effect"], color="tab:orange", lw=1.5, label="Effect")
         if "effect_low" in synth.columns and "effect_high" in synth.columns:
             a2.fill_between(
                 synth.index,
                 synth["effect_low"],
                 synth["effect_high"],
-                color="tab:orange",
-                alpha=0.2,
+                color=S.MODELLED,
+                alpha=0.18,
+                lw=0,
             )
-        a2.axhline(0.0, color="k", lw=0.5)
-        a2.axvline(cutoff_ts, color="k", ls=":", lw=1)
-        a2.set_ylabel("Effect (obs \u2212 synthetic)")
-        a2.set_xlabel("Date")
-        a2.grid(alpha=0.2)
-
-    fig.tight_layout()
+        a2.plot(synth.index, synth["effect"], color=S.MODELLED, lw=1.2, label="Effect")
+        S.zero_line(a2)
+        S.cutoff_line(a2, cutoff_ts)
+        a2.set_ylabel("Effect (observed − synthetic)")
+        S.grid(a2)
+        if dated:
+            S.format_time_axis(a2)
+        S.outer_ticks([a1, a2])
     return fig
 
 
 # ---------------------------------------------------------------------------
 # Generic time series plot (#26)
 # ---------------------------------------------------------------------------
+@styled
 def time_series_plot(
     df: pd.DataFrame,
     target: str,
@@ -525,7 +587,7 @@ def time_series_plot(
     resample: str | None = None,
     title: str | None = None,
     ylabel: str | None = None,
-    color: str = "#2c7bb6",
+    color: str = S.OBSERVED,
     ax: Any | None = None,
 ) -> Any:
     """
@@ -544,7 +606,7 @@ def time_series_plot(
         If given, resamples using the mean.
     title : str, optional
     ylabel : str, optional
-    color : str, default "#2c7bb6"
+    color : str, default the style's blue (#0072B2)
         Line and shade color.
     ax : matplotlib axes, optional
 
@@ -562,9 +624,7 @@ def time_series_plot(
         df_plot = df_plot.resample(resample).mean()
 
     if ax is None:
-        _, ax = plt.subplots(figsize=(11, 4))
-
-    ax.plot(df_plot.index, df_plot[target], color=color, lw=1.5, label=target)
+        _, ax = plt.subplots(figsize=(8, 3), layout="constrained")
 
     if ci_low and ci_high and ci_low in df_plot.columns and ci_high in df_plot.columns:
         ax.fill_between(
@@ -572,12 +632,23 @@ def time_series_plot(
             df_plot[ci_low],
             df_plot[ci_high],
             color=color,
-            alpha=0.15,
+            alpha=0.18,
+            lw=0,
             label="Uncertainty band",
         )
+    ax.plot(
+        df_plot.index,
+        df_plot[target],
+        color=color,
+        lw=0.6 if len(df_plot) > 1500 else 1.2,
+        label=S.formula(target),
+    )
 
-    ax.set_title(title or f"Time series of {target}")
-    ax.set_ylabel(ylabel or target)
-    ax.grid(alpha=0.2)
-    ax.legend(frameon=False, fontsize=9)
+    ax.set_title(title or f"Time series of {S.formula(target)}")
+    ax.set_ylabel(ylabel or S.formula(target))
+    if isinstance(df_plot.index, pd.DatetimeIndex):
+        S.format_time_axis(ax)
+    ax.margins(x=0)
+    S.grid(ax)
+    S.legend(ax, loc="upper right")
     return ax

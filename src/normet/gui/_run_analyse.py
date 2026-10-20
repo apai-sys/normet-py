@@ -12,6 +12,8 @@ import logging
 import pandas as pd
 from PySide6.QtWidgets import QMainWindow, QMessageBox
 
+from normet import style as S
+
 from . import _chronos
 from ._constants import TIME_VARS
 from ._lists import _checked_items, parse_groups
@@ -80,23 +82,24 @@ class AnalyseRunMixin(QMainWindow):
         projected = result.iloc[seeded:]
 
         def render(d: pd.DataFrame):
-            fig = normalise_plot(
+            ax = normalise_plot(
                 d,
                 ci_low=qcols[0] if len(qcols) >= 2 else None,
                 ci_high=qcols[-1] if len(qcols) >= 2 else None,
-                ylabel=target,
-                title=f"Meteorologically normalised {target}",
+                ylabel=S.formula(target),
+                title=f"Meteorologically normalised {S.formula(target)}",
             )
             if seeded:
-                fig.axvspan(
+                ax.axvspan(
                     result.index[0],
                     result.index[seeded - 1],
-                    color="0.85",
+                    color="#E5E5EA",
+                    lw=0,
                     zorder=0,
                     label="seeded (= observed)",
                 )
-                fig.legend(loc="best", fontsize=8)
-            return fig
+                S.legend(ax, loc="upper right", ncols=4)
+            return ax
 
         n_rv = len(self._selected_norm_vars())
         lines = []
@@ -207,11 +210,15 @@ class AnalyseRunMixin(QMainWindow):
             import matplotlib.pyplot as plt
 
             plot_df = result.set_index("date") if "date" in result.columns else result
-            fig, ax = plt.subplots(figsize=(10, 4.5))
+            fig, ax = plt.subplots(figsize=(8, 3))
             for column in plot_df.columns:
                 if pd.api.types.is_numeric_dtype(plot_df[column]):
-                    ax.plot(plot_df.index, plot_df[column], lw=0.9, label=column)
-            ax.legend(loc="upper right", fontsize=8, ncols=2)
+                    ax.plot(plot_df.index, plot_df[column], lw=0.7, label=column)
+            if isinstance(plot_df.index, pd.DatetimeIndex):
+                S.format_time_axis(ax)
+            ax.margins(x=0)
+            S.grid(ax)
+            S.legend(ax, loc="upper right", ncols=3)
             self.tab_decom.show_result(fig)
 
         self.tabs.setCurrentWidget(self.tab_decom)
@@ -261,35 +268,43 @@ class AnalyseRunMixin(QMainWindow):
         overlap = result[rolling_cols].notna().sum(axis=1)
         std = result[rolling_cols].std(axis=1, skipna=True).where(overlap >= 2)
 
-        fig, ax = plt.subplots(figsize=(10, 4.5))
+        fig, ax = plt.subplots(figsize=(8, 3))
+        dense = len(result) > 1500
         if "observed" in result.columns:
             ax.plot(
                 result.index,
                 result["observed"],
-                lw=0.6,
-                alpha=0.35,
-                color="#9a9a9a",
+                lw=0.5 if dense else 0.9,
+                alpha=0.4,
+                color=S.NEUTRAL,
                 label="observed",
             )
-        ax.plot(mean.index, mean.values, lw=1.3, color="#2c7bb6", label="rolling mean")
         if std.notna().any():
             ax.fill_between(
                 mean.index,
                 mean - std,
                 mean + std,
-                color="#2c7bb6",
-                alpha=0.2,
+                color=S.MODELLED,
+                alpha=0.18,
+                lw=0,
                 label="±1 SD across overlapping windows",
             )
+        ax.plot(
+            mean.index,
+            mean.values,
+            lw=0.8 if dense else 1.3,
+            color=S.MODELLED,
+            label="rolling mean",
+        )
         ax.set_title(
             f"Rolling normalisation — mean of {len(rolling_cols)} windows "
-            f"({window} d window, {step} d step)",
-            fontsize=10,
-            loc="left",
+            f"({window} d window, {step} d step)"
         )
-        ax.legend(loc="upper right", fontsize=8)
-        ax.grid(alpha=0.2)
-        fig.tight_layout()
+        if isinstance(result.index, pd.DatetimeIndex):
+            S.format_time_axis(ax)
+        ax.margins(x=0)
+        S.grid(ax)
+        S.legend(ax, loc="upper right", ncols=3)
         return fig
 
     def _run_multiscale(self) -> None:
@@ -379,7 +394,11 @@ class AnalyseRunMixin(QMainWindow):
         self.results["pdp"] = result
         from normet import pdp_grid as _pdp_grid
 
-        fig = _pdp_grid(result, title="Partial dependence")
+        # The tab names the figure; the shared y label says what is predicted.
+        target = S.formula(self.target_combo.currentText())
+        fig = _pdp_grid(
+            result, ylabel=f"Partial dependence of {target}" if target else "Partial dependence"
+        )
         self.tab_pdp.show_result(fig)
         self.tabs.setCurrentWidget(self.tab_pdp)
         self.statusBar().showMessage("PDP done.")

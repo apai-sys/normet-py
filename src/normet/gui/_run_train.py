@@ -12,6 +12,8 @@ import logging
 import pandas as pd
 from PySide6.QtWidgets import QMainWindow, QMessageBox
 
+from normet import style as S
+
 from . import _chronos
 from ._constants import MET_DEFAULTS, TIME_VARS
 from ._lists import _fill_checklist
@@ -118,7 +120,7 @@ class TrainRunMixin(QMainWindow):
             verdict = ("warn", f"Could not run the covariate-sensitivity check: {exc}")
             header, rows = None, None
 
-        fig, ax = plt.subplots(figsize=(11, 4.2))
+        fig, ax = plt.subplots(figsize=(8, 3))
         ax.text(
             0.5,
             0.5,
@@ -128,10 +130,9 @@ class TrainRunMixin(QMainWindow):
             "future meteorology is shuffled.",
             ha="center",
             va="center",
-            fontsize=10,
+            color=S.NEUTRAL,
         )
         ax.axis("off")
-        fig.tight_layout()
 
         self.tab_model.show_result(
             fig,
@@ -194,7 +195,10 @@ class TrainRunMixin(QMainWindow):
         except Exception:
             log.exception("modStats failed")
 
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4.2))
+        fig, (ax1, ax2) = plt.subplots(
+            1, 2, figsize=(8, 3.4), gridspec_kw={"width_ratios": [1, 1.15]}
+        )
+        name = S.formula(self.target_combo.currentText())
 
         test = self.df_prep
         if "set" in self.df_prep.columns:
@@ -203,24 +207,39 @@ class TrainRunMixin(QMainWindow):
             test = self.df_prep
         obs = test["value"].to_numpy()
         pred = np.asarray(ml_predict(self.model, test))
-        ax1.scatter(obs, pred, s=6, alpha=0.35, color="#2c7bb6", edgecolors="none")
-        lims = [min(obs.min(), pred.min()), max(obs.max(), pred.max())]
-        ax1.plot(lims, lims, color="k", lw=0.8, ls="--")
+        ax1.scatter(
+            obs, pred, s=5, alpha=0.35, color=S.OBSERVED, edgecolors="none", rasterized=True
+        )
+        lo, hi = min(obs.min(), pred.min()), max(obs.max(), pred.max())
+        pad = 0.03 * (hi - lo)
+        lims = [lo - pad, hi + pad]
+        ax1.plot(lims, lims, color=S.INK, lw=0.7, ls=(0, (4, 3)), label="1:1")
+        ax1.set_xlim(lims)
+        ax1.set_ylim(lims)
+        ax1.set_aspect("equal", adjustable="box")
         ss_res = float(((obs - pred) ** 2).sum())
         ss_tot = float(((obs - obs.mean()) ** 2).sum())
         r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
         rmse = float(np.sqrt(((obs - pred) ** 2).mean()))
-        ax1.set_xlabel("Observed (test set)")
-        ax1.set_ylabel("Predicted")
-        ax1.set_title(f"Parity — R²={r2:.3f}, RMSE={rmse:.2f}", fontsize=10, loc="left")
-        ax1.grid(alpha=0.2)
+        ax1.set_xlabel(f"Observed {name} (test set)")
+        ax1.set_ylabel(f"Predicted {name}")
+        ax1.set_title(f"Parity — R²={r2:.3f}, RMSE={rmse:.2f}")
+        S.grid(ax1)
+        S.legend(ax1, loc="upper left")
 
         imp = self._feature_importance()
         if imp is not None:
             names, vals = imp
             order = np.argsort(vals)[-15:]
-            ax2.barh([names[i] for i in order], [vals[i] for i in order], color="#2c7bb6")
-            ax2.set_title("Feature importance", fontsize=10, loc="left")
+            ax2.barh(
+                [names[i] for i in order], [vals[i] for i in order], color=S.COMPONENT, height=0.65
+            )
+            ax2.set_title("Feature importance")
+            ax2.set_xlabel("Importance")
+            S.grid(ax2, axis="x")
+            ax2.tick_params(axis="y", length=0)
+            for side in ("top", "right"):
+                ax2.spines[side].set_visible(False)
         else:
             ax2.text(
                 0.5,
@@ -228,9 +247,9 @@ class TrainRunMixin(QMainWindow):
                 "Feature importance not available\nfor this backend",
                 ha="center",
                 va="center",
+                color=S.NEUTRAL,
             )
             ax2.axis("off")
-        fig.tight_layout()
 
         if r2 >= 0.7:
             verdict = (

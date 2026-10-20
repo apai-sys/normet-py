@@ -195,6 +195,9 @@ that script printed. A run of your own will differ in the last digit or two: the
 search is bounded by wall-clock time, so it does not visit exactly the same candidates
 twice.
 
+This manual is also published in Chinese (\code{normet\_manual\_zh.pdf}), chapter for
+chapter, with its screenshots of the window in Chinese (Section~\ref{sec:appearance}).
+
 % ============================ 2. INSTALLATION ===============================
 \chapter{Installation}\label{ch:install}
 
@@ -205,8 +208,10 @@ scripting, servers and notebooks.
 \section{macOS}
 Open \code{Normet-1.0.0-macos-arm64.dmg} and drag \code{Normet.app} onto the
 \code{Applications} folder. The application carries its own Python, Qt, FLAML, LightGBM
-and XGBoost, so nothing else is needed for the de-weathering and synthetic-control
-workflows. The disk image is about 130~MB.
+and XGBoost, and the Data Studio's readers, so nothing else is needed for the
+de-weathering, synthetic-control and data workflows. The first launch takes longer than
+the rest while it builds a font cache, which later launches reuse (it is kept in
+\code{\textasciitilde/.normet/matplotlib}); a splash screen shows meanwhile.
 
 \note{The application is not signed with an Apple Developer ID. The first time, open it
 by right-clicking \code{Normet.app} and choosing \emph{Open}, then confirming in the
@@ -600,7 +605,10 @@ is made of.}
 \chapter{Getting started}\label{ch:start}
 
 \section{The window before a table is open}
-\nm{} opens on its \tab{Data} tab with nothing loaded (Figure~\ref{fig:welcome}). Under
+\nm{} opens on its \tab{Data} tab with nothing loaded (Figure~\ref{fig:welcome}), the
+parameter panel folded away and the Assistant (Chapter~\ref{ch:assistant}) open beside the
+results. \emph{Expand Panel} on the action bar, or Ctrl+B, brings the panel out;
+\tab{View $\rightarrow$ Assistant} closes the Assistant. Under
 \emph{Start with a time series} are three buttons --- \emph{Open CSV\ldots}, \emph{Load
 example} and \emph{Ask the Assistant} --- and cards for the ways in: the two examples, the
 five tables opened most recently (each with its folder, size and the date it last
@@ -609,9 +617,9 @@ without a file of your own, the Data Studio and the Transport Studio. A card wit
 to list is left out. Dropping a \code{.csv} or \code{.csv.gz} file anywhere on the window
 opens it.
 
-\screenshot{ui_welcome.png}{The window before a table is open: the parameter panel on the
-left (its steps waiting for data), the welcome on the \tab{Data} tab, the action bar above
-the tabs and the log at the bottom.}{fig:welcome}
+\screenshot{ui_welcome.png}{The window as it opens: the welcome on the \tab{Data} tab, the
+action bar above the tabs (\emph{Expand Panel} first), the Assistant on the right and the
+log at the bottom. The parameter panel is folded away until it is needed.}{fig:welcome}
 
 \section{The examples}\label{sec:examples}
 \begin{description}
@@ -653,7 +661,8 @@ Service); HYSPLIT (NOAA ARL).
 \section{A first analysis}
 \begin{enumerate}\nosep
   \item \tab{Load data.} \emph{Open CSV\ldots} and choose a table with a \code{date}
-        column, the pollutant and its meteorology (Chapter~\ref{ch:data}).
+        column, the pollutant and its meteorology (Chapter~\ref{ch:data}). Bring the
+        parameter panel out with \emph{Expand Panel} (Ctrl+B), or ask the Assistant.
   \item \tab{Choose the columns.} Check the target and tick the predictors
         (Section~\ref{sec:columns}).
   \item \tab{Train} (Step~1) and read the \tab{Model} tab: is the held-out fit good
@@ -672,7 +681,11 @@ Service); HYSPLIT (NOAA ARL).
 The main window has a scrolling \emph{parameter panel} on the left and \emph{result tabs}
 on the right. The panel walks down the workflow --- Data, Columns, then Steps~1 to~5 ---
 and each step has its own \emph{Run} button beside the settings that govern it. Results
-land in the tab of the same step, which comes to the front when the step finishes.
+land in the tab of the same step, which comes to the front when the step finishes. The
+panel starts folded away, leaving the width to the results and the Assistant;
+\emph{Collapse / Expand Panel} on the action bar (Ctrl+B) folds it and brings it back. The
+window can be narrowed to about 740 pixels with the panel folded: the action bar then
+wraps onto a second row.
 
 \section{The parameter panel}
 \begin{description}\nosep
@@ -713,13 +726,27 @@ PDP         & one partial-dependence panel per variable & Step 5 \\
 \end{center}
 A tab with a judgement to make opens with a \emph{verdict banner} in green (good), amber
 (caution) or red (not usable), followed by plain lines of what was run and, where there
-is one, a compact table. Every figure has a Matplotlib toolbar (home, back, forward, pan,
-zoom, subplot spacing, axes and curve options, save) and \emph{Export for
-Publication\ldots} (Section~\ref{sec:print}). A figure is saved on a white page with dark
-ink whatever the window's appearance.
+is one, a compact table. Every figure has a toolbar of small icons in the window's
+colours --- home, back, forward, pan, zoom, subplot spacing, axes and curve options,
+save --- then \emph{For print\ldots} (Section~\ref{sec:print}) and, at its right end, the
+value under the pointer. A figure is saved on a white page with dark ink whatever the
+window's appearance. Every figure is drawn as journals ask for one: 7 to 8.5~pt text, thin
+axes with ticks outward, legends without a frame, colours a colour-blind reader can tell
+apart, formulas with their subscripts (\NOtwo{}, \PMtwo{}), and a date axis written once
+at each level --- the year once, then the months --- with panels stacked on one time axis
+dated on the bottom panel only.
+
+\paragraph{Resolution.} The time series on the \tab{Data}, \tab{Normalise},
+\tab{Decompose} and \tab{Rolling} tabs have a \emph{Resolution} selector above the
+figure: \emph{As recorded}, \emph{Hourly}, \emph{Daily}, \emph{Weekly}, \emph{Monthly}
+or \emph{Yearly}. A coarser step redraws the figure from the means of each period, which
+makes a long hourly record readable; steps finer than the record's own are greyed out.
+Only the display changes: the result, its table and its export stay at the record's
+resolution.
 
 \section{The action bar}
-Above the tabs: \emph{Get UK data} (the Data Studio, Section~\ref{sec:datastudio}),
+Above the tabs: \emph{Collapse / Expand Panel}, \emph{Get UK data} (the Data Studio,
+Section~\ref{sec:datastudio}),
 \emph{Transport Studio} (Section~\ref{sec:transport}), \emph{Export result CSV} (the
 current tab's table), \emph{HTML report} (the current tab's result as a report with its
 provenance) and \emph{SCM Studio} (Chapter~\ref{ch:scm}).
@@ -763,10 +790,12 @@ File     & Open CSV\ldots                       & Ctrl+O \\
          & Save Session as Script\ldots         & \\
          & Save Config\ldots{} / Load Config\ldots & \\
 View     & Command Palette\ldots                & Ctrl+K \\
+         & Collapse / Expand Panel              & Ctrl+B \\
          & Run History\ldots                    & \\
          & Log, Command Log                     & \\
          & Assistant                            & Ctrl+Shift+A \\
          & Appearance: Follow System, Light, Dark & \\
+         & Language: Follow System, English, Chinese & \\
 Analysis & Synthetic Control (SCM) Studio\ldots & Ctrl+Shift+S \\
 Help     & Documentation, About Normet          & \\
 \bottomrule
@@ -782,11 +811,19 @@ When a task fails, its full traceback is written here and its last line shown in
 dialog. The \emph{Command Log} shares the dock (Section~\ref{sec:commandlog}); the
 \emph{Assistant} opens on the right (Chapter~\ref{ch:assistant}).
 
-\section{Appearance}
+\section{Appearance and language}\label{sec:appearance}
 The window and its figures follow the system's light or dark appearance;
 \tab{View $\rightarrow$ Appearance} pins one. A figure on a dark window is recoloured
 for display only --- its faces, text, ticks and grid; colours that carry data are left
 alone --- and saved in its light colours.
+
+The window speaks English or Chinese: the system's language by default, or the one
+\tab{View $\rightarrow$ Language} chooses, kept for the next session. The switch is
+immediate --- menus, buttons, tabs, tooltips, verdicts and the figures' titles, labels and
+month names are written again in the language chosen, and a figure is saved as it is
+shown. The data's own words (column names, site codes), the log, the command log's code
+and the Assistant's conversation stay as they were written. On macOS the system's own
+menu items (Services, Hide, Quit) follow the new language from the next start.
 
 % ============================ 6. COLUMNS AND TRAINING =========================
 \chapter{Training a model (Step 1)}\label{ch:train}
@@ -982,7 +1019,7 @@ is named in the notes, with why.
 
 \screenshot{ui_multiscale.png}{Multi-scale decomposition of MY1 at 14, 60 and 120~days
 (the 365-day default is longer than this eight-month record): 77, 13 and 5 windows. The
-synoptic band carries the most ($D_\text{fast}$, $\sigma = 3.08$), then the intra-seasonal
+synoptic band carries the most ($D_\text{fast}$, $\sigma \approx 3.0$), then the intra-seasonal
 and the slow.}{fig:multiscale}
 
 % ============================ 10. PDP =========================================
@@ -1334,8 +1371,9 @@ detail (the held-out $R^2$ for a training run, the samples for a normalisation).
 % ============================ 14. ASSISTANT ===================================
 \chapter{The Assistant}\label{ch:assistant}
 
-\tab{View $\rightarrow$ Assistant} (Ctrl+Shift+A) opens a language model working in the
-window. It reads what the window holds --- the table, the model's held-out fit, the
+The Assistant is a language model working in the window. It is open on the right when
+\nm{} starts; \tab{View $\rightarrow$ Assistant} (Ctrl+Shift+A) closes it and opens it
+again. It reads what the window holds --- the table, the model's held-out fit, the
 normalised series, the decomposition --- as \nm{}'s own readings of them, in text, and
 runs the window's steps the way their buttons do, so what it does appears on screen as
 your own runs do and goes into the command log.
@@ -1506,7 +1544,8 @@ What & Where \\
 \midrule
 Recent tables (eight)        & \code{\textasciitilde/.normet/gui\_recent\_files.json} \\
 Run history                  & \code{\textasciitilde/.normet/gui\_run\_history.jsonl} \\
-Window geometry, appearance, Assistant model & the system's settings store (\code{apai-sys/normet-gui}) \\
+Window geometry, appearance, language, Assistant model & the system's settings store (\code{apai-sys/normet-gui}) \\
+Font cache (installers)      & \code{\textasciitilde/.normet/matplotlib} \\
 Assistant API keys           & macOS keychain, service \code{normet} \\
 MCP jobs                     & \code{\$NORMET\_MCP\_HOME}, default \code{\textasciitilde/.normet/mcp} \\
 Chronos-2 weights            & the Hugging Face cache \\
@@ -1531,6 +1570,9 @@ Nothing else is written unless you save it.
   \item[``every meteorological model feature must be in exactly one group''] The groups
         must cover every meteorological predictor trained on, each once; the message
         names the missing ones.
+  \item[``'rdata' is required but not installed''] \emph{Find stations} reads the UK
+        archives with \code{rdata}, part of the \code{data} extra:
+        \code{pip install "normet[data]"}. The installers include it.
   \item[Multi-scale says to run Step 2 first] It differences against Step~2's series.
   \item[A multi-scale band was skipped] Its width leaves fewer than two windows on the
         record; lower it.
@@ -1552,6 +1594,8 @@ Nothing else is written unless you save it.
   \item[A task runs too long] \emph{Cancel} frees the window at once; the computation
         finishes in the background and its result is discarded. Lower the samples, the
         budget, or the number of variables decomposed.
+  \item[The parameter panel is missing] It is folded away: \emph{Expand Panel} on the
+        action bar, or Ctrl+B.
   \item[A task failed] The dialog shows its last line; the full traceback is in the
         \tab{Log} dock.
   \item[macOS: ``Normet cannot be opened''] The app is unsigned: right-click it and choose

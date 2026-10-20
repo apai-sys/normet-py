@@ -94,9 +94,9 @@ def main(argv: list[str] | None = None, *, splash: object | None = None) -> int:
     import matplotlib
 
     matplotlib.use("QtAgg")
-    import matplotlib.pyplot as plt
+    from normet.style import apply_style
 
-    plt.rcParams.update({"savefig.bbox": "tight"})  # toolbar exports cropped tight
+    apply_style()  # every figure in the journal style, as cume's; exports cropped tight
 
     existing = QApplication.instance()
     app = existing if isinstance(existing, QApplication) else QApplication(argv)

@@ -11,6 +11,9 @@ numbers the manual quotes are printed as they are computed. Run from the build v
 
     QT_QPA_PLATFORM=offscreen python docs/manual/make_figures.py
 
+With NORMET_UI_LANGUAGE=zh the window is drawn in Chinese, into figures_zh/ -- the
+Chinese manual's (normet_manual_zh.tex); without it, in English into figures/.
+
 The tasks run on the calling thread instead of the window's worker thread, so a
 grab happens after the result is on screen; everything else is the window's own code.
 """
@@ -42,7 +45,10 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg  # noqa: E402
 from PySide6.QtCore import QDate, Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-OUT = os.path.join(HERE, "figures")
+# The window's language, set here and not left to the system's: an English build on a
+# machine whose system is Chinese draws the English manual's figures in English still.
+LANG = os.environ.setdefault("NORMET_UI_LANGUAGE", "en")
+OUT = os.path.join(HERE, "figures" if LANG == "en" else f"figures_{LANG}")
 os.makedirs(OUT, exist_ok=True)
 SIZE = (1320, 860)
 
@@ -130,7 +136,13 @@ def main_figures(app):
 
     win = main_window()
     print("welcome")
+    # As the app opens: the panel folded, the Assistant beside the results. The steps
+    # below are shown with the panel out and the Assistant closed, so their settings
+    # are in view.
+    win.start_layout()
     grab(win, "ui_welcome.png")
+    win.toggle_panel(True)
+    win.assistant.hide()
 
     # MY1 as a CSV, opened as File > Open CSV opens it, so the command log starts
     # from a read_csv a reader can repeat.
@@ -331,8 +343,14 @@ def main():
     app.setStyle("Fusion")  # as normet-gui starts it
     app.setApplicationName("Normet")
     app.setOrganizationName("apai-sys")
+    from normet.gui import uilang
+
+    uilang.install(app)  # the window's texts in LANG, before any window is built
+    from normet.style import apply_style
+
+    apply_style()  # the figures' style, as normet-gui sets it
     keep = [main_figures(app), scm_figures(None), transport_figures(), data_studio_figure()]
-    print(f"done: {len(keep)} windows")
+    print(f"done: {len(keep)} windows -> {OUT}")
 
 
 if __name__ == "__main__":

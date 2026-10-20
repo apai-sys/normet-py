@@ -24,10 +24,12 @@ from typing import Any
 
 import pandas as pd
 
-OBS_COLOR = "#9a9a9a"
-NORM_COLOR = "#d7191c"
-COMP_COLOR = "#2c7bb6"
-NOISE_COLOR = "#8e8e93"
+from normet import style as S
+
+OBS_COLOR = S.OBSERVED
+NORM_COLOR = S.MODELLED
+COMP_COLOR = S.COMPONENT
+NOISE_COLOR = S.NEUTRAL
 
 #: emission component columns → display labels, in decomposition order.
 EMI_COMPONENTS = [
@@ -65,6 +67,23 @@ def met_contribution_columns(res: pd.DataFrame) -> list[str]:
     ]
 
 
+def _time_series_axes(axes: list[Any], index: Any) -> None:
+    """Panels stacked on one time axis: concise dates on the bottom one only, no margin
+    either side of the record, a faint grid."""
+    for ax in axes:
+        ax.margins(x=0)
+        S.grid(ax)
+    if isinstance(index, pd.DatetimeIndex):
+        S.format_time_axis(axes[-1])
+    S.outer_ticks(axes)
+
+
+def _lw(d: pd.DataFrame) -> float:
+    """A line's width for a record this long: hairlines for months of hours."""
+    return 0.5 if len(d) > 1500 else 0.9
+
+
+@S.styled
 def emission_figure(res: pd.DataFrame, target: str = "") -> Any:
     """STL-style stack: normalised series on top, one time-scale per panel."""
     import matplotlib.pyplot as plt
@@ -72,40 +91,47 @@ def emission_figure(res: pd.DataFrame, target: str = "") -> Any:
     d = indexed_result(res)
     comps = [(col, label) for col, label in EMI_COMPONENTS if col in d.columns]
     n = 1 + len(comps)
-    fig, axes = plt.subplots(n, 1, figsize=(10.5, 1.55 * n + 0.8), sharex=True, squeeze=False)
-    axes = axes.ravel()
+    fig, axes = plt.subplots(
+        n,
+        1,
+        figsize=(8, 1.15 * n + 0.6),
+        sharex=True,
+        squeeze=False,
+        layout="constrained",
+        gridspec_kw={"height_ratios": [1.6] + [1] * len(comps)},
+    )
+    axes = list(axes.ravel())
+    lw = _lw(d)
+    name = S.formula(target)
 
     ax = axes[0]
     if "observed" in d.columns:
-        ax.plot(d.index, d["observed"], lw=0.5, color=OBS_COLOR, alpha=0.6, label="observed")
-    ax.plot(d.index, d["emi_total"], lw=1.0, color=NORM_COLOR, label="normalised (emi_total)")
+        ax.plot(d.index, d["observed"], lw=lw, color=OBS_COLOR, alpha=0.45, label="observed")
+    ax.plot(d.index, d["emi_total"], lw=lw + 0.2, color=NORM_COLOR, label="normalised (emi_total)")
     base = float(d["emi_base"].iloc[0]) if "emi_base" in d.columns else float("nan")
     ax.set_title(
-        f"Meteorologically normalised {target} — decomposed into time scales "
-        f"(baseline = {base:.1f})",
-        fontsize=10,
-        loc="left",
+        f"Meteorologically normalised {name} — decomposed into time scales (baseline = {base:.1f})"
     )
-    ax.legend(loc="upper right", fontsize=8, frameon=False, ncols=2)
-    ax.grid(alpha=0.2)
+    ax.set_ylabel(name)
+    S.legend(ax, loc="upper right", ncols=2)
 
     for ax, (col, label) in zip(axes[1:], comps, strict=False):
         series = d[col]
         if col == "date_unix" and "emi_base" in d.columns:
             series = series + d["emi_base"]  # trend shown as a level, not an anomaly
-            ax.plot(d.index, series, lw=1.2, color=COMP_COLOR)
+            ax.plot(d.index, series, lw=1.0, color=COMP_COLOR)
         else:
             color = NOISE_COLOR if col == "emi_noise" else COMP_COLOR
-            ax.plot(d.index, series, lw=0.7, color=color)
-            ax.axhline(0, color="k", lw=0.5)
-        ax.set_title(f"{label}   σ = {d[col].std():.2f}", fontsize=9, loc="left")
-        ax.grid(alpha=0.2)
+            ax.plot(d.index, series, lw=lw, color=color)
+            S.zero_line(ax)
+        ax.set_title(f"{label}   σ = {d[col].std():.2f}")
 
+    _time_series_axes(axes, d.index)
     fig.align_ylabels(axes)
-    fig.tight_layout(h_pad=0.6)
     return fig
 
 
+@S.styled
 def meteorology_figure(res: pd.DataFrame, target: str = "", top_k: int = 5) -> Any:
     """Total met influence + strongest contributions + influence ranking."""
     import matplotlib.pyplot as plt
@@ -118,34 +144,37 @@ def meteorology_figure(res: pd.DataFrame, target: str = "", top_k: int = 5) -> A
     top = sorted(contribs, key=lambda c: sigma[c], reverse=True)[:top_k]
 
     n_left = 1 + len(top)
-    fig = plt.figure(figsize=(11.5, 1.7 * n_left + 0.8), layout="constrained")
-    gs = fig.add_gridspec(n_left, 2, width_ratios=[2.5, 1])
+    fig = plt.figure(figsize=(8.5, 1.15 * n_left + 0.6), layout="constrained")
+    gs = fig.add_gridspec(n_left, 2, width_ratios=[3, 1])
+    lw = _lw(d)
+    name = S.formula(target)
 
     ax0 = fig.add_subplot(gs[0, 0])
-    ax0.plot(d.index, d["met_total"], lw=0.7, color="#1c1c1e")
-    ax0.axhline(0, color="k", lw=0.5)
+    ax0.plot(d.index, d["met_total"], lw=lw, color=S.INK)
+    S.zero_line(ax0)
     ax0.set_title(
-        f"Meteorological influence on {target}: observed − normalised   "
-        f"σ = {d['met_total'].std():.2f}",
-        fontsize=10,
-        loc="left",
+        f"Meteorological influence on {name}: observed − normalised   "
+        f"σ = {d['met_total'].std():.2f}"
     )
-    ax0.grid(alpha=0.2)
-
-    prev = ax0
+    left = [ax0]
     for i, col in enumerate(top, start=1):
-        ax = fig.add_subplot(gs[i, 0], sharex=prev)
-        ax.plot(d.index, d[col], lw=0.7, color=COMP_COLOR)
-        ax.axhline(0, color="k", lw=0.5)
-        ax.set_title(f"{col}   σ = {sigma[col]:.2f}", fontsize=9, loc="left")
-        ax.grid(alpha=0.2)
-        prev = ax
+        ax = fig.add_subplot(gs[i, 0], sharex=ax0)
+        ax.plot(d.index, d[col], lw=lw, color=COMP_COLOR)
+        S.zero_line(ax)
+        ax.set_title(f"{col}   σ = {sigma[col]:.2f}")
+        left.append(ax)
+    _time_series_axes(left, d.index)
+    fig.align_ylabels(left)
 
     axr = fig.add_subplot(gs[:, 1])
     order = sorted(sigma, key=sigma.get)
     colors = [NOISE_COLOR if c == "met_noise" else COMP_COLOR for c in order]
-    axr.barh(order, [sigma[c] for c in order], color=colors)
-    axr.set_title("Influence ranking (σ of contribution)", fontsize=9, loc="left")
-    axr.grid(alpha=0.2, axis="x")
+    axr.barh(order, [sigma[c] for c in order], color=colors, height=0.6)
+    axr.set_title("Influence ranking")
+    axr.set_xlabel(f"σ of contribution ({name})" if name else "σ of contribution")
+    S.grid(axr, axis="x")
+    axr.tick_params(axis="y", length=0)
+    for side in ("top", "right"):
+        axr.spines[side].set_visible(False)
 
     return fig
