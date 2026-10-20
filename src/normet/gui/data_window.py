@@ -391,6 +391,9 @@ class DataWindow(QMainWindow):
 
     def _build_tabs(self) -> QTabWidget:
         self.tabs = QTabWidget()
+        # Pages on the window's own ground, as the toolbars above their figures are: a
+        # framed pane drew them lighter, and each toolbar as a grey band across it.
+        self.tabs.setDocumentMode(True)
 
         st_tab = QWidget()
         sl = QVBoxLayout(st_tab)
