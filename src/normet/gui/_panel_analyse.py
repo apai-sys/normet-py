@@ -285,3 +285,6 @@ class AnalysePanelMixin(QMainWindow):
         self.decom_attribution.setEnabled(on)
         self._decom_form.setRowVisible(self._decom_groups_label, on)
         self._decom_form.setRowVisible(self.decom_groups, on)
+        panel = getattr(self, "param_panel", None)  # not yet, while the panel is built
+        if on and panel is not None:
+            panel.refit()  # the groups' table, shown, may need the panel wider
