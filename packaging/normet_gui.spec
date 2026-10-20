@@ -69,6 +69,8 @@ hiddenimports += ["shapefile"]
 # time, which PyInstaller's import scan cannot see. Name them, or the frozen app
 # says "'rdata' is required but not installed" although the build env had it.
 hiddenimports += ["requests", "cdsapi", "rdata"]
+# pandas reaches its table readers the same way (Open Data's Parquet, Feather, Excel).
+hiddenimports += ["pyarrow", "openpyxl", "xlrd"]
 
 a = Analysis(
     [os.path.join(SPECPATH, "launcher.py")],  # noqa: F821
@@ -83,6 +85,9 @@ a = Analysis(
         # pulls in. xgboost opens it only for distributed GPU training and goes on
         # without it otherwise.
         "nvidia",
+        # Chronos-2 stays out of the installers: torch alone is ~300 MB. The app says
+        # it is not installed; the pip install (normet[foundation]) has it.
+        "torch", "chronos",
     ],
     noarchive=False,
 )
