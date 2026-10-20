@@ -18,6 +18,28 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   change. Steps finer than the record's own are disabled.
 - **GUI opens as cume does**: the parameter panel folded (◀ Collapse /
   ▶ Expand Panel, Ctrl+B) and the Assistant open beside the results.
+- **Figures in a journal style, as cume's** (`normet.style`, ported from
+  `cume.style` and `cume.figstyle`): 7–8.5 pt text, 0.6 pt axes with ticks
+  outward, frameless legends, slim colour bars, Okabe–Ito colours with one
+  meaning each (observed blue, normalised/synthetic vermilion, context grey),
+  formulas set as chemistry writes them (`formula`: NO₂, PM₂.₅, SO₄²⁻), and
+  concise date axes (the year once, then the months; panels stacked on one
+  time axis dated on the bottom one only). The window applies it at start;
+  every plotting function in `normet.plotting`, `normet.causal`'s band plots,
+  the HTML report and the MCP figures draw in it whatever the session's
+  rcParams. A canvas re-solves its margins at every draw (constrained layout),
+  so titles no longer run into the panel above. The parity plot is square with
+  a 1:1 line, PDP panels share one y label, and figure texts carry their
+  Chinese translations (a formula in a Chinese title is written NO₂).
+- **The user manual in Chinese** (`docs/manual/normet_manual_zh.pdf`), beside
+  the English one, as cume's: `normet_manual_zh.tex` is the English book
+  translated label for label (tests/test_manual.py holds the two to the same
+  chapters, sections, labels and screenshots), built by XeLaTeX with ctex, its
+  screenshots of the window in Chinese in `figures_zh/`
+  (`NORMET_UI_LANGUAGE=zh make_figures.py`). `build.sh` builds both (`en` or
+  `zh` for one). The English book follows the window: the folded panel and the
+  open Assistant, Ctrl+B, Resolution, the toolbar's For print…, View →
+  Language, and the `data` extra Find stations needs.
 
 - **`join_trajectory_features`** (`normet.io`, `normet`): joins a trajectory
   feature table onto a panel the way the module docstring recommends, so
