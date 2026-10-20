@@ -61,6 +61,7 @@ from typing import Any, cast
 import numpy as np
 import pandas as pd
 
+from ..utils import progress
 from ..utils._time import to_datetime_coerced
 from ..utils.logging import get_logger
 from .gdas import _gdas1_file_range, gdas1_filenames
@@ -1013,6 +1014,7 @@ def run_back_trajectories(
         if stop is not None and stop.is_set():
             stopped = True
             break
+        progress.report(i - 1, len(stamps))
         # Minutes in the name only off the hour, so on-the-hour names stay as they were.
         name = "tdump_" + ts.strftime("%Y%m%d%H%M" if ts.minute else "%Y%m%d%H")
         # Hand hyts_std only the files this run can touch: a multi-year archive is

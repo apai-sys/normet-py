@@ -10,6 +10,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from ..utils import progress
 from ..utils._config import DEFAULT_SEED
 from ..utils._lazy import require
 from ..utils.logging import get_logger
@@ -334,6 +335,7 @@ def train_lgb(
     )
 
     for i in range(1, cfg["n_trials"] + 1):
+        progress.report(i - 1, cfg["n_trials"])
         params: dict[str, Any] = {
             "objective": "regression",
             "metric": "rmse",
