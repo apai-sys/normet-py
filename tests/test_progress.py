@@ -4,6 +4,7 @@ that says it with the time so far and the time left."""
 from __future__ import annotations
 
 import os
+import re
 import sys
 import threading
 import time
@@ -105,11 +106,12 @@ def test_the_status_bar_says_how_far_a_task_has_come_and_how_long_it_took(qapp):
         assert bar.currentMessage() == "Running: a test task… · 0 s so far"
         assert win.progress.maximum() == 0  # nothing known yet: a busy bar
         _until(qapp, lambda: "50 %" in bar.currentMessage())
-        assert bar.currentMessage() == "Running: a test task… · 50 % · 0 s so far"
+        # (the seconds as a slow runner has them: the times are the clock tests' below)
+        assert re.fullmatch(r"Running: a test task… · 50 % · \d+ s so far", bar.currentMessage())
         assert win.progress.maximum() == 1000 and win.progress.value() == 500
         seen.set()
         _until(qapp, lambda: not win.runner.busy)
-        assert bar.currentMessage() == "Done. · took 0 s"
+        assert re.fullmatch(r"Done\. · took \d+ s", bar.currentMessage())
         assert win.progress.maximum() == 1
 
         # A task that fails writes no line of its own: the clock says it ended.
@@ -118,7 +120,7 @@ def test_the_status_bar_says_how_far_a_task_has_come_and_how_long_it_took(qapp):
 
         win.runner.submit("a failing task", fails, print, lambda _tb: None)
         _until(qapp, lambda: not win.runner.busy)
-        assert bar.currentMessage() == "Ended: a failing task · took 0 s"
+        assert re.fullmatch(r"Ended: a failing task · took \d+ s", bar.currentMessage())
     finally:
         win.close()
 
