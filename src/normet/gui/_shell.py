@@ -253,6 +253,9 @@ class ShellMixin(QMainWindow):
 
     def _build_tabs(self) -> QTabWidget:
         self.tabs = QTabWidget()
+        # Pages on the window's own ground, as the toolbars above their figures are: a
+        # framed pane drew them lighter, and each toolbar as a grey band across it.
+        self.tabs.setDocumentMode(True)
 
         # Data preview tab: the welcome until a table is open, then its preview.
         data_tab = QWidget()
