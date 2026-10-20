@@ -4,7 +4,6 @@ read however they are written, and a local clock put on UTC."""
 from __future__ import annotations
 
 import gzip
-import importlib.util
 
 import pandas as pd
 import pytest
@@ -54,10 +53,6 @@ def test_a_decimal_comma_and_a_semicolon_are_read_from_the_file(tmp_path):
     assert read_table(path)["NO2"].tolist() == [1.5, 2.25]
 
 
-def _installed(*modules: str) -> bool:
-    return any(importlib.util.find_spec(m) is not None for m in modules)
-
-
 def test_excel_parquet_and_gzip_are_read(tmp_path):
     frame = pd.DataFrame(
         {"date": pd.date_range("2020-01-01", periods=3, freq="h"), "NO2": [1.0, 2, 3]}
@@ -65,13 +60,17 @@ def test_excel_parquet_and_gzip_are_read(tmp_path):
     with gzip.open(tmp_path / "a.csv.gz", "wt") as fh:
         frame.to_csv(fh, index=False)
     names = ["a.csv.gz"]
-    # Parquet and Excel need engines of their own, not every install has them.
-    if _installed("pyarrow", "fastparquet"):
-        frame.to_parquet(tmp_path / "a.parquet")
-        names.append("a.parquet")
-    if _installed("openpyxl"):
-        frame.to_excel(tmp_path / "a.xlsx", index=False)
-        names.append("a.xlsx")
+    # Parquet and Excel need engines of their own, which not every install has: one
+    # found but unusable (CI's pyarrow) is as missing as none, so the write is the test.
+    for name, write in (
+        ("a.parquet", lambda p: frame.to_parquet(p)),
+        ("a.xlsx", lambda p: frame.to_excel(p, index=False)),
+    ):
+        try:
+            write(tmp_path / name)
+        except ImportError:
+            continue
+        names.append(name)
     for name in names:
         df = read_time_series(tmp_path / name)
         assert _times(df) == [str(t) for t in frame["date"]], name
