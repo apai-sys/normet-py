@@ -1,8 +1,7 @@
 # Cross-platform PyInstaller spec for the normet Qt GUI.
 #
-#   macOS  : packaging/macos/build_dmg.sh (wraps this same launcher via CLI
-#            flags) is the primary path and also produces the .dmg; this spec
-#            works there too if invoked directly.
+#   macOS  : packaging/macos/build_dmg.sh builds from this spec
+#            -> dist/macos/Normet.app, then packs it into the .dmg
 #   Windows: pyinstaller --noconfirm packaging/normet_gui.spec
 #            -> dist/normet/normet.exe (then packaging/windows/installer.iss)
 #   Linux  : pyinstaller --noconfirm packaging/normet_gui.spec
@@ -53,8 +52,14 @@ binaries = []
 # default. xgboost is not optional once flaml is: flaml.automl imports it at
 # module level and silently drops AutoML if that fails. shapely/pyshp back
 # Transport Studio's GeoJSON/Shapefile source-region loading.
+def _not_tests(name):
+    return not {"tests", "testing"} & set(name.split("."))
+
+
+# Their own test suites stay out: importing them can need what the app does not
+# ship (shapely's tests and xgboost.testing need hypothesis), which stops the build.
 for pkg in ("flaml", "lightgbm", "xgboost", "shapely"):
-    d, b, h = collect_all(pkg)
+    d, b, h = collect_all(pkg, filter_submodules=_not_tests)
     datas += d
     binaries += b
     hiddenimports += h
