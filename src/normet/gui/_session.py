@@ -31,6 +31,37 @@ from ._lists import _checked_items
 log = logging.getLogger(__name__)
 
 
+def _plain(value):  # noqa: ANN001, ANN202
+    """A value as the Methods paragraph keeps it: numbers, text and their containers;
+    a table or a model is not kept."""
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, (list, tuple)):
+        return [_plain(v) for v in value]
+    if isinstance(value, dict):
+        return {str(k): _plain(v) for k, v in value.items()}
+    return None
+
+
+def _plain_call(args, kwargs) -> dict:  # noqa: ANN001
+    """A call's arguments, the plain ones only, with its positional ones as ``args``."""
+    out = {k: _plain(v) for k, v in kwargs.items()}
+    out["args"] = [_plain(a) for a in args]
+    return out
+
+
+#: The run history's steps (``_log_history``), as its table names them.
+_TASK_WORDS = {
+    "load": "Load",
+    "train": "Train",
+    "normalise": "Normalise",
+    "decompose": "Decompose",
+    "rolling": "Rolling",
+    "multiscale": "Multi-scale",
+    "pdp": "PDP",
+}
+
+
 class SessionMixin(QMainWindow):
     #: Which result each tab shows, for Export.
     _TAB_KEYS = {
@@ -45,20 +76,100 @@ class SessionMixin(QMainWindow):
 
     def _record_task(self, fn, args, kwargs):  # noqa: ANN001, ANN202 - TaskRunner.record
         """The command a task makes, written now from what it was started with and
-        added to the log once it has succeeded."""
+        added to the log once it has succeeded -- and its arguments kept by the step's
+        name, for the Methods paragraph (.methods), which says what ran."""
         normalised = self.results.get("normalise")
         names = [(self.df_raw, "df"), (self.df_prep, "df_prep"), (self.model, "model")]
         if normalised is not None and "normalised" in normalised:
             names.append((normalised["normalised"], "normalised['normalised']"))
         entry = commandlog.task(fn, args, kwargs, [(o, n) for o, n in names if o is not None])
-        if entry is None:
-            return None
-        return lambda: self._log_command(entry)
+        call = _plain_call(args, kwargs)
+        step = getattr(fn, "__name__", "")
+
+        def commit() -> None:
+            if step == "build_model" or step == "load_estimator":
+                self._ran.clear()  # a new model: what ran before was on the old one
+            self._ran[step] = call
+            if entry is not None:
+                self._log_command(entry)
+
+        return commit
+
+    def methods_info(self) -> dict:
+        """What the Methods paragraph is written from: the record, what ran, the fit."""
+        import numpy as np
+
+        import normet
+
+        info: dict = {"version": normet.__version__, "ran": dict(self._ran)}
+        if self.df_raw is not None and "date" in self.df_raw.columns:
+            dates = pd.to_datetime(self.df_raw["date"]).dropna().sort_values()
+            info.update(
+                rows=len(self.df_raw),
+                start=f"{dates.iloc[0]:%Y-%m-%d}",
+                end=f"{dates.iloc[-1]:%Y-%m-%d}",
+                target=self.target_combo.currentText(),
+            )
+            step = float(
+                np.median(np.diff(dates.to_numpy()).astype("timedelta64[s]").astype(float))
+            )
+            for limit, en, zh in ((3600 * 1.5, "hourly", "逐时"), (86400 * 1.5, "daily", "逐日")):
+                if step <= limit:
+                    info.update(step=en, step_zh=zh)
+                    break
+        stats = self.results.get("train")
+        if stats is not None and "set" in stats.columns:
+            row = stats[stats["set"] == "testing"]
+            if len(row):
+                r = row.iloc[0]
+                info["test"] = {"r2": float(r["R2"]), "rmse": float(r["RMSE"]), "n": int(r["n"])}
+        if self.chronos_check is not None:
+            info["chronos_pct"] = float(self.chronos_check[0].get("pct_of_prediction", 0.0))
+        return info
+
+    def show_methods_paragraph(self) -> None:
+        """File -> Methods Paragraph: what the session ran, for a paper, ready to copy."""
+        from PySide6.QtWidgets import QApplication, QDialogButtonBox, QPlainTextEdit
+
+        from . import uilang
+        from .methods import methods_paragraph
+
+        text = methods_paragraph(self.methods_info(), uilang.language())
+        if text is None:
+            self.notify(
+                "Train a model first: the Methods paragraph says what the session ran.",
+                key="need-model",
+                actions=(("Train model", self._run_train),),
+            )
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Methods paragraph")
+        dlg.resize(680, 520)
+        lay = QVBoxLayout(dlg)
+        note = QLabel(
+            "What this session ran, in its own numbers, for a paper's Methods: check it "
+            "against what you did, and cite normet as its release says."
+        )
+        note.setWordWrap(True)
+        lay.addWidget(note)
+        view = QPlainTextEdit(text)
+        view.setReadOnly(True)
+        view.setProperty(
+            "normetKeepText", True
+        )  # the paragraph is in the language it was written in
+        lay.addWidget(view)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        copy = buttons.addButton("Copy", QDialogButtonBox.ButtonRole.ActionRole)
+        copy.clicked.connect(lambda: QApplication.clipboard().setText(text))
+        buttons.rejected.connect(dlg.reject)
+        lay.addWidget(buttons)
+        self._methods_dialog = dlg
+        dlg.open()
 
     def save_script(self) -> None:
         """The command log as a Python file that repeats the session."""
         if not len(self.command_log):
-            QMessageBox.information(self, "Nothing to save", "Open a table and run a step first.")
+            self.notify("Nothing to save yet: open a table and run a step first.", key="nothing")
             return
         path, _ = QFileDialog.getSaveFileName(
             self, "Save session as script", "normet_session.py", "Python (*.py)"
@@ -175,6 +286,8 @@ class SessionMixin(QMainWindow):
             QMessageBox.critical(self, "Load error", str(exc))
 
     def _log_history(self, task: str, detail: str) -> None:
+        if getattr(self, "_restoring", False):
+            return  # a saved session read back: its runs are not run again
         _settings.append_history(
             {
                 "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
@@ -197,11 +310,16 @@ class SessionMixin(QMainWindow):
         else:
             cols = ["time", "task", "target", "backend", "rows", "detail"]
             tbl = QTableWidget(len(recs), len(cols))
-            tbl.setHorizontalHeaderLabels(cols)
+            tbl.setHorizontalHeaderLabels(["Time", "Task", "Target", "Backend", "Rows", "Detail"])
             tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+            from .uilang import tr
+
             for i, rec in enumerate(reversed(recs)):  # newest first
                 for j, col in enumerate(cols):
-                    tbl.setItem(i, j, QTableWidgetItem(str(rec.get(col, ""))))
+                    value = str(rec.get(col, ""))
+                    if col == "task":  # the step, in the window's words
+                        value = tr(_TASK_WORDS.get(value, value))
+                    tbl.setItem(i, j, QTableWidgetItem(value))
             tbl.resizeColumnsToContents()
             lay.addWidget(tbl)
         clr = QPushButton("Clear history")
@@ -218,9 +336,7 @@ class SessionMixin(QMainWindow):
     def _export_current(self) -> None:
         key, result = self._current_result()
         if result is None:
-            QMessageBox.information(
-                self, "Nothing to export", "Run the current tab's analysis first."
-            )
+            self.notify("Nothing to export: run the current tab's analysis first.", key="nothing")
             return
         path, _ = QFileDialog.getSaveFileName(
             self, "Export result", f"normet_{key}.csv", "CSV files (*.csv)"
@@ -233,10 +349,10 @@ class SessionMixin(QMainWindow):
     def _export_html(self) -> None:
         key, result = self._current_result()
         if result is None or key == "data":
-            QMessageBox.information(
-                self,
-                "Nothing to report",
-                "Switch to a result tab (Normalise, Decompose, …) that has been run.",
+            self.notify(
+                "Nothing to report: switch to a result tab (Normalise, Decompose, …) that has "
+                "been run.",
+                key="nothing",
             )
             return
         path, _ = QFileDialog.getSaveFileName(
@@ -255,7 +371,9 @@ class SessionMixin(QMainWindow):
                 model=self.model,
                 seed=self.seed_spin.value(),
             )
-            generate_html_report(run, path)
+            from ._shell import report_language
+
+            generate_html_report(run, path, lang=report_language())
             self.statusBar().showMessage(f"Saved {os.path.basename(path)}")
             log.info("HTML report written to %s", path)
         except Exception as exc:

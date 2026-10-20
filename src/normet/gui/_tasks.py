@@ -22,7 +22,7 @@ class TaskMixin(QMainWindow):
         for b in (self.norm_button, self.decom_button, self.roll_button, self.pdp_button):
             b.setEnabled(not busy and has_model)
         if not has_model:
-            tip = "Train a model first (Step 1)."
+            tip = "Train a model first."
             for b in (self.norm_button, self.decom_button, self.roll_button, self.pdp_button):
                 b.setToolTip(tip)
         elif self._is_chronos():
@@ -38,8 +38,18 @@ class TaskMixin(QMainWindow):
         self.ms_button.setToolTip(
             self._ms_button_tip
             if has_y_inf
-            else "Run Step 2 (Normalise) first — it provides Y_∞, the full-record baseline."
+            else "Run the normalisation first — it provides Y_∞, the full-record baseline."
         )
+        # A notice asking for a step that has now been taken has been answered.
+        for key, done in (
+            ("need-data", has_data),
+            ("need-model", has_model),
+            ("need-normalise", has_y_inf),
+        ):
+            if done:
+                self.notices.clear(key)
+        if hasattr(self, "_step_lights"):
+            self._update_step_lights()
         has_result = bool(self.results)
         self.exp_csv.setEnabled(has_data)
         self.exp_html.setEnabled(has_result)
@@ -57,6 +67,7 @@ class TaskMixin(QMainWindow):
     def _task_finished(self) -> None:
         self.progress.setRange(0, 1)
         self._sync_enabled()
+        self.autosave_session()  # File -> Reopen Last Session, should the window go
 
     def _abandon_task(self) -> None:
         if self.runner.busy:
@@ -67,16 +78,28 @@ class TaskMixin(QMainWindow):
 
     def _check_data(self) -> bool:
         if self.df_raw is None:
-            QMessageBox.information(self, "No data", "Open a CSV file first.")
+            self.notify(
+                "Open a table first: a CSV with a date column, the pollutant and its meteorology.",
+                key="need-data",
+                actions=(("Open Data…", self._open_csv), ("Load example", self.load_example)),
+            )
             return False
         if not self._selected_features():
-            QMessageBox.information(self, "No features", "Tick at least one feature.")
+            self.notify(
+                "Tick at least one feature (predictor) under Columns.",
+                key="need-features",
+                actions=(("Met only", self._check_met_only),),
+            )
             return False
         return True
 
     def _check_model(self) -> bool:
         if self.model is None or self.df_prep is None:
-            QMessageBox.information(self, "No model", "Train a model first (Step 1).")
+            self.notify(
+                "Train a model first: every later step reads it.",
+                key="need-model",
+                actions=(("Train model", self._run_train),),
+            )
             return False
         return True
 

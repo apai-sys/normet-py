@@ -153,6 +153,7 @@ def _catalogue(lang: str):
 
 
 _LETTERS = re.compile(r"[A-Za-z]{2}")
+_LETTER = re.compile(r"[A-Za-z]")  # a number with its unit ("14 d") has one
 _TAG = re.compile(r"<[A-Za-z/][^>]*>")
 _ENTITY = re.compile(r"&(?:#x?[0-9A-Fa-f]+|[a-z]+);")
 _CJK = re.compile(r"[\u4e00-\u9fff]")
@@ -169,7 +170,12 @@ def _translate(text: str, lang: str) -> str | None:
 
     cat = _catalogue(lang)
     lead, core, trail = _SPACES.match(text).groups()
-    if not core or not _LETTERS.search(core):
+    # A text the catalogue has whole, however short: a unit a spin box writes after its
+    # number (" d", " h", " s") has one letter, and the search below wants two.
+    exact = cat[0].get(" ".join(core.split()))
+    if exact is not None:
+        return lead + exact + trail
+    if not core or not _LETTER.search(core):
         return None
     # The text whole first: a tooltip that writes <factor> or <min> is not HTML.
     got = translate(core, lang, cat)
@@ -1095,6 +1101,10 @@ def figure_texts(fig, lang: str | None = None):
                 families = list(labels[0].get_fontfamily()) if labels else ["sans-serif"]
                 if font not in families:
                     axis.set_tick_params(which="both", labelfontfamily=families + [font])
+                # The axis' offset (a date axis' "2020-Jan") is a text of its own.
+                off = list(axis.offsetText.get_fontfamily())
+                if font not in off:
+                    axis.offsetText.set_fontfamily(off + [font])
     fig._normet_lang = lang
 
 

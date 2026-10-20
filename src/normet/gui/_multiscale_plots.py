@@ -68,14 +68,15 @@ def multiscale_figure(result: dict, target: str = "") -> Any:
         ("Y_fast", f"Y_{result['fast_days']}"),
         ("Y_meso", f"Y_{result['meso_days']}"),
         ("Y_slow", f"Y_{result['slow_days']}"),
-        ("Y_inf", "Y_∞ (Step 2)"),
+        ("Y_inf", "Y_∞ (normalised)"),
     ]
     index = None
     for (key, label), color in zip(scales, SCALE_COLORS, strict=True):
         series = result.get(key)
         if series is not None and len(series):
             index = series.index if index is None else index
-            ax0.plot(
+            S.line(
+                ax0,
                 series.index,
                 series.values,
                 lw=0.9 if key == "Y_inf" else 0.7,
@@ -94,7 +95,7 @@ def multiscale_figure(result: dict, target: str = "") -> Any:
         s = result[key]
         sigmas[key] = float(s.std())
         ax = fig.add_subplot(gs[i, 0], sharex=ax0)
-        ax.plot(s.index, s.values, lw=_lw(pd.DataFrame(index=s.index)), color=COMP_COLOR)
+        S.line(ax, s.index, s.values, lw=_lw(pd.DataFrame(index=s.index)), color=COMP_COLOR)
         S.zero_line(ax)
         ax.set_title(f"{label}   σ = {sigmas[key]:.2f}")
         left.append(ax)

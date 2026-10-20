@@ -47,9 +47,12 @@ def _compile(template: str, whole: bool = True, sentences: bool = True) -> re.Pa
         name = m.group(1) + m.group(2)
         free = r".+?" if whole else r"\S.*?"
         if not sentences:
-            # A {s} within its sentence: the window strings sentences together,
-            # and a template's {s} would otherwise take the sentences after it.
-            free = r"(?:(?!\. [A-Z(]).)+?" if whole else r"\S(?:(?!\. [A-Z(]).)*?"
+            # A {s} within its sentence and its part of a line: the window strings
+            # sentences together, and facts with " | " -- a template's {s} would otherwise
+            # take the sentences, or the facts, after it ("Backend: {s0}" took
+            # "lightgbm | features: 9 | rows: 5,793", and those two stayed English).
+            stop = r"(?!\. [A-Z(]| \| )"
+            free = rf"(?:{stop}.)+?" if whole else rf"\S(?:{stop}.)*?"
         parts.append(f"(?P<{name}>{_NUM})" if m.group(1) == "n" else f"(?P<{name}>{free})")
         pos = m.end()
     parts.append(re.escape(template[pos:]))

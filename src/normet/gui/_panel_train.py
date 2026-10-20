@@ -33,7 +33,7 @@ from ._widgets import (
 class TrainPanelMixin(QMainWindow):
     def _build_train_box(self) -> QGroupBox:
         """Step 1: backend, split, budget, seed, device — and fine-tuning."""
-        box = QGroupBox("Step 1 · Train model")
+        box = QGroupBox("Train model")
         form = QFormLayout(box)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.backend_combo = NoWheelComboBox()
