@@ -78,6 +78,9 @@ class MainWindow(
         self.results: dict[str, pd.DataFrame] = {}
         #: The multi-scale run as it came back (its series and notes), for a saved session.
         self._multiscale_raw: dict | None = None
+        #: The decomposition by method, as shown on its tab, and the model they are of.
+        self._decom_views: dict[str, tuple] = {}
+        self._decom_model: object = None
         self._restoring = False  # a saved session being read back: no history, no autosave
         #: Each step's call as it ran (its plain arguments), by function name: the Methods
         #: paragraph is written from these, not from the panel as it stands.

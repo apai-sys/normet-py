@@ -178,3 +178,38 @@ def test_a_session_script_comes_back_into_the_window(qapp, home, tmp_path):
         assert "random search of 2 trials" in text and "mean of 5 predictions" in text
     finally:
         w.close()
+
+
+def test_both_decompositions_come_back_with_the_session(qapp, home, tmp_path):
+    """Emission and meteorology both run on the model: a saved session brings both back,
+    the one run last shown, the other a Method away."""
+    import joblib
+    import numpy as np
+    import pandas as pd
+    from PySide6.QtWidgets import QComboBox
+
+    from normet.gui.main_window import MainWindow
+
+    w = _trained_window()
+    dates = w.df_prep["date"]
+    rng = np.random.default_rng(0)
+    emi = pd.DataFrame({"date": dates, "observed": rng.normal(30, 5, len(dates))})
+    for c in ("emi_total", "emi_base", "date_unix", "day_julian", "weekday", "hour", "emi_noise"):
+        emi[c] = rng.normal(0, 1, len(dates))
+    met = emi[["date", "observed"]].assign(
+        met_total=rng.normal(0, 3, len(dates)), met_base=0.0, ws=0.5, met_noise=0.1
+    )
+    w._decompose_done(emi)
+    w._decompose_done(met)
+    path = tmp_path / "s.normet"
+    joblib.dump(w.session_bundle(), path)
+    w.close()
+
+    v = MainWindow()
+    try:
+        v.load_results(str(path))
+        assert set(v._decom_views) == {"emission", "meteorology"}
+        assert "met_total" in v.results["decompose"].columns
+        assert v.tab_decom.findChild(QComboBox).currentText() == "meteorology"
+    finally:
+        v.close()
