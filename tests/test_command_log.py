@@ -224,7 +224,7 @@ def test_the_dialog_previews_and_follows_its_preset(qapp):
     fig, _ = _figure()
     canvas = FigureCanvasQTAgg(fig)
     toolbar = ThemedToolbar(canvas)
-    assert any(a.text() == "Export for Publication…" for a in toolbar.actions())
+    assert any(a.text() == "For print…" for a in toolbar.actions())
     dlg = PrintDialog(canvas)
     assert dlg.width.value() == 89.0 and not dlg.width.isEnabled()
     assert fig.canvas is dlg.canvas  # the figure itself, on the dialog's canvas

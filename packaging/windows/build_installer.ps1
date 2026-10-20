@@ -13,7 +13,7 @@
     The interpreter must already have normet + its GUI/AutoML extras and
     PyInstaller installed:
 
-        pip install ".[gui,flaml,lgb,geo]" pyinstaller
+        pip install ".[gui,flaml,lgb,geo,data]" pyinstaller
 
 .NOTES
     Do not build with an Anaconda interpreter. Anaconda keeps its own

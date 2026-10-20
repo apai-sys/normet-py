@@ -613,7 +613,7 @@ before a table is open the Data tab offers the examples and recent tables.
 **Command Log** (View → Command Log) — every step you run, written as the normet
 call that repeats it, with the arguments it actually ran with; File → Save
 Session as Script… turns a session done by clicking into a Python script that
-reproduces it. **Export for Publication…** on any figure's toolbar lays the
+reproduces it. **For print…** on any figure's toolbar lays the
 figure out at a journal's column width (Nature, Elsevier, ACS, or custom) with
 its lettering in points, shows it at its printed size to finish -- drag or place
 the legend and set its columns, set line widths and markers, letter the panels,

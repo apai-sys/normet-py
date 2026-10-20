@@ -8,7 +8,7 @@ Estimator → Inference), result tabs on the right with verdict banners.
 
 Tabs
 ----
-① Panel        — outcome by unit, treated highlighted; balance check.
+Panel          — outcome by unit, treated highlighted; balance check.
 Fit            — observed vs. synthetic + effect path + donor weights
                  (``scm_dashboard``) with ``scm_diagnostics`` verdict.
 Placebo Space  — each donor treated as a pseudo-treated unit; permutation
@@ -435,7 +435,7 @@ class SCMWindow(QMainWindow):
     def _build_tabs(self) -> QTabWidget:
         self.tabs = QTabWidget()
         self.tab_panel = CanvasTab("Load a panel CSV to preview the outcome by unit.")
-        self.tabs.addTab(self.tab_panel, "① Panel")
+        self.tabs.addTab(self.tab_panel, "Panel")
         self.tab_fit = CanvasTab("Run the synthetic control to see observed vs. synthetic here.")
         self.tabs.addTab(self.tab_fit, "Fit")
         self.tab_pspace = CanvasTab(
@@ -773,7 +773,7 @@ class SCMWindow(QMainWindow):
         if data is None:
             QMessageBox.information(self, "Nothing to export", "Run this tab's analysis first.")
             return
-        name = self.tabs.tabText(self.tabs.currentIndex()).strip("① ").lower().replace(" ", "_")
+        name = self.tabs.tabText(self.tabs.currentIndex()).strip("").lower().replace(" ", "_")
         path, _ = QFileDialog.getSaveFileName(
             self, "Export data", f"normet_scm_{name}.csv", "CSV (*.csv)"
         )

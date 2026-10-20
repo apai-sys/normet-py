@@ -6,6 +6,7 @@ the command.  Mixed into :class:`~.main_window.MainWindow`.
 
 from __future__ import annotations
 
+import functools
 import logging
 
 import pandas as pd
@@ -68,13 +69,7 @@ class AnalyseRunMixin(QMainWindow):
         from normet import normalise_plot
 
         qcols = sorted(c for c in result.columns if c.startswith("q") and c[1:].isdigit())
-        fig = normalise_plot(
-            result,
-            ci_low=qcols[0] if len(qcols) >= 2 else None,
-            ci_high=qcols[-1] if len(qcols) >= 2 else None,
-            ylabel=self.target_combo.currentText(),
-            title=f"Meteorologically normalised {self.target_combo.currentText()}",
-        )
+        target = self.target_combo.currentText()
         # Chronos-2 has no history to condition on for the first context_length
         # rows, so deweather() seeds them with the observed values: normalised
         # equals observed there by construction, not by result. Averaging across
@@ -83,15 +78,26 @@ class AnalyseRunMixin(QMainWindow):
         # rows are seeded and take the mean over the rest.
         seeded = min(int(self.model.context_length), len(result)) if self._is_chronos() else 0
         projected = result.iloc[seeded:]
-        if seeded:
-            fig.axvspan(
-                result.index[0],
-                result.index[seeded - 1],
-                color="0.85",
-                zorder=0,
-                label="seeded (= observed)",
+
+        def render(d: pd.DataFrame):
+            fig = normalise_plot(
+                d,
+                ci_low=qcols[0] if len(qcols) >= 2 else None,
+                ci_high=qcols[-1] if len(qcols) >= 2 else None,
+                ylabel=target,
+                title=f"Meteorologically normalised {target}",
             )
-            fig.legend(loc="best", fontsize=8)
+            if seeded:
+                fig.axvspan(
+                    result.index[0],
+                    result.index[seeded - 1],
+                    color="0.85",
+                    zorder=0,
+                    label="seeded (= observed)",
+                )
+                fig.legend(loc="best", fontsize=8)
+            return fig
+
         n_rv = len(self._selected_norm_vars())
         lines = []
         if len(projected):
@@ -118,11 +124,11 @@ class AnalyseRunMixin(QMainWindow):
                     f"{self.model.context_length:,} rows."
                 )
             )
-        self.tab_norm.show_result(fig, lines=lines)
+        self.tab_norm.show_timeseries(render, result, lines=lines)
         self._sync_enabled()
         self.tabs.setCurrentWidget(self.tab_norm)
         self.statusBar().showMessage(
-            "Normalisation done — the meteorologically normalised series is on tab ③."
+            "Normalisation done — the meteorologically normalised series is on the Normalise tab."
         )
         self._log_history("normalise", f"n_samples={self.norm_samples.value()}")
         log.info("Normalisation finished (%d rows)", len(result))
@@ -174,7 +180,7 @@ class AnalyseRunMixin(QMainWindow):
 
         try:
             if method == "emission":
-                fig = DP.emission_figure(result, target=target)
+                render = functools.partial(DP.emission_figure, target=target)
                 d = DP.indexed_result(result)
                 comps = [(c, lbl) for c, lbl in DP.EMI_COMPONENTS if c in d.columns]
                 dominant = max(comps, key=lambda cl: d[cl[0]].std())[1] if comps else "n/a"
@@ -183,7 +189,7 @@ class AnalyseRunMixin(QMainWindow):
                     f"largest time-scale: {dominant}."
                 ]
             else:
-                fig = DP.meteorology_figure(result, target=target)
+                render = functools.partial(DP.meteorology_figure, target=target)
                 d = DP.indexed_result(result)
                 contribs = DP.met_contribution_columns(d)
                 dominant = max(contribs, key=lambda c: d[c].std()) if contribs else "n/a"
@@ -195,7 +201,7 @@ class AnalyseRunMixin(QMainWindow):
                     f"met_total = observed − normalised, split across {len(contribs)} "
                     f"{what} ({how} attribution) — strongest: {dominant}."
                 ]
-            self.tab_decom.show_result(fig, lines=lines)
+            self.tab_decom.show_timeseries(render, result, lines=lines)
         except Exception:
             log.exception("Decomposition figure failed; falling back to a line plot")
             import matplotlib.pyplot as plt
@@ -234,9 +240,23 @@ class AnalyseRunMixin(QMainWindow):
 
     def _rolling_done(self, result: pd.DataFrame) -> None:
         self.results["rolling"] = result
+        rolling_cols = [c for c in result.columns if c.startswith("rolling_")]
+        window, step = self.roll_window.value(), self.roll_step.value()
+
+        def render(d: pd.DataFrame):
+            return self._rolling_figure(d, rolling_cols, window, step)
+
+        self.tab_roll.show_timeseries(render, result)
+        self.tabs.setCurrentWidget(self.tab_roll)
+        self.statusBar().showMessage("Rolling normalisation done.")
+        self._log_history("rolling", f"{len(rolling_cols)} windows")
+        log.info("Rolling finished (%d windows)", len(rolling_cols))
+
+    @staticmethod
+    def _rolling_figure(result: pd.DataFrame, rolling_cols: list[str], window: int, step: int):
+        """Mean of the rolling windows' series, ±1 SD where windows overlap."""
         import matplotlib.pyplot as plt
 
-        rolling_cols = [c for c in result.columns if c.startswith("rolling_")]
         mean = result[rolling_cols].mean(axis=1, skipna=True)
         overlap = result[rolling_cols].notna().sum(axis=1)
         std = result[rolling_cols].std(axis=1, skipna=True).where(overlap >= 2)
@@ -263,18 +283,14 @@ class AnalyseRunMixin(QMainWindow):
             )
         ax.set_title(
             f"Rolling normalisation — mean of {len(rolling_cols)} windows "
-            f"({self.roll_window.value()} d window, {self.roll_step.value()} d step)",
+            f"({window} d window, {step} d step)",
             fontsize=10,
             loc="left",
         )
         ax.legend(loc="upper right", fontsize=8)
         ax.grid(alpha=0.2)
         fig.tight_layout()
-        self.tab_roll.show_result(fig)
-        self.tabs.setCurrentWidget(self.tab_roll)
-        self.statusBar().showMessage("Rolling normalisation done.")
-        self._log_history("rolling", f"{len(rolling_cols)} windows")
-        log.info("Rolling finished (%d windows)", len(rolling_cols))
+        return fig
 
     def _run_multiscale(self) -> None:
         if not self._check_model():

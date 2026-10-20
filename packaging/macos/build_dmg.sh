@@ -12,6 +12,10 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 DIST="$REPO/dist/macos"
 APP_NAME="Normet"
+# The data downloaders are imported by name at run time (normet.utils.require),
+# so they are only bundled if the build env has them: fail here, not in the app.
+"$PY" -c 'import requests, cdsapi, rdata' 2>/dev/null || {
+    echo "ERROR: install the data extra first:  $PY -m pip install -e \".[data]\""; exit 1; }
 VERSION="$("$PY" -c 'import importlib.metadata as m; print(m.version("normet"))')"
 
 echo "==> Building $APP_NAME $VERSION with $("$PY" --version 2>&1)"
@@ -34,6 +38,10 @@ cd "$REPO"
     --collect-data xgboost \
     --collect-all shapely \
     --hidden-import shapefile \
+    --hidden-import requests \
+    --hidden-import cdsapi \
+    --hidden-import rdata \
+    --add-data "$REPO/packaging/assets/normet.png:packaging/assets" \
     --exclude-module tkinter \
     --exclude-module IPython \
     --exclude-module pytest
