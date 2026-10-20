@@ -484,11 +484,6 @@ def test_chronos_load_requires_a_met_covariate(qapp, monkeypatch):
         win.load_example()
         win.backend_combo.setCurrentText(_chronos.BACKEND)
 
-        shown: list[str] = []
-        monkeypatch.setattr(
-            "normet.gui._run_train.QMessageBox.information",
-            lambda *a, **k: shown.append(a[1] if len(a) > 1 else ""),
-        )
         submitted: list[str] = []
         monkeypatch.setattr(win.runner, "submit", lambda name, *a, **k: submitted.append(name))
 
@@ -496,7 +491,10 @@ def test_chronos_load_requires_a_met_covariate(qapp, monkeypatch):
         monkeypatch.setattr(win, "_selected_features", lambda: list(_time_vars()))
         win._run_train()
 
-        assert shown and "No covariates" in shown[0]
+        # Said on a notice above the results, with the step that answers it.
+        bar = win.notices.get("chronos-covariates")
+        assert bar is not None and "covariate channel" in bar.label.text()
+        assert [b.text() for b in bar.buttons] == ["Met only"]
         assert not submitted
     finally:
         win.close()

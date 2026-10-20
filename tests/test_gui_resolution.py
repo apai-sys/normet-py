@@ -58,8 +58,10 @@ def test_a_tab_redraws_at_the_chosen_resolution(qapp):
     tab = CanvasTab()
     data = _hourly(90)
     tab.show_timeseries(render, data, lines=["a note"])
-    assert drawn == [len(data)]
+    # Months of hours open as daily means: drawn as they are they are a solid band.
+    assert drawn == [90]
     combo = tab.findChild(QComboBox)
+    assert combo.currentText() == "Daily"
     model = combo.model()
     enabled = {combo.itemText(i): model.item(i).isEnabled() for i in range(combo.count())}
     # Hourly is the record's own step; a year is more than the record holds.
@@ -71,14 +73,18 @@ def test_a_tab_redraws_at_the_chosen_resolution(qapp):
         "Monthly": True,
         "Yearly": False,
     }
-    combo.setCurrentText("Daily")
+    combo.setCurrentText("As recorded")
     qapp.processEvents()  # the redraw is queued
-    assert drawn[-1] == 90
+    assert drawn[-1] == len(data)
     combo = tab.findChild(QComboBox)
-    assert combo.currentText() == "Daily"
+    assert combo.currentText() == "As recorded"
     # A new result on the tab keeps the tab's choice.
     tab.show_timeseries(render, data)
-    assert drawn[-1] == 90
+    assert drawn[-1] == len(data)
+    # A short record opens as it is.
+    other = CanvasTab()
+    other.show_timeseries(render, _hourly(10))
+    assert drawn[-1] == 240
     # Anything else shown there drops the series.
     tab.show_message("cleared")
     assert tab._series is None

@@ -7,6 +7,42 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ## [Unreleased]
 
 ### Added
+- **GUI: closer to cume's window and figures.**
+  - *Cycles*: `normet.cycle_profiles` (and `plotting.profile_axes`) draws a
+    record's mean by hour of day, day of week and month with 95 % confidence
+    intervals, as openair's `timeVariation`. The Normalise tab shows observed
+    and normalised cycles under the series; the emission decomposition draws its
+    diurnal and weekly components as cycles beside the stack.
+  - *Readable time series*: a sub-daily record of more than 2,000 points opens
+    as daily means; every series is drawn broken at a gap (`style.line`,
+    `style.break_at_gaps`, as cume's), time zones kept.
+  - *Polar plot* (Analysis → Polar Plot…): a variable by wind direction and
+    speed, wind columns found by name or made from u10/v10.
+  - *For print* reads the figure against the journal's guide (width, height,
+    smallest and largest text, overlapping tick labels, face), zooms to fit or
+    to actual size, and keeps its choices for the next figure.
+  - *PDP* panels mark each variable's deciles; whole-valued variables are steps.
+    The parity plot becomes a hexbin density past 2,000 points, with n, slope
+    and bias in its corner.
+  - Hidden tabs draw when shown (`FullWidthCanvas`, cume's), covering the
+    widget exactly.
+  - *Notices* above the results replace "do this first" dialogs, with the step
+    on a button; the status bar has a light per step.
+  - *Save Results / Load Results / Reopen Last Session*: a whole session (table,
+    settings, model, results, command log) in one `.normet` file, drawn again by
+    each step's own handler; the last session is kept after every step.
+  - *Load Session Script*: a script the command log wrote, run (after asking)
+    and brought back into the window, the panel set from its calls.
+  - *Methods Paragraph*: what the session ran, written as a paper's Methods in
+    the window's language, from each step's call as it ran, with references.
+  - *Report Language* (File menu) and `generate_html(..., lang="zh")` /
+    `normet report --lang zh`: the HTML report and its figure in Chinese.
+  - *Help → User Manual* (F1) opens the bundled manual in the window's
+    language; *Keyboard Shortcuts* lists them from the menus.
+  - The Assistant's conversation (`chatview`, after cume's): colours mixed from
+    the palette (readable in dark mode), Markdown with shaded code and ruled
+    tables, tool calls as one line whose result opens with a click, Ctrl/Cmd ±
+    to size the text.
 - **GUI in Chinese** (View → Language: Follow System / English / 中文), ported
   from cume: every label, button, menu, tab, tooltip and dialog is translated
   as it is set, figures' texts as they are drawn, while the code still reads

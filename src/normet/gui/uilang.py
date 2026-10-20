@@ -1095,6 +1095,10 @@ def figure_texts(fig, lang: str | None = None):
                 families = list(labels[0].get_fontfamily()) if labels else ["sans-serif"]
                 if font not in families:
                     axis.set_tick_params(which="both", labelfontfamily=families + [font])
+                # The axis' offset (a date axis' "2020-Jan") is a text of its own.
+                off = list(axis.offsetText.get_fontfamily())
+                if font not in off:
+                    axis.offsetText.set_fontfamily(off + [font])
     fig._normet_lang = lang
 
 

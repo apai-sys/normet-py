@@ -640,8 +640,12 @@ class DataWindow(QMainWindow):
             if pol is None:
                 ax.axis("off")
                 continue
-            ax.plot(
-                d.index, d[pol], lw=0.5 if len(d) > 1500 else 0.9, color=S.PALETTE[len(shown) % 4]
+            S.line(
+                ax,
+                d.index,
+                d[pol],
+                lw=0.5 if len(d) > 1500 else 0.9,
+                color=S.PALETTE[len(shown) % 4],
             )
             cov = d[pol].notna().mean() * 100
             ax.set_title(f"{S.formula(pol)} — {cov:.0f} % coverage")

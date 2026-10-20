@@ -29,14 +29,12 @@ from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import (
     QComboBox,
     QDockWidget,
-    QFrame,
     QHBoxLayout,
     QInputDialog,
     QLabel,
     QLineEdit,
     QPlainTextEdit,
     QPushButton,
-    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -45,6 +43,7 @@ from normet.agent import llm, readings
 from normet.agent.mcp_http import ToolServer
 
 from . import assistant_cli
+from .chatview import ChatView
 
 if TYPE_CHECKING:
     from .main_window import MainWindow
@@ -471,134 +470,6 @@ def state_text(win: MainWindow) -> str:
 
 # -- the conversation ---------------------------------------------------------------------
 _MUTED = "color: palette(placeholder-text);"
-
-
-class ChatView(QScrollArea):
-    """The conversation: the analyst's messages on the right, the replies as their
-    Markdown reads, each tool call one quiet line, a proposal a card with Apply."""
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setWidgetResizable(True)
-        self.setFrameShape(QFrame.Shape.NoFrame)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        host = QWidget()
-        self._lay = QVBoxLayout(host)
-        self._lay.setContentsMargins(8, 8, 8, 8)
-        self._lay.setSpacing(8)
-        self._lay.addStretch(1)
-        self.setWidget(host)
-        self._reply: QLabel | None = None
-        self._reply_text = ""
-        self.verticalScrollBar().rangeChanged.connect(
-            lambda _lo, hi: self.verticalScrollBar().setValue(hi)
-        )
-
-    def _add(self, w: QWidget, align: Qt.AlignmentFlag | None = None) -> None:
-        if align is None:
-            self._lay.insertWidget(self._lay.count() - 1, w)
-        else:
-            self._lay.insertWidget(self._lay.count() - 1, w, 0, align)
-
-    def clear(self) -> None:
-        while self._lay.count() > 1:
-            w = self._lay.takeAt(0).widget()
-            if w is not None:
-                w.hide()
-                w.deleteLater()
-        self._reply = None
-
-    @staticmethod
-    def _label(text: str, markdown: bool = False, keep: bool = True) -> QLabel:
-        lbl = QLabel(text)
-        # The analyst's and the model's own words (*keep*): left as written in any
-        # language the window is in (.uilang). A note is the window's own.
-        lbl.setProperty("normetKeepText", keep)
-        lbl.setWordWrap(True)
-        lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        if markdown:
-            lbl.setTextFormat(Qt.TextFormat.MarkdownText)
-            lbl.setOpenExternalLinks(True)
-        else:
-            lbl.setTextFormat(Qt.TextFormat.PlainText)
-        return lbl
-
-    def you(self, text: str) -> None:
-        lbl = self._label(text)
-        lbl.setStyleSheet(
-            "background: palette(alternate-base); border-radius: 10px; padding: 6px 10px;"
-        )
-        # As wide as its words, up to most of the panel: aligned right in the
-        # layout, a wrapped label is otherwise given its narrowest width and cut.
-        most = max(200, int(self.viewport().width() * 0.85))
-        widest = max(
-            lbl.fontMetrics().horizontalAdvance(line) for line in text.splitlines() or [""]
-        )
-        lbl.setFixedWidth(min(most, widest + 24))
-        self._add(lbl, Qt.AlignmentFlag.AlignRight)
-        self._reply = None
-
-    def reply(self, text: str, more: bool = False) -> None:
-        """The model's words: a new reply, or (*more*) added to the one being written."""
-        if not text.strip():
-            return
-        if more and self._reply is not None:
-            self._reply_text += text
-            self._reply.setText(self._reply_text)
-            return
-        self._reply_text = text
-        self._reply = self._label(text, markdown=True)
-        self._add(self._reply)
-
-    def tool(self, name: str, arguments: dict[str, Any]) -> QLabel:
-        args = ", ".join(f"{k}={v!r}" for k, v in arguments.items())
-        lbl = self._label(f"● {name}({args[:120]}{'…' if len(args) > 120 else ''})")
-        lbl.setStyleSheet(_MUTED + "font-size: 11px;")
-        self._add(lbl)
-        self._reply = None
-        return lbl
-
-    @staticmethod
-    def tool_done(lbl: QLabel, output: str, error: bool) -> None:
-        colour = "#ff3b30" if error else "#34c759"
-        lbl.setText(f"<span style='color:{colour}'>●</span> " + lbl.text()[2:].replace("<", "&lt;"))
-        lbl.setTextFormat(Qt.TextFormat.RichText)
-        lbl.setToolTip(output[:3000])
-
-    def note(self, text: str, error: bool = False) -> None:
-        lbl = self._label(text, keep=False)
-        lbl.setStyleSheet(("color: #ff3b30;" if error else _MUTED) + "font-size: 11px;")
-        self._add(lbl)
-        self._reply = None
-
-    def card(self, title: str, body: str, apply: Callable[[], str]) -> QPushButton:
-        frame = QFrame()
-        frame.setObjectName("proposal")
-        frame.setStyleSheet(
-            "#proposal { border: 1px solid palette(mid); border-radius: 8px; background: palette(base); }"
-        )
-        lay = QVBoxLayout(frame)
-        head = QLabel(title)
-        head.setProperty("normetKeepText", True)  # the model's words
-        head.setStyleSheet("font-weight: 600;")
-        lay.addWidget(head)
-        lay.addWidget(self._label(body, markdown=True))
-        btn = QPushButton("Apply")
-        btn.setStyleSheet("font-weight: 600;")
-
-        def clicked() -> None:
-            try:
-                said = apply()
-            except Exception as exc:  # noqa: BLE001 -- shown on the card
-                said = f"Could not apply: {exc}"
-            btn.setText(said)
-            btn.setEnabled(False)
-
-        btn.clicked.connect(clicked)
-        lay.addWidget(btn, 0, Qt.AlignmentFlag.AlignLeft)
-        self._add(frame)
-        self._reply = None
-        return btn
 
 
 class _Composer(QPlainTextEdit):

@@ -12,7 +12,7 @@ import logging
 import os
 
 from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QActionGroup, QDesktopServices
+from PySide6.QtGui import QActionGroup, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QDockWidget,
@@ -38,6 +38,58 @@ from .welcome import Welcome
 from .workers import QtLogHandler
 
 
+def report_language_choice() -> str:
+    """File -> Report Language as chosen: "window" (the default), "en" or "zh"."""
+    from PySide6.QtCore import QSettings
+
+    c = str(QSettings("apai-sys", "normet-gui").value("report_language", "window"))
+    return c if c in ("window", "en", "zh") else "window"
+
+
+def set_report_language(choice: str) -> None:
+    from PySide6.QtCore import QSettings
+
+    QSettings("apai-sys", "normet-gui").setValue("report_language", choice)
+
+
+def report_language() -> str:
+    """The language a report is written in now: the choice, else the window's."""
+    choice = report_language_choice()
+    if choice != "window":
+        return choice
+    from . import uilang
+
+    return uilang.language()
+
+
+def _menu_actions(menu) -> list:  # noqa: ANN001
+    """A menu's actions, its submenus' included."""
+    out = []
+    for act in menu.actions():
+        try:
+            sub = act.menu()
+        except RuntimeError:  # an action a rebuilt menu (Open Recent) has let go
+            continue
+        if sub is not None:
+            out += _menu_actions(sub)
+        elif not act.isSeparator():
+            out.append(act)
+    return out
+
+
+#: The status bar's lights: (what has a result, its name).
+STEP_LIGHTS = (
+    ("data", "Data"),
+    ("model", "Model"),
+    ("normalise", "Normalised"),
+    ("decompose", "Decomposed"),
+    ("rolling", "Rolling"),
+    ("multiscale", "Multi-scale"),
+    ("pdp", "PDP"),
+)
+LIGHT_ON, LIGHT_OFF = "#34c759", "#aeaeb2"
+
+
 class ShellMixin(QMainWindow):
     def _build_menu(self) -> None:
         mb = self.menuBar()
@@ -51,10 +103,27 @@ class ShellMixin(QMainWindow):
         self.recent_menu = fm.addMenu("Open &Recent")
         self._rebuild_recent_menu()
         fm.addSeparator()
+        act = fm.addAction("&Save Results…", self.save_results)
+        act.setShortcut("Ctrl+S")
+        fm.addAction("&Load Results…", lambda: self.load_results())
+        fm.addAction("Reopen &Last Session", self.reopen_last_session)
+        fm.addAction("Load Session S&cript…", lambda: self.load_session_script())
+        fm.addSeparator()
+        fm.addAction("&Methods Paragraph…", self.show_methods_paragraph)
         self._export_action = fm.addAction("&Export Current Result…", self._export_current)
         self._export_action.setShortcut("Ctrl+E")
         self._export_action.setEnabled(False)
         self._report_action = fm.addAction("Export &HTML Report…", self._export_html)
+        # The report's language: the window's unless chosen (kept between sessions).
+        rl = fm.addMenu("Report &Language")
+        group = QActionGroup(self)
+        kept = report_language_choice()
+        for code, label in (("window", "As the Window"), ("en", "English"), ("zh", "中文")):
+            act = rl.addAction(label)
+            act.setCheckable(True)
+            act.setChecked(code == kept)
+            act.triggered.connect(lambda _checked=False, c=code: set_report_language(c))
+            group.addAction(act)
         self._report_action.setEnabled(False)
         fm.addAction("Save Session as &Script…", self.save_script)
         fm.addSeparator()
@@ -112,14 +181,30 @@ class ShellMixin(QMainWindow):
         am = mb.addMenu("&Analysis")
         act = am.addAction("Synthetic Control (SCM) Studio…", self.open_scm_studio)
         act.setShortcut("Ctrl+Shift+S")
+        am.addAction("&Polar Plot…", self.open_polar_plot)
 
         wm = mb.addMenu("&Window")
         wm.addAction("Minimize", self.showMinimized).setShortcut("Ctrl+M")
         wm.addAction("Zoom", self.showMaximized)
 
         hm = mb.addMenu("&Help")
+        act = hm.addAction("&User Manual", self.open_manual)
+        act.setShortcut("F1")
+        hm.addAction("&Keyboard Shortcuts…", self.show_shortcuts)
         hm.addAction("Documentation", lambda: QDesktopServices.openUrl(QUrl(DOCS_URL)))
         hm.addAction("&About Normet", self._about)
+
+    def notify(
+        self,
+        text: str,
+        *,
+        key: str | None = None,
+        actions: tuple = (),
+        kind: str = "info",
+    ) -> None:
+        """A notice above the results (.notices): what wants attention, with the step
+        that answers it on a button -- where a dialog would stop the window."""
+        self.notices.notify(key or text, text, actions, kind)
 
     def show_command_palette(self) -> None:
         """Every menu command and every tab, found by typing (Ctrl+K)."""
@@ -140,6 +225,11 @@ class ShellMixin(QMainWindow):
         rv = QVBoxLayout(right)
         rv.setContentsMargins(0, 4, 4, 0)
         rv.addWidget(self._build_action_bar())
+        from .notices import NoticeStack
+
+        # What wants attention, above the results: a step to take first, with its button.
+        self.notices = NoticeStack()
+        rv.addWidget(self.notices)
         rv.addWidget(self._build_tabs(), 1)
         splitter.addWidget(right)
         splitter.setStretchFactor(0, 0)
@@ -325,8 +415,34 @@ class ShellMixin(QMainWindow):
             "discarded when the background computation eventually finishes."
         )
         self.cancel_btn.clicked.connect(self._abandon_task)
+        # How far the analysis has come, one light per step (as cume's status bar).
+        self._step_lights: dict[str, QLabel] = {}
+        lights = QWidget()
+        row = QHBoxLayout(lights)
+        row.setContentsMargins(0, 0, 6, 0)
+        row.setSpacing(8)
+        for key, _name in STEP_LIGHTS:
+            lbl = QLabel()
+            lbl.setTextFormat(Qt.TextFormat.RichText)
+            row.addWidget(lbl)
+            self._step_lights[key] = lbl
+        self.statusBar().addPermanentWidget(lights)
         self.statusBar().addPermanentWidget(self.cancel_btn)
         self.statusBar().addPermanentWidget(self.progress)
+        self._update_step_lights()
+
+    def _update_step_lights(self) -> None:
+        """Each step's light: green once it has a result, grey until then."""
+        done = {
+            "data": self.df_raw is not None,
+            "model": self.model is not None,
+            **{key: key in self.results for key, _ in STEP_LIGHTS[2:]},
+        }
+        for key, name in STEP_LIGHTS:
+            colour = LIGHT_ON if done[key] else LIGHT_OFF
+            lbl = self._step_lights[key]
+            lbl.setText(f'<span style="color:{colour}">●</span> {name}')
+            lbl.setToolTip(f"{name}: {'done' if done[key] else 'not run yet'}")
 
     def _rebuild_recent_menu(self) -> None:
         self.recent_menu.clear()
@@ -347,6 +463,47 @@ class ShellMixin(QMainWindow):
     def _clear_recent(self) -> None:
         _settings.clear_recent()
         self._rebuild_recent_menu()
+
+    def open_manual(self) -> None:
+        """Help -> User Manual: the PDF in the window's language (.manual)."""
+        from . import uilang
+        from .manual import manual_location
+
+        QDesktopServices.openUrl(manual_location(uilang.language()))
+
+    def show_shortcuts(self) -> None:
+        """Help -> Keyboard Shortcuts: every command with a shortcut, read from the menus."""
+        from PySide6.QtWidgets import QDialog, QTableWidget, QTableWidgetItem
+
+        rows = []
+        for top in self.menuBar().actions():
+            menu = top.menu()
+            if menu is None:
+                continue
+            for act in _menu_actions(menu):
+                try:
+                    key = act.shortcut().toString(QKeySequence.SequenceFormat.NativeText)
+                    name = act.text().replace("&", "")
+                except RuntimeError:  # an action a rebuilt menu (Open Recent) has let go
+                    continue
+                if key:
+                    rows.append((top.text().replace("&", ""), name, key))
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Keyboard shortcuts")
+        dlg.resize(520, 440)
+        lay = QVBoxLayout(dlg)
+        table = QTableWidget(len(rows), 3)
+        table.setHorizontalHeaderLabels(["Menu", "Command", "Shortcut"])
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.verticalHeader().setVisible(False)
+        for i, row in enumerate(rows):
+            for j, value in enumerate(row):
+                table.setItem(i, j, QTableWidgetItem(value))
+        table.resizeColumnsToContents()
+        table.horizontalHeader().setStretchLastSection(True)
+        lay.addWidget(table)
+        self._shortcuts_dialog = dlg
+        dlg.open()
 
     def _about(self) -> None:
         import normet

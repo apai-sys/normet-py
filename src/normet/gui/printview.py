@@ -19,6 +19,12 @@ size, and can be finished there:
 Nothing is kept: every change is recorded as it is made and undone when the
 dialog closes, and the figure goes back to its tab as it was.
 
+Beside it, what the journal's guide asks of the figure, read from it as drawn
+(``preflight``, after cume's): its width and height, its smallest and largest text,
+tick labels that run into one another, the face its text is set in. The preview is
+fitted to the window or shown at its actual size, and the journal, lettering,
+resolution, panel letters and zoom chosen are kept for the next figure.
+
 The widths offered are the column widths the publishers' artwork guides give;
 check the journal's own current guide before submitting.
 """
@@ -26,7 +32,9 @@ check the journal's own current guide before submitting.
 from __future__ import annotations
 
 import contextlib
+import html
 import io
+import itertools
 from collections.abc import Callable, Iterator
 from typing import Any
 
@@ -94,6 +102,137 @@ LETTERS: tuple[tuple[str, str | None], ...] = (
 
 #: Logical pixels to the inch the dialog shows the figure at: its printed size.
 SCREEN_DPI = 96.0
+
+#: What each publisher's guide asks of a figure beyond its width, as cume reads them
+#: (cume.figstyle.PRESETS): its text's least and greatest size in pt, its greatest height
+#: in mm. None where the guide says nothing.
+GUIDES: dict[str, dict[str, float | None]] = {
+    "Nature": {"min_text": 5.0, "max_text": 7.0, "max_height": 170.0},
+    "Elsevier": {"min_text": 7.0, "max_text": None, "max_height": None},
+    "ACS": {"min_text": 8.0, "max_text": None, "max_height": 660 / 72 * 25.4},
+}
+
+#: The preview's zoom: the figure's actual printed size, or fitted to the window.
+ZOOMS = ("Actual size", "Fit to window")
+
+
+def guide_for(preset: str) -> tuple[str, dict[str, float | None]] | None:
+    """The publisher a preset is from, and what its guide asks; None for Custom."""
+    for name, guide in GUIDES.items():
+        if preset.startswith(name):
+            return name, guide
+    return None
+
+
+def drawn_texts(fig: Any) -> list[Any]:
+    """The texts a draw of ``fig`` puts on the page: shown, in view, not empty."""
+    from matplotlib.text import Text
+
+    drawn: list[Any] = []
+    draw = Text.draw
+
+    def record(self: Any, renderer: Any) -> Any:
+        if self.get_visible() and self.get_text().strip():
+            drawn.append(self)
+        return draw(self, renderer)
+
+    Text.draw = record  # type: ignore[method-assign]
+    try:
+        fig.draw_without_rendering()
+    finally:
+        Text.draw = draw  # type: ignore[method-assign]
+    return drawn
+
+
+def _tick_clashes(fig: Any, drawn: list[Any]) -> list[str]:
+    """The axes whose drawn tick labels run into one another, as "the x axis of panel b"."""
+    renderer = fig.canvas.get_renderer()
+    shown = {id(t) for t in drawn}
+    out = []
+    for i, ax in enumerate(panel_axes(fig)):
+        for axis, which in ((ax.xaxis, "x"), (ax.yaxis, "y")):
+            boxes = sorted(
+                (
+                    t.get_window_extent(renderer)
+                    for t in axis.get_ticklabels(which="both")
+                    if id(t) in shown
+                ),
+                key=lambda b, w=which: b.x0 if w == "x" else b.y0,
+            )
+            if any(a.overlaps(b.shrunk(0.98, 0.98)) for a, b in itertools.pairwise(boxes)):
+                out.append(f"the {which} axis of panel {letter('a', i)}")
+    return out
+
+
+def preflight(fig: Any, preset: str, width_mm: float, height_mm: float) -> list[tuple[bool, str]]:
+    """What ``preset``'s guide asks of ``fig`` as it is drawn: (met, what) per check."""
+    from matplotlib import font_manager as fm
+
+    from normet.style import plain
+
+    out: list[tuple[bool, str]] = []
+    found = guide_for(preset)
+    column = PRESETS.get(preset)
+    if column is not None:
+        out.append(
+            (
+                width_mm <= column + 0.5,
+                f"{width_mm:.0f} mm wide; the column is {column:.0f} mm.",
+            )
+        )
+    else:
+        out.append((True, f"{width_mm:.0f} mm wide."))
+    guide = found[1] if found else {}
+    most = guide.get("max_height")
+    out.append(
+        (
+            most is None or height_mm <= most + 0.5,
+            f"{height_mm:.0f} mm high" + (f"; at most {most:.0f} mm." if most else "."),
+        )
+    )
+    drawn = drawn_texts(fig)
+    if drawn:
+        small = min(drawn, key=lambda t: t.get_fontsize())
+        least = guide.get("min_text")
+        size = float(small.get_fontsize())
+        out.append(
+            (
+                least is None or size >= least - 0.05,
+                f"Smallest text {size:.1f} pt ({plain(small.get_text())[:24]!r})"
+                + (f"; at least {least:g} pt." if least else "."),
+            )
+        )
+        greatest = guide.get("max_text")
+        if greatest is not None:
+            big = max(drawn, key=lambda t: t.get_fontsize())
+            size = float(big.get_fontsize())
+            out.append(
+                (
+                    size <= greatest + 0.05,
+                    f"Largest text {size:.1f} pt ({plain(big.get_text())[:24]!r}); "
+                    f"at most {greatest:g} pt.",
+                )
+            )
+        faces = sorted(
+            {fm.get_font(fm.findfont(t.get_fontproperties())).family_name for t in drawn}
+        )
+        out.append((True, "Set in " + ", ".join(faces) + "."))
+    clashes = _tick_clashes(fig, drawn)
+    out.append(
+        (
+            not clashes,
+            "Tick labels overlap on " + "; ".join(clashes) + ": a wider figure, or fewer ticks."
+            if clashes
+            else "No tick labels overlap.",
+        )
+    )
+    return out
+
+
+def _prefs() -> Any:
+    from PySide6.QtCore import QSettings
+
+    return QSettings("apai-sys", "normet-gui")
 
 
 # -- the layout, as a function ------------------------------------------------------------
@@ -381,10 +520,19 @@ class PrintDialog(QDialog):
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.reject)
 
+        # What the journal's guide asks, read from the figure as drawn.
+        checks_box = QGroupBox("What the guide asks")
+        cl = QVBoxLayout(checks_box)
+        self.checks = QLabel()
+        self.checks.setTextFormat(Qt.TextFormat.RichText)
+        self.checks.setWordWrap(True)
+        cl.addWidget(self.checks)
+
         left = QVBoxLayout()
         left.addLayout(page)
         left.addWidget(legend_box)
         left.addWidget(marks)
+        left.addWidget(checks_box)
         left.addWidget(note)
         left.addStretch(1)
         row = QHBoxLayout()
@@ -404,11 +552,18 @@ class PrintDialog(QDialog):
         scroll.setWidget(self.preview)
         scroll.setWidgetResizable(True)
         scroll.setMinimumSize(560, 440)
+        self._scroll = scroll
         self.size_label = QLabel()
         self.size_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.zoom = QComboBox()
+        self.zoom.addItems(list(ZOOMS))
+        self.zoom.setToolTip("Fit the preview to the window, or show it at its printed size.")
+        under = QHBoxLayout()
+        under.addWidget(self.zoom)
+        under.addWidget(self.size_label, 1)
         right = QVBoxLayout()
         right.addWidget(scroll, 1)
-        right.addWidget(self.size_label)
+        right.addLayout(under)
 
         lay = QHBoxLayout(self)
         lay.addLayout(left)
@@ -425,9 +580,41 @@ class PrintDialog(QDialog):
         self.legend_frame.toggled.connect(self.apply)
         self.legend_place.currentTextChanged.connect(self._place_changed)
         self.letters.currentTextChanged.connect(self.apply)
+        self.zoom.currentTextChanged.connect(lambda _z: self._show())
+        self._restore_prefs()
         self._preset_changed(self.preset.currentText())
 
     # -- settings ------------------------------------------------------------------------
+    #: The choices kept for the next figure, as QSettings keys -> the control's text.
+    _KEPT = ("preset", "font", "dpi", "letters", "zoom")
+
+    def _restore_prefs(self) -> None:
+        """The journal, lettering, resolution, panel letters and zoom last chosen."""
+        prefs = _prefs()
+        for key in self._KEPT:
+            value = prefs.value(f"print/{key}")
+            if value is None:
+                continue
+            widget = getattr(self, key)
+            widget.blockSignals(True)
+            try:
+                if isinstance(widget, QComboBox):
+                    if widget.findText(str(value)) >= 0:
+                        widget.setCurrentText(str(value))
+                else:
+                    widget.setValue(float(value))
+            except (TypeError, ValueError):
+                pass
+            finally:
+                widget.blockSignals(False)
+
+    def _keep_prefs(self) -> None:
+        prefs = _prefs()
+        for key in self._KEPT:
+            widget = getattr(self, key)
+            value = widget.currentText() if isinstance(widget, QComboBox) else widget.value()
+            prefs.setValue(f"print/{key}", value)
+
     def settings(self) -> tuple[float, float, float, int]:
         return (
             self.width.value(),
@@ -540,16 +727,49 @@ class PrintDialog(QDialog):
             )
             undo.then(t.remove)
 
+    def _scale(self, w_in: float, h_in: float) -> float:
+        """The preview's zoom: 1 at the actual printed size; fitted, what fills the
+        preview's room (never more than twice the printed size)."""
+        if self.zoom.currentText() != "Fit to window":
+            return 1.0
+        room = self._scroll.viewport().size()
+        avail_w, avail_h = max(room.width() - 24, 100), max(room.height() - 24, 100)
+        return max(0.25, min(2.0, avail_w / (w_in * SCREEN_DPI), avail_h / (h_in * SCREEN_DPI)))
+
     def _show(self) -> None:
-        """The canvas at the figure's printed size, on this screen's logical inch."""
+        """The canvas at the figure's printed size (or fitted), on this screen's inch."""
         w_in, h_in = self.fig.get_size_inches()
-        self.canvas.setFixedSize(round(w_in * SCREEN_DPI), round(h_in * SCREEN_DPI))
+        scale = self._scale(w_in, h_in)
+        self.fig.set_dpi(SCREEN_DPI * scale)
+        self.fig._original_dpi = SCREEN_DPI * scale
+        self.canvas.setFixedSize(round(w_in * SCREEN_DPI * scale), round(h_in * SCREEN_DPI * scale))
         # The canvas, resized, sets the figure's size from its own pixels: put back
         # exactly, so the layout and the file are at the size asked.
         self.fig.set_size_inches(w_in, h_in, forward=False)
         self.canvas.draw_idle()
         w, h, _, _ = self.settings()
-        self.size_label.setText(f"{w:.0f} × {h:.0f} mm, shown at its printed size")
+        self.size_label.setText(
+            f"{w:.0f} × {h:.0f} mm, shown at its printed size"
+            if scale == 1.0
+            else f"{w:.0f} × {h:.0f} mm, shown at {scale:.0%}"
+        )
+        self._check()
+
+    def _check(self) -> None:
+        """What the journal's guide asks of the figure as now laid out."""
+        w, h, _, _ = self.settings()
+        try:
+            found = preflight(self.fig, self.preset.currentText(), w, h)
+        except Exception:  # noqa: BLE001 - a check that cannot run says nothing
+            self.checks.setText("")
+            return
+        rows = [
+            f'<span style="color:{"#34c759" if ok else "#ff3b30"}">{"✓" if ok else "✗"}</span> '
+            + html.escape(what)
+            for ok, what in found
+        ]
+        self.checks.setText("<br>".join(rows))
+        self.findings = found
 
     # -- edits at the figure -------------------------------------------------------------
     def _legend_under(self, event: Any) -> tuple[Any, Any] | None:
@@ -634,6 +854,7 @@ class PrintDialog(QDialog):
 
     def done(self, result: int) -> None:
         """Closed: every change undone, and the figure back on its tab as it was."""
+        self._keep_prefs()
         self._undo.revert()
         size, dpi, original = self._kept
         fig = self.fig

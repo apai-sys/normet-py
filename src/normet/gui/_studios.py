@@ -39,6 +39,18 @@ class StudiosMixin(QMainWindow):
         if self._scm_window is not None:
             self._scm_window.load_example()
 
+    def open_polar_plot(self) -> None:
+        """Analysis -> Polar Plot: the open table's target by wind direction and speed."""
+        from .polar_window import PolarWindow
+
+        if self.df_raw is None:
+            self.notify("Open a table first: the polar plot is drawn from its wind columns.")
+            return
+        frame = self.df_raw.set_index("date") if "date" in self.df_raw.columns else self.df_raw
+        self._polar_window = PolarWindow(frame, self.target_combo.currentText(), parent=self)
+        self._polar_window.show()
+        self._polar_window.raise_()
+
     def open_data_studio(self) -> None:
         from .data_window import DataWindow
 
@@ -81,7 +93,11 @@ class StudiosMixin(QMainWindow):
         joined (the dataset is then left unchanged, and the user told why).
         """
         if self.df_raw is None:
-            QMessageBox.information(self, "No data", "Load a dataset in the main window first.")
+            self.notify(
+                "Open a table in the main window first: the trajectory features are joined onto it.",
+                key="need-data",
+                actions=(("Open CSV…", self._open_csv),),
+            )
             return 0
         from normet.io.trajectory import join_trajectory_features
 

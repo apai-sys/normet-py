@@ -244,6 +244,22 @@ def main_figures(app):
     grab(dlg, "ui_print.png")
     dlg.reject()
     _settle(win)
+
+    print("polar plot")
+    win.open_polar_plot()
+    polar = win._polar_window
+    polar.resize(760, 640)
+    polar.show()
+    grab(polar, "ui_polar.png")
+    polar.close()
+
+    print("methods paragraph")
+    win.show_methods_paragraph()
+    methods = win._methods_dialog
+    methods.resize(760, 560)
+    grab(methods, "ui_methods.png")
+    methods.close()
+    _settle(win)
     return win
 
 

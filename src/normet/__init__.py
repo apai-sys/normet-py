@@ -271,6 +271,7 @@ __all__ = [
     "normalise_plot",
     "plot_bayesian_scm",
     "time_series_plot",
+    "cycle_profiles",
     # --- Foundation Models (Chronos) ---
     "ChronosEmbedder",
     "Chronos2Estimator",
@@ -295,6 +296,7 @@ __all__ = [
 ]
 
 from .plotting import (
+    cycle_profiles,
     decomposition_stack,
     normalise_plot,
     pdp_grid,
