@@ -16,6 +16,7 @@ from typing import Any
 import pandas as pd
 
 from ..model.train import build_model
+from ..utils import progress
 from ..utils._config import DEFAULT_SEED, resolve_config
 from ..utils.features import extract_features
 from ..utils.logging import _progress_str, get_logger
@@ -193,6 +194,7 @@ def rolling(
     total = len(start_days)
 
     for i, start_day in enumerate(start_days, start=1):
+        progress.report(i - 1, total)
         end_excl = start_day + pd.Timedelta(days=_cfg.window_days)
         mask = (d_floor >= start_day) & (d_floor < end_excl)
         dfa = df_work.loc[mask]
@@ -212,18 +214,19 @@ def rolling(
             # irrelevant to the resampled distribution, defeating the point
             # of testing whether meteorological influence separates by
             # timescale (matches the corrected default in R's nm_rolling()).
-            df_norm = normalise(
-                df=dfa,
-                model=model,
-                covariates=covariates_resolved,
-                variables_resample=variables_resample_resolved,
-                n_samples=_cfg.n_samples,
-                aggregate=True,
-                seed=_cfg.seed + (i * 997),
-                n_cores=n_cores_eff,
-                resample_df=dfa,
-                memory_save=_cfg.memory_save,
-            )
+            with progress.part(i - 1, total):
+                df_norm = normalise(
+                    df=dfa,
+                    model=model,
+                    covariates=covariates_resolved,
+                    variables_resample=variables_resample_resolved,
+                    n_samples=_cfg.n_samples,
+                    aggregate=True,
+                    seed=_cfg.seed + (i * 997),
+                    n_cores=n_cores_eff,
+                    resample_df=dfa,
+                    memory_save=_cfg.memory_save,
+                )
             result[f"rolling_{i - 1}"] = df_norm["normalised"]
         except Exception as e:
             start_str = start_day.strftime("%Y-%m-%d")

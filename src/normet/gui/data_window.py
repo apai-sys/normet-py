@@ -62,6 +62,7 @@ from PySide6.QtWidgets import (
 
 from normet import style as S
 
+from ._clock import TaskClock
 from ._widgets import CanvasTab, NoWheelComboBox, hint_label, run_button
 from .workers import TaskRunner
 
@@ -86,7 +87,6 @@ NETWORKS: dict[str, str] = {
 
 MET_OPEN_METEO = "Open-Meteo (ERA5, no key needed)"
 MET_CDS = "Copernicus CDS (needs ~/.cdsapirc)"
-MET_NONE = "None (air quality only)"
 
 
 def _find_stations(pollutants: list[str], source: str) -> pd.DataFrame:
@@ -247,6 +247,7 @@ class DataWindow(QMainWindow):
         self.runner = TaskRunner(self)
         self.runner.started.connect(self._task_started)
         self.runner.finished.connect(self._task_finished)
+        self.task_clock = TaskClock(self, self.runner)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self._build_panel())
@@ -341,7 +342,7 @@ class DataWindow(QMainWindow):
         mf = QFormLayout(met_box)
         mf.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.met_combo = NoWheelComboBox()
-        self.met_combo.addItems([MET_OPEN_METEO, MET_CDS, MET_NONE])
+        self.met_combo.addItems([MET_OPEN_METEO, MET_CDS])
         self.met_combo.setToolTip(
             "Hourly meteorology at the station coordinates.\n"
             "Open-Meteo serves the ERA5 archive without registration;\n"
@@ -447,14 +448,11 @@ class DataWindow(QMainWindow):
         self.cancel_btn.setEnabled(busy)
 
     def _task_started(self, name: str) -> None:
-        self.progress.setRange(0, 0)
-        self.statusBar().showMessage(f"Running: {name}…")
         for b in self._run_buttons:
             b.setEnabled(False)
         self.cancel_btn.setEnabled(True)
 
     def _task_finished(self) -> None:
-        self.progress.setRange(0, 1)
         self._sync_enabled()
 
     def _abandon(self) -> None:

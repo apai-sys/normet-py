@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import pandas as pd
 
+from ..utils import progress
 from ..utils._config import DEFAULT_SEED
 from ..utils.logging import get_logger
 
@@ -132,17 +133,20 @@ def compute_multiscale(
     """
     scales = {}
     notes: list[str] = []
-    for key, days in (("fast", fast_days), ("meso", meso_days), ("slow", slow_days)):
-        series, n_windows, reason = rolling_mean_series(
-            df_prep=df_prep,
-            model=model,
-            covariates=covariates,
-            variables_resample=variables_resample,
-            window_days=days,
-            n_samples=n_samples,
-            n_cores=n_cores,
-            seed=seed + hash(key) % 1000,
-        )
+    for index, (key, days) in enumerate(
+        (("fast", fast_days), ("meso", meso_days), ("slow", slow_days))
+    ):
+        with progress.part(index, 3):
+            series, n_windows, reason = rolling_mean_series(
+                df_prep=df_prep,
+                model=model,
+                covariates=covariates,
+                variables_resample=variables_resample,
+                window_days=days,
+                n_samples=n_samples,
+                n_cores=n_cores,
+                seed=seed + hash(key) % 1000,
+            )
         scales[key] = series
         if reason:
             notes.append(f"{days} d scale skipped: {reason}")

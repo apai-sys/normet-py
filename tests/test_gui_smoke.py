@@ -674,3 +674,21 @@ def test_the_group_editor_suggests_groups_and_keeps_the_text_form(qapp):
     with pytest.raises(ValueError, match="rain not among"):
         ed.setText("wet: rain")
         ed.groups(["ws"])
+
+
+def test_the_groups_show_only_for_the_meteorological_decomposition(qapp):
+    """Groups split a meteorological decomposition; the emission one has none, so the
+    table is there only when Method is meteorology."""
+    from normet.gui.main_window import MainWindow
+
+    win = MainWindow()
+    try:
+        assert win.decom_method.currentText() == "emission"
+        assert win.decom_groups.isHidden() and win._decom_groups_label.isHidden()
+        win.decom_method.setCurrentText("meteorology")
+        assert not win.decom_groups.isHidden() and not win._decom_groups_label.isHidden()
+        assert win.decom_attribution.isEnabled()
+        win.decom_method.setCurrentText("emission")
+        assert win.decom_groups.isHidden() and not win.decom_attribution.isEnabled()
+    finally:
+        win.close()

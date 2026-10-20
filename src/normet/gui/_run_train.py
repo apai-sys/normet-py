@@ -66,6 +66,9 @@ class TrainRunMixin(QMainWindow):
             seed=self.seed_spin.value(),
             verbose=True,
         )
+        if backend == "flaml":
+            # FLAML searches for as long as it is given: its share done is the time.
+            self.task_clock.expect(self.budget_spin.value())
 
     def _run_load_chronos(self, target: str, features: list[str]) -> None:
         """Bring up the zero-shot estimator instead of training one.
