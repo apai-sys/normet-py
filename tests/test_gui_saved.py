@@ -78,6 +78,33 @@ def test_a_saved_session_comes_back_as_it_was(qapp, home, tmp_path):
         v.close()
 
 
+def test_a_session_saved_with_the_old_window_names_comes_back_with_the_new(qapp, home, tmp_path):
+    import joblib
+
+    from normet.gui.main_window import MainWindow
+
+    w = _trained_window()
+    norm = w.results["normalise"]
+    # A rolling result as sessions saved before the windows were window_01, ...
+    old = norm[["observed"]].copy() if "observed" in norm else norm.iloc[:, :1].copy()
+    for i in range(3):
+        old[f"rolling_{i}"] = float(i)
+    w.results["rolling"] = old
+    path = tmp_path / "old.normet"
+    joblib.dump(w.session_bundle(), path)
+    w.close()
+
+    v = MainWindow()
+    try:
+        v.load_results(str(path))
+        rolled = v.results["rolling"]
+        assert [c for c in rolled.columns if "_" in c] == ["window_01", "window_02", "window_03"]
+        assert (rolled["window_03"] == 2.0).all()
+        assert v.tab_roll.canvas is not None  # its figure drawn from the windows
+    finally:
+        v.close()
+
+
 def test_the_last_session_is_kept_after_a_step(qapp, home):
     import time
 

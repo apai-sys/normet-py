@@ -387,8 +387,9 @@ $v(\text{all}) - v(\emptyset)$ 有两种分摊方式：
 \code{rolling} 逐窗口地归一化记录：每 \code{rolling\_every} 天（7）开始一个长
 \code{window\_days} 天（默认 14）的窗口，每个窗口的天气\emph{只从该窗口内}抽取。因此短窗口
 只去掉在窗口内变化的天气——对两周的窗口来说就是天气尺度的变化——而保留全记录归一化会去掉
-的较慢的气象变化。结果每个窗口一列，\code{rolling\_0}、\code{rolling\_1}、……；窗口中显示
-它们的均值，以及重叠窗口之间的离散度。
+的较慢的气象变化。结果每个窗口一列，从 1 开始编号：\code{window\_01}、\code{window\_02}、……
+（超过 99 个窗口时补足为三位，使列名按窗口顺序排列）；\code{window\_columns(rolled)} 列出这些列。
+窗口中显示它们的均值，以及重叠窗口之间的离散度。
 
 \section{多尺度分解}\label{sec:multiscale}
 记 $Y_W$ 为窗口宽度 $W$ 下滚动归一化序列的均值，$Y_\infty$ 为普通归一化序列（其池为整条
