@@ -21,6 +21,8 @@ from typing import Any
 
 import pandas as pd
 
+from normet import style as S
+
 from . import readings
 from .jobs import JobStore
 
@@ -363,26 +365,28 @@ class Tools:
         """One of the figures in :data:`FIGURES`, as ``(caption, png)``."""
         if kind not in FIGURES:
             raise ValueError(f"kind is one of {', '.join(FIGURES)}")
+        import matplotlib as mpl
         from matplotlib.figure import Figure
 
-        fig = Figure(figsize=(8, 4.2), layout="constrained")
-        ax = fig.add_subplot()
-        draw: Callable[[], str]
-        if kind in ("model", "importance") or source.endswith(".joblib"):
-            run = self._run(source)
+        with mpl.rc_context(S.rc()):  # the window's figure style
+            fig = Figure(figsize=(6.5, 3.2), layout="constrained")
+            ax = fig.add_subplot()
+            draw: Callable[[], str]
+            if kind in ("model", "importance") or source.endswith(".joblib"):
+                run = self._run(source)
 
-            def draw() -> str:
-                return _draw_run(ax, run, kind)
+                def draw() -> str:
+                    return _draw_run(ax, run, kind)
 
-        else:
-            df = self._table(self.path(source))
+            else:
+                df = self._table(self.path(source))
 
-            def draw() -> str:
-                return _draw_table(fig, ax, df, kind, cutoff)
+                def draw() -> str:
+                    return _draw_table(fig, ax, df, kind, cutoff)
 
-        caption = draw()
-        buf = io.BytesIO()
-        fig.savefig(buf, format="png", dpi=dpi)
+            caption = draw()
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", dpi=max(dpi, 150))
         return caption, buf.getvalue()
 
     def write_report(self, run: str, out: str | None = None) -> str:
@@ -402,12 +406,21 @@ def _dated(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _normalised_axes(ax: Any, d: pd.DataFrame) -> None:
+    """Observed and normalised daily means, in the window's colours."""
+    ax.plot(d.index, d["observed"], lw=0.8, color=S.OBSERVED, alpha=0.6, label="observed")
+    ax.plot(d.index, d["normalised"], lw=1.2, color=S.MODELLED, label="normalised")
+    if isinstance(d.index, pd.DatetimeIndex):
+        S.format_time_axis(ax)
+    ax.margins(x=0)
+    S.grid(ax)
+    S.legend(ax, loc="upper right", ncols=2)
+
+
 def _draw_run(ax: Any, run: Any, kind: str) -> str:
     if kind == "normalised":
         df = run.result.resample("D").mean()
-        ax.plot(df.index, df["observed"], lw=0.8, color="#9a9a9a", label="observed")
-        ax.plot(df.index, df["normalised"], lw=1.2, color="#2c7bb6", label="normalised")
-        ax.legend(frameon=False)
+        _normalised_axes(ax, df)
         return "Observed and meteorologically normalised series (daily means)."
     if kind == "model":
         from normet import ml_predict
@@ -415,12 +428,14 @@ def _draw_run(ax: Any, run: Any, kind: str) -> str:
         test = run.df_prep[run.df_prep["set"] == "testing"]
         test = test if len(test) else run.df_prep
         pred = ml_predict(run.model, test)
-        ax.scatter(test["value"], pred, s=5, alpha=0.4, color="#2c7bb6", edgecolors="none")
+        ax.scatter(test["value"], pred, s=5, alpha=0.35, color=S.OBSERVED, edgecolors="none")
         lo = float(min(test["value"].min(), pred.min()))
         hi = float(max(test["value"].max(), pred.max()))
-        ax.plot([lo, hi], [lo, hi], color="k", lw=0.8, ls="--")
+        ax.plot([lo, hi], [lo, hi], color=S.INK, lw=0.7, ls=(0, (4, 3)))
+        ax.set_aspect("equal", adjustable="box")
         ax.set_xlabel("observed")
         ax.set_ylabel("predicted")
+        S.grid(ax)
         return f"Observed against predicted on {len(test):,} held-out rows; dashed: 1:1."
     if kind == "importance":
         fi = readings.feature_importance(run.model)
@@ -428,7 +443,9 @@ def _draw_run(ax: Any, run: Any, kind: str) -> str:
             raise ValueError("this run's model does not report feature importance")
         names, vals = fi
         order = sorted(range(len(vals)), key=lambda i: vals[i])[-15:]
-        ax.barh([names[i] for i in order], [vals[i] for i in order], color="#2c7bb6")
+        ax.barh([names[i] for i in order], [vals[i] for i in order], color=S.COMPONENT, height=0.65)
+        ax.tick_params(axis="y", length=0)
+        S.grid(ax, axis="x")
         return "The model's feature importance (largest 15)."
     df = run.result
     return _draw_table(ax.figure, ax, df, kind, None)
@@ -438,9 +455,7 @@ def _draw_table(fig: Any, ax: Any, df: pd.DataFrame, kind: str, cutoff: str | No
     df = _dated(df)
     if kind == "normalised":
         d = df[["observed", "normalised"]].resample("D").mean()
-        ax.plot(d.index, d["observed"], lw=0.8, color="#9a9a9a", label="observed")
-        ax.plot(d.index, d["normalised"], lw=1.2, color="#2c7bb6", label="normalised")
-        ax.legend(frameon=False)
+        _normalised_axes(ax, d)
         return "Observed and meteorologically normalised series (daily means)."
     if kind == "decomposition":
         cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
@@ -448,15 +463,25 @@ def _draw_table(fig: Any, ax: Any, df: pd.DataFrame, kind: str, cutoff: str | No
         fig.set_size_inches(8, 1.4 * max(len(cols), 1) + 0.6)
         axes = fig.subplots(len(cols), 1, sharex=True, squeeze=False)[:, 0]
         for a, c in zip(axes, cols, strict=True):
-            a.plot(df.index, df[c], lw=0.7, color="#2c7bb6")
+            a.plot(df.index, df[c], lw=0.6, color=S.COMPONENT)
             a.set_ylabel(c, rotation=0, ha="right", va="center")
+            a.margins(x=0)
+            S.grid(a)
+        if isinstance(df.index, pd.DatetimeIndex):
+            S.format_time_axis(axes[-1])
+        S.outer_ticks(axes)
         return f"The decomposition's {len(cols)} components."
     if kind == "scm":
-        ax.plot(df.index, df["observed"], lw=1.2, color="#d7191c", label="treated (observed)")
-        ax.plot(df.index, df["synthetic"], lw=1.2, color="#2c7bb6", label="synthetic control")
+        ax.plot(df.index, df["observed"], lw=1.2, color=S.OBSERVED, label="treated (observed)")
+        ax.plot(
+            df.index, df["synthetic"], lw=1.2, ls="--", color=S.MODELLED, label="synthetic control"
+        )
         if cutoff:
-            ax.axvline(pd.Timestamp(cutoff), color="k", ls=":", lw=1)
-        ax.legend(frameon=False)
+            S.cutoff_line(ax, pd.Timestamp(cutoff))
+        if isinstance(df.index, pd.DatetimeIndex):
+            S.format_time_axis(ax)
+        S.grid(ax)
+        S.legend(ax)
         return "The treated unit and its synthetic control" + (
             f"; dotted: {cutoff}." if cutoff else "."
         )

@@ -1060,9 +1060,18 @@ def figure_texts(fig, lang: str | None = None):
         shown = t.get_text()
         kept = getattr(t, "_normet_en", None)
         en = kept[0] if kept and kept[1] == shown else shown
-        if not en or not en.strip() or "$" in en:
+        # A formula alone ($\mathregular{NO_{2}}$) has no words to translate; one in a
+        # title is carried through the translation as a name is.
+        words = re.sub(r"\$[^$]*\$", "", en or "")
+        if not en or not en.strip() or not re.search(r"[A-Za-z]{2}", words):
             continue
         new = tr(en, lang) if lang != "en" else en
+        if new != en and "$" in new:
+            # Mathtext sets the whole text in its own face, which has no Chinese: the
+            # formula is written out in sub- and superscripts instead (NO₂).
+            from normet.style import plain
+
+            new = plain(new)
         if new != shown:
             t.set_text(new)
         t._normet_en = (en, new) if new != en else None

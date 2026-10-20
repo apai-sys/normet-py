@@ -21,10 +21,15 @@ from __future__ import annotations
 
 from typing import Any
 
-from ._decomp_plots import COMP_COLOR, NOISE_COLOR
+import pandas as pd
 
-#: fast -> meso -> slow -> inf: light to dark as the resample pool widens.
-SCALE_COLORS = ["#a6cee3", "#2c7bb6", "#08306b", "#d7191c"]
+from normet import style as S
+
+from ._decomp_plots import COMP_COLOR, NOISE_COLOR, _lw, _time_series_axes
+
+#: fast -> meso -> slow: light to dark blue as the resample pool widens; inf the
+#: normalised series' own colour.
+SCALE_COLORS = ["#9ECAE1", "#4292C6", "#08519C", S.MODELLED]
 
 _BAND_DEFS = [
     ("D_fast", "fast_days", "meso_days", "synoptic / sub-monthly residual"),
@@ -49,13 +54,14 @@ def available_bands(result: dict) -> list[tuple[str, str]]:
     return out
 
 
+@S.styled
 def multiscale_figure(result: dict, target: str = "") -> Any:
     import matplotlib.pyplot as plt
 
     bands = available_bands(result)
     n = 1 + len(bands)
-    fig = plt.figure(figsize=(11.5, 1.7 * n + 0.8), layout="constrained")
-    gs = fig.add_gridspec(n, 2, width_ratios=[2.5, 1])
+    fig = plt.figure(figsize=(8.5, 1.15 * n + 0.6), layout="constrained")
+    gs = fig.add_gridspec(n, 2, width_ratios=[3, 1], height_ratios=[1.6] + [1] * len(bands))
 
     ax0 = fig.add_subplot(gs[0, 0])
     scales = [
@@ -64,36 +70,46 @@ def multiscale_figure(result: dict, target: str = "") -> Any:
         ("Y_slow", f"Y_{result['slow_days']}"),
         ("Y_inf", "Y_∞ (Step 2)"),
     ]
+    index = None
     for (key, label), color in zip(scales, SCALE_COLORS, strict=True):
         series = result.get(key)
         if series is not None and len(series):
-            ax0.plot(series.index, series.values, lw=1.1, color=color, label=label)
-    ax0.set_title(
-        f"Scale-space cascade of meteorologically normalised {target}".strip(),
-        fontsize=10,
-        loc="left",
-    )
-    ax0.legend(loc="upper right", fontsize=8, frameon=False, ncols=4)
-    ax0.grid(alpha=0.2)
+            index = series.index if index is None else index
+            ax0.plot(
+                series.index,
+                series.values,
+                lw=0.9 if key == "Y_inf" else 0.7,
+                color=color,
+                label=label,
+                zorder=3 if key == "Y_inf" else 2,
+            )
+    name = S.formula(target)
+    ax0.set_title(f"Scale-space cascade of meteorologically normalised {name}".strip())
+    ax0.set_ylabel(name)
+    S.legend(ax0, loc="upper right", ncols=4)
 
-    prev = ax0
+    left = [ax0]
     sigmas: dict[str, float] = {}
     for i, (key, label) in enumerate(bands, start=1):
         s = result[key]
         sigmas[key] = float(s.std())
-        ax = fig.add_subplot(gs[i, 0], sharex=prev)
-        ax.plot(s.index, s.values, lw=0.7, color=COMP_COLOR)
-        ax.axhline(0, color="k", lw=0.5)
-        ax.set_title(f"{label}   σ = {sigmas[key]:.2f}", fontsize=9, loc="left")
-        ax.grid(alpha=0.2)
-        prev = ax
+        ax = fig.add_subplot(gs[i, 0], sharex=ax0)
+        ax.plot(s.index, s.values, lw=_lw(pd.DataFrame(index=s.index)), color=COMP_COLOR)
+        S.zero_line(ax)
+        ax.set_title(f"{label}   σ = {sigmas[key]:.2f}")
+        left.append(ax)
+    _time_series_axes(left, index if index is not None else pd.Index([]))
+    fig.align_ylabels(left)
 
     axr = fig.add_subplot(gs[:, 1])
     if sigmas:
         order = sorted(sigmas, key=sigmas.get)
-        axr.barh(order, [sigmas[k] for k in order], color=[COMP_COLOR] * len(order))
-        axr.set_title("Energy by band (σ)", fontsize=9, loc="left")
-        axr.grid(alpha=0.2, axis="x")
+        axr.barh(order, [sigmas[k] for k in order], color=[COMP_COLOR] * len(order), height=0.6)
+        axr.set_title("Energy by band (σ)")
+        S.grid(axr, axis="x")
+        axr.tick_params(axis="y", length=0)
+        for side in ("top", "right"):
+            axr.spines[side].set_visible(False)
     else:
         axr.text(
             0.5,

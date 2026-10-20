@@ -149,6 +149,23 @@ def as_figure(obj: Any):
     return fig if fig is not None else plt.gcf()
 
 
+def adaptive_layout(fig: Any) -> None:
+    """Solve the figure's margins at every draw, not once at its design size (as cume's).
+
+    A one-off ``tight_layout()`` fixes the margins as fractions of the size the figure
+    was made at; on a canvas of another shape they no longer leave the room its labels
+    need -- titles run into the panel above, tick labels are cut. A layout engine
+    measures the texts at each draw. A figure that chose its own engine keeps it."""
+    from matplotlib.layout_engine import PlaceHolderLayoutEngine
+
+    if not isinstance(fig.get_layout_engine(), (type(None), PlaceHolderLayoutEngine)):
+        return
+    try:
+        fig.set_layout_engine("constrained", h_pad=0.04, w_pad=0.04, hspace=0.02, wspace=0.02)
+    except Exception:  # noqa: BLE001 - keep the margins it was made with
+        pass
+
+
 class ThemedToolbar(NavigationToolbar2QT):
     """The figure toolbar, as cume's (``cume_qt._widgets.CumeToolbar``): icons
     16 pt and tinted for the theme, the bar in the window's own colours, Save
@@ -643,6 +660,7 @@ class CanvasTab(QWidget):
             self._layout.addWidget(table)
         if fig is not None:
             fig = as_figure(fig)
+            adaptive_layout(fig)
             apply_figure_theme(fig, theme_manager().dark)
             from .uilang import figure_texts
 

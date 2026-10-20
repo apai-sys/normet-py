@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from normet import style as S
 from normet.utils._time import to_datetime_coerced
 
 from . import _settings, commandlog
@@ -214,11 +215,13 @@ class InputsMixin(QMainWindow):
         s = s[s.index.notna()]
 
         def render(d: pd.DataFrame):
-            fig, ax = plt.subplots(figsize=(9, 2.4))
-            ax.plot(d.index, d[target].values, lw=0.7, color="#2c7bb6")
-            ax.set_title(target, fontsize=10, loc="left")
-            ax.grid(alpha=0.2)
-            fig.tight_layout()
+            fig, ax = plt.subplots(figsize=(8, 2.2))
+            ax.plot(d.index, d[target].values, lw=0.5 if len(d) > 1500 else 0.9, color=S.OBSERVED)
+            ax.set_ylabel(S.formula(target))
+            if isinstance(d.index, pd.DatetimeIndex):
+                S.format_time_axis(ax)
+            ax.margins(x=0)
+            S.grid(ax)
             return fig
 
         # A dense record is first shown as daily means; the selector changes it.

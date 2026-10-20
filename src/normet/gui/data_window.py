@@ -60,6 +60,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from normet import style as S
+
 from ._widgets import CanvasTab, NoWheelComboBox, hint_label, run_button
 from .workers import TaskRunner
 
@@ -631,17 +633,26 @@ class DataWindow(QMainWindow):
         import matplotlib.pyplot as plt
 
         n = max(1, len(pol_cols))
-        fig, axes = plt.subplots(n, 1, figsize=(10, 2.2 * n), sharex=True, squeeze=False)
+        fig, axes = plt.subplots(n, 1, figsize=(8, 1.5 * n + 0.4), sharex=True, squeeze=False)
         d = df.set_index("date")
+        shown = []
         for ax, pol in zip(axes.ravel(), pol_cols or [None], strict=False):
             if pol is None:
                 ax.axis("off")
                 continue
-            ax.plot(d.index, d[pol], lw=0.6, color="#2c7bb6")
+            ax.plot(
+                d.index, d[pol], lw=0.5 if len(d) > 1500 else 0.9, color=S.PALETTE[len(shown) % 4]
+            )
             cov = d[pol].notna().mean() * 100
-            ax.set_title(f"{pol} — {cov:.0f} % coverage", fontsize=9, loc="left")
-            ax.grid(alpha=0.2)
-        fig.tight_layout()
+            ax.set_title(f"{S.formula(pol)} — {cov:.0f} % coverage")
+            ax.set_ylabel(S.formula(pol))
+            ax.margins(x=0)
+            S.grid(ax)
+            shown.append(ax)
+        if shown and isinstance(d.index, pd.DatetimeIndex):
+            S.format_time_axis(shown[-1])
+        S.outer_ticks(shown)
+        fig.align_ylabels(shown)
         self.tab_preview.show_result(
             fig,
             verdict=(

@@ -49,6 +49,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from normet import style as S
 from normet.utils._time import to_datetime_coerced
 
 from ._widgets import (
@@ -62,8 +63,8 @@ from .workers import TaskRunner
 
 log = logging.getLogger(__name__)
 
-TREATED_COLOR = "#d7191c"
-DONOR_COLOR = "#9a9a9a"
+TREATED_COLOR = S.MODELLED
+DONOR_COLOR = S.NEUTRAL
 
 BACKEND_TIPS = {
     "scm": "Augmented SCM (ridge) — the recommended default.",
@@ -635,22 +636,23 @@ class SCMWindow(QMainWindow):
             return
         treated = self.treated_combo.currentText()
 
-        fig, ax = plt.subplots(figsize=(10, 4.6))
+        fig, ax = plt.subplots(figsize=(8, 3.4))
         cols = list(wide.columns)
         for c in cols:
             if str(c) == treated:
                 continue
-            ax.plot(wide.index, wide[c], color=DONOR_COLOR, lw=0.7, alpha=0.35)
+            ax.plot(wide.index, wide[c], color=DONOR_COLOR, lw=0.6, alpha=0.45)
         if treated in map(str, cols):
             tc = next(c for c in cols if str(c) == treated)
-            ax.plot(wide.index, wide[tc], color=TREATED_COLOR, lw=1.8, label=f"treated: {treated}")
-            ax.legend(loc="upper right", frameon=False)
+            ax.plot(wide.index, wide[tc], color=TREATED_COLOR, lw=1.4, label=f"treated: {treated}")
+            S.legend(ax, loc="upper right")
         cutoff = pd.Timestamp(self.cutoff_edit.date().toPython())
-        ax.axvline(cutoff, color="k", ls=":", lw=1)
-        ax.set_ylabel(outcome)
-        ax.set_title(f"{outcome} by unit ({wide.shape[1]} units)", fontsize=10, loc="left")
-        ax.grid(alpha=0.2)
-        fig.tight_layout()
+        S.cutoff_line(ax, cutoff)
+        ax.set_ylabel(S.formula(outcome))
+        ax.set_title(f"{S.formula(outcome)} by unit ({wide.shape[1]} units)")
+        S.format_time_axis(ax)
+        ax.margins(x=0)
+        S.grid(ax)
 
         n_cells = wide.shape[0] * wide.shape[1]
         missing = float(wide.isna().sum().sum()) / n_cells * 100 if n_cells else 0.0
@@ -872,6 +874,7 @@ class SCMWindow(QMainWindow):
                 cutoff_date=cutoff,
                 diagnostics=self.diagnostics,
                 title=f"{design['treated_unit']} vs. synthetic ({backend})",
+                ylabel=S.formula(design.get("outcome_col") or "Outcome"),
             )
 
         verdict = None
@@ -952,22 +955,24 @@ class SCMWindow(QMainWindow):
 
         from normet.causal import plot_effect_with_bands
 
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 5), sharex=True)
         placebos = out.get("placebos") or {}
         for name, dfp in placebos.items():
             eff = dfp["effect"] if "effect" in dfp.columns else dfp.iloc[:, 0]
-            ax1.plot(dfp.index, eff, color=DONOR_COLOR, lw=0.7, alpha=0.4)
+            ax1.plot(dfp.index, eff, color=DONOR_COLOR, lw=0.6, alpha=0.45)
         tr = out["treated"]
-        ax1.plot(tr.index, tr["effect"], color=TREATED_COLOR, lw=1.8, label="treated")
-        ax1.axvline(cutoff, color="k", ls=":", lw=1)
-        ax1.axhline(0, color="k", lw=0.5)
-        ax1.set_title(f"Placebo effects ({len(placebos)} donors)", fontsize=10, loc="left")
-        ax1.legend(loc="upper left", frameon=False)
-        ax1.grid(alpha=0.2)
+        ax1.plot(tr.index, tr["effect"], color=TREATED_COLOR, lw=1.4, label="treated")
+        S.cutoff_line(ax1, cutoff)
+        S.zero_line(ax1)
+        ax1.set_title(f"Placebo effects ({len(placebos)} donors)")
+        ax1.set_ylabel("Effect (observed − synthetic)")
+        S.legend(ax1, loc="upper left")
+        S.grid(ax1)
+        ax1.margins(x=0)
         plot_effect_with_bands(
             bands, cutoff_date=cutoff, title="Effect with 95 % placebo bands", ax=ax2
         )
-        fig.tight_layout()
+        S.outer_ticks([ax1, ax2])
 
         p = out.get("p_value", float("nan"))
         if p == p and p <= 0.05:
@@ -1058,25 +1063,24 @@ class SCMWindow(QMainWindow):
         bands = bands.iloc[:k]
         bands["effect"] = post_eff[:k]
 
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 7))
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 5))
         seg = bands_dict.get("segments")
         if seg is not None:
             for c in seg.columns:
-                ax1.plot(seg.index, seg[c], color=DONOR_COLOR, lw=0.7, alpha=0.4)
-        ax1.plot(bands.index, bands["effect"], color=TREATED_COLOR, lw=1.8, label="true cutoff")
-        ax1.axhline(0, color="k", lw=0.5)
+                ax1.plot(seg.index, seg[c], color=DONOR_COLOR, lw=0.6, alpha=0.45)
+        ax1.plot(bands.index, bands["effect"], color=TREATED_COLOR, lw=1.4, label="true cutoff")
+        S.zero_line(ax1)
         ax1.set_title(
-            f"Event-time effects: true cutoff vs. {len(bands_dict.get('cutoffs', []))} fake cutoffs",
-            fontsize=10,
-            loc="left",
+            f"Event-time effects: true cutoff vs. {len(bands_dict.get('cutoffs', []))} fake cutoffs"
         )
         ax1.set_xlabel("Event time (steps after cutoff)")
-        ax1.legend(loc="upper left", frameon=False)
-        ax1.grid(alpha=0.2)
+        ax1.set_ylabel("Effect (observed − synthetic)")
+        S.legend(ax1, loc="upper left")
+        S.grid(ax1)
+        ax1.margins(x=0)
         plot_effect_with_bands(
             bands, cutoff_date=None, title="Effect with 95 % placebo-in-time bands", ax=ax2
         )
-        fig.tight_layout()
 
         p = out.get("p_value", float("nan"))
         n_plc = len(out.get("placebos") or {})
@@ -1152,10 +1156,6 @@ class SCMWindow(QMainWindow):
             out, cutoff_date=design["cutoff_date"], title=f"Effect with {method} bands"
         )
         fig = as_figure(ret)
-        try:
-            fig.tight_layout()
-        except Exception:
-            pass
 
         tr, low, high = out["treated"], out["low"], out["high"]
         post = tr.index >= pd.Timestamp(design["cutoff_date"])
@@ -1203,13 +1203,16 @@ class SCMWindow(QMainWindow):
         self._similarity = sim
         unit_col = sim.columns[0]
         top = sim.head(25).iloc[::-1]
-        fig, ax = plt.subplots(figsize=(9, max(3.5, 0.28 * len(top))))
-        ax.barh(top[unit_col].astype(str), top["similarity"], color=DONOR_COLOR)
+        fig, ax = plt.subplots(figsize=(6, max(3.0, 0.2 * len(top))))
+        ax.barh(top[unit_col].astype(str), top["similarity"], color=S.COMPONENT, height=0.65)
         ax.set_xlabel(
             f"Similarity to {self.treated_combo.currentText()} before the cutoff (cosine)"
         )
-        ax.set_title("Units ranked by Chronos-2 embedding similarity", fontsize=10, loc="left")
-        fig.tight_layout()
+        ax.set_title("Units ranked by Chronos-2 embedding similarity")
+        S.grid(ax, axis="x")
+        ax.tick_params(axis="y", length=0)
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
         self.tab_sim.show_result(
             fig,
             lines=[
@@ -1265,13 +1268,18 @@ class SCMWindow(QMainWindow):
         post = df_all[pd.to_datetime(df_all[date_col]) >= cutoff]
         att = post.groupby(unit_col)["effect"].mean().sort_values()
 
-        fig, ax = plt.subplots(figsize=(9, max(3.5, 0.28 * len(att))))
+        fig, ax = plt.subplots(figsize=(6, max(3.0, 0.2 * len(att))))
         colors = [TREATED_COLOR if str(u) == treated else DONOR_COLOR for u in att.index]
-        ax.barh([str(u) for u in att.index], att.values, color=colors)
-        ax.axvline(0, color="k", lw=0.6)
+        ax.barh([str(u) for u in att.index], att.values, color=colors, height=0.65)
+        ax.axvline(0, color=S.REFERENCE, lw=0.6)
         ax.set_xlabel("Post-cutoff mean effect (observed − synthetic)")
-        ax.set_title("Pseudo-effects: every unit fitted as if treated", fontsize=10, loc="left")
-        fig.tight_layout()
+        ax.set_title("Pseudo-effects: every unit fitted as if treated")
+        S.grid(ax, axis="x")
+        ax.tick_params(axis="y", length=0)
+        if len(att) > 40:  # a long batch: one step below the tick labels, so each fits
+            ax.tick_params(axis="y", labelsize=S.SMALL_SIZE)
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
 
         rank = int((att.abs() >= abs(att.get(treated, float("nan")))).sum())
         n = len(att)
