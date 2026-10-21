@@ -371,7 +371,10 @@ class FlowLayout(QLayout):
         super().__init__(parent)
         self._items: list[Any] = []
         self._gap = spacing
-        self._center = center  # each widget centred in the height of its line
+        # Each widget centred in the height of its line's controls; one laid out with
+        # Qt.AlignTop (setAlignment) hangs from their top instead -- a box taller than
+        # the buttons beside it, its top on theirs rather than above them.
+        self._center = center
 
     def addItem(self, item: Any) -> None:  # noqa: N802
         self._items.append(item)
@@ -428,10 +431,18 @@ class FlowLayout(QLayout):
             row_h = max(row_h, hint.height())
         if move:
             for line in lines:
-                tall = max((it.sizeHint().height() for it, _x, _y in line), default=0)
-                for item, ix, iy in line:
+                hangs = [it.alignment() & Qt.AlignmentFlag.AlignTop for it, _x, _y in line]
+                tall = max(
+                    (
+                        it.sizeHint().height()
+                        for (it, _x, _y), h in zip(line, hangs, strict=True)
+                        if not h
+                    ),
+                    default=0,
+                )
+                for (item, ix, iy), hang in zip(line, hangs, strict=True):
                     hint = item.sizeHint()
-                    dy = (tall - hint.height()) // 2 if self._center else 0
+                    dy = (tall - hint.height()) // 2 if self._center and not hang else 0
                     item.setGeometry(QRect(ix, iy + dy, hint.width(), hint.height()))
         return y + row_h - rect.y() + m.bottom()
 
@@ -536,6 +547,8 @@ class CanvasTab(QWidget):
         #: end: kept, not rebuilt, as the row is at each draw.
         self.bar_lead: QWidget | None = None
         self.bar_tail: list[QWidget] = []
+        #: Of those, the ones taller than the row's buttons: their top on the buttons'.
+        self.bar_top: list[QWidget] = []
         #: The pandas rule the time series on show is averaged to (None: as recorded).
         self.rule: str | None = None
         self._show_placeholder()
@@ -716,6 +729,8 @@ class CanvasTab(QWidget):
             for w in [self.bar_lead, *groups, *self.bar_tail]:
                 if w is not None:
                     flow.addWidget(w)
+                    if w in self.bar_top:
+                        flow.setAlignment(w, Qt.AlignmentFlag.AlignTop)
                     w.show()
         else:
             row = QHBoxLayout(bar)
