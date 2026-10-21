@@ -136,7 +136,9 @@ class TaskRunner(QObject):
         worker.failed.connect(on_error)
         worker.progress.connect(self.progress)
         worker.done.connect(thread.quit)
-        thread.finished.connect(lambda t=thread, w=worker: self._on_thread_finished(t, w))
+        # A method of this object, not a lambda: the connection goes with it, so a thread
+        # that ends after its window has been destroyed has no one to tell.
+        thread.finished.connect(self._on_thread_finished)
 
         self._active = (thread, worker)
         self.task_name = name
@@ -177,8 +179,12 @@ class TaskRunner(QObject):
         )
         self.finished.emit()
 
-    def _on_thread_finished(self, thread: QThread, worker: FunctionWorker) -> None:
-        worker.deleteLater()
+    def _on_thread_finished(self) -> None:
+        thread = self.sender()
+        for t, worker in ([self._active] if self._active else []) + self._zombies:
+            if t is thread:
+                worker.deleteLater()
+                break
         thread.deleteLater()
         if self._active is not None and self._active[0] is thread:
             self._active = None
