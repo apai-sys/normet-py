@@ -34,7 +34,6 @@ features, and it commits the project to API stability for downstream users.
 | ✅ | Bayesian SCM + event detection |
 | ✅ | Qt desktop GUI (`normet-gui`) with packaged installers |
 | ✅ | Chronos-2 foundation model: zero-shot de-weathering, counterfactuals, station embeddings |
-| ✅ | Physics-informed graph models (PI-STGNN, advection-diffusion-reaction loss) |
 | ✅ | Zero-shot paths through `do_all` and `decompose(method="meteorology")` |
 | ✅ | `embed_multisite`: station embeddings meet the multi-site drivers |
 | ✅ | mypy strict on the public surface (`warn_return_any` and `disallow_any_generics` deliberately off; `disallow_untyped_decorators` off for `normet.cli` alone -- see CHANGELOG for why) |

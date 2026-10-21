@@ -79,7 +79,6 @@ except Exception:  # requests / cdsapi missing
     _HAS_IO = False
 
 
-# --- Pipelines ---
 # --- Analysis ---
 from .analysis import (
     DecomposeConfig,
@@ -139,8 +138,7 @@ from .foundation import (
     to_regular_index,
 )
 
-# --- Physics-informed graph models ---
-from .physics import PhysicsGraphBuilder, build_adr_pde_loss, build_pi_stgnn
+# --- Pipelines ---
 from .pipeline import (
     SingleConfig,
     UncConfig,
@@ -288,10 +286,6 @@ __all__ = [
     # --- Counterfactual policy evaluation ---
     "HarmonicCounterfactual",
     "HarmonicCounterfactualResult",
-    # --- Physics-informed graph models ---
-    "PhysicsGraphBuilder",
-    "build_pi_stgnn",
-    "build_adr_pde_loss",
     # --- Reporting ---
     "generate_html_report",
     "report_to_markdown",

@@ -270,10 +270,8 @@ inform the other. The variates must share an index and a horizon. Covariates
 are shared across them, because meteorology is a property of the site rather
 than of the species.
 
-Neighbouring stations can be variates too, once they are columns of one frame.
-That is the point where `normet.physics`'s graphs and the foundation model meet:
-the graph says which stations are neighbours, and the variate stack is how you
-tell the model to read them together.
+Neighbouring stations can be variates too, once they are columns of one frame:
+the variate stack is how you tell the model to read them together.
 
 ## Several sites at once
 
