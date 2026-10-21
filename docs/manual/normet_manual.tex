@@ -900,10 +900,17 @@ page draws every column as a heatmap, each scaled to its own range, above the se
 picked (here \NOtwo{}, daily).}{fig:data}
 
 The \tab{Data} tab has four pages. \tab{Overview} shows the record at a glance: drag across
-the series to pick a span, and its rows are listed below the plot; a drag with Shift held
-(or Ctrl, or Cmd) adds another span, and Escape clears them. \emph{Exclude picked}
-leaves them all out, \emph{Restore picked} takes them back, and the \emph{Exclude} box takes
-spans typed one to a line (\code{2020-03-23 .. 2020-04-05}, or a single date). Rows left out
+the plot to pick a span, or click it to pick the point under the cursor (the period it
+stands for, where the series is averaged), and the rows are listed below the plot; with
+Shift held (or Ctrl, or Cmd) a drag or a click adds to the pick, a click on a picked point
+drops it, and Escape clears them. The time, the variable and the value under the cursor
+are read at the plot's lower left, under what is picked. In the list, rows are selected
+as in a spreadsheet --- Ctrl- or Cmd-click for rows apart, Shift-click or a drag down the
+rows for a run --- and right-clicked to exclude or restore them; \emph{Exclude picked}
+and \emph{Restore picked}, on the plot's \emph{Resolution} row, do the same for the rows
+selected, or every row picked when none is. The list stays, its excluded rows in grey, to
+go on from. The \emph{Exclude} box beside them takes spans typed one to a line
+(\code{2020-03-23 .. 2020-04-05}, or a single date) and \emph{Apply}. Rows left out
 are shaded on the plot and are left out of every step after: training, normalisation,
 decomposition and the rest. The Command Log writes them as \code{left\_out} and
 \code{df\_kept}, and the session keeps them. \tab{Cycles} draws a column's diurnal, weekly and
@@ -1481,7 +1488,9 @@ and the ticks worked out anew for that size, not scaled to it (Figure~\ref{fig:p
         ACS 3.33 or 7~in; Copernicus at least 80~mm), or a width of your own. A figure of
         one column of panels starts at the narrowest, panels side by side at the widest.
   \item[Height] As the figure needs --- its own proportion, raised until every panel has
-        at least 12~mm for its data, within the journal's greatest height --- or set.
+        at least 12~mm for its data, within the journal's greatest height, and lowered to
+        what is drawn where panels of a shape of their own (roses side by side) would
+        leave the rest blank --- or set.
   \item[Panel labels] None, a~b~c, (a)~(b)~(c), A~B~C or (A)~(B)~(C), bold or not, from any
         letter (a figure that is panels c and d of a composite starts at c); each column of
         panels has its letters in a line.
@@ -1503,7 +1512,8 @@ in red, and all are read again as the settings change. The preview fits the wind
 shows the figure at its actual printed size. On the preview, double-click a title, an axis
 label or a panel letter to edit its text and size, a tick's numbers to size and turn them
 (and give that tick a text of its own), the legend to place it, or a colour bar to put it
-on another side of its panel; drag the legend or a colour bar where it reads best.
+on another side of its panel and give its width and height on the page in millimetres;
+drag the legend or a colour bar where it reads best.
 \emph{Save\ldots} writes the formats the journal takes --- PDF, EPS or SVG with the text
 kept as editable text and the fonts embedded, TIFF or PNG at the resolution chosen --- at
 exactly the size shown, on a white page. While the dialog is open the figure is in the
