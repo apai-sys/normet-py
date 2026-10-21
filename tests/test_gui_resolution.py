@@ -228,3 +228,26 @@ def test_the_multiscale_tab_offers_the_resolutions(qapp):
         assert "multiscale" in win.results
     finally:
         win.close()
+
+
+def test_the_row_centres_its_controls_and_hangs_a_tall_box_from_their_top(qapp):
+    from PySide6.QtCore import QRect, Qt
+    from PySide6.QtWidgets import QWidget
+
+    from normet.gui._widgets import FlowLayout
+
+    host = QWidget()
+    flow = FlowLayout(host, spacing=4, center=True)
+    flow.setContentsMargins(0, 0, 0, 0)
+    made = {}
+    for name, h in (("button", 25), ("combo", 21), ("box", 44)):
+        made[name] = w = QWidget()
+        w.setFixedSize(60, h)
+        flow.addWidget(w)
+    flow.setGeometry(QRect(0, 0, 400, 50))
+    # All centred on the line: the button and the combo on the box's middle.
+    assert (made["box"].y(), made["button"].y(), made["combo"].y()) == (0, 9, 11)
+    # The box hung from the controls' top: theirs is the button's, the combo on its middle.
+    flow.setAlignment(made["box"], Qt.AlignmentFlag.AlignTop)
+    flow.setGeometry(QRect(0, 0, 400, 50))
+    assert (made["box"].y(), made["button"].y(), made["combo"].y()) == (0, 0, 2)

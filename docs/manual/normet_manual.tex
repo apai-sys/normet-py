@@ -903,10 +903,14 @@ The \tab{Data} tab has four pages. \tab{Overview} shows the record at a glance: 
 the plot to pick a span, or click it to pick the point under the cursor (the period it
 stands for, where the series is averaged), and the rows are listed below the plot; with
 Shift held (or Ctrl, or Cmd) a drag or a click adds to the pick, a click on a picked point
-drops it, and Escape clears them. The time, the variable and the value under the cursor
-are read at the plot's lower left, under what is picked. In the list, rows are selected
+drops it, and Escape clears them. One line under the plot says the pick --- its rows,
+and how many of them are left out --- at its left, and the time, the variable and the
+value under the cursor at its right. In the list, rows are selected
 as in a spreadsheet --- Ctrl- or Cmd-click for rows apart, Shift-click or a drag down the
-rows for a run --- and right-clicked to exclude or restore them; \emph{Exclude picked}
+rows for a run --- and right-clicked, on them or on their numbers, to exclude or restore
+them (a row right-clicked that is not selected is selected alone first). A right-click on
+the plot offers the same for every row picked, a point outside the pick picked first;
+\emph{Exclude picked}
 and \emph{Restore picked}, on the plot's \emph{Resolution} row, do the same for the rows
 selected, or every row picked when none is. The list stays, its excluded rows in grey, to
 go on from. The \emph{Exclude} box beside them takes spans typed one to a line
