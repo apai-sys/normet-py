@@ -6,7 +6,13 @@ through the readings the MCP server gives (:mod:`normet.agent.readings`), and
 runs the window's steps the way their buttons do, so what it does is on screen
 as the analyst's own runs are. Where it helps most is what to model and how to
 read the result: it RECOMMENDS a target and predictors as a card with an Apply
-button, and nothing is applied until the analyst clicks it.
+button, and nothing is applied until the analyst clicks it -- the click ticks them
+in the panel and starts training, and the next message tells the model so.
+
+When a turn ends, the box written in offers the message the analyst is most likely
+to send next: the model's own (its ``<!-- next: ... -->`` line, kept off the panel),
+else one read off the window as it stands (``suggested_message``); Tab in the empty
+box fills it in.
 
 Models are named as :mod:`normet.agent.llm` names them
 (``"anthropic:claude-sonnet-5-5"``, ``"deepseek:deepseek-chat"``,
@@ -18,6 +24,7 @@ the provider's environment variable; it is never written anywhere else.
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 import threading
@@ -26,7 +33,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from PySide6.QtCore import QEvent, QObject, QSettings, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QKeyEvent
+from PySide6.QtGui import QKeyEvent, QKeySequence, QShortcut, QTextCursor
 from PySide6.QtWidgets import (
     QComboBox,
     QDockWidget,
@@ -39,6 +46,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QSizePolicy,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -49,6 +57,7 @@ from normet.agent.mcp_http import ToolServer
 
 from . import assistant_cli
 from .chatview import ChatView, Look, composer_sheet
+from .theme import theme_manager
 
 if TYPE_CHECKING:
     from .main_window import MainWindow
@@ -68,10 +77,12 @@ model (model_fit), normalise (normalise), read it (normalised), and decompose
 
 Where you help most is what to model and how to read the result. RECOMMEND, with your
 reasons and how sure you are; the analyst decides.
-- Put a target and predictors to the analyst with propose_setup: a card with an Apply
-  button. Predictors are meteorological columns (wind, temperature, humidity, pressure,
-  boundary layer height, radiation, cloud, rain); normet adds the time features itself.
-  Say what you left out and why. After proposing, stop and let the analyst answer.
+- Put a target and predictors to the analyst with propose_setup: a card whose Apply
+  button ticks them in the panel and starts training. Predictors are meteorological
+  columns (wind, temperature, humidity, pressure, boundary layer height, radiation,
+  cloud, rain); normet adds the time features itself.
+  Say what you left out and why. After proposing, stop and let the analyst answer: their
+  Apply trains the model, and their next message says so -- do not train it again.
 - Train, normalise or decompose only when the analyst has asked or agreed: each takes
   time (training can take minutes), so say what you start before starting it.
 - Judge a model on the 'testing' rows (R2, RMSE, FAC2) and say plainly where it is weak.
@@ -80,12 +91,17 @@ reasons and how sure you are; the analyst decides.
 Quote normet's numbers as the tools give them; do not compute or invent others.
 Each message starts with the window as it stands ([Window now: ...]).
 Answer in the language the analyst writes in. The panel shows Markdown; keep it short.
+End every reply with one line of its own, <!-- next: ... -->, holding the message the
+analyst is most likely to send next: in their language, as they would type it, following
+from what you just said -- an offer you made, its acceptance; a question you asked, its
+likely answer. The panel puts it in their box as a suggestion, not in your reply.
 """
 
 #: What SYSTEM says of a proposal waiting for the analyst, and what full automatic says
 #: instead (system_prompt).
 _ASKED = """\
-  Say what you left out and why. After proposing, stop and let the analyst answer.
+  Say what you left out and why. After proposing, stop and let the analyst answer: their
+  Apply trains the model, and their next message says so -- do not train it again.
 - Train, normalise or decompose only when the analyst has asked or agreed: each takes
   time (training can take minutes), so say what you start before starting it.
 """
@@ -420,15 +436,25 @@ class WindowTools:
             self.dock.pending_resample = resample
             return "Applied" + (f" ({', '.join(unknown)} not in the list)" if unknown else "")
 
+        def apply_and_train() -> str:
+            # The analyst's click: the set-up ticked and the model trained at once, as
+            # the card's button says; the next message tells the model.
+            said = apply()
+            self.dock.train_applied(f"target {target}; predictors {', '.join(features)}")
+            return said
+
         if auto_on():
             said = str(self._gui(apply))
-            self.dock.post_card.emit("Proposed set-up", body, apply, said)
+            self.dock.post_card.emit("Proposed set-up", body, apply, said, "Apply")
             return (
                 f"{said} at once (full automatic is on): the panel has the target and "
                 "predictors ticked. Go on with the chain."
             )
-        self.dock.post_card.emit("Proposed set-up", body, apply, "")
-        return "Shown to the analyst as a card with an Apply button. Stop here and let them answer."
+        self.dock.post_card.emit("Proposed set-up", body, apply_and_train, "", "Apply and train")
+        return (
+            "Shown to the analyst as a card; its Apply ticks the set-up and starts training. "
+            "Stop here and let them answer."
+        )
 
     # steps
     def train(self) -> str:
@@ -529,12 +555,56 @@ def chronos_reading(win: MainWindow) -> str:
     )
 
 
+#: The box written in before its first turn, and again on New chat (a turn's suggestion
+#: is set over it).
+INPUT_PLACEHOLDER = "Ask about the data, or what to model… (Enter sends)"
+
+_NEXT = re.compile(r"\s*<!--\s*next:\s*(.*?)\s*-->\s*", re.S | re.I)
+
+
+def split_next(text: str) -> tuple[str, str | None]:
+    """A reply and the next message its model suggests (its ``<!-- next: ... -->`` line,
+    the system prompt's), apart: the suggestion goes to the box written in, the reply to
+    the panel without it. ``(text, None)`` where the reply gives none."""
+    found = list(_NEXT.finditer(text or ""))
+    if not found:
+        return text, None
+    said = " ".join(found[-1].group(1).split()) or None
+    return _NEXT.sub("\n", text).strip(), said
+
+
+def without_next(live: str) -> str:
+    """A reply as it is still being written, the suggestion's line kept off the panel --
+    whole or begun."""
+    text, _ = split_next(live)
+    at = text.rfind("<!--")
+    return text[:at].rstrip() if at >= 0 and "-->" not in text[at:] else text
+
+
+def suggested_message(win: MainWindow, called: set[str]) -> str:
+    """What the box written in offers once a turn has ended, where the model suggested
+    nothing: the window's next step, read off the window as it stands (``called``, the
+    tools the model has called)."""
+    if win.df_raw is None:
+        return "What can you do in this window?"
+    if win.runner.busy:
+        return "Wait for the step under way, then tell me how it went."
+    if win.model is None:
+        if "propose_setup" in called:
+            return "Train the model with the set-up in the panel."
+        return "Look at the data and propose a target and predictors."
+    if "normalise" not in win.results:
+        return "How well does the model fit? If it is good enough, normalise."
+    if "decompose" not in win.results:
+        return "What does the normalised series show? Then decompose it."
+    return "Summarise what the analysis shows."
+
+
 def unstamp(text: str) -> str:
     """A reply with the ``[Window now: …]`` line it was sent with taken off its head:
     an agent that repeats its prompt's first line would show it as its own."""
-    import re
-
-    return re.sub(r"^\s*\[Window now:[^\]]*\]\s*", "", text)
+    # Its bracket is not always kept: a model was seen to echo "Window now: ...]" bare.
+    return re.sub(r"^\s*\[?Window now:[^\]\n]*\]\s*", "", text)
 
 
 def state_text(win: MainWindow) -> str:
@@ -596,15 +666,25 @@ _MUTED = "color: palette(placeholder-text);"
 
 
 class _Composer(QPlainTextEdit):
-    """The box the analyst writes in: Enter sends, Shift+Enter starts a new line."""
+    """The box the analyst writes in: Enter (or Cmd/Ctrl+Enter) sends, Shift+Enter starts
+    a new line, and Tab in the empty box fills in the message suggested (``suggestion``,
+    shown as its placeholder), as Claude Code's box does."""
 
     send = Signal()
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.suggestion = ""
 
     def keyPressEvent(self, e: QKeyEvent) -> None:  # noqa: N802
         if e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and not (
             e.modifiers() & Qt.KeyboardModifier.ShiftModifier
         ):
             self.send.emit()
+            return
+        if e.key() == Qt.Key.Key_Tab and self.suggestion and not self.toPlainText().strip():
+            self.setPlainText(self.suggestion)
+            self.moveCursor(QTextCursor.MoveOperation.End)
             return
         super().keyPressEvent(e)
 
@@ -661,6 +741,7 @@ class _ChatThread(QThread):
                     on_event=self._on_event,
                     stop=self.box.stop,
                 )
+                self.event.emit({"type": "usage", "usage": dict(turn.usage)})
             except Exception as exc:  # noqa: BLE001 -- shown in the panel
                 failures += 1
                 if self._again(failures, AUTO_RETRY_WAIT):
@@ -711,7 +792,7 @@ class _ChatThread(QThread):
 class AssistantDock(QDockWidget):
     """The Assistant panel: a model, a conversation, proposals the analyst applies."""
 
-    post_card = Signal(str, str, object, str)
+    post_card = Signal(str, str, object, str, str)
     _tool_started = Signal(str, object)
     _tool_ended = Signal(str, str, bool)
 
@@ -723,6 +804,16 @@ class AssistantDock(QDockWidget):
         self.tools = WindowTools(win, self)
         self.pending_resample: list[str] = []
         self.messages: list[dict[str, Any]] = []
+        #: What the analyst did in the window that the model is told with their next
+        #: message (a set-up applied and trained), in brackets ahead of it.
+        self.notes: list[str] = []
+        #: The model's own suggestion of the next message, this turn's (split_next).
+        self._model_next: str | None = None
+        #: The tokens the conversation has taken (an API model's).
+        self.usage = {"input": 0, "output": 0}
+        #: A command-line agent's reply as it is written, whole (its suggestion split off
+        #: at the turn's end).
+        self._cli_text = ""
         self._thread: _ChatThread | None = None
         self._cli: assistant_cli.CliChat | None = None
         self._server: ToolServer | None = None
@@ -808,14 +899,20 @@ class AssistantDock(QDockWidget):
         self.composer = _Composer()
         self.composer.setObjectName("composer_input")
         self.composer.setFrameShape(QFrame.Shape.NoFrame)
-        self.composer.setPlaceholderText("Ask about the data, or what to model… (Enter sends)")
+        self.composer.setPlaceholderText(INPUT_PLACEHOLDER)
         self.composer.send.connect(self.send)
         self.composer.textChanged.connect(self._fit_input)
         self.composer.installEventFilter(self)
         box.addWidget(self.composer)
         row = QHBoxLayout()
         row.setSpacing(6)
-        row.addStretch(1)
+        # What the turn is doing (a step running in the window), and at its end the tokens
+        # the conversation has taken.
+        self.status = QLabel("")
+        self.status.setObjectName("composer_status")
+        self.status.setStyleSheet(_MUTED)
+        self.status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        row.addWidget(self.status, 1)
         self.new_btn = QPushButton("New chat")
         self.new_btn.setObjectName("composer_new")
         self.new_btn.setToolTip("Start a new conversation.")
@@ -835,6 +932,17 @@ class AssistantDock(QDockWidget):
         self.setMinimumWidth(300)
         self.view.restyled.connect(self._style_composer)
         self._style_composer(self.view.look)
+        # Cmd/Ctrl+F finds in the conversation from anywhere in the panel, the box
+        # written in too.
+        find = QShortcut(QKeySequence(QKeySequence.StandardKey.Find), body)
+        find.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        find.activated.connect(self.view.open_find)
+        # The system's appearance changing (light, dark) reaches the conversation through
+        # the theme manager: its own style sheet keeps the palette's events from it.
+        theme_manager().themeChanged.connect(self._follow_theme)
+        # A step the analyst ran ending (a set-up applied and trained): the suggestion
+        # follows the window.
+        win.runner.finished.connect(self._step_ended)
 
         self.post_card.connect(self.view.card)
         self._tool_started.connect(self._on_tool_started)
@@ -858,6 +966,62 @@ class AssistantDock(QDockWidget):
         margin = int(self.composer.document().documentMargin())
         self.composer.setFixedHeight(
             max(2, min(8, lines)) * self.composer.fontMetrics().lineSpacing() + 2 * margin + 4
+        )
+
+    def _follow_theme(self, _dark: bool = False) -> None:
+        self.view.follow_palette()
+
+    def changeEvent(self, e: QEvent) -> None:  # noqa: N802
+        super().changeEvent(e)
+        if e.type() == QEvent.Type.PaletteChange and hasattr(self, "view"):
+            self.view.follow_palette()
+
+    # -- the suggestion ---------------------------------------------------------------
+    def _suggest(self, text: str) -> None:
+        """The message offered in the box written in: its placeholder, Tab fills it."""
+        self.composer.suggestion = text
+        self.composer.setPlaceholderText(text or INPUT_PLACEHOLDER)
+
+    def _step_ended(self) -> None:
+        if not self.busy() and self.messages_sent():
+            self._say_tokens()
+            self._suggest(suggested_message(self.win, self.tools.called))
+
+    def _say_tokens(self) -> None:
+        """The tokens the conversation has taken, in the box's status line (none where the
+        model is a command-line agent, which does not say)."""
+        used = self.usage["input"] or self.usage["output"]
+        self.status.setText(
+            f"tokens: {self.usage['input']:,} in, {self.usage['output']:,} out" if used else ""
+        )
+
+    def messages_sent(self) -> bool:
+        """Whether the conversation has begun (a suggestion means something only then)."""
+        return bool(self.messages) or self._cli is not None
+
+    def train_applied(self, what: str) -> None:
+        """The set-up the analyst applied on a card (*what*), trained at once; the model
+        is told with their next message."""
+        if self.win.runner.busy:
+            self.view.note("A step is running: train once it has ended.")
+            self.notes.append(
+                f"[The analyst applied the proposed set-up ({what}); a step was running, "
+                "so training did not start.]"
+            )
+            return
+        self.win._run_train()
+        if not self.win.runner.busy:
+            self.view.note("Training did not start: the window says why.")
+            self.notes.append(
+                f"[The analyst applied the proposed set-up ({what}), but the window did "
+                "not start training (it says why on screen).]"
+            )
+            return
+        self.view.note("Training started in the window.")
+        self.status.setText(f"{self.win.runner.task_name} running in the window…")
+        self.notes.append(
+            f"[The analyst applied the proposed set-up ({what}) and training started in "
+            "the window: wait_for_run, then model_fit reads it. Do not train it again.]"
         )
 
     def eventFilter(self, obj: QObject, ev: QEvent) -> bool:  # noqa: N802
@@ -942,8 +1106,12 @@ class AssistantDock(QDockWidget):
             return
         self.composer.clear()
         self.view.you(text)
-        stamped = f"[Window now: {state_text(self.win)}]\n{text}"
+        told = "".join(n + "\n" for n in self.notes)
+        self.notes.clear()
+        stamped = f"[Window now: {state_text(self.win)}]\n{told}{text}"
         self.tools.stop.clear()
+        self._model_next = None
+        self.status.setText("Thinking…")
         if self._is_agent():
             self._send_cli(stamped)
             return
@@ -963,19 +1131,36 @@ class AssistantDock(QDockWidget):
     def _on_event(self, e: dict[str, Any]) -> None:
         if e["type"] == "note":
             self.view.note(e["text"])
+        elif e["type"] == "usage":
+            for k in ("input", "output"):
+                self.usage[k] += int(e["usage"].get(k, 0) or 0)
         elif e["type"] == "model":
-            self.view.reply(unstamp(e.get("text") or ""))
+            text, said = split_next(unstamp(e.get("text") or ""))
+            if said:
+                self._model_next = said
+            self.view.reply(text)
             for c in e.get("calls") or []:
                 self._open_tools.append(self.view.tool(c["name"], c["arguments"]))
-        elif e["type"] == "tool" and self._open_tools:
-            self.view.tool_done(self._open_tools.pop(0), e["output"], e["error"])
+                self._say_running(c["name"])
+        elif e["type"] == "tool":
+            if self._open_tools:
+                self.view.tool_done(self._open_tools.pop(0), e["output"], e["error"])
+            self.status.setText("Thinking…")
+
+    def _say_running(self, name: str) -> None:
+        """What the turn is doing, in the box's status line: a step of the window's, or a
+        reading."""
+        steps = ("train", "normalise", "decompose", "wait_for_run")
+        self.status.setText(f"{name} running in the window…" if name in steps else f"{name}…")
 
     def _on_tool_started(self, name: str, arguments: dict[str, Any]) -> None:
         self._open_tools.append(self.view.tool(name, arguments))
+        self._say_running(name)
 
     def _on_tool_ended(self, name: str, output: str, error: bool) -> None:
         if self._open_tools:
             self.view.tool_done(self._open_tools.pop(0), output, error)
+        self.status.setText("Thinking…")
 
     def _working(self, on: bool) -> None:
         self.working.setVisible(on)
@@ -985,6 +1170,12 @@ class AssistantDock(QDockWidget):
     def _idle(self) -> None:
         self._working(False)
         self._open_tools.clear()
+        self._say_tokens()
+        # The next message offered: the model's, following the conversation (an offer it
+        # made, the reply to it); else the window's next step. Tab in the empty box fills
+        # it; the next turn's end sets a fresher one.
+        self._suggest(self._model_next or suggested_message(self.win, self.tools.called))
+        self._model_next = None
 
     def _auto_chosen(self, on: bool) -> None:
         _settings().setValue(AUTO_KEY, bool(on))
@@ -1020,10 +1211,15 @@ class AssistantDock(QDockWidget):
         if self.busy():
             return
         self.messages.clear()
+        self.notes.clear()
         self.pending_resample = []
         self.tools.called.clear()
+        self.usage = {"input": 0, "output": 0}
+        self._model_next = None
         self._close_cli()
         self.view.clear()
+        self.status.setText("")
+        self._suggest("")
 
     # -- a command-line agent --------------------------------------------------------
     def _send_cli(self, text: str) -> None:
@@ -1042,16 +1238,10 @@ class AssistantDock(QDockWidget):
                 command = assistant_cli.AGENTS[agent][0]
                 self.view.note(f"'{command}' is not installed, or not on PATH.", error=True)
                 return
-            first = [True]
-
-            def text_in(t: str) -> None:
-                self.view.reply(unstamp(t) if first[0] else t, more=not first[0])
-                first[0] = False
-
-            self._cli.text.connect(text_in)
+            self._cli.text.connect(self._cli_text_in)
             self._cli.step.connect(lambda name: self.view.note(f"the agent's own step: {name}"))
             self._cli.failed.connect(lambda msg: self.view.note(msg, error=True))
-            self._cli.ended.connect(lambda: (first.__setitem__(0, True), self._cli_ended()))
+            self._cli.ended.connect(self._cli_ended)
             self._retried = False
         self._working(True)
         try:
@@ -1059,6 +1249,14 @@ class AssistantDock(QDockWidget):
         except (OSError, RuntimeError) as exc:
             self.view.note(str(exc), error=True)
             self._idle()
+
+    def _cli_text_in(self, t: str) -> None:
+        """The agent's words as they arrive: the reply written so far shown whole, its
+        suggestion's line (whole or begun) kept off the panel."""
+        if not self.view.writing:
+            self._cli_text = ""
+        self._cli_text += t
+        self.view.reply_live(without_next(unstamp(self._cli_text)))
 
     def _cli_ended(self) -> None:
         """The agent's message ended: asked once more on its own where its stream broke
@@ -1075,6 +1273,11 @@ class AssistantDock(QDockWidget):
             cli.send(assistant_cli.STREAM_INTERRUPTED, system_prompt())
             return
         self._retried = False
+        text, said = split_next(unstamp(self._cli_text))
+        if said:
+            self._model_next = said
+            self.view.reply_live(text)
+        self._cli_text = ""
         self._idle()
 
     def _close_cli(self) -> None:

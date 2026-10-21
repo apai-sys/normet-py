@@ -336,17 +336,25 @@ def test_window_tools_read_and_propose(win, qapp):
     said = tools.propose_setup(
         "NO2", ["t2m", "blh"], "Wind and mixing.", 0.8, resample_vars=["t2m", "blh"]
     )
-    assert "card" in said
+    assert "card" in said and "starts training" in said
     qapp.processEvents()
     from PySide6.QtWidgets import QPushButton
 
-    apply = [b for b in win.assistant.view.findChildren(QPushButton) if b.text() == "Apply"]
+    trained = []
+    win._run_train = lambda: trained.append(win.target_combo.currentText())
+    apply = [
+        b for b in win.assistant.view.findChildren(QPushButton) if b.text() == "Apply and train"
+    ]
     assert len(apply) == 1
     apply[0].click()
     assert win.target_combo.currentText() == "NO2"
     assert win._selected_features() == ["t2m", "blh"]
     assert win.assistant.pending_resample == ["t2m", "blh"]
     assert apply[0].text() == "Applied" and not apply[0].isEnabled()
+    # The click trains at once, with the set-up just ticked (here the window did not
+    # start: the model is told so with the next message).
+    assert trained == ["NO2"]
+    assert "did not start training" in win.assistant.notes[-1]
     assert [t.name for t in tools.tools()][:3] == ["window", "inspect_data", "model_fit"]
 
 
@@ -568,6 +576,8 @@ def test_the_window_stamp_is_not_shown_as_the_reply():
         == "The table has 8 rows."
     )
     assert unstamp("No stamp [Window now: here] stays.") == "No stamp [Window now: here] stays."
+    # Echoed without its opening bracket, as a model was seen to do.
+    assert unstamp("Window now: table: x; results: normalise]\n当前窗口") == "当前窗口"
 
 
 # -- full automatic: the turn worked to the chain's end ---------------------------------
@@ -766,3 +776,116 @@ def test_full_automatic_carries_a_lazy_model_through_the_window(win, qapp, monke
     assert A.chain_left(win, dock.tools.called) == []
     nudges = [m for m in dock.messages if m["role"] == "user"][1:]
     assert len(nudges) == len(A.CHAIN) - 1
+
+
+# -- the panel as cume's: the next message, Apply that trains, the status line -------------
+def test_a_replys_next_message_is_split_off():
+    from normet.gui.assistant import split_next, without_next
+
+    text, said = split_next("Shall I train it?\n<!-- next: Yes, train it -->")
+    assert text == "Shall I train it?" and said == "Yes, train it"
+    assert split_next("No suggestion.") == ("No suggestion.", None)
+    # The last of several, its spaces folded.
+    assert split_next("a <!-- next: x --> b <!--next:  y\n z-->")[1] == "y z"
+    # While it is being written, the line is kept off the panel whole or begun.
+    assert without_next("Done.\n<!-- next: Yes") == "Done."
+    assert without_next("Done.\n<!-- next: Yes -->") == "Done."
+    assert without_next("Done.") == "Done."
+
+
+def test_the_window_suggests_its_next_step(win, qapp):
+    from normet.gui.assistant import suggested_message
+
+    assert suggested_message(win, set()) == "What can you do in this window?"
+    win.load_example()
+    assert "propose a target" in suggested_message(win, set())
+    assert suggested_message(win, {"propose_setup"}).startswith("Train the model")
+
+
+def test_tab_fills_the_suggestion_and_enter_sends(win, qapp, monkeypatch):
+    from PySide6.QtCore import QEvent, Qt
+    from PySide6.QtGui import QKeyEvent
+
+    dock = win.assistant
+    box = dock.composer
+    monkeypatch.setattr(
+        dock, "_model", lambda: llm.FakeModel(lambda m, t: llm.Reply("Hi.", [], {}))
+    )
+
+    def key(k, mods=Qt.KeyboardModifier.NoModifier):
+        box.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, k, mods))
+
+    dock._suggest("Yes, train it")
+    assert box.placeholderText() == "Yes, train it"
+    key(Qt.Key.Key_Tab)
+    assert box.toPlainText() == "Yes, train it"
+    key(Qt.Key.Key_Tab)  # the box is not empty: the suggestion is not put in again
+    assert box.toPlainText().count("Yes, train it") == 1
+    box.setPlainText("hello")
+    key(Qt.Key.Key_Return, Qt.KeyboardModifier.ShiftModifier)  # a new line, not sent
+    assert box.toPlainText().strip() == "hello" and "\n" in box.toPlainText()
+    key(Qt.Key.Key_Return, Qt.KeyboardModifier.ControlModifier)  # Cmd/Ctrl+Enter sends
+    assert box.toPlainText() == "" and "› hello" in dock.view.toPlainText()
+    _wait(qapp, lambda: not dock.busy() and box.suggestion != "Yes, train it")
+    dock.new_conversation()
+    assert box.suggestion == "" and box.placeholderText().startswith("Ask about the data")
+
+
+def test_a_turn_leaves_its_suggestion_and_tokens(win, qapp, monkeypatch):
+    win.load_example()
+    dock = win.assistant
+
+    def policy(messages, tools):
+        return llm.Reply(
+            "Train on wind and mixing?\n<!-- next: Yes, train it -->",
+            [],
+            {"input": 1200, "output": 34},
+        )
+
+    monkeypatch.setattr(dock, "_model", lambda: llm.FakeModel(policy))
+    dock.send("What should I model?")
+    _wait(qapp, lambda: not dock.busy() and dock.composer.suggestion)
+    reply = [w for w in dock.view.items() if type(w).__name__ == "_Reply"][-1]
+    assert reply.md == "Train on wind and mixing?"  # the suggestion is not in the reply
+    assert dock.composer.suggestion == "Yes, train it"
+    assert dock.status.text() == "tokens: 1,200 in, 34 out"
+
+
+def test_apply_trains_at_once_and_the_model_is_told(win, qapp, monkeypatch):
+    win.load_example()
+    dock = win.assistant
+
+    def quick():  # the window's training, as quick as a test wants it
+        win.runner.submit(
+            "train (test)",
+            lambda: time.sleep(0.2),
+            lambda _r: setattr(win, "model", "a model"),
+            lambda _e: None,
+        )
+
+    monkeypatch.setattr(win, "_run_train", quick)
+    dock.tools.propose_setup("PM2.5", ["ws", "wd"], "wind", 0.7)
+    qapp.processEvents()
+    from PySide6.QtWidgets import QPushButton
+
+    btn = [b for b in dock.view.findChildren(QPushButton) if b.text() == "Apply and train"][0]
+    btn.click()
+    assert win.runner.busy and "running in the window" in dock.status.text()
+    assert "training started" in dock.notes[-1]
+    seen = []
+
+    def policy(messages, tools):
+        seen.append(messages[-1]["content"])
+        return llm.Reply("Reading it.", [], {})
+
+    monkeypatch.setattr(dock, "_model", lambda: llm.FakeModel(policy))
+    dock.messages.append({"role": "assistant", "text": "(card)", "calls": []})
+    _wait(qapp, lambda: not win.runner.busy)
+    # The step ended with the conversation begun: the window's next step is offered.
+    assert dock.composer.suggestion.startswith("How well does the model fit?")
+    dock.composer.suggestion = ""
+    dock.send("How did it go?")
+    _wait(qapp, lambda: not dock.busy() and dock.composer.suggestion)
+    told = seen[0].splitlines()
+    assert told[0].startswith("[Window now:") and "training started" in told[1]
+    assert told[-1] == "How did it go?" and dock.notes == []
