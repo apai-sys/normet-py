@@ -510,8 +510,7 @@ def _build_cli() -> Any:
                         "cdsapi": _v("cdsapi"),
                         "dask": _v("dask"),
                         "click": _v("click"),
-                        # `normet deweather` and normet.foundation need these two;
-                        # torch alone also unlocks normet.physics.
+                        # `normet deweather` and normet.foundation need these two.
                         "chronos-forecasting": _v("chronos-forecasting"),
                         "torch": _v("torch"),
                         "PySide6": _v("PySide6"),

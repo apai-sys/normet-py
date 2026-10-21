@@ -15,7 +15,6 @@ The main sub-packages are also documented individually below.
    normet.model
    normet.foundation
    normet.counterfactual
-   normet.physics
    normet.plotting
    normet.utils
    normet.io

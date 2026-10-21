@@ -73,10 +73,6 @@ foundation = ["chronos-forecasting>=2.3", "torch>=2.0"]
 # and finetune refuses that mode outright when it is absent rather than letting
 # upstream fall back to full fine-tuning behind the caller's back.
 finetune = ["chronos-forecasting>=2.3", "torch>=2.0", "accelerate>=0.26", "peft>=0.10"]
-# Physics-informed graph models (normet.physics). PhysicsGraphBuilder is pure
-# numpy; only build_pi_stgnn / build_adr_pde_loss need torch, and they import it
-# lazily, so `import normet.physics` still works without this extra.
-physics = ["torch>=2.0"]
 bayes = ["pymc>=5.0", "arviz>=0.17"]
 # normet-mcp: normet as an MCP server (normet.mcp_server), for Claude Code,
 # Claude Desktop and other MCP clients. 1.x and 2.x of the SDK both served.

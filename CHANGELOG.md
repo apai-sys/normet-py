@@ -513,18 +513,6 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   it ignores parameter uncertainty and assumes homoscedastic, serially
   independent residuals, neither of which holds for hourly air quality, so read
   it as an indication rather than a calibrated interval.
-- **Physics-informed graph models** (`normet.physics`): `PhysicsGraphBuilder`
-  builds a static k-NN geospatial graph and a dynamic wind-guided directed
-  advection graph over an irregular monitoring network; `build_pi_stgnn` and
-  `build_adr_pde_loss` construct a dual-graph spatio-temporal GNN and an
-  advection-diffusion-reaction mass-conservation loss. Torch is imported lazily,
-  so `import normet.physics` and `PhysicsGraphBuilder` work without it; the
-  neural pieces need the new `physics` extra: `pip install normet[physics]`.
-  `ADR_PDE_Loss` takes `direction="upwind"` (default) or `"outflow"`.
-  `A_wind[i, j]` weights `j` downwind of `i`, so summing over `j` untransposed
-  charges the advection term to the *source* node and leaves a downwind receptor
-  with exactly zero --- fine as an outflow formulation, wrong for the
-  mass-conservation residual at a receptor, which is what `upwind` computes.
 - **Chronos-2 in the GUI.** The Backend combo on the training tab gains a
   `chronos-2` entry, greyed out with an install hint when the `foundation` extra
   is absent. Picking it hides the training controls that a zero-shot model has
