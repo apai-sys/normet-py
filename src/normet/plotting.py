@@ -174,6 +174,9 @@ def _rose(
     ax.set_theta_zero_location("N")
     ax.set_theta_direction(-1)  # clockwise, as a compass reads
     ax.set_thetagrids([0, 90, 180, 270], ["N", "E", "S", "W"])
+    from matplotlib.ticker import MaxNLocator
+
+    ax.yaxis.set_major_locator(MaxNLocator(4))  # four rings read; every 2 % crowds them
     ax.yaxis.set_major_formatter(lambda v, _pos: f"{v:.0f}%")
     ax.tick_params(axis="y", labelsize=S.SMALL_SIZE)
     ax.set_rlabel_position(112.5)
