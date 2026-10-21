@@ -55,7 +55,7 @@ from PySide6.QtWidgets import (
 from normet.agent import llm, readings
 from normet.agent.mcp_http import ToolServer
 
-from . import assistant_cli
+from . import _code, assistant_cli
 from .chatview import ChatView, Look, composer_sheet
 from .theme import theme_manager
 
@@ -74,6 +74,17 @@ Work in the window's order, as the analyst asks: look at the data (inspect_data,
 the target), agree the target and predictors (propose_setup), train (train), read the
 model (model_fit), normalise (normalise), read it (normalised), and decompose
 (decompose, then decomposition).
+
+Which tool does what the analyst asks:
+- The window's own steps are tools, each run as its button runs it, with the settings
+  the analyst named (and no others): train (backend, budget, split, seed), normalise,
+  decompose, rolling (rolling normalisation), multiscale, pdp (partial dependence),
+  polar_plot (a variable by wind direction and speed), and the SCM Studio's synthetic
+  control: scm_open, scm_fit, scm_placebo, scm_bands. results reads every result tab.
+- Everything else normet's API does goes to the analyst with carry_out: code on the
+  table open, CODE_CONVENTIONS api_help("") lists the API and api_help(name) shows a
+  call; write a call from what api_help shows. Do not say normet cannot do something
+  before api_help("") has listed what it does.
 
 Where you help most is what to model and how to read the result. RECOMMEND, with your
 reasons and how sure you are; the analyst decides.
@@ -124,8 +135,42 @@ API_MODELS = (
 #: Full automatic (the panel's Auto, kept in the settings): what the Assistant proposes is
 #: applied at once, and a turn is worked to the chain's end.
 AUTO_KEY = "assistant/auto"
-#: The model calls one round of tool use may make before the turn is looked at again.
-MAX_TURNS = 25
+#: Rounds of tool calls one message may take before the model is stopped (full automatic:
+#: counted from the last step done, a round that only waits not counted).
+MAX_ROUNDS = 30
+#: Tokens a reply may take. A model that thinks first spends them on its thinking too:
+#: at 4096, a thinking model's answer to a long question came back empty (cume's measure).
+MAX_TOKENS = 16384
+#: The tool-result rounds the payload keeps whole: older ones fold to their head line --
+#: the tokens a long session spends are mostly the full readings it would otherwise carry
+#: for good; the panel's conversation is untouched, and a fresh reading one call away.
+KEEP_ROUNDS = 2
+FOLDED = " ... [the head of an earlier reading; call the same tool once more for the whole]"
+#: Readings the payload keeps whole however old in full automatic -- the latest of each:
+#: what the set-up, the fit and the reading of the results stand on, read early in a
+#: chain and decided on late.
+PINNED = ("inspect_data", "model_fit", "normalised", "decomposition", "results")
+#: Told to a model whose call's arguments were not JSON: cut off at its output limit.
+UNPARSED = (
+    "Your call's arguments were not valid JSON -- most likely cut off at your output "
+    "limit. Call the tool again with shorter text (reasons in a few sentences)."
+)
+#: What each reading points at next, said at its tail: the model spends a round finding
+#: out only where it does not know.
+NEXT_TEXT = {
+    "inspect_data": "propose_setup -- the target and the meteorological predictors, with "
+    "your reasons (what you left out and why)",
+    "model_fit": "where the testing rows fit well (R2, FAC2), normalise; where they do "
+    "not, say what to change -- predictors, the budget, the backend",
+    "normalised": "decompose: 'emission' splits the normalised series by time scale, "
+    "'meteorology' the weather's part by variable; rolling or multiscale show how the "
+    "weather's part moves over the record",
+    "decomposition": "results reads every tab; pdp shows how the model answers each "
+    "variable; polar_plot where the target comes from by the wind",
+    "rolling": "multiscale reads the bands between rolling widths (it needs the "
+    "normalisation); results reads every tab",
+    "pdp": "results reads every tab; polar_plot reads the target by wind direction",
+}
 #: Full automatic: the times in a row the model is told the chain is unfinished without
 #: the window moving, before its turn is let end; and the nudges a turn takes at most.
 AUTO_STALLS = 2
@@ -166,10 +211,15 @@ def auto_on() -> bool:
     return bool(_settings().value(AUTO_KEY, False, type=bool))
 
 
+def _next(key: str) -> str:
+    return "\nThen: " + NEXT_TEXT[key] + "."
+
+
 def system_prompt() -> str:
     """SYSTEM, with full automatic on what it says of proposals waiting for a click
-    replaced by what happens instead."""
-    return SYSTEM.replace(_ASKED, _AUTO) if auto_on() else SYSTEM
+    replaced by what happens instead, and carry_out's language (:mod:`._code`) said."""
+    text = SYSTEM.replace(_ASKED, _AUTO) if auto_on() else SYSTEM
+    return text.replace("CODE_CONVENTIONS", f"written in {_code.CONVENTIONS}")
 
 
 # -- keys -------------------------------------------------------------------------------
@@ -260,6 +310,189 @@ class WindowTools:
         self.stop = threading.Event()
         #: The tools called without error (full automatic's chain_left reads from it).
         self.called: set[str] = set()
+        #: Each reading's stamp at its last read (_same_once): what it depends on.
+        self._readings: dict[str, tuple] = {}
+
+    def _sig(self, key: str) -> tuple:
+        """What the reading *key* depends on, stamped at each read: the window's state and
+        the very objects read (a step run again makes a new one)."""
+        w = self.win
+        own = {
+            "inspect_data": (id(w.df_raw), w.target_combo.currentText()),
+            "model_fit": (id(w.model),),
+            "normalised": (id(w.results.get("normalise")),),
+            "decomposition": (id(w.results.get("decompose")),),
+        }.get(key, ())
+        return (*state_parts(w), *own)
+
+    def _same_once(self, key: str) -> str | None:
+        """The short answer when the reading is as it was at its last one (None else),
+        given once: the whole is in the rounds the model already has, and asking once more
+        reads it out whole. A step under way is no replay: the reading moves."""
+        w = self.win
+        if w.runner.busy:
+            return None
+        sig = self._sig(key)
+        if self._readings.get(key) != sig:
+            self._readings[key] = sig
+            return None
+        self._readings.pop(key, None)  # the next asking comes whole again
+        return (
+            "Unchanged since you last read it. The whole reading is in your earlier rounds "
+            "while they last: one more call and it comes whole."
+        )
+
+    def _reading(self, key: str, read: Callable[[], str]) -> str:
+        """A reading of the window's, said short where unchanged since the last (once), its
+        pointer to the next step at its tail."""
+
+        def go() -> str:
+            same = self._same_once(key)
+            if same is not None:
+                return same
+            return read() + (_next(key) if key in NEXT_TEXT else "")
+
+        return str(self._gui(go))
+
+    #: Each tool, and what the window must hold for it to be offered: one with nothing to
+    #: act on is not offered, so not called. Read again at every round of a message: a
+    #: step a tool runs brings its own.
+    OFFERED = (
+        ("window", None),
+        ("inspect_data", "data"),
+        ("model_fit", "model"),
+        ("normalised", "normalised"),
+        ("decomposition", "decomposed"),
+        ("wait_for_run", None),
+        ("log", None),
+        ("propose_setup", "data"),
+        ("train", "data"),
+        ("normalise", "model"),
+        ("decompose", "model"),
+        ("rolling", "model"),
+        ("multiscale", "normalised"),
+        ("pdp", "model"),
+        ("polar_plot", "data"),
+        ("results", None),
+        ("scm_open", None),
+        ("scm_fit", "panel"),
+        ("scm_placebo", "scm"),
+        ("scm_bands", "scm"),
+        ("api_help", None),
+        ("carry_out", None),
+    )
+    #: Why a tool is not offered, as a model calling it anyway is told.
+    WANTING = {
+        "data": "no table is open",
+        "model": "no model is trained: train first",
+        "normalised": "nothing is normalised: normalise first",
+        "decomposed": "nothing is decomposed: decompose first",
+        "panel": "the SCM Studio has no panel open: scm_open first",
+        "scm": "no synthetic control is fitted: scm_fit first",
+    }
+    #: Where a request goes that a tool's own arguments do not cover.
+    BEYOND = {
+        "train": "a model with any other setting is normet's build_model in carry_out "
+        "(api_help('build_model'))",
+        "normalise": "a normalisation with any other setting is normet's normalise in "
+        "carry_out (api_help('normalise'))",
+        "decompose": "a decomposition with any other setting is normet's decompose in "
+        "carry_out (api_help('decompose'))",
+        "api_help": "name is one of normet's calls, as api_help('') lists them",
+        "carry_out": "code is normet's calls on the table open; reasons are said to the analyst",
+    }
+    #: Arguments a model names otherwise, taken as the tool's own.
+    SYNONYMS = {
+        "carry_out": {"call": "code", "calls": "code", "script": "code", "reason": "reasons"},
+        "api_help": {
+            "topic": "name",
+            "query": "name",
+            "symbol": "name",
+            "function": "name",
+            "call": "name",
+        },
+        "normalise": {"variables": "resample_vars", "variables_resample": "resample_vars"},
+        "pdp": {"var_list": "variables", "vars": "variables"},
+        "polar_plot": {"var": "variable", "pollutant": "variable", "stat": "statistic"},
+        "train": {"n_trials": "budget", "time_budget": "budget", "split": "split_method"},
+        "propose_setup": {"predictors": "features", "covariates": "features", "reason": "reasons"},
+    }
+    #: What an agent writes about its own call into the call's arguments, spelt without
+    #: case or underscores -- dropped, not refused.
+    ENVELOPE = {"servername", "toolname", "toolaction", "toolsummary"}
+    #: Each argument said in its schema, by (tool, argument) or by argument.
+    ARG_TEXT: dict[Any, str] = {
+        "reasons": "your reasons, in the analyst's words, shown on the card",
+        ("propose_setup", "confidence"): "how sure you are, from 0 to 1 (0.7 = fairly sure)",
+        ("propose_setup", "features"): "the predictors: the table's meteorological columns",
+        ("api_help", "name"): "one of normet's calls, e.g. 'rolling'; '' lists them",
+        ("carry_out", "code"): "normet's calls on the table open (df), as api_help shows "
+        "them, printing what the analyst should read",
+        ("train", "budget"): "the search budget: seconds or trials, as the panel says",
+        ("scm_fit", "cutoff"): "the intervention date, YYYY-MM-DD",
+    }
+
+    def _holds(self) -> set[str]:
+        w = self.win
+        have = set()
+        if w.df_raw is not None:
+            have.add("data")
+        if w.model is not None:
+            have.add("model")
+        if "normalise" in w.results:
+            have.add("normalised")
+        if "decompose" in w.results:
+            have.add("decomposed")
+        scm = getattr(w, "_scm_window", None)
+        if scm is not None and getattr(scm, "df", None) is not None:
+            have.add("panel")
+            if getattr(scm, "result", None) is not None:
+                have.add("scm")
+        return have
+
+    def check_arguments(self, t: llm.Tool, args: dict[str, Any]) -> str | None:
+        """What is wrong with a call's arguments against the tool's own, said so the model
+        can write it again -- None where nothing is. A synonym of an argument (SYNONYMS)
+        is renamed in *args* to the argument it stands for; the agent's own account of
+        the call (ENVELOPE) is dropped from *args*."""
+        import difflib
+
+        props = t.schema.get("properties", {})
+        for k in [
+            k for k in args if k not in props and k.lower().replace("_", "") in self.ENVELOPE
+        ]:
+            del args[k]
+        for other, own in self.SYNONYMS.get(t.name, {}).items():
+            if other in args and own not in args:
+                args[own] = args.pop(other)
+        need = t.schema.get("required", [])
+        unknown = [k for k in args if k not in props]
+        missing = [k for k in need if k not in args]
+        if not unknown and not missing:
+            return None
+        said = []
+        for k in unknown:
+            close = difflib.get_close_matches(k, list(props), n=1)
+            said.append(
+                f"{k!r} is not one of its arguments"
+                + (f" (did you mean {close[0]!r}?)" if close else "")
+            )
+        if missing:
+            said.append("it needs " + ", ".join(missing))
+        takes = ", ".join(p + ("" if p in need else " (optional)") for p in props) or "nothing"
+        return (
+            f"{t.name} takes {takes}: "
+            + "; ".join(said)
+            + "."
+            + (f" {self.BEYOND[t.name]}." if t.name in self.BEYOND else "")
+        )
+
+    def not_offered(self, name: str) -> str:
+        """Why a tool was not found, as the model calling it is told."""
+        need = dict(self.OFFERED).get(name, "")
+        if name in dict(self.OFFERED) and need not in self._gui(self._holds):
+            return f"{name} is not offered now: {self.WANTING.get(need, need)}"
+        return f"no tool {name!r}"
 
     def _gui(self, fn: Callable[[], Any]) -> Any:
         """*fn* run on the window's thread, its answer (or its exception) brought back."""
@@ -282,22 +515,34 @@ class WindowTools:
         return box.get("out")
 
     def _step(
-        self, start: Callable[[], None], marker: Callable[[], Any], describe: Callable[[], str]
+        self,
+        start: Callable[[], None],
+        marker: Callable[[], Any],
+        describe: Callable[[], str],
+        window: Any = None,
     ) -> str:
         """Run a step of the window's (``start``, on its thread) to its end, as its
         button does, and say what it made (``describe``); ``marker`` is what the
-        step replaces when it succeeds."""
+        step replaces when it succeeds. ``window``: the window whose runner runs it
+        (a studio's), the main window's where left out."""
         ended = threading.Event()
         box: dict[str, Any] = {}
 
         def begin() -> None:
-            runner = self.win.runner
+            runner = (window or self.win).runner
             if runner.busy:
                 box["error"] = "the window is running something: wait for it to end"
                 ended.set()
                 return
             box["before"] = marker()
-            start()
+            try:
+                start()
+            except Exception as exc:  # noqa: BLE001 -- raised again in the tool's thread
+                # A setting the panel refuses: said to the model, and the tool's thread
+                # not left waiting for a step that never started.
+                box["exc"] = exc
+                ended.set()
+                return
             if not runner.busy:
                 box["error"] = "the window did not start it (it says why on screen)"
                 ended.set()
@@ -314,6 +559,8 @@ class WindowTools:
         while not ended.wait(0.25):
             if self.stop.is_set():
                 return "stopped by the analyst; the window's step carries on and its result comes on screen"
+        if "exc" in box:
+            raise box["exc"]
         if "error" in box:
             return str(box["error"])
 
@@ -341,7 +588,7 @@ class WindowTools:
             t = target or self.win.target_combo.currentText() or None
             return readings.data_reading(self.win.df_raw, t, name="The table open")
 
-        return str(self._gui(read))
+        return self._reading("inspect_data", read)
 
     def model_fit(self) -> str:
         """How well the trained model predicts: normet.modStats on the rows held out
@@ -354,7 +601,7 @@ class WindowTools:
                 return chronos_reading(self.win)
             return readings.model_reading(self.win.df_prep, self.win.model)
 
-        return str(self._gui(read))
+        return self._reading("model_fit", read)
 
     def normalised(self) -> str:
         """The normalised series on screen against the observed one: means overall
@@ -366,7 +613,7 @@ class WindowTools:
                 raise ValueError("nothing is normalised in the window yet")
             return readings.normalised_reading(result)
 
-        return str(self._gui(read))
+        return self._reading("normalised", read)
 
     def decomposition(self) -> str:
         """The decomposition on screen: each component's mean, spread and range."""
@@ -377,7 +624,7 @@ class WindowTools:
                 raise ValueError("nothing is decomposed in the window yet")
             return readings.decomposition_reading(result)
 
-        return str(self._gui(read))
+        return self._reading("decomposition", read)
 
     def wait_for_run(self, max_wait: float = 600.0) -> str:
         """Wait for the step the window is running -- one the analyst started, or one
@@ -457,24 +704,60 @@ class WindowTools:
         )
 
     # steps
-    def train(self) -> str:
-        """Train the model with the window's panel as it stands (target, predictors,
-        backend, budget) -- once the analyst has agreed the set-up. Returns the fit."""
-        return self._step(self.win._run_train, lambda: self.win.model, self._fit_now)
+    def train(
+        self,
+        backend: str | None = None,
+        budget: int | None = None,
+        split_method: str | None = None,
+        train_fraction: float | None = None,
+        seed: int | None = None,
+    ) -> str:
+        """Train the model with the window's panel (target, predictors) -- once the
+        analyst has agreed the set-up. Each setting given is set in the panel first, as
+        the analyst would: backend (one the Backend list offers), budget (its search
+        budget: seconds or trials, as the panel says), split_method (random, ts,
+        month_ts, season_ts), train_fraction (0.1 to 0.95), seed. Returns the fit."""
+
+        def start() -> None:
+            w = self.win
+            if backend is not None:
+                _choose(w.backend_combo, backend, "backend")
+            if budget is not None:
+                w.budget_spin.setValue(int(budget))
+            if split_method is not None:
+                _choose(w.split_combo, split_method, "split_method")
+            if train_fraction is not None:
+                w.train_fraction_spin.setValue(float(train_fraction))
+            if seed is not None:
+                w.seed_spin.setValue(int(seed))
+            w._run_train()
+
+        return self._step(start, lambda: self.win.model, self._fit_now)
 
     def _fit_now(self) -> str:
         if self.win._is_chronos():
             return chronos_reading(self.win)
         return readings.model_reading(self.win.df_prep, self.win.model)
 
-    def normalise(self, resample_vars: list[str] | None = None) -> str:
+    def normalise(
+        self,
+        resample_vars: list[str] | None = None,
+        n_samples: int | None = None,
+        quantiles: bool | None = None,
+    ) -> str:
         """Normalise with the trained model, resampling resample_vars (the set-up the
-        analyst applied, or the panel's ticks, where left out). Returns the reading."""
+        analyst applied, or the panel's ticks, where left out), with n_samples
+        Monte-Carlo draws and (quantiles) the 5-95 % band, where given. Returns the
+        reading."""
 
         def start() -> None:
             names = resample_vars or self.dock.pending_resample
             if names:
                 _set_checked(self.win.norm_vars, list(names))
+            if n_samples is not None:
+                self.win.norm_samples.setValue(int(n_samples))
+            if quantiles is not None:
+                self.win.norm_quantiles.setChecked(bool(quantiles))
             self.win._run_normalise()
 
         return self._step(
@@ -483,10 +766,11 @@ class WindowTools:
             lambda: readings.normalised_reading(self.win.results["normalise"]),
         )
 
-    def decompose(self, method: str = "emission") -> str:
+    def decompose(self, method: str = "emission", n_samples: int | None = None) -> str:
         """Decompose with the trained model: method 'emission' splits the normalised
         series into time scales; 'meteorology' splits observed − normalised by
-        meteorological variable. Returns the reading."""
+        meteorological variable; n_samples, its draws, where given. Returns the
+        reading."""
         if method not in ("emission", "meteorology"):
             raise ValueError("method is 'emission' or 'meteorology'")
         if method == "emission" and self._gui(self.win._is_chronos):
@@ -498,6 +782,8 @@ class WindowTools:
 
         def start() -> None:
             self.win.decom_method.setCurrentText(method)
+            if n_samples is not None:
+                self.win.decom_samples.setValue(int(n_samples))
             self.win._run_decompose()
 
         return self._step(
@@ -506,7 +792,260 @@ class WindowTools:
             lambda: readings.decomposition_reading(self.win.results["decompose"]),
         )
 
+    def rolling(
+        self,
+        window_days: int | None = None,
+        step_days: int | None = None,
+        n_samples: int | None = None,
+    ) -> str:
+        """Rolling normalisation with the trained model: the record normalised window by
+        window (window_days long, a new one every step_days, n_samples draws each, where
+        given), resampling the Normalise ticks. Returns the reading."""
+
+        def start() -> None:
+            w = self.win
+            if window_days is not None:
+                w.roll_window.setValue(int(window_days))
+            if step_days is not None:
+                w.roll_step.setValue(int(step_days))
+            if n_samples is not None:
+                w.roll_samples.setValue(int(n_samples))
+            w._run_rolling()
+
+        return self._step(
+            start,
+            lambda: self.win.results.get("rolling"),
+            lambda: readings.rolling_reading(self.win.results["rolling"]) + _next("rolling"),
+        )
+
+    def multiscale(
+        self,
+        fast_days: int | None = None,
+        meso_days: int | None = None,
+        slow_days: int | None = None,
+    ) -> str:
+        """Multi-scale decomposition (needs the normalisation): rolling normalisations at
+        three window widths (fast, meso, slow, in days, where given) and the bands
+        between them. Returns what the Multi-scale tab says."""
+
+        def start() -> None:
+            w = self.win
+            for spin, days in (
+                (w.ms_fast, fast_days),
+                (w.ms_meso, meso_days),
+                (w.ms_slow, slow_days),
+            ):
+                if days is not None:
+                    spin.setValue(int(days))
+            w._run_multiscale()
+
+        return self._step(
+            start,
+            lambda: getattr(self.win, "_multiscale_raw", None),
+            lambda: _tab_says(self.win.tab_multiscale),
+        )
+
+    def pdp(self, variables: list[str] | None = None, grid_points: int | None = None) -> str:
+        """Partial dependence of the trained model on variables (the PDP list's ticks
+        where left out), at grid_points values each. Returns the reading."""
+
+        def start() -> None:
+            w = self.win
+            if variables:
+                unknown = _set_checked(w.pdp_vars, list(variables))
+                if unknown:
+                    raise ValueError(f"the model has no variable {', '.join(unknown)}")
+            if grid_points is not None:
+                w.pdp_grid.setValue(int(grid_points))
+            w._run_pdp()
+
+        return self._step(
+            start,
+            lambda: self.win.results.get("pdp"),
+            lambda: readings.pdp_reading(self.win.results["pdp"]) + _next("pdp"),
+        )
+
+    def polar_plot(self, variable: str | None = None, statistic: str = "mean") -> str:
+        """The polar plot (Analysis > Polar Plot) of variable (the target where left out)
+        by wind direction and speed, statistic mean, median, p95 or max: opened for the
+        analyst, and read here as the variable's mean by wind direction (8 sectors) and
+        by wind speed."""
+        from .polar_window import STATISTICS, wind_columns
+
+        stats = [s for _label, s in STATISTICS]
+        if statistic not in stats:
+            raise ValueError(f"statistic is one of {', '.join(stats)}")
+
+        def show() -> str:
+            w = self.win
+            if w.df_raw is None:
+                raise ValueError("no table is open in the window")
+            frame = w.df_raw.set_index("date") if "date" in w.df_raw.columns else w.df_raw
+            frame, ws, wd = wind_columns(frame)
+            if ws is None or wd is None:
+                raise ValueError(
+                    "the table has no wind speed and direction (ws, wd, or u10 and v10)"
+                )
+            var = variable or w.target_combo.currentText()
+            if var not in frame.columns:
+                raise ValueError(f"the table has no column {var}")
+            w.open_polar_plot()
+            pw = getattr(w, "_polar_window", None)
+            if pw is not None:
+                _choose(pw.var_combo, var, "variable")
+                pw.stat_combo.setCurrentIndex(stats.index(statistic))
+            return _wind_reading(frame, var, ws, wd)
+
+        return str(self._gui(show))
+
+    def results(self) -> str:
+        """What every result tab of the window says now (its verdict and notes), the
+        steps not yet run left out."""
+        return str(self._gui(lambda: _all_tabs_say(self.win)))
+
+    # the SCM Studio
+    def _scm(self) -> Any:
+        w = getattr(self.win, "_scm_window", None)
+        if w is None or w.df is None:
+            raise ValueError("the SCM Studio has no panel open: scm_open first")
+        return w
+
+    def scm_open(self, example: str = "") -> str:
+        """Open the SCM Studio (synthetic control): with example 'ulez' or 'synthetic',
+        that example panel; else the main window's table, where it is a panel (a unit
+        column repeated over dates). Returns the design it shows."""
+
+        def opened() -> str:
+            self.win.open_scm_studio()
+            w = self.win._scm_window
+            if example:
+                w.load_example(example)
+            elif w.df is None and getattr(w, "_main_df", None) is not None:
+                if w._panel_candidate(w._main_df) is None:
+                    raise ValueError(
+                        "the table open is not a panel: no unit column repeats over dates"
+                    )
+                w._use_main_data()
+            if w.df is None:
+                raise ValueError("no panel: give example='ulez', or open a panel in the SCM Studio")
+            return _scm_design(w)
+
+        return str(self._gui(opened))
+
+    def scm_fit(
+        self,
+        treated: str | None = None,
+        cutoff: str | None = None,
+        backend: str | None = None,
+        donors: list[str] | None = None,
+    ) -> str:
+        """Fit the synthetic control in the SCM Studio: the treated unit, the cutoff date
+        (YYYY-MM-DD), the backend (one its Backend list offers) and the donors ticked,
+        where given. Returns its fit and what the tab says."""
+
+        def start() -> None:
+            w = self._scm()
+            if treated is not None:
+                _choose(w.treated_combo, treated, "treated")
+            if cutoff is not None:
+                from PySide6.QtCore import QDate
+
+                d = QDate.fromString(str(cutoff)[:10], "yyyy-MM-dd")
+                if not d.isValid():
+                    raise ValueError("cutoff is a date, YYYY-MM-DD")
+                w.cutoff_edit.setDate(d)
+            if backend is not None:
+                _choose(w.backend_combo, backend, "backend")
+            if donors:
+                unknown = _set_checked(w.donor_list, list(donors))
+                if unknown:
+                    raise ValueError(f"the panel has no unit {', '.join(unknown)}")
+            w._run_fit()
+
+        w = self._gui(self._scm)
+        return self._step(
+            start, lambda: getattr(w, "result", None), lambda: _scm_fit_reading(w), window=w
+        )
+
+    def scm_placebo(self, kind: str = "space") -> str:
+        """Placebo tests of the fit in the SCM Studio: kind 'space' (every donor as if
+        treated) or 'time' (the cutoff moved back). Returns what the tab says."""
+        if kind not in ("space", "time"):
+            raise ValueError("kind is 'space' or 'time'")
+        w = self._gui(self._scm)
+        run = w._run_placebo_space if kind == "space" else w._run_placebo_time
+        tab = w.tab_pspace if kind == "space" else w.tab_ptime
+        return self._step(run, lambda: _tab_says(tab), lambda: _tab_says(tab), window=w)
+
+    def scm_bands(self, method: str | None = None) -> str:
+        """Uncertainty bands around the effect in the SCM Studio, by method (one its
+        Uncertainty list offers, as jackknife), where given. Returns what the tab says."""
+        w = self._gui(self._scm)
+
+        def start() -> None:
+            if method is not None:
+                _choose(w.unc_method, method, "method")
+            w._run_uncertainty()
+
+        return self._step(
+            start, lambda: _tab_says(w.tab_unc), lambda: _tab_says(w.tab_unc), window=w
+        )
+
+    # the rest of normet's API
+    def api_help(self, name: str = "") -> str:
+        """normet's API, for what carry_out runs: name="" lists its calls, a line each;
+        a name shows the call in full (its arguments and what it does)."""
+        own = {n for n, _need in self.OFFERED}
+        if name.strip() in own:
+            return (
+                f"{name.strip()} is not a call for carry_out: it is a tool of yours -- call it "
+                "as your tool list describes it."
+            )
+        return _code.api_help(name)
+
+    def carry_out(self, code: str, reasons: str) -> str:
+        """What the window's own steps do not do, from the rest of normet's API --
+        written as code (the system prompt says in what language, and what is bound:
+        the table open as df), run on the window's table. It is shown to the analyst as a
+        card with your reasons and runs when they click Run; full automatic runs it at
+        once. Returns what it printed and the tables it made (or that it waits for the
+        analyst)."""
+        if not code.strip():
+            raise ValueError("no code")
+        body = f"```\n{code.strip()}\n```\n\n{reasons}"
+
+        def inputs() -> tuple[Any, Any, Any]:
+            return self.win.df_raw, self.win.df_prep, self.win.model
+
+        if auto_on():
+            self.dock.post_card.emit("Run in the window", body, lambda: "Ran", "Ran", "Run")
+            df, df_prep, model = self._gui(inputs)
+            said = _code.run_code(code, df, df_prep, model)
+            return "Ran at once (full automatic is on).\n\n" + said
+
+        def run() -> str:
+            self.dock.run_code(code)
+            return "Running…"
+
+        self.dock.post_card.emit("Run in the window", body, run, "", "Run")
+        return (
+            "Shown to the analyst as a card; Run carries it out on the table, and their "
+            "next message says what it gave. Stop here and let them answer."
+        )
+
     def tools(self) -> list[llm.Tool]:
+        """The tools the window offers now (OFFERED), each argument described."""
+        have = self._gui(self._holds)
+        offered = {n for n, need in self.OFFERED if need is None or need in have}
+        out = [t for t in self.all_tools() if t.name in offered]
+        for t in out:
+            for arg, schema in t.schema.get("properties", {}).items():
+                text = self.ARG_TEXT.get((t.name, arg)) or self.ARG_TEXT.get(arg)
+                if text:
+                    schema["description"] = text
+        return out
+
+    def all_tools(self) -> list[llm.Tool]:
         return [
             llm.as_tool(f)
             for f in (
@@ -521,8 +1060,118 @@ class WindowTools:
                 self.train,
                 self.normalise,
                 self.decompose,
+                self.rolling,
+                self.multiscale,
+                self.pdp,
+                self.polar_plot,
+                self.results,
+                self.scm_open,
+                self.scm_fit,
+                self.scm_placebo,
+                self.scm_bands,
+                self.api_help,
+                self.carry_out,
             )
         ]
+
+
+def _choose(combo: Any, text: str, what: str) -> None:
+    """*text* chosen in a list box, or a ValueError naming what it offers."""
+    offered = [combo.itemText(i) for i in range(combo.count())]
+    if text not in offered:
+        raise ValueError(f"{what} is one of {', '.join(offered)}, not {text!r}")
+    combo.setCurrentText(text)
+
+
+def _tab_says(tab: Any) -> str:
+    """What a result tab shows in words: its verdict, notes and table, as text."""
+    from PySide6.QtWidgets import QLabel, QTableWidget
+
+    lines = [
+        lbl.text().strip()
+        for lbl in tab.findChildren(QLabel)
+        if lbl.isVisibleTo(tab) and lbl.text().strip() and "<" not in lbl.text()
+    ]
+    for tw in tab.findChildren(QTableWidget):
+        if not tw.isVisibleTo(tab) or not tw.rowCount():
+            continue
+        header = [
+            (tw.horizontalHeaderItem(c).text() if tw.horizontalHeaderItem(c) else "")
+            for c in range(tw.columnCount())
+        ]
+        rows = [
+            [(tw.item(r, c).text() if tw.item(r, c) else "") for c in range(tw.columnCount())]
+            for r in range(min(tw.rowCount(), 30))
+        ]
+        lines += ["", readings.table(header, rows)]
+    return "\n".join(lines) or "The tab shows nothing in words yet."
+
+
+def _all_tabs_say(win: MainWindow) -> str:
+    out = []
+    for i in range(win.tabs.count()):
+        tab = win.tabs.widget(i)
+        said = _tab_says(tab)
+        if said and not said.startswith("The tab shows nothing"):
+            out.append(f"## {win.tabs.tabText(i)}\n{said}")
+    return "\n\n".join(out) or "No result tab says anything yet: nothing has run."
+
+
+def _wind_reading(frame: Any, var: str, ws: str, wd: str) -> str:
+    """*var*'s mean by wind direction (8 sectors) and by wind speed (quartiles)."""
+    import pandas as pd
+
+    d = frame[[var, ws, wd]].apply(pd.to_numeric, errors="coerce").dropna()
+    if d.empty:
+        raise ValueError(f"no rows have {var}, {ws} and {wd} all")
+    names = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+    sector = pd.Categorical(
+        [names[int(((x % 360) + 22.5) // 45) % 8] for x in d[wd]], categories=names
+    )
+    by_dir = d.groupby(sector, observed=False)[var].agg(["mean", "count"])
+    speed = pd.qcut(d[ws], 4, duplicates="drop")
+    by_speed = d.groupby(speed, observed=True)[var].mean()
+    share = 100.0 * by_dir["count"] / by_dir["count"].sum()
+    return "\n".join(
+        [
+            f"{var} by wind direction ({len(d):,} rows with wind; the polar plot is open):",
+            "",
+            readings.table(
+                ["from", f"mean {var}", "% of hours"],
+                [[k, r["mean"], s] for (k, r), s in zip(by_dir.iterrows(), share, strict=True)],
+            ),
+            "",
+            f"{var} by wind speed ({ws}, quartiles):",
+            "",
+            readings.table(
+                [f"{ws} range", f"mean {var}"],
+                [[f"{iv.left:.2f}–{iv.right:.2f}", v] for iv, v in by_speed.items()],
+            ),
+        ]
+    )
+
+
+def _scm_design(w: Any) -> str:
+    """The SCM Studio's design as it stands: the panel, the treated unit, the cutoff."""
+    n_units = w.df[w.unit_combo.currentText()].nunique() if w.unit_combo.currentText() else 0
+    donors = _checked(w.donor_list)
+    return (
+        f"The SCM Studio has a panel of {len(w.df):,} rows, {n_units} units; outcome "
+        f"{w.outcome_combo.currentText()}, unit column {w.unit_combo.currentText()}, date column "
+        f"{w.date_combo.currentText()}. Treated unit {w.treated_combo.currentText()}, cutoff "
+        f"{w.cutoff_edit.date().toString('yyyy-MM-dd')}, {len(donors)} donors ticked, backend "
+        f"{w.backend_combo.currentText()} (offered: "
+        + ", ".join(w.backend_combo.itemText(i) for i in range(w.backend_combo.count()))
+        + ")."
+    )
+
+
+def _scm_fit_reading(w: Any) -> str:
+    d = w.diagnostics or {}
+    keys = ("pre_r2", "pre_rmse", "att", "effective_n_donors", "n_donors", "top_donors")
+    rows = [[k, d.get(k)] for k in keys if k in d]
+    head = readings.table(["diagnostic", "value"], rows) if rows else ""
+    return "\n".join(s for s in (head, _tab_says(w.tab_fit)) if s)
 
 
 def chronos_reading(win: MainWindow) -> str:
@@ -609,8 +1258,21 @@ def unstamp(text: str) -> str:
 
 def state_text(win: MainWindow) -> str:
     """The window as it stands, in a line: told the model with each message."""
+    return "; ".join(state_parts(win))
+
+
+def state_brief(parts: list[str]) -> str:
+    """The line sent when the window is as it was at the message before: its table alone,
+    said as unchanged -- repeating the whole state would spend its tokens telling the
+    model what it knows."""
+    return f"as before -- {parts[0]}; unchanged since the last message"
+
+
+def state_parts(win: MainWindow) -> list[str]:
+    """What the window holds as a message is sent, in parts (state_text joins them;
+    state_brief says a message's state apart from the one before)."""
     if win.df_raw is None:
-        return "no table open"
+        return ["no table open"]
     parts = [f"table: {win.file_label.text().splitlines()[0]} ({len(win.df_raw):,} rows)"]
     target = win.target_combo.currentText()
     if target:
@@ -625,9 +1287,15 @@ def state_text(win: MainWindow) -> str:
         parts.append(f"results: {', '.join(made)}")
     if win.runner.busy:
         parts.append(f"running: {win.runner.task_name}")
+    scm = getattr(win, "_scm_window", None)
+    if scm is not None and getattr(scm, "df", None) is not None:
+        parts.append(
+            "SCM Studio: a panel open"
+            + (", a fit made" if getattr(scm, "result", None) is not None else "")
+        )
     if auto_on():
         parts.append("the Assistant's full automatic is on: what it proposes is applied at once")
-    return "; ".join(parts)
+    return parts
 
 
 def chain_left(win: MainWindow, called: set[str]) -> list[str]:
@@ -701,11 +1369,6 @@ class _ChatThread(QThread):
         super().__init__()
         self.model, self.messages, self.box = model, messages, tools
 
-    def _on_event(self, e: dict[str, Any]) -> None:
-        if e["type"] == "tool" and not e["error"]:
-            self.box.called.add(e["name"])
-        self.event.emit(e)
-
     def _note(self, text: str) -> None:
         self.event.emit({"type": "note", "text": text})
 
@@ -721,72 +1384,223 @@ class _ChatThread(QThread):
         self.box.stop.wait(wait)
         return not self.box.stop.is_set()
 
+    def _mend(self) -> None:
+        """A reply with neither text nor a tool call is refused when sent back ("content
+        or tool_calls must be set"): kept in words instead."""
+        for m in self.messages:
+            if (
+                m["role"] == "assistant"
+                and not m.get("calls")
+                and not (m.get("text") or "").strip()
+            ):
+                m["text"] = "(empty reply)"
+
+    def _close(self, text: str) -> None:
+        # Every provider wants the turns to alternate: the model has the last word.
+        if self.messages and self.messages[-1]["role"] != "assistant":
+            self.messages.append({"role": "assistant", "text": text, "calls": []})
+
+    def _payload(self) -> list[dict[str, Any]]:
+        """``self.messages`` as the next call gets it: rounds older than the last
+        KEEP_ROUNDS have their tool results folded to the head line (FOLDED) and their
+        reasoning left out. A long session otherwise carries every full reading to every
+        round -- the largest thing it spends; the panel's conversation is not touched,
+        and a fresh reading is one call of the same tool away. Full automatic keeps the
+        latest of each PINNED reading whole."""
+        kept: int | None = None
+        rounds = 0
+        for i in range(len(self.messages) - 1, -1, -1):
+            if self.messages[i]["role"] == "assistant":
+                rounds += 1
+                if rounds > KEEP_ROUNDS:
+                    kept = i
+                    break
+        if kept is None:
+            return self.messages
+        pinned = self._pinned() if self.auto else set()
+        out: list[dict[str, Any]] = []
+        for pos, m in enumerate(self.messages):
+            if pos >= kept:
+                out.append(m)
+            elif m["role"] == "assistant":
+                out.append({k: v for k, v in m.items() if k != "reasoning"})
+            elif m["role"] == "tool":
+                results = []
+                for r in m.get("results", []):
+                    r = dict(r)
+                    text = r.get("text") or ""
+                    if len(text) > len(FOLDED) + 60 and r.get("id") not in pinned:
+                        r["text"] = text[:160].rstrip() + FOLDED
+                    results.append(r)
+                out.append({"role": "tool", "results": results})
+            else:
+                out.append(dict(m))
+        return out
+
+    def _pinned(self) -> set[str]:
+        """The ids of the results kept whole however old (full automatic): the latest of
+        each PINNED reading that did not fail."""
+        name_of: dict[str, str] = {}
+        for m in self.messages:
+            if m["role"] == "assistant":
+                for c in m.get("calls") or []:
+                    name_of[c.id] = c.name
+        latest: dict[str, str] = {}
+        for m in self.messages:
+            if m["role"] == "tool":
+                for r in m.get("results", []):
+                    name = name_of.get(r.get("id", ""))
+                    if name in PINNED and not r.get("error"):
+                        latest[name] = r["id"]
+        return set(latest.values())
+
+    def _call(self, c: llm.Call, by_name: dict[str, llm.Tool]) -> tuple[str, bool]:
+        """A call of the model's carried out: its arguments checked first (renamed where a
+        synonym, refused where wrong, said so the model can write it again)."""
+        t = by_name.get(c.name)
+        if t is None:
+            check = getattr(self.box, "not_offered", None)
+            return (check(c.name) if check else f"no tool {c.name!r}"), True
+        if "_unparsed" in c.arguments:
+            return UNPARSED, True
+        check_arguments = getattr(self.box, "check_arguments", None)
+        problem = check_arguments(t, c.arguments) if check_arguments else None
+        if problem:
+            return problem, True
+        try:
+            text = str(t.fn(**c.arguments))
+        except Exception as exc:  # noqa: BLE001 -- told to the model
+            return f"{type(exc).__name__}: {exc}", True
+        self.box.called.add(c.name)
+        return text, False
+
     def run(self) -> None:
-        """The analyst's message worked to the model's reply. With full automatic on (no
-        one to answer): a turn the model ends with the chain
-        unfinished (chain_left) is told what is left and goes on, until the window stops
-        moving (AUTO_STALLS) or AUTO_NUDGES nudges; a failed call to the model, or an
-        empty reply, is made again (AUTO_RETRIES)."""
+        """The rounds of one message: the model called, and its tool calls carried out,
+        until it answers without one. With full automatic on (no one to answer): a turn
+        the model ends with the chain unfinished (chain_left) is told what is left and
+        goes on, until the window stops moving (AUTO_STALLS) or AUTO_NUDGES nudges; the
+        MAX_ROUNDS budget runs from the last step done, and a round that only waits for a
+        step is not counted; the latest PINNED readings are kept whole (_payload); a
+        failed call to the model, or an empty reply, is made again (AUTO_RETRIES)."""
         self.auto = auto_on()
-        failures = nudges = stalls = 0
+        rounds = failures = nudges = stalls = 0
+        free_waits = 10
+        best = len([s for s in self._left() if s != "wait"]) if self.auto else 0
         nudged: list[str] | None = None
-        while True:
-            try:
-                turn = llm.converse(
-                    self.model,
-                    self.box.tools(),
-                    system_prompt(),
-                    self.messages,
-                    max_turns=MAX_TURNS,
-                    on_event=self._on_event,
-                    stop=self.box.stop,
+        try:
+            while rounds < MAX_ROUNDS:
+                if self.box.stop.is_set():
+                    self._close("(stopped by the analyst)")
+                    self._note("Stopped.")
+                    return
+                self._mend()
+                # The tools the window offers now: a step run a round ago brings its own.
+                tools = self.box.tools()
+                by_name = {t.name: t for t in tools}
+                try:
+                    reply = self.model.chat(system_prompt(), self._payload(), tools)
+                except Exception as exc:  # noqa: BLE001 -- shown in the panel
+                    failures += 1
+                    if self._again(failures, AUTO_RETRY_WAIT):
+                        self._note(
+                            f"The call to the model failed ({type(exc).__name__}: {exc}); full "
+                            "automatic tries again."
+                        )
+                        continue
+                    raise
+                rounds += 1
+                self.event.emit({"type": "usage", "usage": dict(reply.usage)})
+                if not reply.calls and not (reply.text or "").strip():
+                    raw = reply.raw if isinstance(reply.raw, dict) else {}
+                    why = (
+                        ((raw.get("choices") or [{}])[0]).get("finish_reason")
+                        or raw.get("stop_reason")
+                        or "none given"
+                    )
+                    self.messages.append(
+                        {"role": "assistant", "text": "(empty reply)", "calls": []}
+                    )
+                    failures += 1
+                    if self._again(failures, 0.0):
+                        self.messages.append(
+                            {
+                                "role": "user",
+                                "content": f"[Your reply was empty (finish reason: {why}). Full "
+                                "automatic: go on with the analysis, a step at a time.]",
+                            }
+                        )
+                        continue
+                    self.failed.emit(
+                        f"The model's reply was empty (finish reason: {why})"
+                        + (
+                            "; it reached its output limit while thinking. Ask again, perhaps "
+                            "for less at a time."
+                            if why in ("length", "max_tokens")
+                            else ". Ask again."
+                        )
+                    )
+                    return
+                self.messages.append(
+                    {
+                        "role": "assistant",
+                        "text": reply.text,
+                        "calls": reply.calls,
+                        "reasoning": reply.reasoning,
+                    }
                 )
-                self.event.emit({"type": "usage", "usage": dict(turn.usage)})
-            except Exception as exc:  # noqa: BLE001 -- shown in the panel
-                failures += 1
-                if self._again(failures, AUTO_RETRY_WAIT):
+                self.event.emit(
+                    {
+                        "type": "model",
+                        "text": reply.text,
+                        "calls": [{"name": c.name, "arguments": c.arguments} for c in reply.calls],
+                    }
+                )
+                if not reply.calls:
+                    left = self._left() if self.auto and nudges < AUTO_NUDGES else []
+                    # Told again only while the window moves: the same steps left at two
+                    # nudges running is a model that cannot do them.
+                    stalls = stalls + 1 if left and left == nudged else 0
+                    if not left or stalls >= AUTO_STALLS:
+                        return
+                    nudges += 1
+                    nudged = left
+                    state = str(self.box._gui(lambda: state_text(self.box.win)))
+                    self.messages.append({"role": "user", "content": nudge_text(left, state)})
                     self._note(
-                        f"The call to the model failed ({type(exc).__name__}: {exc}); full "
-                        "automatic tries again."
+                        "Full automatic: not finished, so it goes on -- left: "
+                        + ", ".join(CHAIN_WORDS[s] for s in left)
+                        + "."
                     )
                     continue
-                # Every provider wants the turns to alternate: the model has the last word.
-                if self.messages and self.messages[-1]["role"] != "assistant":
-                    self.messages.append({"role": "assistant", "text": "(failed)", "calls": []})
-                self.failed.emit(f"{type(exc).__name__}: {exc}")
-                return
-            if not self.auto or turn.stopped == "stopped":
-                return
-            last = self.messages[-1] if self.messages else {}
-            if turn.stopped == "answered" and not (last.get("text") or "").strip():
-                failures += 1
-                if self._again(failures, 0.0):
-                    self.messages.append(
+                results = []
+                for c in reply.calls:
+                    if self.box.stop.is_set():
+                        text, error = "stopped by the analyst before this call ran", True
+                    else:
+                        text, error = self._call(c, by_name)
+                    self.event.emit(
                         {
-                            "role": "user",
-                            "content": "[Your reply was empty. Full automatic: go on with "
-                            "the analysis, a step at a time.]",
+                            "type": "tool",
+                            "name": c.name,
+                            "arguments": c.arguments,
+                            "output": text,
+                            "error": error,
                         }
                     )
-                    continue
-                return
-            left = self._left() if nudges < AUTO_NUDGES else []
-            if not left:
-                return
-            # Told again only while the window moves: the same steps left at two nudges
-            # running is a model that cannot do them.
-            stalls = stalls + 1 if left == nudged else 0
-            if stalls >= AUTO_STALLS:
-                return
-            nudges += 1
-            nudged = left
-            state = str(self.box._gui(lambda: state_text(self.box.win)))
-            self.messages.append({"role": "user", "content": nudge_text(left, state)})
-            self._note(
-                "Full automatic: not finished, so it goes on -- left: "
-                + ", ".join(CHAIN_WORDS[s] for s in left)
-                + "."
-            )
+                    results.append({"id": c.id, "text": text, "error": error})
+                self.messages.append({"role": "tool", "results": results})
+                if self.auto:
+                    if free_waits and all(c.name == "wait_for_run" for c in reply.calls):
+                        free_waits -= 1
+                        rounds -= 1  # waiting is not working
+                    now = len([s for s in self._left() if s != "wait"])
+                    if now < best:
+                        best, rounds = now, 0  # a step done: the budget anew
+            self._close("(stopped: too many rounds of tool calls)")
+            self.failed.emit(f"Stopped after {MAX_ROUNDS} rounds of tool calls.")
+        except Exception as exc:  # noqa: BLE001 -- the provider's word, shown in the panel
+            self._close("(no reply: the call failed)")
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
 
 
 class AssistantDock(QDockWidget):
@@ -809,6 +1623,8 @@ class AssistantDock(QDockWidget):
         self.notes: list[str] = []
         #: The model's own suggestion of the next message, this turn's (split_next).
         self._model_next: str | None = None
+        #: The window's state as the last message told it (state_brief).
+        self._state_parts: list[str] | None = None
         #: The tokens the conversation has taken (an API model's).
         self.usage = {"input": 0, "output": 0}
         #: A command-line agent's reply as it is written, whole (its suggestion split off
@@ -1024,6 +1840,36 @@ class AssistantDock(QDockWidget):
             "the window: wait_for_run, then model_fit reads it. Do not train it again.]"
         )
 
+    def run_code(self, code: str) -> None:
+        """The code of a card the analyst ran (carry_out), on the window's table, off the
+        interface thread; what it gave shown and told to the model with the next
+        message."""
+        w = self.win
+        item = self.view.tool("carry_out", {"lines": len(code.strip().splitlines())})
+
+        def done(said: str) -> None:
+            failed = "\nError:\n" in f"\n{said}"
+            self.view.tool_done(item, said, failed)
+            self.notes.append("[The analyst ran your code. What it gave:\n" + said + "]")
+            if not self.busy() and self.messages_sent():
+                self._suggest(suggested_message(w, self.tools.called))
+
+        def failed(message: str) -> None:
+            self.view.tool_done(item, message, True)
+            self.notes.append(f"[The analyst ran your code; it failed: {message}]")
+
+        if not w.runner.submit(
+            "carry out",
+            _code.run_code,
+            done,
+            failed,
+            code,
+            w.df_raw,
+            w.df_prep,
+            w.model,
+        ):
+            self.view.tool_done(item, "A step is running: run it again once it has ended.", True)
+
     def eventFilter(self, obj: QObject, ev: QEvent) -> bool:  # noqa: N802
         box = getattr(self, "composer", None)  # events come while the dock is built
         if (
@@ -1092,7 +1938,11 @@ class AssistantDock(QDockWidget):
     def _model(self) -> llm.Model:
         name = self.model_box.currentText().strip()
         provider = name.partition(":")[0]
-        return llm.Model(name, api_key=find_key(provider) if provider in llm.PROVIDERS else None)
+        return llm.Model(
+            name,
+            api_key=find_key(provider) if provider in llm.PROVIDERS else None,
+            max_tokens=MAX_TOKENS,
+        )
 
     # -- a message -------------------------------------------------------------------
     def busy(self) -> bool:
@@ -1108,7 +1958,11 @@ class AssistantDock(QDockWidget):
         self.view.you(text)
         told = "".join(n + "\n" for n in self.notes)
         self.notes.clear()
-        stamped = f"[Window now: {state_text(self.win)}]\n{told}{text}"
+        # The whole state where it moved since the last message; a brief line where not.
+        parts = state_parts(self.win)
+        state = state_brief(parts) if parts == self._state_parts else "; ".join(parts)
+        self._state_parts = parts
+        stamped = f"[Window now: {state}]\n{told}{text}"
         self.tools.stop.clear()
         self._model_next = None
         self.status.setText("Thinking…")
@@ -1216,6 +2070,8 @@ class AssistantDock(QDockWidget):
         self.tools.called.clear()
         self.usage = {"input": 0, "output": 0}
         self._model_next = None
+        self._state_parts = None
+        self.tools._readings.clear()
         self._close_cli()
         self.view.clear()
         self.status.setText("")
@@ -1225,8 +2081,10 @@ class AssistantDock(QDockWidget):
     def _send_cli(self, text: str) -> None:
         if self._cli is None:
             if self._server is None:
+                # Every tool: an agent lists them once, as its session starts, and a tool
+                # the window cannot run yet says why when it is called.
                 self._server = ToolServer(
-                    self.tools.tools,
+                    self.tools.all_tools,
                     instructions=system_prompt(),
                     on_call=lambda n, a: self._tool_started.emit(n, a),
                     on_result=lambda n, t, err: self._tool_ended.emit(n, t, err),

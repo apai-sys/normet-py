@@ -307,6 +307,80 @@ def decomposition_reading(result: pd.DataFrame) -> str:
     )
 
 
+def rolling_reading(result: pd.DataFrame) -> str:
+    """A rolling normalisation: how many windows, their mean series by year (or month)
+    and how far the windows that overlap a time disagree there."""
+    import re
+
+    df = result.copy()
+    if not isinstance(df.index, pd.DatetimeIndex) and "date" in df.columns:
+        df = df.set_index(pd.to_datetime(df["date"])).drop(columns="date")
+    cols = [
+        c for c in df.columns if isinstance(c, str) and re.fullmatch(r"(window|rolling)_\d+", c)
+    ]
+    if not cols:
+        raise ValueError("a rolling result has window_01, window_02, ... columns")
+    windows = df[cols].apply(pd.to_numeric, errors="coerce")
+    mean, spread = windows.mean(axis=1), windows.std(axis=1)
+    lines = [
+        f"{len(cols)} windows over {len(df):,} rows, {df.index.min()} to {df.index.max()}.",
+        f"Mean of the windows' normalised series {num(mean.mean())}; where windows overlap "
+        f"they differ by {num(spread.mean())} on average (standard deviation across them).",
+    ]
+    if isinstance(df.index, pd.DatetimeIndex):
+        rule, word = _periods(df.index)
+        by = pd.DataFrame({"windows' mean": mean, "spread": spread}).resample(rule).mean()
+        label = "%Y" if word == "year" else "%Y-%m"
+        lines += [
+            "",
+            f"By {word}:",
+            "",
+            table(
+                [word, "windows' mean", "spread"],
+                [
+                    [t.strftime(label), *r]
+                    for t, r in zip(by.index, by.itertuples(index=False), strict=True)
+                ],
+            ),
+        ]
+    return "\n".join(lines)
+
+
+def pdp_reading(result: pd.DataFrame) -> str:
+    """Partial dependence: for each variable, the prediction's range over its values and
+    where along them it is lowest and highest."""
+    need = {"variable", "value", "pdp_mean"}
+    if not need <= set(result.columns):
+        raise ValueError(f"a PDP result has columns {', '.join(sorted(need))}")
+    rows = []
+    for var, g in result.groupby("variable", sort=False):
+        g = g.dropna(subset=["pdp_mean"])
+        if g.empty:
+            continue
+        lo, hi = g.loc[g["pdp_mean"].idxmin()], g.loc[g["pdp_mean"].idxmax()]
+        rows.append(
+            [
+                var,
+                hi["pdp_mean"] - lo["pdp_mean"],
+                lo["value"],
+                lo["pdp_mean"],
+                hi["value"],
+                hi["pdp_mean"],
+            ]
+        )
+    rows.sort(key=lambda r: -float(r[1]))
+    return "\n".join(
+        [
+            f"Partial dependence of {len(rows)} variables, widest range first: the predicted "
+            "mean at the value where it is lowest and where it is highest.",
+            "",
+            table(
+                ["variable", "range", "lowest at", "prediction", "highest at", "prediction"], rows
+            ),
+        ]
+    )
+
+
 def scm_reading(result: pd.DataFrame, cutoff: str) -> str:
     """A synthetic-control fit (:func:`normet.scm_diagnostics`): how closely the
     synthetic unit follows the treated one before *cutoff*, and the effect after."""

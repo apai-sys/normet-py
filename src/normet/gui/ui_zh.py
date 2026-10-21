@@ -1273,5 +1273,10 @@ TEXTS.update(
         "No matches": "没有匹配",
         "{n0} of {n1}": "第 {n0} 个，共 {n1} 个",
         "Back to the end of the conversation": "回到对话末尾",
+        "Run in the window": "在窗口中运行",
+        "Run": "运行",
+        "Ran": "已运行",
+        "Running…": "运行中…",
+        "A step is running: run it again once it has ended.": "有步骤正在运行：等它结束后再运行。",
     }
 )
