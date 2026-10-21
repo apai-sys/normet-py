@@ -27,8 +27,8 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from PySide6.QtCore import QModelIndex, Qt, QTimer, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtCore import QItemSelectionModel, QModelIndex, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QCursor, QTextOption
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
@@ -335,6 +335,7 @@ class DataTab(QWidget):
         self.spans: list[tuple[pd.Timestamp, pd.Timestamp]] = []
         #: The spans picked on the overview, in time order and apart.
         self.picked: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+        self._n_picked = 0  # the rows the pick holds
 
         # Overview
         ov = QWidget()
@@ -377,8 +378,18 @@ class DataTab(QWidget):
         bar.setContentsMargins(0, 0, 0, 0)
         self.exclude_box = QPlainTextEdit()
         self.exclude_box.setPlaceholderText("Rows left out, a span a line")
-        self.exclude_box.setMaximumHeight(2 * self.exclude_box.fontMetrics().lineSpacing() + 14)
-        self.exclude_box.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)  # a span a line
+        # Two lines tall exactly, no sliver of a third under them: the frame both sides,
+        # the document's margin above the text only (a plain text edit sets none below).
+        edge = 2 * self.exclude_box.frameWidth() + self.exclude_box.document().documentMargin()
+        self.exclude_box.setMaximumHeight(
+            2 * self.exclude_box.fontMetrics().lineSpacing() + round(edge)
+        )
+        # A span a line, folded at its " .. " where it is wider than the box (a span with
+        # its times is): read whole, never under a sideways scroll bar that hides the
+        # box's second line.
+        self.exclude_box.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        self.exclude_box.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        self.exclude_box.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.exclude_box.setToolTip(
             "Rows left out of every step, a line each: 2020-03-23 .. 2020-04-05, or one date"
         )
@@ -389,9 +400,11 @@ class DataTab(QWidget):
         self.apply_btn = QPushButton("Apply")
         self.apply_btn.setToolTip("Leave out the rows the box names (as edited by hand).")
         self.apply_btn.clicked.connect(self.apply_box)
-        bar.addWidget(self.apply_btn)
-        # Groups the row wraps between, where the window is narrow.
+        bar.addWidget(self.apply_btn, 0, Qt.AlignmentFlag.AlignTop)
+        # Groups the row wraps between, where the window is narrow; the box, two lines
+        # tall, with its top and Apply's on the buttons'.
         self.overview.bar_lead, self.overview.bar_tail = lead, [buttons, box]
+        self.overview.bar_top = [box]
         for w in (lead, buttons, box):
             w.hide()
         # At the plot's lower left, as in cume: the pick said, and what is under the
@@ -400,25 +413,26 @@ class DataTab(QWidget):
         pl = QVBoxLayout(plot)
         pl.setContentsMargins(0, 0, 0, 0)
         pl.addWidget(self.overview, 1)
+        # One line under the plot: the pick (its rows, those left out) at the left, the
+        # point under the cursor at the right.
+        said = QHBoxLayout()
+        said.setContentsMargins(0, 0, 0, 0)
         self.pick_info = QLabel(PICK_HINT)
         self.pick_info.setWordWrap(True)
         self.pick_info.setMaximumHeight(2 * self.pick_info.fontMetrics().lineSpacing() + 4)
         self.pick_info.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        pl.addWidget(self.pick_info)
+        said.addWidget(self.pick_info, 1)
         self.hover = QLabel("")
         self.hover.setStyleSheet("color:#636366;")
-        # As wide as the plot whatever it says, and a line tall when it says nothing.
-        self.hover.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-        self.hover.setMinimumHeight(self.hover.fontMetrics().height())
-        pl.addWidget(self.hover)
+        self.hover.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
+        said.addWidget(self.hover, 0, Qt.AlignmentFlag.AlignTop)
+        pl.addLayout(said)
         # Under the plot, the rows picked: every column, those left out in grey. Rows are
         # selected in it as in a spreadsheet (Ctrl/Cmd, Shift, a drag down the rows) and
         # left out or put back by its menu or the buttons.
         rows = QWidget()
         rl = QVBoxLayout(rows)
         rl.setContentsMargins(0, 0, 0, 0)
-        self.rows_label = QLabel("")
-        rl.addWidget(self.rows_label)
         self.rows_model = _RowsModel(max_rows=PICKED_ROWS)
         self.rows_view = QTableView()
         self.rows_view.setModel(self.rows_model)
@@ -427,6 +441,10 @@ class DataTab(QWidget):
         self.rows_view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.rows_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.rows_view.customContextMenuRequested.connect(self._rows_menu)
+        # The same menu on the rows' numbers, where a spreadsheet's user right-clicks.
+        header = self.rows_view.verticalHeader()
+        header.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        header.customContextMenuRequested.connect(lambda pos: self._rows_menu(pos, header))
         self.rows_view.selectionModel().selectionChanged.connect(lambda *_: self._sync_buttons())
         rl.addWidget(self.rows_view, 1)
         self.rows_panel = rows
@@ -620,6 +638,15 @@ class DataTab(QWidget):
         axes = self._axes()
         toolbar = getattr(event.canvas, "toolbar", None)
         if (
+            event.button == 3
+            and axes is not None
+            and event.inaxes in axes
+            and not (toolbar is not None and toolbar.mode)
+        ):
+            self._press = None
+            self._plot_menu(event)
+            return
+        if (
             axes is None
             or event.button != 1
             or event.inaxes not in axes
@@ -687,6 +714,29 @@ class DataTab(QWidget):
         a = pd.Timestamp(mdates.num2date(lo)).tz_localize(None)
         b = pd.Timestamp(mdates.num2date(hi)).tz_localize(None)
         self.pick(a, b, add=add)
+
+    def _plot_menu(self, event: Any) -> None:
+        """The plot's right-click menu, as the list's: on a time picked, the pick kept
+        whole; elsewhere the point under the pointer picked first, as a click picks it.
+        Its actions take every row picked (the list's selection let go)."""
+        from matplotlib import dates as mdates
+
+        t = pd.Timestamp(mdates.num2date(event.xdata)).tz_localize(None)
+        if not any(a <= t <= b for a, b in self.picked):
+            i = self._point_at(event)
+            if i is not None:
+                self._pick_point(i, add=False)
+        if not self.picked:
+            return
+        self.rows_view.clearSelection()
+        n = self._n_picked
+        menu = QMenu(self.overview)
+        menu.addAction(f"Exclude {n:,} picked rows", self.exclude_picked)
+        restore = menu.addAction(f"Restore {n:,} picked rows", self.restore_picked)
+        restore.setEnabled(self._restorable(self.picked))
+        menu.addSeparator()
+        menu.addAction("Clear pick", self.clear_pick)
+        menu.exec(QCursor.pos())
 
     def _point_at(self, event: Any) -> int | None:
         """The point of the figure's frame a click or the cursor names: on the series the
@@ -778,17 +828,21 @@ class DataTab(QWidget):
         if not self.picked:
             self.clear_pick()
             return
-        n = self._show_picked_rows()
+        self._n_picked = self._show_picked_rows()
+        self._sync_buttons()
+        self.draw_overview()
+
+    def _say_pick(self, rows: str) -> None:
+        """The pick said under the plot: its span (or how many, and the first), and
+        *rows*, how many rows it holds and how many of them are left out."""
         if len(self.picked) == 1:
             ((s0, s1),) = self.picked
-            self.pick_info.setText(f"Picked {_stamp(s0)} – {_stamp(s1)} ({n:,} rows)")
+            self.pick_info.setText(f"Picked {_stamp(s0)} – {_stamp(s1)} ({rows})")
         else:
             lines = exclusion_lines(self.picked)
             shown = "; ".join(lines[:3]) + (f"; … {len(lines) - 3} more" if len(lines) > 3 else "")
-            self.pick_info.setText(f"Picked {len(lines)} spans ({n:,} rows): {shown}")
+            self.pick_info.setText(f"Picked {len(lines)} spans ({rows}): {shown}")
         self.pick_info.setToolTip("\n".join(exclusion_lines(self.picked)))
-        self._sync_buttons()
-        self.draw_overview()
 
     def _on_key(self, event: Any) -> None:
         if event.key == "escape" and self.picked:
@@ -813,10 +867,10 @@ class DataTab(QWidget):
         self.rows_model.set_dataframe(rows)
         self.rows_view.resizeColumnsToContents()
         shown = min(len(rows), PICKED_ROWS)
-        self.rows_label.setText(
-            f"{len(rows):,} rows picked"
-            + (f", {int(out.sum()):,} of them left out" if out.any() else "")
-            + (f" (the first {shown:,} listed)" if shown < len(rows) else "")
+        self._say_pick(
+            f"{len(rows):,} rows"
+            + (f", {int(out.sum()):,} left out" if out.any() else "")
+            + (f", the first {shown:,} listed" if shown < len(rows) else "")
         )
         if len(rows) and not self.rows_panel.isVisible():
             # Shown: two thirds to the plot, a third to the rows.
@@ -840,8 +894,26 @@ class DataTab(QWidget):
             return _runs(self.df["date"], sel)
         return list(self.picked)
 
-    def _rows_menu(self, pos: Any) -> None:
-        """The list's menu: the rows selected left out or put back, as in a spreadsheet."""
+    def _rows_menu(self, pos: Any, where: QWidget | None = None) -> None:
+        """The list's menu, at *pos* on its cells or on *where*, its rows' numbers: the
+        rows selected left out or put back, as in a spreadsheet -- a row right-clicked
+        that is not among them selected alone first, so the menu acts on the row under
+        the pointer; one that is keeps the selection whole."""
+        view = self.rows_view
+        where = where or view.viewport()
+        if where is view.verticalHeader():
+            row = view.verticalHeader().logicalIndexAt(pos)
+        else:
+            row = view.indexAt(pos).row()
+        if row >= 0 and not view.selectionModel().isRowSelected(row, QModelIndex()):
+            view.selectionModel().select(
+                self.rows_model.index(row, 0),
+                QItemSelectionModel.SelectionFlag.ClearAndSelect
+                | QItemSelectionModel.SelectionFlag.Rows,
+            )
+            view.selectionModel().setCurrentIndex(
+                self.rows_model.index(row, 0), QItemSelectionModel.SelectionFlag.NoUpdate
+            )
         n = len(self.selected_rows())
         menu = QMenu(self.rows_view)
         exclude = menu.addAction(f"Exclude {n:,} selected rows")
@@ -852,7 +924,7 @@ class DataTab(QWidget):
         restore.triggered.connect(self.restore_picked)
         menu.addSeparator()
         menu.addAction("Select all", self.rows_view.selectAll)
-        menu.exec(self.rows_view.viewport().mapToGlobal(pos))
+        menu.exec(where.mapToGlobal(pos))
 
     def clear_pick(self) -> None:
         self.picked = []

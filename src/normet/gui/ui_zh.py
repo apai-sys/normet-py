@@ -639,6 +639,10 @@ TEXTS = {
 }
 
 INNER: dict[str, str] = {
+    # the rows a pick holds, said in its line under the Data tab's plot
+    ", the first {n0} listed": "，列出前 {n0} 行",
+    "{n0} rows, {n1} left out": "{n0} 行，其中 {n1} 行已排除",
+    "{n0} rows": "{n0} 行",
     # emission components and multi-scale bands, as a verdict or a panel's title names them
     "Trend (long-term)": "趋势（长期）",
     "Seasonal (annual)": "季节（年周期）",
@@ -1293,11 +1297,13 @@ TEXTS.update(
         "Rows left out, a span a line": "排除的行，每行一段",
         "Exclude {n0} selected rows": "排除所选的 {n0} 行",
         "Restore {n0} selected rows": "恢复所选的 {n0} 行",
+        "Exclude {n0} picked rows": "排除框选的 {n0} 行",
+        "Restore {n0} picked rows": "恢复框选的 {n0} 行",
         "Select all": "全选",
         "{s0}: {s1} = {s2}": "{s0}：{s1} = {s2}",
         "{s0}: {s1} = {s2}, left out": "{s0}：{s1} = {s2}，已排除",
         "{s0}: mean {s1} = {s2}": "{s0}：{s1} 均值 = {s2}",
-        "Picked {n0} spans ({n1} rows): {s0}": "已选 {n0} 段（{n1} 行）：{s0}",
+        "Picked {n0} spans ({s0}): {s1}": "已选 {n0} 段（{s0}）：{s1}",
         "Pick nothing (Escape on the plot).": "取消选取（在图上按 Esc）。",
         "The table at a glance appears here once data is loaded.": "载入数据后，这里显示整张表的概览。",
         "Exclude picked": "排除所选",
@@ -1312,11 +1318,7 @@ TEXTS.update(
         "A variable's diurnal, weekly and seasonal cycles.": "变量的日变化、周变化和季节变化。",
         "Pollutant": "污染物",
         "The wind rose, the pollution rose and the polar plot.": "风玫瑰图、污染玫瑰图和极坐标图。",
-        "Picked {s0} – {s1} ({n0} rows)": "已选 {s0} – {s1}（{n0} 行）",
-        "{n0} rows picked": "已选 {n0} 行",
-        "{n0} rows picked, {n1} of them left out": "已选 {n0} 行，其中 {n1} 行已排除",
-        "{n0} rows picked (the first {n1} listed)": "已选 {n0} 行（列出前 {n1} 行）",
-        "{n0} rows picked, {n1} of them left out (the first {n2} listed)": "已选 {n0} 行，其中 {n1} 行已排除（列出前 {n2} 行）",
+        "Picked {s0} – {s1} ({s2})": "已选 {s0} – {s1}（{s2}）",
         "left out: {n0} rows": "已排除：{n0} 行",
         "yes": "是",
         "{n0} rows kept.": "保留 {n0} 行。",
