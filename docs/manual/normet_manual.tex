@@ -724,7 +724,7 @@ read from the \tab{File} menu (Section~\ref{sec:config}).
 \toprule
 Tab & Shows & Filled by \\
 \midrule
-Data        & a preview of the target, the table, its size, span and missing values & loading \\
+Data        & overview, cycles, wind and pollution roses, statistics; rows left out & loading \\
 Model       & verdict, statistics table, parity plot, feature importance & Train model \\
 Normalise   & observed and normalised series, the quantile band, their cycles & Run normalisation \\
 Decompose   & the emission or meteorological components, the cycles & Run decomposition \\
@@ -894,8 +894,21 @@ hand --- in MY1, \code{atmos\_pres}. The same applies to the \tab{Normalise} pag
 \screenshot{ui_data.png}{MY1 opened from \tab{File $\rightarrow$ Load Example}: 5,793
 hourly rows of 11 columns from 2020-01-01 to 2020-08-31, with no missing values. The
 example sets the paper's target, \NOtwo{}, and its nine meteorological predictors
-(\code{atmos\_pres} among them, a name the window does not recognise). The tab previews the
-target series and lists the table.}{fig:data}
+(\code{atmos\_pres} among them, a name the window does not recognise). The \tab{Overview}
+page draws every column as a heatmap, each scaled to its own range, above the series
+picked (here \NOtwo{}, daily).}{fig:data}
+
+The \tab{Data} tab has four pages. \tab{Overview} shows the record at a glance: drag across
+the series to pick a span, and its rows are listed below the plot. \emph{Exclude picked}
+leaves them out, \emph{Restore picked} takes them back, and the \emph{Exclude} box takes
+spans typed one to a line (\code{2020-03-23 .. 2020-04-05}, or a single date). Rows left out
+are shaded on the plot and are left out of every step after: training, normalisation,
+decomposition and the rest. The Command Log writes them as \code{left\_out} and
+\code{df\_kept}, and the session keeps them. \tab{Cycles} draws a column's diurnal, weekly and
+seasonal cycles; \tab{Wind}, when the table has wind speed and direction, the wind rose,
+a pollutant's pollution rose and its polar plot; \tab{Statistics} each column's values,
+missing share, mean, standard deviation, minimum, quartiles and maximum. All four read
+the rows kept.
 
 \section{Settings}
 \begin{description}\nosep
