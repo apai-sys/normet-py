@@ -3,7 +3,8 @@ the rows left out of every step.
 
 - Overview: every numeric column as a strip, each scaled to its own range (missing
   values grey), over the whole record; below it, one variable as measured. A span
-  dragged across either is picked -- its rows listed beneath the plot -- and *Exclude
+  dragged across either is picked -- Shift (Ctrl, Cmd) adds another, as cume's samples
+  are picked, and Escape clears them -- its rows listed beneath the plot, and *Exclude
   picked* leaves its rows out of every
   step -- training, normalisation, decomposition, rolling. The rows left out are greyed
   where they are, and written to the Exclude box as the lines ``exclusion_lines``
@@ -12,7 +13,7 @@ the rows left out of every step.
 - Wind: the wind rose, the pollution rose and the polar plot of a variable.
 - Statistics: each column's count, missing share and spread.
 
-The rows of a span picked on the overview are listed under it, every column, the ones
+The rows of the spans picked on the overview are listed under it, every column, the ones
 left out marked: what a span holds is read where it is picked.
 
 Everything but the overview reads the rows kept: what the steps see.
@@ -48,7 +49,25 @@ from normet import style as S
 from ._widgets import CanvasTab, NoWheelComboBox
 from .dataframe_model import DataFrameModel
 
-#: The rows of a span picked listed at most (a year of hours and more).
+PICK_HINT = "Drag across the plot to pick a span of rows; Shift adds another."
+
+
+def _adding() -> bool:
+    """Whether Shift, Ctrl or Cmd is held: a drag with one adds its span to the pick."""
+    from PySide6.QtWidgets import QApplication
+
+    held = QApplication.keyboardModifiers()
+    return any(
+        held & m
+        for m in (
+            Qt.KeyboardModifier.ShiftModifier,
+            Qt.KeyboardModifier.ControlModifier,
+            Qt.KeyboardModifier.MetaModifier,
+        )
+    )
+
+
+#: The rows of the spans picked listed at most (a year of hours and more).
 PICKED_ROWS = 20_000
 
 #: A line of the Exclude box: one time (a date alone is its whole day) or "a .. b".
@@ -158,11 +177,11 @@ def overview_figure(
     d: pd.DataFrame,
     variable: str,
     spans: Sequence[tuple[pd.Timestamp, pd.Timestamp]] = (),
-    picked: tuple[pd.Timestamp, pd.Timestamp] | None = None,
+    picked: Sequence[tuple[pd.Timestamp, pd.Timestamp]] = (),
 ) -> Any:
     """Every numeric column of *d* (indexed by time) as a strip scaled to its own range
     -- missing values grey -- above *variable* as measured; the spans left out greyed,
-    the span picked in red. The series' axes are the figure's first."""
+    the spans picked in red. The series' axes are the figure's first."""
     import matplotlib.pyplot as plt
     from matplotlib import dates as mdates
 
@@ -198,9 +217,9 @@ def overview_figure(
     for a, b in spans:
         for ax in (ax_h, ax_s):
             ax.axvspan(a, b, color=_EXCLUDED, alpha=0.45, lw=0, zorder=3)
-    if picked is not None:
+    for a, b in picked:
         for ax in (ax_h, ax_s):
-            ax.axvspan(picked[0], picked[1], color=_PICKED, alpha=0.25, lw=0, zorder=4)
+            ax.axvspan(a, b, facecolor=_PICKED, edgecolor=_PICKED, alpha=0.25, lw=1, zorder=4)
     if isinstance(d.index, pd.DatetimeIndex):
         S.format_time_axis(ax_s)
         if len(d):
@@ -231,7 +250,8 @@ class DataTab(QWidget):
         self.kept: pd.DataFrame | None = None  # the rows the steps see
         self.target = ""
         self.spans: list[tuple[pd.Timestamp, pd.Timestamp]] = []
-        self.picked: tuple[pd.Timestamp, pd.Timestamp] | None = None
+        #: The spans picked on the overview, in time order and apart.
+        self.picked: list[tuple[pd.Timestamp, pd.Timestamp]] = []
         self._selectors: list[Any] = []
 
         # Overview
@@ -245,7 +265,7 @@ class DataTab(QWidget):
         self.var_combo.currentTextChanged.connect(lambda _t: self.draw_overview())
         top.addWidget(self.var_combo)
         top.addStretch(1)
-        self.pick_info = QLabel("Drag across the plot to pick a span of rows.")
+        self.pick_info = QLabel(PICK_HINT)
         self.pick_info.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         top.addWidget(self.pick_info, 2)
         ol.addLayout(top)
@@ -284,6 +304,7 @@ class DataTab(QWidget):
         self.restore_btn.setToolTip("Put the picked rows that are left out back.")
         self.restore_btn.clicked.connect(self.restore_picked)
         self.clear_btn = QPushButton("Clear pick")
+        self.clear_btn.setToolTip("Pick nothing (Escape on the plot).")
         self.clear_btn.clicked.connect(self.clear_pick)
         for b in (self.exclude_btn, self.restore_btn, self.clear_btn):
             bar.addWidget(b)
@@ -360,7 +381,7 @@ class DataTab(QWidget):
         fresh = df is not self.df or target != self.target  # a new table, or a new target
         self.df, self.kept, self.target = df, kept, target
         self.spans = list(spans)
-        self.picked = None
+        self.picked = []
         self.rows_panel.hide()
         self.exclude_box.setPlainText("\n".join(exclusion_lines(self.spans)))
         numeric = [
@@ -423,6 +444,9 @@ class DataTab(QWidget):
         if canvas is None:
             return
         self._selectors = []
+        if getattr(self, "_keys_on", None) is not canvas:
+            canvas.mpl_connect("key_press_event", self._on_key)
+            self._keys_on = canvas
         for ax in canvas.figure.axes:
 
             def picked(lo: float, hi: float) -> None:
@@ -430,7 +454,7 @@ class DataTab(QWidget):
                     return
                 a = pd.Timestamp(mdates.num2date(lo)).tz_localize(None)
                 b = pd.Timestamp(mdates.num2date(hi)).tz_localize(None)
-                self.pick(a, b)
+                self.pick(a, b, add=_adding())
 
             self._selectors.append(
                 SpanSelector(
@@ -443,24 +467,35 @@ class DataTab(QWidget):
                 )
             )
 
-    def pick(self, a: pd.Timestamp, b: pd.Timestamp) -> None:
-        """The span from *a* to *b* picked: said, and drawn on the overview."""
+    def pick(self, a: pd.Timestamp, b: pd.Timestamp, add: bool = False) -> None:
+        """The span from *a* to *b* picked -- beside those picked already, with *add* (a
+        drag with Shift, Ctrl or Cmd held) -- said, and drawn on the overview."""
         # To the minute, as the Exclude box writes it: what is picked is what is read back.
-        self.picked = (min(a, b).floor("min"), max(a, b).floor("min"))
+        span = (min(a, b).floor("min"), max(a, b).floor("min"))
+        self.picked = _merged([*self.picked, span]) if add else [span]
         n = self._show_picked_rows()
-        self.pick_info.setText(
-            f"Picked {_stamp(self.picked[0])} – {_stamp(self.picked[1])} ({n:,} rows)"
-        )
+        if len(self.picked) == 1:
+            ((s0, s1),) = self.picked
+            self.pick_info.setText(f"Picked {_stamp(s0)} – {_stamp(s1)} ({n:,} rows)")
+        else:
+            lines = exclusion_lines(self.picked)
+            shown = "; ".join(lines[:3]) + (f"; … {len(lines) - 3} more" if len(lines) > 3 else "")
+            self.pick_info.setText(f"Picked {len(lines)} spans ({n:,} rows): {shown}")
+        self.pick_info.setToolTip("\n".join(exclusion_lines(self.picked)))
         self._sync_buttons()
         self.draw_overview()
+
+    def _on_key(self, event: Any) -> None:
+        if event.key == "escape" and self.picked:
+            self.clear_pick()
 
     def _show_picked_rows(self) -> int:
         """The picked span's rows listed under the plot (every column, the left-out marked):
         how many there are."""
-        if self.df is None or self.picked is None or "date" not in self.df.columns:
+        if self.df is None or not self.picked or "date" not in self.df.columns:
             self.rows_panel.hide()
             return 0
-        inside = excluded_mask(self.df["date"], [self.picked])
+        inside = excluded_mask(self.df["date"], self.picked)
         rows = self.df[inside].copy()
         out = excluded_mask(rows["date"], self.spans)
         rows.insert(0, "Left out", np.where(out, "yes", ""))
@@ -480,21 +515,25 @@ class DataTab(QWidget):
         return len(rows)
 
     def clear_pick(self) -> None:
-        self.picked = None
+        self.picked = []
         self.rows_panel.hide()
-        self.pick_info.setText("Drag across the plot to pick a span of rows.")
+        self.pick_info.setText(PICK_HINT)
+        self.pick_info.setToolTip("")
         self._sync_buttons()
         self.draw_overview()
 
     def exclude_picked(self) -> None:
-        if self.picked is None:
+        if not self.picked:
             return
-        self._apply([*self.spans, self.picked])
+        self._apply([*self.spans, *self.picked])
 
     def restore_picked(self) -> None:
-        if self.picked is None:
+        if not self.picked:
             return
-        self._apply(_subtract(self.spans, self.picked))
+        spans = self.spans
+        for cut in self.picked:
+            spans = _subtract(spans, cut)
+        self._apply(spans)
 
     def apply_box(self) -> None:
         try:
@@ -508,22 +547,21 @@ class DataTab(QWidget):
 
     def _apply(self, spans: list[tuple[pd.Timestamp, pd.Timestamp]]) -> None:
         self.spans = _merged(spans)
-        self.picked = None
+        self.picked = []
         self.rows_panel.hide()
-        self.pick_info.setText("Drag across the plot to pick a span of rows.")
+        self.pick_info.setText(PICK_HINT)
+        self.pick_info.setToolTip("")
         self.exclude_box.setPlainText("\n".join(exclusion_lines(self.spans)))
         self._sync_buttons()
         self.exclusionsChanged.emit(exclusion_lines(self.spans))
 
     def _sync_buttons(self) -> None:
         has = self.df is not None
-        self.exclude_btn.setEnabled(has and self.picked is not None)
+        self.exclude_btn.setEnabled(has and bool(self.picked))
         self.restore_btn.setEnabled(
-            has
-            and self.picked is not None
-            and any(not (b < self.picked[0] or a > self.picked[1]) for a, b in self.spans)
+            has and any(not (b < p0 or a > p1) for a, b in self.spans for p0, p1 in self.picked)
         )
-        self.clear_btn.setEnabled(self.picked is not None)
+        self.clear_btn.setEnabled(bool(self.picked))
         self.apply_btn.setEnabled(has)
 
     # -- cycles ------------------------------------------------------------------------------

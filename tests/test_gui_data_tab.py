@@ -75,6 +75,49 @@ def test_a_span_picked_is_listed_left_out_and_restored(qapp):
         win.close()
 
 
+def test_several_spans_are_picked_with_shift_and_left_out_together(qapp):
+    """As cume's samples: a drag picks a span, one with Shift (Ctrl, Cmd) adds another, a
+    plain drag starts again and Escape clears; the spans picked are left out and put
+    back together."""
+    from types import SimpleNamespace
+
+    from normet.gui.main_window import MainWindow
+
+    win = MainWindow()
+    try:
+        win.load_example("my1")
+        tab = win.data_tab
+        n = len(win.df_raw)
+        tab.pick(pd.Timestamp("2020-03-23"), pd.Timestamp("2020-03-23 23:59"))
+        tab.pick(pd.Timestamp("2020-05-01"), pd.Timestamp("2020-05-01 11:59"), add=True)
+        assert tab.picked == [
+            (pd.Timestamp("2020-03-23"), pd.Timestamp("2020-03-23 23:59")),
+            (pd.Timestamp("2020-05-01"), pd.Timestamp("2020-05-01 11:59")),
+        ]
+        assert tab.rows_model.rowCount() == 36 and tab.rows_label.text() == "36 rows picked"
+        assert tab.pick_info.text().startswith("Picked 2 spans (36 rows): 2020-03-23; ")
+        # Overlapping or touching spans are one.
+        tab.pick(pd.Timestamp("2020-05-01 06:00"), pd.Timestamp("2020-05-01 17:59"), add=True)
+        assert len(tab.picked) == 2 and tab.rows_model.rowCount() == 42
+        tab.exclude_picked()
+        assert win.exclusions == ["2020-03-23", "2020-05-01 .. 2020-05-01 17:59"]
+        assert len(win.df_raw) == n - 42 and tab.picked == []
+        # Both put back at once.
+        tab.pick(pd.Timestamp("2020-03-23"), pd.Timestamp("2020-03-23 23:59"))
+        tab.pick(pd.Timestamp("2020-05-01"), pd.Timestamp("2020-05-01 23:59"), add=True)
+        assert tab.restore_btn.isEnabled()
+        tab.restore_picked()
+        assert win.exclusions == [] and len(win.df_raw) == n
+        # A plain drag starts again; Escape clears.
+        tab.pick(pd.Timestamp("2020-03-23"), pd.Timestamp("2020-03-23 23:59"))
+        tab.pick(pd.Timestamp("2020-06-01"), pd.Timestamp("2020-06-01 23:59"))
+        assert len(tab.picked) == 1
+        tab._on_key(SimpleNamespace(key="escape"))
+        assert tab.picked == [] and not tab.clear_btn.isEnabled()
+    finally:
+        win.close()
+
+
 def test_the_other_pages_draw(qapp):
     from normet.gui.main_window import MainWindow
 
