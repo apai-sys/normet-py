@@ -900,8 +900,9 @@ page draws every column as a heatmap, each scaled to its own range, above the se
 picked (here \NOtwo{}, daily).}{fig:data}
 
 The \tab{Data} tab has four pages. \tab{Overview} shows the record at a glance: drag across
-the series to pick a span, and its rows are listed below the plot. \emph{Exclude picked}
-leaves them out, \emph{Restore picked} takes them back, and the \emph{Exclude} box takes
+the series to pick a span, and its rows are listed below the plot; a drag with Shift held
+(or Ctrl, or Cmd) adds another span, and Escape clears them. \emph{Exclude picked}
+leaves them all out, \emph{Restore picked} takes them back, and the \emph{Exclude} box takes
 spans typed one to a line (\code{2020-03-23 .. 2020-04-05}, or a single date). Rows left out
 are shaded on the plot and are left out of every step after: training, normalisation,
 decomposition and the rest. The Command Log writes them as \code{left\_out} and
