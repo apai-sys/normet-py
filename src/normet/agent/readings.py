@@ -352,7 +352,7 @@ def pdp_reading(result: pd.DataFrame) -> str:
     need = {"variable", "value", "pdp_mean"}
     if not need <= set(result.columns):
         raise ValueError(f"a PDP result has columns {', '.join(sorted(need))}")
-    rows = []
+    rows: list[list] = []
     for var, g in result.groupby("variable", sort=False):
         g = g.dropna(subset=["pdp_mean"])
         if g.empty:
