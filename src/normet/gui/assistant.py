@@ -1287,7 +1287,12 @@ def state_parts(win: MainWindow) -> list[str]:
         parts.append(f"model trained on: {', '.join(win.trained_features)}")
     made = [k for k in ("normalise", "decompose", "rolling", "pdp") if k in win.results]
     if made:
+        from . import uilang
+        from ._shell import report_language
+
         parts.append(f"results: {', '.join(made)}")
+        # The analyst picks it under File > Export HTML Report.
+        parts.append(f"the report in {uilang.LANGUAGES[report_language()]}")
     if win.runner.busy:
         parts.append(f"running: {win.runner.task_name}")
     scm = getattr(win, "_scm_window", None)

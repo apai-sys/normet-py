@@ -179,6 +179,10 @@ def _translate(text: str, lang: str) -> str | None:
         return None
     # The text whole first: a tooltip that writes <factor> or <min> is not HTML.
     got = translate(core, lang, cat)
+    if got is not None and "\n" in core and "\n" not in got:
+        # A template for one line ('Carried out: {s0}') took a text of several -- its
+        # lines run together; line by line keeps them.
+        got = _in_parts(core, lang, cat) or got
     if got is not None:
         return lead + got + trail
     if _TAG.search(core) or _ENTITY.search(core):
@@ -190,6 +194,8 @@ def _translate(text: str, lang: str) -> str | None:
         got = _with_note(core, lang, cat)
     if got is None:
         got = _sentences(core, lang, cat)
+    if got is None:
+        got = _label_head(core, lang, cat)
     return None if got is None else lead + got + trail
 
 
@@ -245,6 +251,18 @@ def _with_note(text: str, lang: str, cat) -> str | None:
     return (th or head) + (tn or " " + note)
 
 
+def _label_head(text: str, lang: str, cat) -> str | None:
+    """A name the window writes as a label's head -- 'Resolution:' -- the name as the
+    catalogue has it, alone or as a sentence, and the language's colon."""
+    from ._i18n import translate
+
+    if not text.endswith(":") or text.endswith("::"):
+        return None
+    name = text[:-1].rstrip()
+    got = translate(name, lang, cat) or translate(name + ".", lang, cat)
+    return None if got is None else got.rstrip("。.") + "："
+
+
 # A sentence's end -- a full stop after a word, a number or a bracket, a capital after it
 # -- but not an abbreviation's (St. Louis, et al. 2015, e.g. X, vs. Y, Fig. 2).
 _SENTENCE = re.compile(
@@ -286,15 +304,20 @@ def _in_parts(text: str, lang: str, cat, joins=_JOINS) -> str | None:
             continue
         parts = text.split(join)
         done = []
-        for part in parts:
+        for whole in parts:
+            # A line's own indent ('Restored:\n  data: a.csv') kept about its words; the
+            # space about a fact (" | ") goes, as the language spaces its own.
+            pre, part, post = _SPACES.match(whole).groups() if join == "\n" else ("", whole, "")
             t = translate(part, lang, cat) if _LETTERS.search(part) else part
             if t is None and _LETTERS.search(part):
                 t = _in_parts(part, lang, cat, joins[k + 1 :])
             if t is None and _LETTERS.search(part):
                 t = _with_note(part, lang, cat)
+            if t is None and _LETTERS.search(part):
+                t = _label_head(part, lang, cat)
             if t is None and _AUDIT and _LETTERS.search(part) and join != " — ":
                 _missed.add(" ".join(part.split()))
-            done.append(part if t is None else t)
+            done.append(pre + (part if t is None else t) + post)
         if done != parts:
             return join.join(done)
         return None

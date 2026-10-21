@@ -69,3 +69,15 @@ def test_a_file_dialog_is_titled_in_the_systems_language(monkeypatch):
     assert uilang.panel_caption("Open data") == "Open data"
     monkeypatch.setattr(uilang, "system_language", lambda: "zh")
     assert uilang.panel_caption("Open data") == "打开数据"
+
+
+def test_a_label_head_and_a_text_of_several_lines():
+    """As cume's: 'Name:' is the name the catalogue has with the language's colon; a
+    text of several lines keeps its lines and their indent; a statistic before a formula
+    is translated, one before any other words is not."""
+    from normet.gui.uilang import tr
+
+    assert tr("Resolution:", "zh") == "时间分辨率："
+    assert tr("Features (predictors)\n  ws", "zh") == "特征（预测变量）\n  ws"
+    assert tr("mean $\\mathregular{NO_{2}}$", "zh") == "$\\mathregular{NO_{2}}$ 均值"
+    assert tr("mean absolute error", "zh") == "mean absolute error"
