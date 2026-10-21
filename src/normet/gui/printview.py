@@ -41,7 +41,6 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -131,6 +130,69 @@ def _size_box(size: float) -> QDoubleSpinBox:
     box.setSuffix(" pt")
     box.setValue(size)
     return box
+
+
+#: A colour bar's sides, as its dialog names them: None is where it was drawn.
+_BAR_SIDES: tuple[tuple[str, str | None], ...] = (
+    ("Where drawn", None),
+    ("Right", "right"),
+    ("Left", "left"),
+    ("Top", "top"),
+    ("Bottom", "bottom"),
+)
+
+
+def _mm_box(mm: float) -> QDoubleSpinBox:
+    box = QDoubleSpinBox()
+    box.setRange(0.5, 400.0)
+    box.setDecimals(1)
+    box.setSingleStep(1.0)
+    box.setSuffix(" mm")
+    box.setValue(mm)
+    return box
+
+
+class _BarChoices(QDialog):
+    """A colour bar's own choices -- the side it stands on, its width and its height on
+    the page -- asked at the bar itself. A bar turned from upright to lying (or back)
+    has its width and height swapped with it."""
+
+    def __init__(self, parent: QWidget, side: str | None, width: float, height: float) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Colour bar")
+        self.place = QComboBox()
+        for text, where in _BAR_SIDES:
+            self.place.addItem(text, where)
+        sides = [where for _t, where in _BAR_SIDES]
+        self.place.setCurrentIndex(sides.index(side) if side in sides else 0)
+        self._upright = self._is_upright(side, width, height)
+        self.width = _mm_box(width)
+        self.width.setToolTip("Across the page: the bar's thickness where it stands upright.")
+        self.height = _mm_box(height)
+        self.height.setToolTip("Up the page: the bar's length where it stands upright.")
+        self.place.currentIndexChanged.connect(self._turned)
+        form = QFormLayout()
+        form.addRow("Where", self.place)
+        form.addRow("Width", self.width)
+        form.addRow("Height", self.height)
+        _choices_dialog(self, form)
+
+    @staticmethod
+    def _is_upright(side: str | None, width: float, height: float) -> bool:
+        return side in ("right", "left") if side is not None else height >= width
+
+    def _turned(self, _i: int) -> None:
+        side = self.place.currentData()
+        upright = self._is_upright(side, self.width.value(), self.height.value())
+        if side is not None and upright != self._upright:
+            w, h = self.width.value(), self.height.value()
+            self.width.setValue(h)
+            self.height.setValue(w)
+        if side is not None:
+            self._upright = upright
+
+    def chosen(self) -> tuple[str | None, float, float]:
+        return self.place.currentData(), self.width.value(), self.height.value()
 
 
 class _LegendChoices(QDialog):
@@ -738,17 +800,19 @@ class PrintDialog(QDialog):
             if leg_ask.exec() == QDialog.DialogCode.Accepted:
                 self._set_legend(*leg_ask.chosen())
         else:
-            names = ["Where drawn", "Right", "Left", "Top", "Bottom"]
-            sides = [None, "right", "left", "top", "bottom"]
             side0 = self._bar_side(target)
             if side0 is None:
                 side0 = (self._bar_drags.get(target) or {}).get("side")
-            here = sides.index(side0) if side0 in sides else 0
-            said, ok = QInputDialog.getItem(
-                self, "Colour bar", "Where it stands:", names, here, False
-            )
-            if ok:
-                self._set_bar(target, sides[names.index(said)])
+            w0, h0 = self._bar_mm(target)
+            bar_ask = _BarChoices(self, side0, w0, h0)
+            if bar_ask.exec() == QDialog.DialogCode.Accepted:
+                side, w, h = bar_ask.chosen()
+                cax = target
+                if side != side0:
+                    cax = self._set_bar(target, side) or target
+                    w0, h0 = self._bar_mm(cax)
+                if abs(w - w0) > 0.05 or abs(h - h0) > 0.05:
+                    self._size_bar(cax, w, h)
 
     def _holds(self, what: Any, x: float, y: float) -> bool:
         try:
@@ -911,7 +975,7 @@ class PrintDialog(QDialog):
             return "bottom"
         return None
 
-    def _set_bar(self, cax: Any, side: str | None) -> None:
+    def _set_bar(self, cax: Any, side: str | None) -> Any:
         """The colour bar to another side of its parent -- or back to the side it was
         drawn on, None asking that: the bar taken off and one matplotlib places put in
         its stead, its label with it. Closing the dialog puts one back on the side it
@@ -944,6 +1008,49 @@ class PrintDialog(QDialog):
         made = self.fig.colorbar(mappable, ax=parent, location=side, **was["opts"])
         if was["label"]:
             made.set_label(was["label"])
+        self.canvas.draw_idle()
+        return made.ax
+
+    def _bar_mm(self, cax: Any) -> tuple[float, float]:
+        """The bar's width and height on the page, in millimetres, as drawn."""
+        self.canvas.draw()  # laid out: where the layout and the bar's aspect put it
+        pos = cax.get_position()
+        fw, fh = self.fig.get_size_inches() * 25.4
+        return round(pos.width * fw, 1), round(pos.height * fh, 1)
+
+    def _size_bar(self, cax: Any, width_mm: float, height_mm: float) -> None:
+        """The bar made *width_mm* across and *height_mm* up the page: its edge by its
+        panel kept where it is, the bar centred along it; pinned there, as a dragged bar
+        is, and put back as drawn when the dialog closes."""
+        from matplotlib.transforms import Bbox
+
+        self.canvas.draw()
+        pos = cax.get_position()
+        fw, fh = self.fig.get_size_inches() * 25.4
+        w, h = min(width_mm / fw, 1.0), min(height_mm / fh, 1.0)
+        side = self._bar_side(cax) or (self._bar_drags.get(cax) or {}).get("side")
+        cx, cy = (pos.x0 + pos.x1) / 2, (pos.y0 + pos.y1) / 2
+        x0 = {"right": pos.x0, "left": pos.x1 - w}.get(side or "", cx - w / 2)
+        y0 = {"top": pos.y0, "bottom": pos.y1 - h}.get(side or "", cy - h / 2)
+        box = Bbox.from_bounds(min(max(x0, 0.0), 1.0 - w), min(max(y0, 0.0), 1.0 - h), w, h)
+        if cax not in self._bar_drags:
+            self._bar_drags[cax] = {
+                "locator": cax.get_axes_locator(),
+                "pos": cax.get_position(original=True).frozen(),
+                "side": side,
+            }
+        rec = self._bar_drags[cax]
+        # Its own aspect let go, or matplotlib would shrink the box back to it.
+        rec.setdefault("box_aspect", cax.get_box_aspect())
+
+        def pinned(ax: Any, renderer: Any, box: Any = box) -> Any:
+            # A constrained layout sets the aspect again at each draw, before this is
+            # asked where the bar goes: let go here, so the box is the bar's.
+            ax._box_aspect = None
+            return box
+
+        cax.set_axes_locator(pinned)
+        cax.stale = True
         self.canvas.draw_idle()
 
     @staticmethod
@@ -1009,11 +1116,17 @@ class PrintDialog(QDialog):
                 drag[1]._draggable.save_offset()
             else:
                 cax = drag[1]
-                self._bar_drags[cax] = {
-                    "locator": cax.get_axes_locator(),
-                    "pos": cax.get_position().frozen(),
-                    "side": self._bar_side(cax),
-                }
+                # As it was laid out, kept from its first move or resize: what closing
+                # the dialog puts back. The drag starts from where it stands now.
+                rec = self._bar_drags.setdefault(
+                    cax,
+                    {
+                        "locator": cax.get_axes_locator(),
+                        "pos": cax.get_position().frozen(),
+                        "side": self._bar_side(cax),
+                    },
+                )
+                rec["start"] = cax.get_position().frozen()
         if drag[0] == "legend":
             drag[1]._draggable.update_offset(event.x - drag[2], event.y - drag[3])
         else:
@@ -1035,7 +1148,8 @@ class PrintDialog(QDialog):
         -- in the figure's own fractions, kept within the figure."""
         from matplotlib.transforms import Bbox
 
-        x0, y0, w, h = self._bar_drags[cax]["pos"].bounds
+        rec = self._bar_drags[cax]
+        x0, y0, w, h = rec.get("start", rec["pos"]).bounds
         bbox = self.fig.bbox
         box = Bbox.from_bounds(
             min(max(x0 + dx / bbox.width, 0.0), 1.0 - w),
@@ -1053,6 +1167,8 @@ class PrintDialog(QDialog):
         cax.set_axes_locator(rec["locator"])
         if rec["locator"] is None:
             cax.set_position(rec["pos"])
+        if "box_aspect" in rec:
+            cax.set_box_aspect(rec["box_aspect"])
         cax.stale = True
         self.canvas.draw_idle()
 

@@ -265,6 +265,12 @@ def label_panels(
     return out
 
 
+#: Blank height, mm, a figure laid out at the height it needs is lowered past: the
+#: height its panels' shape leaves unfilled.
+TRIM_MM = 5.0
+#: The margin, mm, kept round what is drawn where the blank is cut.
+PAD_MM = 2.0
+
 #: The least height a panel's data are drawn in, mm: a figure laid out lower than this
 #: has panels too low to read, and :func:`to_print` raises it until each has as much.
 MIN_PANEL = 12.0
@@ -533,6 +539,23 @@ def to_print(
                 break
             h = min(cap, h + (MIN_PANEL - low) * panel_grid(fig)[0] / MM)
             fig.set_size_inches(w, h, forward=False)
+        # Lowered to what is drawn: panels held to a shape of their own (a rose, a map)
+        # fill the width and leave the rest of the height blank, above and below.
+        # Lowered no further than leaves what is drawn as it was: a panel that would
+        # shrink with the figure has no blank to give.
+        drawn = fig.get_tightbbox(_renderer(fig)).height  # inches
+        for _ in range(3):
+            if h - drawn <= TRIM_MM / MM:
+                break
+            was = h
+            h = max(drawn + PAD_MM / MM, MIN_PANEL / MM)
+            fig.set_size_inches(w, h, forward=False)
+            now = fig.get_tightbbox(_renderer(fig)).height
+            if now < drawn - 0.5 / MM:
+                h = was
+                fig.set_size_inches(w, h, forward=False)
+                break
+            drawn = now
     if labels:
         made = label_panels(
             fig,
