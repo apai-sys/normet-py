@@ -98,27 +98,28 @@ def test_data_preview_offers_the_resolutions(qapp):
     win = MainWindow()
     try:
         win.load_example()
-        combo = win.data_preview.findChild(QComboBox)
-        assert combo is not None
+        combo = _combos(win.data_preview)["Resolution"]
         combo.setCurrentText("Monthly")
         qapp.processEvents()
-        assert win.data_preview.findChild(QComboBox).currentText() == "Monthly"
+        assert _combos(win.data_preview)["Resolution"].currentText() == "Monthly"
     finally:
         win.close()
 
 
 def _combos(tab) -> dict[str, object]:
-    """The tab's selectors by the label in front of each."""
+    """The tab's selectors by the label in front of each (in the group it stands in)."""
     from PySide6.QtWidgets import QComboBox, QLabel
 
-    row = tab.findChild(QComboBox).parentWidget().layout()
-    out, label = {}, None
-    for i in range(row.count()):
-        w = row.itemAt(i).widget()
-        if isinstance(w, QLabel):
-            label = w.text()
-        elif isinstance(w, QComboBox):
-            out[label] = w
+    out = {}
+    for combo in tab.findChildren(QComboBox):
+        row, label = combo.parentWidget().layout(), None
+        for i in range(row.count()):
+            w = row.itemAt(i).widget()
+            if w is combo:
+                break
+            if isinstance(w, QLabel):
+                label = w.text()
+        out[label] = combo
     return out
 
 
