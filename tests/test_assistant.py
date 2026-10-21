@@ -336,18 +336,26 @@ def test_window_tools_read_and_propose(win, qapp):
     said = tools.propose_setup(
         "NO2", ["t2m", "blh"], "Wind and mixing.", 0.8, resample_vars=["t2m", "blh"]
     )
-    assert "card" in said
+    assert "card" in said and "starts training" in said
     qapp.processEvents()
     from PySide6.QtWidgets import QPushButton
 
-    apply = [b for b in win.assistant.view.findChildren(QPushButton) if b.text() == "Apply"]
+    trained = []
+    win._run_train = lambda: trained.append(win.target_combo.currentText())
+    apply = [
+        b for b in win.assistant.view.findChildren(QPushButton) if b.text() == "Apply and train"
+    ]
     assert len(apply) == 1
     apply[0].click()
     assert win.target_combo.currentText() == "NO2"
     assert win._selected_features() == ["t2m", "blh"]
     assert win.assistant.pending_resample == ["t2m", "blh"]
     assert apply[0].text() == "Applied" and not apply[0].isEnabled()
-    assert [t.name for t in tools.tools()][:3] == ["window", "inspect_data", "model_fit"]
+    # The click trains at once, with the set-up just ticked (here the window did not
+    # start: the model is told so with the next message).
+    assert trained == ["NO2"]
+    assert "did not start training" in win.assistant.notes[-1]
+    assert [t.name for t in tools.all_tools()][:3] == ["window", "inspect_data", "model_fit"]
 
 
 def test_a_conversation_in_the_panel(win, qapp, monkeypatch):
@@ -568,6 +576,8 @@ def test_the_window_stamp_is_not_shown_as_the_reply():
         == "The table has 8 rows."
     )
     assert unstamp("No stamp [Window now: here] stays.") == "No stamp [Window now: here] stays."
+    # Echoed without its opening bracket, as a model was seen to do.
+    assert unstamp("Window now: table: x; results: normalise]\n当前窗口") == "当前窗口"
 
 
 # -- full automatic: the turn worked to the chain's end ---------------------------------
@@ -766,3 +776,321 @@ def test_full_automatic_carries_a_lazy_model_through_the_window(win, qapp, monke
     assert A.chain_left(win, dock.tools.called) == []
     nudges = [m for m in dock.messages if m["role"] == "user"][1:]
     assert len(nudges) == len(A.CHAIN) - 1
+
+
+# -- the panel as cume's: the next message, Apply that trains, the status line -------------
+def test_a_replys_next_message_is_split_off():
+    from normet.gui.assistant import split_next, without_next
+
+    text, said = split_next("Shall I train it?\n<!-- next: Yes, train it -->")
+    assert text == "Shall I train it?" and said == "Yes, train it"
+    assert split_next("No suggestion.") == ("No suggestion.", None)
+    # The last of several, its spaces folded.
+    assert split_next("a <!-- next: x --> b <!--next:  y\n z-->")[1] == "y z"
+    # While it is being written, the line is kept off the panel whole or begun.
+    assert without_next("Done.\n<!-- next: Yes") == "Done."
+    assert without_next("Done.\n<!-- next: Yes -->") == "Done."
+    assert without_next("Done.") == "Done."
+
+
+def test_the_window_suggests_its_next_step(win, qapp):
+    from normet.gui.assistant import suggested_message
+
+    assert suggested_message(win, set()) == "What can you do in this window?"
+    win.load_example()
+    assert "propose a target" in suggested_message(win, set())
+    assert suggested_message(win, {"propose_setup"}).startswith("Train the model")
+
+
+def test_tab_fills_the_suggestion_and_enter_sends(win, qapp, monkeypatch):
+    from PySide6.QtCore import QEvent, Qt
+    from PySide6.QtGui import QKeyEvent
+
+    dock = win.assistant
+    box = dock.composer
+    monkeypatch.setattr(
+        dock, "_model", lambda: llm.FakeModel(lambda m, t: llm.Reply("Hi.", [], {}))
+    )
+
+    def key(k, mods=Qt.KeyboardModifier.NoModifier):
+        box.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, k, mods))
+
+    dock._suggest("Yes, train it")
+    assert box.placeholderText() == "Yes, train it"
+    key(Qt.Key.Key_Tab)
+    assert box.toPlainText() == "Yes, train it"
+    key(Qt.Key.Key_Tab)  # the box is not empty: the suggestion is not put in again
+    assert box.toPlainText().count("Yes, train it") == 1
+    box.setPlainText("hello")
+    key(Qt.Key.Key_Return, Qt.KeyboardModifier.ShiftModifier)  # a new line, not sent
+    assert box.toPlainText().strip() == "hello" and "\n" in box.toPlainText()
+    key(Qt.Key.Key_Return, Qt.KeyboardModifier.ControlModifier)  # Cmd/Ctrl+Enter sends
+    assert box.toPlainText() == "" and "› hello" in dock.view.toPlainText()
+    _wait(qapp, lambda: not dock.busy() and box.suggestion != "Yes, train it")
+    dock.new_conversation()
+    assert box.suggestion == "" and box.placeholderText().startswith("Ask about the data")
+
+
+def test_a_turn_leaves_its_suggestion_and_tokens(win, qapp, monkeypatch):
+    win.load_example()
+    dock = win.assistant
+
+    def policy(messages, tools):
+        return llm.Reply(
+            "Train on wind and mixing?\n<!-- next: Yes, train it -->",
+            [],
+            {"input": 1200, "output": 34},
+        )
+
+    monkeypatch.setattr(dock, "_model", lambda: llm.FakeModel(policy))
+    dock.send("What should I model?")
+    _wait(qapp, lambda: not dock.busy() and dock.composer.suggestion)
+    reply = [w for w in dock.view.items() if type(w).__name__ == "_Reply"][-1]
+    assert reply.md == "Train on wind and mixing?"  # the suggestion is not in the reply
+    assert dock.composer.suggestion == "Yes, train it"
+    assert dock.status.text() == "tokens: 1,200 in, 34 out"
+
+
+def test_apply_trains_at_once_and_the_model_is_told(win, qapp, monkeypatch):
+    win.load_example()
+    dock = win.assistant
+
+    def quick():  # the window's training, as quick as a test wants it
+        win.runner.submit(
+            "train (test)",
+            lambda: time.sleep(0.2),
+            lambda _r: setattr(win, "model", "a model"),
+            lambda _e: None,
+        )
+
+    monkeypatch.setattr(win, "_run_train", quick)
+    dock.tools.propose_setup("PM2.5", ["ws", "wd"], "wind", 0.7)
+    qapp.processEvents()
+    from PySide6.QtWidgets import QPushButton
+
+    btn = [b for b in dock.view.findChildren(QPushButton) if b.text() == "Apply and train"][0]
+    btn.click()
+    assert win.runner.busy and "running in the window" in dock.status.text()
+    assert "training started" in dock.notes[-1]
+    seen = []
+
+    def policy(messages, tools):
+        seen.append(messages[-1]["content"])
+        return llm.Reply("Reading it.", [], {})
+
+    monkeypatch.setattr(dock, "_model", lambda: llm.FakeModel(policy))
+    dock.messages.append({"role": "assistant", "text": "(card)", "calls": []})
+    _wait(qapp, lambda: not win.runner.busy)
+    # The step ended with the conversation begun: the window's next step is offered.
+    assert dock.composer.suggestion.startswith("How well does the model fit?")
+    dock.composer.suggestion = ""
+    dock.send("How did it go?")
+    _wait(qapp, lambda: not dock.busy() and dock.composer.suggestion)
+    told = seen[0].splitlines()
+    assert told[0].startswith("[Window now:") and "training started" in told[1]
+    assert told[-1] == "How did it go?" and dock.notes == []
+
+
+# -- the whole API: the window's steps as tools, the rest as code ---------------------------
+def test_api_help_lists_and_shows_the_calls():
+    from normet.gui import _code
+
+    listed = _code.api_help("")
+    assert "- normalise:" in listed and "- detect_events:" in listed
+    shown = _code.api_help("normet.rolling")
+    assert shown.startswith("normet.rolling(") and "window_days" in shown
+    with pytest.raises(ValueError, match="did you mean"):
+        _code.api_help("rollin")
+
+
+def test_code_runs_on_the_table_and_says_what_it_made():
+    import pandas as pd
+
+    from normet.gui import _code
+
+    df = pd.DataFrame({"date": pd.date_range("2020-01-01", periods=48, freq="h"), "NO2": range(48)})
+    said = _code.run_code("print(len(df))\nmeans = df.resample('D', on='date').mean()", df)
+    assert "Output:\n48" in said and "means: 2 rows" in said
+    assert "df:" not in said  # the table given is not listed: the code did not replace it
+    said = _code.run_code("df = df[df.NO2 > 40]", df)
+    assert "df: 7 rows" in said
+    said = _code.run_code("normet.no_such_call(df)", df)
+    assert "Error:" in said and "AttributeError" in said
+    assert len(df) == 48  # the window's table is the code's copy, untouched
+
+
+def test_carry_out_waits_for_run_and_the_model_is_told(win, qapp, monkeypatch):
+    win.load_example()
+    dock = win.assistant
+    said = dock.tools.carry_out("print(df.shape)", "the table's size")
+    assert "card" in said and "Stop here" in said
+    qapp.processEvents()
+    from PySide6.QtWidgets import QPushButton
+
+    btn = [b for b in dock.view.findChildren(QPushButton) if b.text() == "Run"][0]
+    btn.click()
+    _wait(qapp, lambda: dock.notes)
+    assert "Output:" in dock.notes[-1] and str(win.df_raw.shape) in dock.notes[-1]
+    assert "carry_out" in dock.view.toPlainText()
+
+
+def test_carry_out_runs_at_once_in_full_automatic(win, qapp, monkeypatch):
+    from normet.gui import assistant as A
+
+    win.load_example()
+    monkeypatch.setattr(A, "auto_on", lambda: True)
+    said = win.assistant.tools.carry_out("x = df.describe()", "statistics")
+    assert said.startswith("Ran at once") and "x: 8 rows" in said
+
+
+def test_polar_plot_and_the_tabs_read(win, qapp):
+    win.load_example()
+    tools = win.assistant.tools
+    said = tools.polar_plot(statistic="median")
+    assert "by wind direction" in said and "| SW |" in said.replace("  ", " ") or "SW" in said
+    assert win._polar_window is not None and win._polar_window.stat_combo.currentText() == "Median"
+    with pytest.raises(ValueError, match="statistic is one of"):
+        tools.polar_plot(statistic="mode")
+    assert "nothing has run" in tools.results() or tools.results()
+    box = {}
+
+    def refused():  # a step's tool runs off the window's thread, as the model's calls do
+        try:
+            tools.train(backend="nope")
+        except ValueError as exc:
+            box["exc"] = exc
+
+    t = threading.Thread(target=refused)
+    t.start()
+    _wait(qapp, lambda: not t.is_alive(), timeout=30)
+    assert "backend is one of" in str(box["exc"])
+    win._polar_window.close()
+
+
+def test_rolling_and_pdp_through_the_tools(win, qapp):
+    pytest.importorskip("lightgbm")
+    win.load_example()
+    win.df_raw = win.df_raw.iloc[: 24 * 60].reset_index(drop=True)
+    box = {}
+
+    def work():
+        box["fit"] = win.assistant.tools.train(backend="lightgbm", budget=3, seed=7)
+        box["roll"] = win.assistant.tools.rolling(window_days=20, step_days=20, n_samples=3)
+        box["pdp"] = win.assistant.tools.pdp(grid_points=5)
+
+    t = threading.Thread(target=work)
+    t.start()
+    _wait(qapp, lambda: not t.is_alive(), timeout=300)
+    assert win.seed_spin.value() == 7 and win.budget_spin.value() == 3
+    assert "Model fit" in box["fit"], box["fit"]
+    assert "windows over" in box["roll"], box["roll"]
+    assert "Partial dependence of" in box["pdp"], box["pdp"]
+
+
+def test_the_scm_studio_through_the_tools(win, qapp):
+    tools = win.assistant.tools
+    with pytest.raises(ValueError, match="no panel"):
+        tools.scm_fit()
+    said = tools.scm_open("synthetic")
+    assert "The SCM Studio has a panel" in said
+    box = {}
+    t = threading.Thread(target=lambda: box.setdefault("fit", tools.scm_fit(backend="scm")))
+    t.start()
+    _wait(qapp, lambda: not t.is_alive(), timeout=300)
+    assert "pre_r2" in box["fit"], box["fit"]
+    win._scm_window.close()
+
+
+# -- cume's harness: the payload folded, readings once, arguments checked ---------------------
+def test_older_rounds_fold_to_their_head_and_pinned_readings_stay(monkeypatch):
+    from normet.gui import assistant as A
+
+    long = "Model fit, testing rows: " + "x" * 400
+    msgs = [{"role": "user", "content": "go"}]
+    for i in range(4):
+        msgs.append(
+            {"role": "assistant", "text": "", "calls": [llm.Call(f"c{i}", "model_fit", {})]}
+        )
+        msgs.append({"role": "tool", "results": [{"id": f"c{i}", "text": long, "error": False}]})
+    msgs.append({"role": "assistant", "text": "Done.", "calls": []})
+    c = A._ChatThread.__new__(A._ChatThread)
+    c.messages, c.auto = msgs, False
+    out = c._payload()
+    folded = [r["text"] for m in out if m["role"] == "tool" for r in m["results"]]
+    assert folded[0].endswith(A.FOLDED) and len(folded[0]) < 300  # the oldest, folded
+    assert folded[-1] == long  # the last KEEP_ROUNDS whole
+    assert msgs[2]["results"][0]["text"] == long  # the conversation itself untouched
+    c.auto = True  # full automatic: the latest model_fit is pinned whole however old
+    assert c._pinned() == {"c3"}
+
+
+def test_arguments_are_checked_and_synonyms_taken(win, qapp):
+    tools = win.assistant.tools
+    t = {x.name: x for x in tools.all_tools()}
+    args = {"topic": "rolling", "ServerName": "normet"}
+    assert tools.check_arguments(t["api_help"], args) is None and args == {"name": "rolling"}
+    said = tools.check_arguments(t["normalise"], {"n_sample": 5})
+    assert "'n_sample' is not one of its arguments (did you mean 'n_samples'?)" in said
+    assert "carry_out" in said  # where a setting it lacks goes
+    assert "it needs code" in tools.check_arguments(t["carry_out"], {"reasons": "r"})
+
+
+def test_tools_are_offered_as_the_window_holds_them(win, qapp):
+    tools = win.assistant.tools
+    names = {t.name for t in tools.tools()}
+    assert "model_fit" not in names and "carry_out" in names and "train" not in names
+    assert "no model is trained" in tools.not_offered("model_fit")
+    win.load_example()
+    names = {t.name for t in tools.tools()}
+    assert {"train", "inspect_data", "polar_plot"} <= names and "normalise" not in names
+    described = {t.name: t for t in tools.tools()}["propose_setup"].schema["properties"]
+    assert "0 to 1" in described["confidence"]["description"]
+    assert "tool of yours" in tools.api_help("train")
+
+
+def test_a_reading_unchanged_is_said_short_once(win, qapp):
+    win.load_example()
+    tools = win.assistant.tools
+    first = tools.inspect_data()
+    assert "r with PM2.5" in first and "Then: propose_setup" in first
+    assert tools.inspect_data().startswith("Unchanged since you last read it")
+    assert "r with PM2.5" in tools.inspect_data()  # asked once more: whole again
+
+
+def test_an_unchanged_window_is_told_briefly(win, qapp, monkeypatch):
+    win.load_example()
+    dock = win.assistant
+    seen = []
+
+    def policy(messages, tools):
+        seen.append(messages[-1]["content"].splitlines()[0])
+        return llm.Reply("Yes.", [], {})
+
+    monkeypatch.setattr(dock, "_model", lambda: llm.FakeModel(policy))
+    for text in ("first", "second"):
+        dock.composer.suggestion = ""
+        dock.send(text)
+        _wait(qapp, lambda: not dock.busy() and dock.composer.suggestion)
+    assert seen[0].startswith("[Window now: table: ") and "unchanged" not in seen[0]
+    assert seen[1].startswith("[Window now: as before -- table: ") and "unchanged" in seen[1]
+
+
+def test_a_call_cut_off_mid_json_is_told_to_write_it_shorter(monkeypatch):
+    from normet.gui import assistant as A
+
+    def check() -> str:
+        """Read the checks."""
+        return "the checks"
+
+    c, events, failed = _scripted_chat(
+        monkeypatch,
+        [
+            llm.Reply("", [llm.Call("1", "check", {"_unparsed": '{"x": '})], {}),
+            llm.Reply("ok", [], {}),
+        ],
+        lambda: [],
+        auto=False,
+    )
+    c.run()
+    told = [e for e in events if e["type"] == "tool"][0]
+    assert told["error"] and told["output"] == A.UNPARSED

@@ -1241,3 +1241,42 @@ INNER.update(
         "the decomposition": "分解",
     }
 )
+# The Assistant as cume's: the message suggested, Apply that trains, the menu's copies,
+# find, the way back to the end and the box's status line.
+TEXTS.update(
+    {
+        "Apply and train": "应用并训练",
+        "Training started in the window.": "窗口中已开始训练。",
+        "Training did not start: the window says why.": "训练没有开始：窗口中有原因说明。",
+        "A step is running: train once it has ended.": "有步骤正在运行：等它结束后再训练。",
+        "Thinking…": "思考中…",
+        "{s0} running in the window…": "{s0} 正在窗口中运行…",
+        "tokens: {n0} in, {n1} out": "tokens：输入 {n0}，输出 {n1}",
+        "What can you do in this window?": "你在这个窗口里能做什么？",
+        "Wait for the step under way, then tell me how it went.": "等正在进行的步骤结束，然后告诉我结果如何。",
+        "Train the model with the set-up in the panel.": "用面板中的设定训练模型。",
+        "Look at the data and propose a target and predictors.": "看看数据，提议目标变量和预测变量。",
+        "How well does the model fit? If it is good enough, normalise.": "模型拟合得怎么样？如果足够好，就做归一化。",
+        "What does the normalised series show? Then decompose it.": "归一化序列说明了什么？然后做分解。",
+        "Summarise what the analysis shows.": "总结这次分析的结果。",
+        "Copy text": "复制文本",
+        "Copy message": "复制消息",
+        "Copy conversation": "复制整个对话",
+        "Find…": "查找…",
+        "Larger text": "放大文字",
+        "Smaller text": "缩小文字",
+        "Actual size": "实际大小",
+        "Find in the conversation": "在对话中查找",
+        "Previous (Shift+Enter)": "上一个（Shift+回车）",
+        "Next (Enter)": "下一个（回车）",
+        "Close (Esc)": "关闭（Esc）",
+        "No matches": "没有匹配",
+        "{n0} of {n1}": "第 {n0} 个，共 {n1} 个",
+        "Back to the end of the conversation": "回到对话末尾",
+        "Run in the window": "在窗口中运行",
+        "Run": "运行",
+        "Ran": "已运行",
+        "Running…": "运行中…",
+        "A step is running: run it again once it has ended.": "有步骤正在运行：等它结束后再运行。",
+    }
+)

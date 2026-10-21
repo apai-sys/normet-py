@@ -265,6 +265,8 @@ __all__ = [
     "list_ukaq_stations",
     # --- Plotting ---
     "polar_plot",
+    "wind_rose",
+    "pollution_rose",
     "pdp_grid",
     "decomposition_stack",
     "scm_dashboard",
@@ -298,8 +300,10 @@ from .plotting import (
     pdp_grid,
     plot_bayesian_scm,
     polar_plot,
+    pollution_rose,
     scm_dashboard,
     time_series_plot,
+    wind_rose,
 )
 from .report import (
     generate_html as generate_html_report,
