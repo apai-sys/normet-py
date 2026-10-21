@@ -171,3 +171,83 @@ def test_a_double_click_finds_what_it_is_on(qapp, kept):
     assert a.get_legend()._loc != 4
     dlg.reject()
     assert a.get_legend()._loc == 4
+
+
+@pytest.mark.parametrize("layout", [None, "constrained"])
+def test_a_colour_bar_is_sized_where_it_stands(qapp, kept, monkeypatch, layout):
+    """A double-click on a colour bar asks its side, and its width and height on the
+    page: the bar is drawn at them, its edge by its panel kept; on another side, at the
+    sizes asked there; closing the dialog puts it back as drawn."""
+    from matplotlib.backend_bases import MouseEvent
+    from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+    from matplotlib.figure import Figure
+
+    from normet.gui import printview
+    from normet.gui.printview import PrintDialog
+
+    fig = Figure(figsize=(8, 5), layout=layout)
+    ax = fig.subplots()
+    im = ax.imshow(np.arange(100.0).reshape(10, 10))
+    cb = fig.colorbar(im, ax=ax, label="NO2")
+    canvas = FigureCanvasQTAgg(fig)
+    canvas.draw()
+    drawn = cb.ax.get_position().frozen()  # as the tab draws it
+    dlg = PrintDialog(canvas)
+    dlg.canvas.draw()
+    cax = next(a for a in dlg.fig.axes if getattr(a, "_colorbar", None) is not None)
+    w0, h0 = dlg._bar_mm(cax)
+    assert h0 > w0 > 0  # upright, on the right
+    edge0 = cax.get_position().x0
+    asked = []
+
+    class _Ask(printview._BarChoices):
+        # A subclass's exec, not one set on Qt's class (PySide calls the built-in one).
+        def exec(self_):
+            asked.append((self_.place.currentData(), self_.width.value(), self_.height.value()))
+            return printview.QDialog.DialogCode.Accepted
+
+        def chosen(self_):
+            return answer
+
+    monkeypatch.setattr(printview, "_BarChoices", _Ask)
+    box = cax.get_window_extent(dlg.canvas.get_renderer())
+    at = ((box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2)
+    answer = ("right", 6.0, 0.5 * h0)
+    dlg._pressed(MouseEvent("button_press_event", dlg.canvas, *at, button=1, dblclick=True))
+    assert asked[0][0] == "right" and abs(asked[0][1] - w0) < 0.2
+    w1, h1 = dlg._bar_mm(cax)
+    assert abs(w1 - 6.0) < 0.3 and abs(h1 - 0.5 * h0) < 0.3, (w1, h1)
+    assert abs(cax.get_position().x0 - edge0) < 1e-3  # its edge by the panel kept
+    # Laid along the bottom, 60 mm long and 4 mm thick.
+    box = cax.get_window_extent(dlg.canvas.get_renderer())
+    at = ((box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2)
+    answer = ("bottom", 60.0, 4.0)
+    dlg._pressed(MouseEvent("button_press_event", dlg.canvas, *at, button=1, dblclick=True))
+    bar = next(a for a in dlg.fig.axes if getattr(a, "_colorbar", None) is not None)
+    w2, h2 = dlg._bar_mm(bar)
+    assert abs(w2 - 60.0) < 0.3 and abs(h2 - 4.0) < 0.3, (w2, h2)
+    assert dlg._bar_side(bar) == "bottom" or dlg._bar_drags.get(bar, {}).get("side") == "bottom"
+    dlg.reject()
+    canvas.draw()
+    # Back on its side (made again there, as a bar moved to another side is), its
+    # label kept, pinned no more.
+    back = next(a for a in fig.axes if getattr(a, "_colorbar", None) is not None)
+    pos = back.get_position()
+    assert pos.x0 >= ax.get_position().x1 - 1e-9 and pos.height > pos.width
+    assert abs(pos.width - drawn.width) < 0.01
+    assert "NO" in back._colorbar.ax.get_ylabel()
+    assert getattr(back.get_axes_locator(), "__name__", "") != "pinned"
+
+
+def test_the_colour_bar_dialog_turns_its_sizes_with_the_bar(qapp):
+    """Upright to lying: the width and height asked swap, so the bar keeps its shape."""
+    from PySide6.QtWidgets import QWidget
+
+    from normet.gui.printview import _BAR_SIDES, _BarChoices
+
+    host = QWidget()
+    ask = _BarChoices(host, "right", 5.0, 80.0)
+    ask.place.setCurrentIndex([where for _t, where in _BAR_SIDES].index("bottom"))
+    assert ask.chosen() == ("bottom", 80.0, 5.0)
+    ask.place.setCurrentIndex(2)  # left: upright again
+    assert ask.chosen() == ("left", 5.0, 80.0)
