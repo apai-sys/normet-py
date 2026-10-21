@@ -724,7 +724,7 @@ read from the \tab{File} menu (Section~\ref{sec:config}).
 \toprule
 Tab & Shows & Filled by \\
 \midrule
-Data        & a preview of the target, the table, its size, span and missing values & loading \\
+Data        & overview, cycles, wind and pollution roses, statistics; rows left out & loading \\
 Model       & verdict, statistics table, parity plot, feature importance & Train model \\
 Normalise   & observed and normalised series, the quantile band, their cycles & Run normalisation \\
 Decompose   & the emission or meteorological components, the cycles & Run decomposition \\
@@ -820,8 +820,7 @@ File     & Open Data\ldots                      & Ctrl+O \\
          & Load Session Script\ldots            & \\
          & Methods Paragraph\ldots              & \\
          & Export Current Result\ldots          & Ctrl+E \\
-         & Export HTML Report\ldots             & \\
-         & Report Language: As the Window, English, Chinese & \\
+         & Export HTML Report: English, Chinese & \\
          & Save Session as Script\ldots         & \\
          & Save Config\ldots{} / Load Config\ldots & \\
          & Run History\ldots                    & \\
@@ -868,8 +867,10 @@ and the Assistant's conversation stay as they were written. What the system draw
 itself stays in the system's language whichever the window is written in: the
 open and save panels, their titles too, and, on a Mac, the items macOS adds to the menus
 (\emph{AutoFill}, \emph{Start Dictation}, \emph{Emoji \& Symbols}). An HTML
-report (Section~\ref{sec:commandlog}) is written in the window's language too, or in the
-one \tab{File $\rightarrow$ Report Language} chooses: its headings, labels and figure.
+report (Section~\ref{sec:commandlog}) is written in the language picked as it is exported
+--- \tab{File $\rightarrow$ Export HTML Report}, or the \emph{HTML report} button, lists
+each language named in itself --- its headings, labels and figure; the language is kept
+for the next report, and is the system's until one is picked.
 
 % ============================ 6. COLUMNS AND TRAINING =========================
 \chapter{Training a model}\label{ch:train}
@@ -894,8 +895,22 @@ hand --- in MY1, \code{atmos\_pres}. The same applies to the \tab{Normalise} pag
 \screenshot{ui_data.png}{MY1 opened from \tab{File $\rightarrow$ Load Example}: 5,793
 hourly rows of 11 columns from 2020-01-01 to 2020-08-31, with no missing values. The
 example sets the paper's target, \NOtwo{}, and its nine meteorological predictors
-(\code{atmos\_pres} among them, a name the window does not recognise). The tab previews the
-target series and lists the table.}{fig:data}
+(\code{atmos\_pres} among them, a name the window does not recognise). The \tab{Overview}
+page draws every column as a heatmap, each scaled to its own range, above the series
+picked (here \NOtwo{}, daily).}{fig:data}
+
+The \tab{Data} tab has four pages. \tab{Overview} shows the record at a glance: drag across
+the series to pick a span, and its rows are listed below the plot; a drag with Shift held
+(or Ctrl, or Cmd) adds another span, and Escape clears them. \emph{Exclude picked}
+leaves them all out, \emph{Restore picked} takes them back, and the \emph{Exclude} box takes
+spans typed one to a line (\code{2020-03-23 .. 2020-04-05}, or a single date). Rows left out
+are shaded on the plot and are left out of every step after: training, normalisation,
+decomposition and the rest. The Command Log writes them as \code{left\_out} and
+\code{df\_kept}, and the session keeps them. \tab{Cycles} draws a column's diurnal, weekly and
+seasonal cycles; \tab{Wind}, when the table has wind speed and direction, the wind rose,
+a pollutant's pollution rose and its polar plot; \tab{Statistics} each column's values,
+missing share, mean, standard deviation, minimum, quartiles and maximum. All four read
+the rows kept.
 
 \section{Settings}
 \begin{description}\nosep
@@ -1393,7 +1408,8 @@ north-east.}{fig:polar}
         \tab{Data}, the statistics on \tab{Model}, the normalised series with its
         quantiles, the decomposition, every rolling window, the multi-scale series, the
         partial-dependence values.
-  \item[HTML report] The current tab's result as one self-contained HTML file --- figures
+  \item[HTML report] (File $\rightarrow$ Export HTML Report, or the button; pick the
+        report's language from its menu.) The current tab's result as one self-contained HTML file --- figures
         embedded, no scripts or external links --- with a summary of the model and the
         result, and its provenance: \nm{}'s version, the time, the platform and Python
         version, the host and user names, the shape and hash of the data, the panel's
@@ -1491,7 +1507,7 @@ on another side of its panel; drag the legend or a colour bar where it reads bes
 \emph{Save\ldots} writes the formats the journal takes --- PDF, EPS or SVG with the text
 kept as editable text and the fonts embedded, TIFF or PNG at the resolution chosen --- at
 exactly the size shown, on a white page. While the dialog is open the figure is in the
-report's language (File $\rightarrow$ Report Language). When it closes the figure goes back
+report's language (the one last picked under File $\rightarrow$ Export HTML Report). When it closes the figure goes back
 to its tab as it was; the journal, width, panel labels, formulas and resolution are kept
 for the next figure. Check the journal's current guide before submitting.
 

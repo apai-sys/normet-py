@@ -65,7 +65,8 @@ class SavedResultsMixin(QMainWindow):
             "version": VERSION,
             "saved": datetime.datetime.now().isoformat(timespec="seconds"),
             "label": self.file_label.text().split("\n")[0] if self.df_raw is not None else "",
-            "df_raw": self.df_raw,
+            # Every row as loaded: the config's exclusions leave the same ones out again.
+            "df_raw": self.df_loaded if self.df_loaded is not None else self.df_raw,
             "config": self.get_config(),
             "df_prep": self.df_prep,
             "model": None if chronos else self.model,
