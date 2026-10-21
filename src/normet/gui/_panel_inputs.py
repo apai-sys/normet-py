@@ -321,9 +321,7 @@ class InputsMixin(QMainWindow):
             return
         mask = excluded_mask(self.df_loaded["date"], parse_exclusions(lines))
         self.exclusions = lines
-        self.df_raw = (
-            self.df_loaded[~mask].reset_index(drop=True) if mask.any() else self.df_loaded
-        )
+        self.df_raw = self.df_loaded[~mask].reset_index(drop=True) if mask.any() else self.df_loaded
         self._log_command(commandlog.exclude(lines))
         self._say_rows()
         if self.model is not None:

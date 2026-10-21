@@ -355,7 +355,9 @@ class SessionMixin(QMainWindow):
             self.statusBar().showMessage(f"Saved {os.path.basename(path)}")
             log.info("Exported %s result to %s", key, path)
 
-    def _export_html(self) -> None:
+    def _export_html(self, lang: str | None = None) -> None:
+        """The current tab's result as an HTML report in *lang* (the one last chosen when
+        None), and *lang* kept for the next one. A cancelled save changes nothing."""
         key, result = self._current_result()
         if result is None or key == "data":
             self.notify(
@@ -380,9 +382,13 @@ class SessionMixin(QMainWindow):
                 model=self.model,
                 seed=self.seed_spin.value(),
             )
-            from ._shell import report_language
+            from ._shell import report_language, set_report_language
 
-            generate_html_report(run, path, lang=report_language())
+            if lang is None:
+                lang = report_language()
+            else:
+                set_report_language(lang)
+            generate_html_report(run, path, lang=lang)
             self.statusBar().showMessage(f"Saved {os.path.basename(path)}")
             log.info("HTML report written to %s", path)
         except Exception as exc:

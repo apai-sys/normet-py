@@ -36,6 +36,7 @@ TEXTS = {
     "Get UK Data (AQ networks + met)": "获取英国数据（空气质量网络 + 气象）",
     "&Export Current Result…": "导出当前结果(&E)…",
     "Export &HTML Report…": "导出 HTML 报告(&H)…",
+    "Export &HTML Report": "导出 HTML 报告(&H)",
     "Save Session as &Script…": "将会话保存为脚本(&S)…",
     "Save Session as Script": "将会话保存为脚本",
     "Save Con&fig…": "保存配置(&F)…",
@@ -817,9 +818,6 @@ TEXTS.update(
         "Load Session Script…": "载入会话脚本…",
         "&Methods Paragraph…": "方法段落(&M)…",
         "Methods Paragraph…": "方法段落…",
-        "Report &Language": "报告语言(&L)",
-        "Report Language": "报告语言",
-        "As the Window": "跟随界面",
         "&Polar Plot…": "风向玫瑰图(&P)…",
         "Polar Plot…": "风向玫瑰图…",
         "&User Manual": "用户手册(&U)",
@@ -1325,5 +1323,14 @@ TEXTS.update(
         "Train": "训练",
         "Leave rows out": "排除行",
         "Keep every row": "保留所有行",
+        # The polar plot's colour bar: the statistic and a formula ($...$) alone -- a
+        # plain name after "mean" could be any phrase, so only a formula is taken.
+        "mean ${s0}$": "${s0}$ 均值",
+        "median ${s0}$": "${s0}$ 中位数",
+        "max ${s0}$": "${s0}$ 最大值",
+        "min ${s0}$": "${s0}$ 最小值",
+        "sum ${s0}$": "${s0}$ 总和",
+        "std ${s0}$": "${s0}$ 标准差",
+        "p{n0} ${s0}$": "${s0}$ 第 {n0} 百分位数",
     }
 )

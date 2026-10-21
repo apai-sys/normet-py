@@ -820,8 +820,7 @@ File     & Open Data\ldots                      & Ctrl+O \\
          & Load Session Script\ldots            & \\
          & Methods Paragraph\ldots              & \\
          & Export Current Result\ldots          & Ctrl+E \\
-         & Export HTML Report\ldots             & \\
-         & Report Language: As the Window, English, Chinese & \\
+         & Export HTML Report: English, Chinese & \\
          & Save Session as Script\ldots         & \\
          & Save Config\ldots{} / Load Config\ldots & \\
          & Run History\ldots                    & \\
@@ -868,8 +867,10 @@ and the Assistant's conversation stay as they were written. What the system draw
 itself stays in the system's language whichever the window is written in: the
 open and save panels, their titles too, and, on a Mac, the items macOS adds to the menus
 (\emph{AutoFill}, \emph{Start Dictation}, \emph{Emoji \& Symbols}). An HTML
-report (Section~\ref{sec:commandlog}) is written in the window's language too, or in the
-one \tab{File $\rightarrow$ Report Language} chooses: its headings, labels and figure.
+report (Section~\ref{sec:commandlog}) is written in the language picked as it is exported
+--- \tab{File $\rightarrow$ Export HTML Report}, or the \emph{HTML report} button, lists
+each language named in itself --- its headings, labels and figure; the language is kept
+for the next report, and is the system's until one is picked.
 
 % ============================ 6. COLUMNS AND TRAINING =========================
 \chapter{Training a model}\label{ch:train}
@@ -1406,7 +1407,8 @@ north-east.}{fig:polar}
         \tab{Data}, the statistics on \tab{Model}, the normalised series with its
         quantiles, the decomposition, every rolling window, the multi-scale series, the
         partial-dependence values.
-  \item[HTML report] The current tab's result as one self-contained HTML file --- figures
+  \item[HTML report] (File $\rightarrow$ Export HTML Report, or the button; pick the
+        report's language from its menu.) The current tab's result as one self-contained HTML file --- figures
         embedded, no scripts or external links --- with a summary of the model and the
         result, and its provenance: \nm{}'s version, the time, the platform and Python
         version, the host and user names, the shape and hash of the data, the panel's
@@ -1504,7 +1506,7 @@ on another side of its panel; drag the legend or a colour bar where it reads bes
 \emph{Save\ldots} writes the formats the journal takes --- PDF, EPS or SVG with the text
 kept as editable text and the fonts embedded, TIFF or PNG at the resolution chosen --- at
 exactly the size shown, on a white page. While the dialog is open the figure is in the
-report's language (File $\rightarrow$ Report Language). When it closes the figure goes back
+report's language (the one last picked under File $\rightarrow$ Export HTML Report). When it closes the figure goes back
 to its tab as it was; the journal, width, panel labels, formulas and resolution are kept
 for the next figure. Check the journal's current guide before submitting.
 
