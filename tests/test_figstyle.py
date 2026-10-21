@@ -183,6 +183,29 @@ def _found(findings, about):
     return [f for f in findings if f.about == about][0]
 
 
+def test_the_height_a_panel_of_its_own_shape_leaves_blank_is_cut():
+    """Roses side by side fill the column's width and leave half its height blank: laid
+    out at the height it needs, the figure is lowered to what is drawn; panels that fill
+    any height keep theirs."""
+    fig = plt.figure(figsize=(12, 8))
+    for i in range(3):
+        ax = fig.add_subplot(1, 3, i + 1, projection="polar")
+        ax.bar(np.linspace(0, 2 * np.pi, 8, endpoint=False), np.arange(1, 9), width=0.7)
+    put_back = FS.to_print(fig, PRESETS["elsevier"], 190)
+    fig.canvas.draw()
+    w, h = fig.get_size_inches() * MM
+    drawn = fig.get_tightbbox(fig.canvas.get_renderer()).height * MM
+    assert abs(w - 190) < 0.5 and h - drawn <= FS.TRIM_MM, (h, drawn)
+    put_back()
+    plt.close(fig)
+    # Panels that fill the height: as high as without the cut.
+    fig, _axes = _figure(2, 1)
+    FS.to_print(fig, PRESETS["elsevier"], 90)
+    w2, h2 = fig.get_size_inches() * MM
+    assert h2 >= 90 * 8 / 12 - 0.5
+    plt.close(fig)
+
+
 def test_the_checks_read_the_guide_from_the_figure_as_drawn():
     fig, axes = _figure()
     fig.set_size_inches(200 / MM, 100 / MM)

@@ -365,10 +365,13 @@ class ThemedToolbar(NavigationToolbar2QT):
 class FlowLayout(QLayout):
     """A row of widgets that wraps onto further rows when the width runs out."""
 
-    def __init__(self, parent: QWidget | None = None, spacing: int = 8) -> None:
+    def __init__(
+        self, parent: QWidget | None = None, spacing: int = 8, center: bool = False
+    ) -> None:
         super().__init__(parent)
         self._items: list[Any] = []
         self._gap = spacing
+        self._center = center  # each widget centred in the height of its line
 
     def addItem(self, item: Any) -> None:  # noqa: N802
         self._items.append(item)
@@ -414,14 +417,22 @@ class FlowLayout(QLayout):
         m = self.contentsMargins()
         r = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
         x, y, row_h = r.x(), r.y(), 0
+        lines: list[list[tuple[Any, int, int]]] = [[]]
         for item in self._items:
             hint = item.sizeHint()
             if x + hint.width() > r.right() + 1 and row_h > 0:
                 x, y, row_h = r.x(), y + row_h + self._gap, 0
-            if move:
-                item.setGeometry(QRect(x, y, hint.width(), hint.height()))
+                lines.append([])
+            lines[-1].append((item, x, y))
             x += hint.width() + self._gap
             row_h = max(row_h, hint.height())
+        if move:
+            for line in lines:
+                tall = max((it.sizeHint().height() for it, _x, _y in line), default=0)
+                for item, ix, iy in line:
+                    hint = item.sizeHint()
+                    dy = (tall - hint.height()) // 2 if self._center else 0
+                    item.setGeometry(QRect(ix, iy + dy, hint.width(), hint.height()))
         return y + row_h - rect.y() + m.bottom()
 
 
@@ -521,6 +532,12 @@ class CanvasTab(QWidget):
         #: The resolution chosen on this tab (a RESOLUTIONS label), or None
         #: for the default each result asks for.
         self._resolution: str | None = None
+        #: Controls of the tab's owner on the Resolution row, before it and at its right
+        #: end: kept, not rebuilt, as the row is at each draw.
+        self.bar_lead: QWidget | None = None
+        self.bar_tail: list[QWidget] = []
+        #: The pandas rule the time series on show is averaged to (None: as recorded).
+        self.rule: str | None = None
         self._show_placeholder()
         theme_manager().themeChanged.connect(self._retheme)
         _follow_language(self)
@@ -549,6 +566,11 @@ class CanvasTab(QWidget):
     def clear(self) -> None:
         import matplotlib.pyplot as plt
 
+        going = {self._layout.itemAt(i).widget() for i in range(self._layout.count())}
+        for kept in (self.bar_lead, *self.bar_tail):
+            if kept is not None and kept.parentWidget() in going:
+                kept.hide()  # out of the row before it goes (not the row made to follow it)
+                kept.setParent(self)
         while self._layout.count():
             w = self._layout.takeAt(0).widget()
             if w is not None:
@@ -646,12 +668,20 @@ class CanvasTab(QWidget):
             label = "As recorded"
 
         bar = QWidget()
-        row = QHBoxLayout(bar)
-        row.setContentsMargins(4, 2, 4, 0)
+        groups: list[QWidget] = []  # each kept whole where the row wraps
+
+        def group(*widgets: QWidget) -> QWidget:
+            host = QWidget()
+            h = QHBoxLayout(host)
+            h.setContentsMargins(0, 0, 0, 0)
+            for w in widgets:
+                h.addWidget(w)
+            groups.append(host)
+            return host
+
         views = self._views
         if views is not None and len(views[1]) > 1:
             title, results, shown = views
-            row.addWidget(QLabel(title))
             pick = NoWheelComboBox()
             pick.addItems(list(results))
             pick.setCurrentText(shown)
@@ -664,9 +694,7 @@ class CanvasTab(QWidget):
                 QTimer.singleShot(0, self._draw_series)
 
             pick.currentTextChanged.connect(picked)
-            row.addWidget(pick)
-            row.addSpacing(12)
-        row.addWidget(QLabel("Resolution"))
+            group(QLabel(title), pick)
         combo = NoWheelComboBox()
         for name, _rule, ok in options:
             combo.addItem(name)
@@ -679,8 +707,24 @@ class CanvasTab(QWidget):
             "Draw the figure at this time step: each period's mean of every series\n"
             "(bands too). Only the figure changes; the result and its export do not."
         )
-        row.addWidget(combo)
-        row.addStretch(1)
+        group(QLabel("Resolution"), combo)
+        if self.bar_lead is not None or self.bar_tail:
+            # The owner's controls too: a row that wraps where the window is narrow,
+            # rather than one that holds the window wide.
+            flow = FlowLayout(bar, spacing=12, center=True)
+            flow.setContentsMargins(4, 2, 4, 0)
+            for w in [self.bar_lead, *groups, *self.bar_tail]:
+                if w is not None:
+                    flow.addWidget(w)
+                    w.show()
+        else:
+            row = QHBoxLayout(bar)
+            row.setContentsMargins(4, 2, 4, 0)
+            for i, w in enumerate(groups):
+                if i:
+                    row.addSpacing(12)
+                row.addWidget(w)
+            row.addStretch(1)
 
         def chosen(name: str) -> None:
             self._resolution = name
@@ -690,6 +734,7 @@ class CanvasTab(QWidget):
         combo.currentTextChanged.connect(chosen)
 
         try:
+            self.rule = usable[label]
             fig = render(resample_frame(data, usable[label]))
         except Exception:  # noqa: BLE001 - fall back to the series as recorded
             if usable[label] is None:
@@ -698,6 +743,7 @@ class CanvasTab(QWidget):
 
             logging.getLogger(__name__).exception("Figure at %s failed", label)
             self._resolution = "As recorded"
+            self.rule = None
             fig = render(data)
             combo.blockSignals(True)
             combo.setCurrentText("As recorded")
