@@ -174,6 +174,25 @@ def load_example(example: Any = None) -> Entry:
     return Entry(title, example.code, imports=example.imports)
 
 
+def exclude(lines: Sequence[str]) -> Entry:
+    """The rows the Data tab's Exclude box leaves out of every step: the table as loaded
+    (``df``) without them, as ``df_kept`` -- which the steps after it read. Cleared, every
+    row is kept again."""
+    if not lines:
+        return Entry("Keep every row", "df_kept = df", notes=("The Exclude box was cleared.",))
+    from ._data_tab import parse_exclusions
+
+    spans = parse_exclusions(lines)
+    conds = "\n    | ".join(
+        f'df["date"].between({literal(str(a))}, {literal(str(b))})' for a, b in spans
+    )
+    return Entry(
+        "Leave rows out",
+        f"left_out = (\n    {conds}\n)\ndf_kept = df[~left_out].reset_index(drop=True)",
+        notes=tuple(f"left out: {line}" for line in lines),
+    )
+
+
 def from_memory(label: str) -> Entry:
     """A table the window was handed in memory (the Data Studio's), which no call reads."""
     return Entry(

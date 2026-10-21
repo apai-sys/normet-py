@@ -30,7 +30,6 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from normet import style as S
 from normet.io.tables import TABLE_SUFFIXES
 
 from . import _settings, commandlog
@@ -237,7 +236,8 @@ class InputsMixin(QMainWindow):
         self.dates_label.setVisible(bool(text))
 
     def _ingest(self, df: pd.DataFrame, label: str) -> None:
-        self.df_raw = df
+        self.df_raw = self.df_loaded = df
+        self.exclusions = []
         self.df_prep = None
         self.model = None
         self.chronos_check = None
@@ -250,7 +250,6 @@ class InputsMixin(QMainWindow):
         span = f"{df['date'].min():%Y-%m-%d} → {df['date'].max():%Y-%m-%d} ({self._zone()})"
         self.file_label.setText(f"{label}\n{len(df):,} rows × {df.shape[1]} columns")
         self.file_label.setStyleSheet("")
-        self.table_model.set_dataframe(df)
 
         n_nan = int(df.isna().sum().sum())
         self.data_summary.setText(
@@ -298,31 +297,59 @@ class InputsMixin(QMainWindow):
             item.setCheckState(Qt.CheckState.Checked if is_met else Qt.CheckState.Unchecked)
 
     def _draw_data_preview(self) -> None:
-        """Quick look at the chosen target series (daily means when dense)."""
-        target = self.target_combo.currentText()
-        if self.df_raw is None or not target or target not in self.df_raw.columns:
+        """The Data tab over the table as loaded and the rows kept: the overview (daily
+        means when dense), the cycles, the winds, the statistics."""
+        if self.df_loaded is None:
             return
-        import matplotlib.pyplot as plt
+        from ._data_tab import parse_exclusions
 
-        s = self.df_raw.set_index("date")[target].dropna()
-        # A date that did not parse has no place on the axis; with a time zone, one
-        # NaT also stops matplotlib converting the whole axis.
-        s = s[s.index.notna()]
+        self.data_tab.set_data(
+            self.df_loaded,
+            self.df_raw,
+            self.target_combo.currentText(),
+            parse_exclusions(self.exclusions),
+        )
 
-        def render(d: pd.DataFrame):
-            fig, ax = plt.subplots(figsize=(8, 2.2))
-            S.line(
-                ax, d.index, d[target].values, lw=0.5 if len(d) > 1500 else 0.9, color=S.OBSERVED
+    def _set_exclusions(self, lines: list[str]) -> None:
+        """The rows the Exclude box names left out of every step: df_raw is the table as
+        loaded without them. Logged as the line that leaves them out; a model already
+        trained was trained on the rows before, which the window says."""
+        from ._data_tab import excluded_mask, parse_exclusions
+
+        lines = list(lines)
+        if self.df_loaded is None or lines == self.exclusions:
+            return
+        mask = excluded_mask(self.df_loaded["date"], parse_exclusions(lines))
+        self.exclusions = lines
+        self.df_raw = (
+            self.df_loaded[~mask].reset_index(drop=True) if mask.any() else self.df_loaded
+        )
+        self._log_command(commandlog.exclude(lines))
+        self._say_rows()
+        if self.model is not None:
+            self.notify(
+                "The rows left out changed: the model and its results were made with the "
+                "rows before. Train again to use them.",
+                key="exclusions-changed",
+                kind="warn",
+                actions=(("Train", self._run_train),),
             )
-            ax.set_ylabel(S.formula(target))
-            if isinstance(d.index, pd.DatetimeIndex):
-                S.format_time_axis(ax)
-            ax.margins(x=0)
-            S.grid(ax)
-            return fig
+        self._draw_data_preview()
+        self._sync_enabled()
 
-        # A dense record is first shown as daily means (CanvasTab); the selector changes it.
-        self.data_preview.show_timeseries(render, s.to_frame(target))
+    def _say_rows(self) -> None:
+        """The data summary: the rows kept, and those left out where any are."""
+        df = self.df_loaded
+        if df is None:
+            return
+        span = f"{df['date'].min():%Y-%m-%d} → {df['date'].max():%Y-%m-%d} ({self._zone()})"
+        n_nan = int(df.isna().sum().sum())
+        left = len(df) - len(self.df_raw)
+        self.data_summary.setText(
+            f"{len(df):,} rows × {df.shape[1]} columns   |   date range: {span}"
+            f"   |   missing values: {n_nan:,}"
+            + (f"   |   left out: {left:,} rows" if left else "")
+        )
 
     def dragEnterEvent(self, event) -> None:  # noqa: N802
         md = event.mimeData()

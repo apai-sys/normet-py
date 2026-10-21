@@ -1274,6 +1274,9 @@ def state_parts(win: MainWindow) -> list[str]:
     if win.df_raw is None:
         return ["no table open"]
     parts = [f"table: {win.file_label.text().splitlines()[0]} ({len(win.df_raw):,} rows)"]
+    left = 0 if win.df_loaded is None else len(win.df_loaded) - len(win.df_raw)
+    if left:
+        parts[0] += f", {left:,} rows left out of every step (Data tab, Exclude)"
     target = win.target_combo.currentText()
     if target:
         parts.append(f"target: {target}")

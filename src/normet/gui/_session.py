@@ -79,7 +79,13 @@ class SessionMixin(QMainWindow):
         added to the log once it has succeeded -- and its arguments kept by the step's
         name, for the Methods paragraph (.methods), which says what ran."""
         normalised = self.results.get("normalise")
-        names = [(self.df_raw, "df"), (self.df_prep, "df_prep"), (self.model, "model")]
+        # The rows kept where some are left out (the log's df_kept, ._data_tab), else df.
+        names = [
+            (self.df_raw, "df_kept" if self.exclusions else "df"),
+            (self.df_loaded, "df"),
+            (self.df_prep, "df_prep"),
+            (self.model, "model"),
+        ]
         if normalised is not None and "normalised" in normalised:
             names.append((normalised["normalised"], "normalised['normalised']"))
         entry = commandlog.task(fn, args, kwargs, [(o, n) for o, n in names if o is not None])
@@ -201,6 +207,7 @@ class SessionMixin(QMainWindow):
             "norm_vars": self._selected_norm_vars(),
             "norm_samples": self.norm_samples.value(),
             "norm_cores": self.norm_cores.value(),
+            "exclude": list(self.exclusions),
             "norm_quantiles": self.norm_quantiles.isChecked(),
             "decom_method": self.decom_method.currentText(),
             "decom_samples": self.decom_samples.value(),
@@ -252,6 +259,8 @@ class SessionMixin(QMainWindow):
             c.get("norm_samples", _chronos.DEFAULT_SAMPLES if self._is_chronos() else 300)
         )
         self.norm_cores.setValue(c.get("norm_cores", 0))
+        if "exclude" in c:  # the rows left out (the Data tab's Exclude box)
+            self._set_exclusions(list(c.get("exclude") or []))
         self.norm_quantiles.setChecked(c.get("norm_quantiles", False))
         self.decom_method.setCurrentText(c.get("decom_method", "emission"))
         self.decom_samples.setValue(c.get("decom_samples", 300))

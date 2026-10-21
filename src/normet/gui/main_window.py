@@ -73,6 +73,10 @@ class MainWindow(
         self.setAcceptDrops(True)  # drag a CSV onto the window to load it
 
         self.df_raw: pd.DataFrame | None = None
+        #: The table as loaded, every row; df_raw is its rows kept (the Data tab's Exclude).
+        self.df_loaded: pd.DataFrame | None = None
+        #: The Exclude box's lines: the rows left out of every step.
+        self.exclusions: list[str] = []
         self.df_prep: pd.DataFrame | None = None
         self.model: object | None = None
         self.trained_features: list[str] = []

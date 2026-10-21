@@ -23,7 +23,6 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QSplitter,
-    QTableView,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -31,8 +30,8 @@ from PySide6.QtWidgets import (
 
 from . import _settings, commandlog, theme
 from ._constants import DOCS_URL
+from ._data_tab import DataTab
 from ._widgets import CanvasTab, FlowLayout
-from .dataframe_model import DataFrameModel
 from .welcome import Welcome
 from .workers import QtLogHandler
 
@@ -279,13 +278,13 @@ class ShellMixin(QMainWindow):
         self.data_summary = QLabel("Open data, or load an example from the File menu, to begin.")
         self.data_summary.setWordWrap(True)
         dl.addWidget(self.data_summary)
-        self.data_preview = CanvasTab("The target series preview appears here once data is loaded.")
-        self.data_preview.setMaximumHeight(320)  # its Resolution row included
-        dl.addWidget(self.data_preview)
-        self.table_model = DataFrameModel()
-        self.table_view = QTableView()
-        self.table_view.setModel(self.table_model)
-        dl.addWidget(self.table_view, 1)
+        # The table at a glance, its cycles, its winds, its statistics -- and the rows
+        # left out of every step (._data_tab).
+        self.data_tab = DataTab()
+        self.data_tab.exclusionsChanged.connect(self._set_exclusions)
+        #: The overview's figure, as the window has always named its data preview.
+        self.data_preview = self.data_tab.overview
+        dl.addWidget(self.data_tab, 1)
         self.tabs.addTab(data_tab, "Data")
 
         self.tab_model = CanvasTab("Train a model to see its quality here.")
