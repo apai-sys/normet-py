@@ -18,7 +18,7 @@ chosen.
 - any text, a tick's numbers -- their size and how they stand, a tick's own text -- the
   legend or a colour bar edited where it stands, by double-clicking it.
 
-The figure's texts are in the report's language (File → Report Language) while it is
+The figure's texts are in the report's language (File → Export HTML Report) while it is
 here. Closed, the figure goes back to its tab as it was. The journal, width, panel
 letters, formulas and resolution chosen are kept for the next figure.
 """
@@ -281,7 +281,7 @@ class PrintDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Figure for Print")
         self._home, self.fig = canvas, canvas.figure
-        # A figure for a paper is in the report's language (File → Report Language), not
+        # A figure for a paper is in the report's language (File → Export HTML Report), not
         # the window's: its texts are written so while it is here, and the tab's canvas
         # writes them back in the window's language when it next draws.
         from ._shell import report_language

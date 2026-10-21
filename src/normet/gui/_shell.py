@@ -19,11 +19,11 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMenu,
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QSplitter,
-    QTableView,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -31,34 +31,27 @@ from PySide6.QtWidgets import (
 
 from . import _settings, commandlog, theme
 from ._constants import DOCS_URL
+from ._data_tab import DataTab
 from ._widgets import CanvasTab, FlowLayout
-from .dataframe_model import DataFrameModel
 from .welcome import Welcome
 from .workers import QtLogHandler
 
 
-def report_language_choice() -> str:
-    """File -> Report Language as chosen: "window" (the default), "en" or "zh"."""
-    from PySide6.QtCore import QSettings
-
-    c = str(QSettings("apai-sys", "normet-gui").value("report_language", "window"))
-    return c if c in ("window", "en", "zh") else "window"
-
-
-def set_report_language(choice: str) -> None:
-    from PySide6.QtCore import QSettings
-
-    QSettings("apai-sys", "normet-gui").setValue("report_language", choice)
-
-
 def report_language() -> str:
-    """The language a report is written in now: the choice, else the window's."""
-    choice = report_language_choice()
-    if choice != "window":
-        return choice
+    """The language a report is written in: the one last chosen under Export HTML Report,
+    kept between sessions; the system's until one is chosen, as the window's."""
+    from PySide6.QtCore import QSettings
+
     from . import uilang
 
-    return uilang.language()
+    c = str(QSettings("apai-sys", "normet-gui").value("report_language", ""))
+    return c if c in uilang.LANGUAGES else uilang.system_language()
+
+
+def set_report_language(code: str) -> None:
+    from PySide6.QtCore import QSettings
+
+    QSettings("apai-sys", "normet-gui").setValue("report_language", code)
 
 
 def _menu_actions(menu) -> list:  # noqa: ANN001
@@ -125,17 +118,11 @@ class ShellMixin(QMainWindow):
         self._export_action = fm.addAction("&Export Current Result…", self._export_current)
         self._export_action.setShortcut("Ctrl+E")
         self._export_action.setEnabled(False)
-        self._report_action = fm.addAction("Export &HTML Report…", self._export_html)
-        # The report's language: the window's unless chosen (kept between sessions).
-        rl = fm.addMenu("Report &Language")
-        group = QActionGroup(self)
-        kept = report_language_choice()
-        for code, label in (("window", "As the Window"), ("en", "English"), ("zh", "中文")):
-            act = rl.addAction(label)
-            act.setCheckable(True)
-            act.setChecked(code == kept)
-            act.triggered.connect(lambda _checked=False, c=code: set_report_language(c))
-            group.addAction(act)
+        # The report's language is chosen where the report is exported, as cume's: a
+        # submenu of the export, not a setting of its own.
+        report_menu = fm.addMenu("Export &HTML Report")
+        self._report_languages(report_menu)
+        self._report_action = report_menu.menuAction()
         self._report_action.setEnabled(False)
         fm.addAction("Save Session as &Script…", self.save_script)
         fm.addSeparator()
@@ -222,6 +209,16 @@ class ShellMixin(QMainWindow):
 
         open_palette(self, skip=(self._palette_action,))
 
+    def _report_languages(self, menu: QMenu) -> None:
+        """The report's languages in *menu*, each named in itself and none ticked (a mark
+        before one reads as a setting, not a choice): choosing one asks where the report
+        goes and writes it in that language."""
+        from . import uilang
+
+        for code, name in uilang.LANGUAGES.items():
+            act = menu.addAction(name)
+            act.triggered.connect(lambda _checked=False, c=code: self._export_html(c))
+
     def _clip(self, method: str) -> None:
         w = self.focusWidget()
         if w is not None and hasattr(w, method):
@@ -279,13 +276,13 @@ class ShellMixin(QMainWindow):
         self.data_summary = QLabel("Open data, or load an example from the File menu, to begin.")
         self.data_summary.setWordWrap(True)
         dl.addWidget(self.data_summary)
-        self.data_preview = CanvasTab("The target series preview appears here once data is loaded.")
-        self.data_preview.setMaximumHeight(320)  # its Resolution row included
-        dl.addWidget(self.data_preview)
-        self.table_model = DataFrameModel()
-        self.table_view = QTableView()
-        self.table_view.setModel(self.table_model)
-        dl.addWidget(self.table_view, 1)
+        # The table at a glance, its cycles, its winds, its statistics -- and the rows
+        # left out of every step (._data_tab).
+        self.data_tab = DataTab()
+        self.data_tab.exclusionsChanged.connect(self._set_exclusions)
+        #: The overview's figure, as the window has always named its data preview.
+        self.data_preview = self.data_tab.overview
+        dl.addWidget(self.data_tab, 1)
         self.tabs.addTab(data_tab, "Data")
 
         self.tab_model = CanvasTab("Train a model to see its quality here.")
@@ -602,7 +599,10 @@ class ShellMixin(QMainWindow):
         self.exp_html.setToolTip(
             "Single-file HTML report of the current tab's result,\nwith provenance metadata."
         )
-        self.exp_html.clicked.connect(self._export_html)
+        # The report in a language picked from the button's menu, as File's.
+        html_menu = QMenu(self.exp_html)
+        self._report_languages(html_menu)
+        self.exp_html.setMenu(html_menu)
         self.exp_html.setEnabled(False)
         self.scm_btn = QPushButton("🧪  SCM Studio")
         self.scm_btn.setToolTip(

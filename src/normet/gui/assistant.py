@@ -1274,6 +1274,9 @@ def state_parts(win: MainWindow) -> list[str]:
     if win.df_raw is None:
         return ["no table open"]
     parts = [f"table: {win.file_label.text().splitlines()[0]} ({len(win.df_raw):,} rows)"]
+    left = 0 if win.df_loaded is None else len(win.df_loaded) - len(win.df_raw)
+    if left:
+        parts[0] += f", {left:,} rows left out of every step (Data tab, Exclude)"
     target = win.target_combo.currentText()
     if target:
         parts.append(f"target: {target}")
@@ -1284,7 +1287,12 @@ def state_parts(win: MainWindow) -> list[str]:
         parts.append(f"model trained on: {', '.join(win.trained_features)}")
     made = [k for k in ("normalise", "decompose", "rolling", "pdp") if k in win.results]
     if made:
+        from . import uilang
+        from ._shell import report_language
+
         parts.append(f"results: {', '.join(made)}")
+        # The analyst picks it under File > Export HTML Report.
+        parts.append(f"the report in {uilang.LANGUAGES[report_language()]}")
     if win.runner.busy:
         parts.append(f"running: {win.runner.task_name}")
     scm = getattr(win, "_scm_window", None)

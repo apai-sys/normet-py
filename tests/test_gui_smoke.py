@@ -734,3 +734,53 @@ def test_the_groups_names_are_not_cut_short(qapp, method):
         assert box.lineEdit().cursorPosition() == 0
     finally:
         win.close()
+
+
+def test_the_report_language_is_chosen_where_the_report_is_exported(qapp, monkeypatch, tmp_path):
+    """As cume's: File > Export HTML Report and the HTML report button each list the
+    languages, named in themselves and none ticked; the one chosen writes the report and is
+    kept for the next. A Chinese window names English as English."""
+    import pandas as pd
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QFileDialog
+
+    import normet
+    from normet.gui import uilang
+    from normet.gui._shell import report_language
+    from normet.gui.main_window import MainWindow
+
+    prefs = QSettings("apai-sys", "normet-gui")
+    kept = prefs.value("report_language")
+    win = MainWindow()
+    try:
+        menu = win._report_action.menu()
+        assert [a.text() for a in menu.actions()] == list(uilang.LANGUAGES.values())
+        assert not any(a.isCheckable() for a in menu.actions())
+        assert [a.text() for a in win.exp_html.menu().actions()] == list(uilang.LANGUAGES.values())
+        assert uilang.tr("English", "zh") == "English" and uilang.tr("中文", "en") == "中文"
+
+        written = []
+        path = str(tmp_path / "r.html")
+        monkeypatch.setattr(win, "_current_result", lambda: ("normalise", pd.DataFrame({"a": [1]})))
+        monkeypatch.setattr(
+            QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (path, ""))
+        )
+        monkeypatch.setattr(normet, "make_run", lambda *a, **k: "run")
+        monkeypatch.setattr(
+            normet, "generate_html_report", lambda run, p, lang: written.append((p, lang))
+        )
+        menu.actions()[list(uilang.LANGUAGES).index("zh")].trigger()
+        assert written == [(path, "zh")] and report_language() == "zh"
+        menu.actions()[list(uilang.LANGUAGES).index("en")].trigger()
+        assert written[-1] == (path, "en") and report_language() == "en"
+
+        # A cancelled save changes nothing.
+        monkeypatch.setattr(QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: ("", "")))
+        menu.actions()[list(uilang.LANGUAGES).index("zh")].trigger()
+        assert len(written) == 2 and report_language() == "en"
+    finally:
+        win.close()
+        if kept is None:
+            prefs.remove("report_language")
+        else:
+            prefs.setValue("report_language", kept)
