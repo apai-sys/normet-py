@@ -234,9 +234,18 @@ def test_the_overview_is_picked_with_the_mouse_and_read_under_it(qapp):
         def mouse(name, xy, **kw):
             canvas.callbacks.process(name, MouseEvent(name, canvas, xy[0], xy[1], **kw))
 
+        def close_in(t):
+            # A click lands on a whole pixel, and across the months drawn an hour is less
+            # than one: zoomed in on its day, as one would to click a single hour.
+            day = pd.Timedelta("1D")
+            ax_s.set_xlim(mdates.date2num(t - day), mdates.date2num(t + day))
+            canvas.draw()
+
         # The cursor read at the lower left.
         t0 = pd.Timestamp("2020-03-23 05:00")
         v0 = float(frame.loc[t0, variable])
+        whole = ax_s.get_xlim()
+        close_in(t0)
         mouse("motion_notify_event", at(t0, v0))
         assert tab.hover.text() == f"2020-03-23 05:00: {variable} = {v0:.4g}"
         # A click on a point picks its row; with Shift another is added.
@@ -249,9 +258,11 @@ def test_the_overview_is_picked_with_the_mouse_and_read_under_it(qapp):
         ax_s = canvas.figure.axes[0]
         t1 = pd.Timestamp("2020-04-02 12:00")
         v1 = float(frame.loc[t1, variable])
+        close_in(t1)
         for name in ("button_press_event", "button_release_event"):
             mouse(name, at(t1, v1), button=1, modifiers={"shift"} if "press" in name else None)
         assert tab.picked == [(t0, t0), (t1, t1)] and tab.rows_model.rowCount() == 2
+        ax_s.set_xlim(whole)
         assert tab.pick_info.text().startswith("Picked 2 spans (2 rows)")
         # A drag picks the span crossed, afresh without Shift.
         canvas = tab.overview.canvas
