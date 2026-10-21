@@ -46,9 +46,9 @@ def test_all_is_actually_importable():
 def test_imports_without_the_heavy_optional_extras():
     """``import normet`` must survive with torch, chronos and PySide6 absent.
 
-    ``normet.physics`` and ``normet.foundation`` are re-exported at the top
-    level, so a module-level import of any of the three in either subpackage
-    would make the whole library unimportable for anyone who skipped the extra.
+    ``normet.foundation`` is re-exported at the top level, so a module-level
+    import of any of the three in it would make the whole library unimportable
+    for anyone who skipped the extra.
     Run in a subprocess with those names blocked, because the rest of the suite
     has already imported them into this one.
     """
@@ -70,14 +70,7 @@ def test_imports_without_the_heavy_optional_extras():
 
         import normet
         import normet.foundation
-        import normet.physics
         import normet.counterfactual
-
-        # The pure-numpy parts must still work.
-        builder = normet.PhysicsGraphBuilder(
-            stations=["a", "b"], latitudes=[51.5, 53.5], longitudes=[-0.1, -2.2]
-        )
-        builder.build_static_graph()
 
         leaked = [n for n in BLOCKED if n in sys.modules]
         assert not leaked, f"imported despite being optional: {leaked}"

@@ -110,9 +110,6 @@ pip install "normet[cli]"
 # Chronos-2 foundation model (zero-shot de-weathering, station embeddings)
 pip install "normet[foundation]"
 
-# Physics-informed graph models (PI-STGNN, advection-diffusion-reaction loss)
-pip install "normet[physics]"
-
 # MCP server for AI assistants (Claude Code, Claude Desktop, ...)
 pip install "normet[mcp]"
 
