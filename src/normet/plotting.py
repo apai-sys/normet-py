@@ -25,6 +25,8 @@ log = get_logger(__name__)
 
 __all__ = [
     "polar_plot",
+    "wind_rose",
+    "pollution_rose",
     "pdp_grid",
     "decomposition_stack",
     "scm_dashboard",
@@ -128,6 +130,152 @@ def polar_plot(
             ax.figure, mesh, ax, label=f"{statistic} {S.formula(target)}", fraction=0.05, pad=0.1
         )
     ax.set_title(title or f"{S.formula(target)} by wind direction and speed")
+    return ax
+
+
+def _rose(
+    ax: Any,
+    direction: pd.Series,
+    value: pd.Series,
+    edges: np.ndarray,
+    unit: str,
+    n_sectors: int,
+    cmap: str,
+) -> None:
+    """Stacked bars by direction sector, as openair's roses: a sector's length the share
+    of the rows from it, cut into the classes of *value* between *edges*."""
+    import matplotlib.pyplot as plt
+
+    width = 360.0 / n_sectors
+    sector = np.floor(((direction.to_numpy(dtype=float) % 360.0) + width / 2) / width) % n_sectors
+    klass = np.clip(
+        np.searchsorted(edges, value.to_numpy(dtype=float), side="right") - 1, 0, len(edges) - 2
+    )
+    counts = np.zeros((n_sectors, len(edges) - 1))
+    np.add.at(counts, (sector.astype(int), klass.astype(int)), 1)
+    share = 100.0 * counts / max(1, counts.sum())
+    theta = np.deg2rad(np.arange(n_sectors) * width)
+    colors = plt.get_cmap(cmap)(np.linspace(0.15, 0.95, len(edges) - 1))
+    bottom = np.zeros(n_sectors)
+    for k in range(len(edges) - 1):
+        hi = f"{edges[k + 1]:.3g}" if np.isfinite(edges[k + 1]) else ""
+        label = f"{edges[k]:.3g}–{hi} {unit}".strip() if hi else f"≥ {edges[k]:.3g} {unit}".strip()
+        ax.bar(
+            theta,
+            share[:, k],
+            width=np.deg2rad(width) * 0.9,
+            bottom=bottom,
+            color=colors[k],
+            edgecolor="white",
+            lw=0.3,
+            label=label,
+        )
+        bottom += share[:, k]
+    ax.set_theta_zero_location("N")
+    ax.set_theta_direction(-1)  # clockwise, as a compass reads
+    ax.set_thetagrids([0, 90, 180, 270], ["N", "E", "S", "W"])
+    ax.yaxis.set_major_formatter(lambda v, _pos: f"{v:.0f}%")
+    ax.tick_params(axis="y", labelsize=S.SMALL_SIZE)
+    ax.set_rlabel_position(112.5)
+    ax.spines["polar"].set_linewidth(S.RC["axes.linewidth"])
+    ax.legend(
+        loc="upper left",
+        bbox_to_anchor=(1.05, 1.0),
+        fontsize=S.SMALL_SIZE,
+        frameon=False,
+        handlelength=1.0,
+    )
+
+
+def _class_edges(values: pd.Series, breaks: Iterable[float] | None, n: int = 5) -> np.ndarray:
+    """Class edges for a rose: *breaks* given, else *n* classes from 0 at round steps up
+    to the 95th percentile, the last open-ended."""
+    if breaks is not None:
+        edges = np.asarray(sorted(float(b) for b in breaks))
+    else:
+        top = float(np.nanpercentile(values, 95)) if len(values) else 1.0
+        step = float(10 ** np.floor(np.log10(max(top / n, 1e-9))))
+        for mult in (1, 2, 2.5, 5, 10):
+            if step * mult * n >= top:
+                step *= mult
+                break
+        edges = np.arange(n) * step
+    return np.append(edges, np.inf)
+
+
+@styled
+def wind_rose(
+    df: pd.DataFrame,
+    *,
+    ws_col: str = "ws",
+    wd_col: str = "wd",
+    n_sectors: int = 16,
+    breaks: Iterable[float] | None = None,
+    cmap: str = "viridis",
+    title: str | None = None,
+    ax: Any | None = None,
+) -> Any:
+    """A wind rose (openair's ``windRose``): how often the wind blows from each direction,
+    each sector's bar cut into wind speed classes (``breaks``, m/s; five round classes by
+    default).
+
+    Returns
+    -------
+    matplotlib.axes.Axes (polar)
+    """
+    import matplotlib.pyplot as plt
+
+    for col in (ws_col, wd_col):
+        if col not in df.columns:
+            raise ValueError(f"Column '{col}' not in df.")
+    sub = df[[ws_col, wd_col]].apply(pd.to_numeric, errors="coerce").dropna()
+    if sub.empty:
+        raise ValueError("No rows with both wind speed and direction.")
+    if ax is None:
+        _fig, ax = plt.subplots(
+            subplot_kw={"projection": "polar"}, figsize=(4.4, 3.6), layout="constrained"
+        )
+    edges = _class_edges(sub[ws_col], breaks)
+    _rose(ax, sub[wd_col], sub[ws_col], edges, "m/s", n_sectors, cmap)
+    ax.set_title(title or "Wind rose")
+    return ax
+
+
+@styled
+def pollution_rose(
+    df: pd.DataFrame,
+    *,
+    target: str,
+    wd_col: str = "wd",
+    n_sectors: int = 16,
+    breaks: Iterable[float] | None = None,
+    cmap: str = "magma_r",
+    title: str | None = None,
+    ax: Any | None = None,
+) -> Any:
+    """A pollution rose (openair's ``pollutionRose``): how often the wind blows from each
+    direction, each sector's bar cut into classes of ``target``'s concentration
+    (``breaks``; five round classes by default) -- where the high values come from.
+
+    Returns
+    -------
+    matplotlib.axes.Axes (polar)
+    """
+    import matplotlib.pyplot as plt
+
+    for col in (target, wd_col):
+        if col not in df.columns:
+            raise ValueError(f"Column '{col}' not in df.")
+    sub = df[[target, wd_col]].apply(pd.to_numeric, errors="coerce").dropna()
+    if sub.empty:
+        raise ValueError(f"No rows with both {target} and wind direction.")
+    if ax is None:
+        _fig, ax = plt.subplots(
+            subplot_kw={"projection": "polar"}, figsize=(4.4, 3.6), layout="constrained"
+        )
+    edges = _class_edges(sub[target], breaks)
+    _rose(ax, sub[wd_col], sub[target], edges, "", n_sectors, cmap)
+    ax.set_title(title or f"{S.formula(target)} by wind direction")
     return ax
 
 
