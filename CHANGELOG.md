@@ -29,6 +29,25 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   (typically the emission component from `decompose` or a deweathered
   `normalised` column). User guide: `guide/examples_trend.md`.
 
+- **Segmented trend: `detect_trend_breaks`** (`normet.analysis.trend`,
+  exported at the top level). A single-slope record whose level or slope
+  changes part-way through a policy year or a lockdown shows the change
+  diluted into a muddier trend; the honest question is *where* the regime
+  changes and how the slopes differ. `detect_trend_breaks` splits the record
+  into at most `max_segments` (default 2) linear segments, each reported with
+  its own Theil-Sen slope and Sen (1968) interval. The split comes from a
+  full O(n) grid search (the two-segment SSE of every candidate position is
+  O(1) from prefix sums) and is reported only under a two-part gate, because
+  a grid searched over n-1 positions *always* finds something: the split must
+  improve the BIC, and the SSE improvement of the final fit over the
+  single-segment fit must beat the same search re-run on moved-block
+  resamples of the series (the multiple-testing-corrected, autocorrelation-
+  aware p-value). A record that fails either gate is reported as one regime,
+  with the best candidate cut and its p kept in `best_break`,
+  `best_split_pct` and `notes` so a report can say what was looked at.
+  Deterministic under `seed`; `summary()` returns one row per segment
+  (start, end, n, slope, CI, per-year when timestamps are present).
+
 - **GUI: the trend is a step of the window.** The Decompose page gains a
   *Trend test* box (the series -- the decomposition's emission part, its weather
   part or the observed target; the seasonal period, `auto` or named; the
