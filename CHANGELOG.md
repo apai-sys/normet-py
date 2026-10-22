@@ -21,6 +21,18 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   own CRPS is its MAE exactly: the factor is the normal-scale convention, not
   the degenerate integral) -- so model and baseline read on one scale.
   Non-finite rows are dropped and rows meaned, as the package scores them.
+- **Notebook 06: the skill benchmark, on the bundled MY1 NO2 record.**
+  The lightgbm model trained through `do_all` on a `month_ts` split keeps
+  its quantiles (`return_quantiles`), so its spread is scored as the CRPS of
+  those five levels; persistence and three climatologies are scored as point
+  forecasts' references, and a Chronos-2 zero-shot row -- where the
+  `foundation` extra is installed -- joins them. The zero-shot model has no
+  forecast for its leading context (those rows carry the observed values),
+  and a third of the held-out hours fall there, so the final table is
+  re-scored on the hours the zero-shot model actually predicts and every
+  method is read on that one set: how many hours that excludes, and where the
+  window starts, is printed above the table rather than footnoted. The
+  expensive calls are memoised with `nm.make_memory`.
 - **GUI: window and figures refined.**
   - *Cycles*: `normet.cycle_profiles` (and `plotting.profile_axes`) draws a
     record's mean by hour of day, day of week and month with 95 % confidence
