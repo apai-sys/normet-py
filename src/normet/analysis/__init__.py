@@ -5,6 +5,7 @@ from .events import anomaly_scores, detect_events
 from .normalise import NormaliseConfig, normalise, normalise_auto
 from .pdp import pdp
 from .rolling import RollingConfig, rolling, window_columns
+from .verification import crps_from_quantiles, crps_from_samples, crps_observed, pinball_loss
 
 __all__ = [
     "DecomposeConfig",
@@ -20,4 +21,8 @@ __all__ = [
     "window_columns",
     "detect_events",
     "anomaly_scores",
+    "crps_from_quantiles",
+    "crps_from_samples",
+    "crps_observed",
+    "pinball_loss",
 ]

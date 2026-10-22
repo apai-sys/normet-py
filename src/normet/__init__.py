@@ -85,6 +85,9 @@ from .analysis import (
     NormaliseConfig,
     RollingConfig,
     anomaly_scores,
+    crps_from_quantiles,
+    crps_from_samples,
+    crps_observed,
     decom_emi,
     decom_met,
     decompose,
@@ -92,6 +95,7 @@ from .analysis import (
     normalise,
     normalise_auto,
     pdp,
+    pinball_loss,
     rolling,
     window_columns,
 )
@@ -185,6 +189,11 @@ __all__ = [
     "decompose",
     "detect_events",
     "anomaly_scores",
+    # --- verification ---
+    "crps_from_quantiles",
+    "crps_from_samples",
+    "crps_observed",
+    "pinball_loss",
     # --- Synthetic control ---
     "scm",
     "mlscm",
