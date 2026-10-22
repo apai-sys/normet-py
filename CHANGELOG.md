@@ -48,6 +48,32 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   Deterministic under `seed`; `summary()` returns one row per segment
   (start, end, n, slope, CI, per-year when timestamps are present).
 
+- **Uncertainty decomposition: `decompose_uncertainty`**
+  (`normet.analysis.uncertainty`, exported at the top level, with the
+  `UncDecomposition` result). A de-weathered estimate carries a Monte-Carlo
+  spread and an ensemble of models (`do_all_unc`) a wider, model-form spread,
+  but neither says *why* the band is wide. `decompose_uncertainty` attributes
+  the total per-date variance to its source by an orthogonal (two-way)
+  decomposition of the full model-by-weather prediction matrix, exploiting the
+  package's common-random-number discipline rather than adding a new source of
+  randomness: every ensemble member is trained on its own seed (so the members
+  differ in *form*) but predicts on the *same* `n_samples` met resamples shared
+  across the ensemble. At one timestamp the response is a
+  `n_models x n_samples` matrix whose total variance splits orthogonally into
+  the *model-form* term (variance across members, over the draws), the
+  *weather* term (variance across met draws, over the members) and the
+  interaction (what is not additive). The total per-date variance is exactly the
+  three summands (pinned by a test), every term non-negative. The cost is one
+  prediction per `(member, draw, timestamp)` -- the same total count as one
+  `do_all_unc` run -- and the whole thing is reproducible under `seed`. The
+  result's `frame()` is the per-date rows (`var_weather`, `var_model`,
+  `var_interaction`, `var_total` and their `pct_*` shares), `summary()` the
+  median share per source, and `plot()` the stacked-variance-band figure --
+  the policy-evaluation deliverable that answers "of the band, which part is
+  weather and which part is model form?" -- the question a policy effect
+  smaller than its band reduces to: which error dominates decides whether it is
+  separable.
+
 - **GUI: the trend is a step of the window.** The Decompose page gains a
   *Trend test* box (the series -- the decomposition's emission part, its
   separated long-term trend, its weather part or the observed target; the

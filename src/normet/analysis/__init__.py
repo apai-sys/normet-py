@@ -15,6 +15,7 @@ from .trend import (
     theil_sen,
     trend,
 )
+from .uncertainty import UncDecomposition, decompose_uncertainty
 from .verification import crps_from_quantiles, crps_from_samples, crps_observed, pinball_loss
 
 __all__ = [
@@ -26,6 +27,8 @@ __all__ = [
     "theil_sen",
     "trend",
     "detect_trend_breaks",
+    "UncDecomposition",
+    "decompose_uncertainty",
     "DecomposeConfig",
     "NormaliseConfig",
     "RollingConfig",
