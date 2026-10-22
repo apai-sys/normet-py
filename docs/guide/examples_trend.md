@@ -93,32 +93,150 @@ module does not decide which is right for a given record -- that is a
 statement about the data's structure, and a report should say which was
 used.
 
+## When the trend changes: `nm.detect_trend_breaks`
+
+A single slope cannot say what happened on a record whose level or slope
+changes part-way through -- a policy year, a lockdown. Fit the whole record
+with one line and the change is diluted into a muddier trend: the pre-event
+segment drags the slope toward zero, the post-event segment drags it up,
+and either significance statement or the slope itself is a statement about
+*both* regimes mixed together. `detect_trend_breaks` asks the question
+directly: *where does the regime change, and what are the slopes of the
+regimes?*
+
+```python
+res = nm.detect_trend_breaks(
+    df_emi["emi_total"],                       # or any Series/DataFrame + value_col
+    name="MY1 NO2 emission",
+    max_segments=2,                            # one split (the default)
+    # min_segment=None  -> the longer of 28 and 5 % of the record
+    # alpha=0.05, n_bootstrap=500, seed=7654321
+)
+print(res)
+# MY1 NO2 emission: n=5793 | 2 segments | break at 2020-03-25 22:00 | SSE -39.9%
+# | seg1 slope 0.0216 u/m3/day | seg2 slope 0.0229 u/m3/day | p=0.002
+
+res.summary()   # one row per segment: start, end, n, slope, CI (+ per-year)
+```
+
+On MY1's emission part (January-August 2020, the record that holds the
+UK lockdown) the detector puts the break at **2020-03-25 22:00**, two days
+after the 23 March lockdown order, with the SSE falling 39.9 % when the
+record is allowed one break and the block-bootstrap p at 0.002. The two
+regimes split on exactly the question of interest: the pre-lockdown
+segment's 95 % CI is `[-0.0019, 0.0446]` (straddling 0, so not
+significantly trending), the post-lockdown segment's is `[0.0171,
+0.0286]` (entirely positive). A single slope for the whole record could
+not have made that distinction -- the point of the segmentation is that
+the two regimes carry their own, separately honest, intervals.
+
+### How the split is found, and why the gate exists
+
+The search is a full O(n) grid: the two-segment OLS residual sum of
+squares of *every* candidate position is O(1) from prefix sums, so the
+record is scanned once, and the split that most reduces the SSE wins.
+A grid searched over `n-1` positions, however, always finds *something* --
+pure noise contains a split that cuts its SSE by some amount -- so the
+candidate split passes two gates before it is reported:
+
+1. **BIC, per round.** Each split must beat the BIC of the current fit, so
+   the extra slope + intercept earn their keep. This is the *stopping*
+   rule for `max_segments > 2` (greedy forward segmentation).
+2. **Block-bootstrap p for the search.** The observed SSE reduction of the
+   final fit over the single-segment fit is compared with the *same
+   search re-run on every moved-block resample* of the series. The
+   resulting p is the probability that a record without a break --
+   searched exactly as hard, with its autocorrelation preserved by the
+   blocks -- produces a reduction at least that large. It is the
+   multiple-testing-corrected, autocorrelation-aware test; it is why a
+   grid search can be honest.
+
+If either gate fails, the series is reported as **one regime** and
+`summary()` has a single row; the search is not hidden -- `best_break`,
+`best_split_pct` and `notes` keep *where it wanted to cut* and *what the
+p was*, so a report can say "a cut at X lowers the SSE by Y % but the
+block-bootstrap p is Z, so it is not claimed as a break."
+
+| Quantity | Note |
+|---|---|
+| `starts`, `ends` | Index value of each segment's first and last point (timestamps for a datetime record, positions otherwise). The break is `starts[1]` -- the first point of the new regime. |
+| `segments[i].slope` | Theil-Sen per segment, in the same units as `theil_sen` (per day / per step, with `slope_per_year` when timestamps are present). Robust to the spikes a pollution event leaves inside a segment. |
+| `best_break`, `best_split_pct` | The first round's best candidate and its SSE reduction, recorded *even when the gates rejected it*. |
+| `sse_single`, `sse_segmented`, `improvement_pct` | The single- and segmented-fit residuals and their relative reduction. |
+| `bic_single`, `bic_segmented` | The BICs the gate compared (3 parameters per segment: slope, intercept, noise variance). |
+| `p_value`, `significant` | The block-bootstrap p and whether it fell below `alpha` (default 0.05). |
+| `min_segment` | Minimum points per segment (default: the longer of 28 and 5 % of the record). Bars splits pinned to an edge and keeps each piece long enough for a Theil-Sen to mean something. |
+
+The per-segment CIs are Sen intervals: compare adjacent segments against
+*their* intervals (here: the pre-lockdown CI straddles 0, the
+post-lockdown interval is entirely positive) rather than re-testing the
+split -- the split itself is what `p_value` certifies.
+
+### Performance
+
+The search is O(n) and the bootstrap O(n · n_bootstrap) with an O(n)
+search inside each replicate: MY1's 5,793-hour record runs in about a
+second at the default 500 replicates, and three years of hourly
+(26,280 points) takes about 20 seconds (measured). The block length uses
+the same heuristic as `nm.trend` (longer of `3 n^(1/3)` and a calendar
+week for sub-daily records). The per-segment Theil-Sen is the same
+median-of-pairs as everywhere else, so a *very* long single segment costs
+as much as `nm.theil_sen` would on the whole record; for multi-year
+hourly records prefer `max_segments=2` and a smaller record window when
+speed matters.
+
 ## In the window and the Assistant
 
 The window runs the test as one of its steps. The **Trend test** box on the
 Decompose page names the series (the decomposition's emission part, its
-weather part, or the observed target), the seasonal period (`auto`, `none`,
-`24`, `7`, `12`) and the bootstrap's replicates, and a *Run* button starts
-it; with **Run after each emission decomposition** ticked (the default), a
+**separated long-term trend**, its weather part, or the observed target), the
+seasonal period (`auto`, `none`, `24`, `7`, `12`), the **number of segments**
+(`1` to `4`) and the bootstrap's replicates, and a *Run* button starts it;
+with **Run after each emission decomposition** ticked (the default), a
 finished emission decomposition starts the test of its emission part under
-those same settings. Its result opens on the **Trend** tab: the series with
-its Theil-Sen line, a verdict that says whether the trend is significant and
-*which p stands for it* -- the block-bootstrap's where the record is
-autocorrelated, the classical Mann-Kendall's elsewhere -- the test's notes,
-and its two-column summary. The tab carries its own CSV export (the summary)
-and a command-log entry, `trend_call(...)`, as a saved session's script.
-The box's `auto` seasonal is the *stated* choice of the table above, made
-from the record's step and spoken where it fell back to the classical test
-because the record was not a whole number of periods.
+those same settings.
+
+The number of segments picks which test runs on the chosen series:
+
+- **1 segment** (the default) — the single-slope test: `mann_kendall` +
+  `theil_sen`, exactly as `normet.trend` below. The series is shown with its
+  Theil-Sen line, the verdict says whether the trend is significant and
+  *which p stands for it* -- the block-bootstrap's where the record is
+  autocorrelated, the classical Mann-Kendall's elsewhere.
+- **2 to 4 segments** — the segmented fit, `detect_trend_breaks`, on the
+  chosen series: where the trend breaks, each segment with its own Theil-Sen
+  slope and Sen interval, and the block-bootstrap **p of the search** (the
+  one to quote). The series is shown with its piecewise Theil-Sen lines and a
+  marked break. The separated **long-term trend** is the cleaner input for
+  this: the emission decomposition's `date_unix` contribution plus its base,
+  with the recurring calendar cycles already taken into their own component
+  columns, so the segmentation runs on the drift plus one-off structural
+  breaks rather than on the full, cycled `emi_total`. Raising Segments above
+  `1` moves the default *emission part* choice to the long-term trend; the
+  choice stays until the analyst changes it.
+
+Its result opens on the **Trend** tab: the figure above, a traffic-light
+verdict, the test's notes, and its tidy summary (one row per segment for the
+segmented fit, the two-column metric table for one). The tab carries its own
+CSV export and a command-log entry (`trend_call(...)` for one segment,
+`trend_breaks_call(...)` for two or more), as a saved session's script. The
+box's `auto` seasonal is the *stated* choice of the table above, made from the
+record's step and spoken where it fell back to the classical test because the
+record was not a whole number of periods.
 
 The window's **Assistant** runs the step for you: ask `*is the emission
 signal trending?*` and it calls the `trend` tool (series `emission`, `met`
 or `observed`; seasonal `auto` or named), which runs the step as its button
 does and returns the reading -- `readings.trend_reading` -- the same numbers
-the tab shows, with its notes on which p to quote. The headless MCP server
-does the same in place: `normet_trend(path, column=...)` on a result table
-(a decomposition's `emi_total` or `met_total`, a normalised table's
-`normalised`, a raw table's target).
+the tab shows, with its notes on which p to quote. Ask `*where does the trend
+break?*` and it calls `trend_breaks` (series `long-term` (the default),
+`emission`, `met` or `observed`; segments `2` to `4`), returning
+`readings.trend_breaks_reading`. The headless MCP server does the same in
+place: `normet_trend(path, column=...)` on a result table (a decomposition's
+`emi_total` or `met_total`, a normalised table's `normalised`, a raw table's
+target) and `normet_trend_breaks(path, column=...)`, where `column='long-term'`
+(the default) is the separated long-term component and `'emission'` its
+`emi_total`.
 
 ## Performance note
 

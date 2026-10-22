@@ -29,19 +29,57 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   (typically the emission component from `decompose` or a deweathered
   `normalised` column). User guide: `guide/examples_trend.md`.
 
+- **Segmented trend: `detect_trend_breaks`** (`normet.analysis.trend`,
+  exported at the top level). A single-slope record whose level or slope
+  changes part-way through a policy year or a lockdown shows the change
+  diluted into a muddier trend; the honest question is *where* the regime
+  changes and how the slopes differ. `detect_trend_breaks` splits the record
+  into at most `max_segments` (default 2) linear segments, each reported with
+  its own Theil-Sen slope and Sen (1968) interval. The split comes from a
+  full O(n) grid search (the two-segment SSE of every candidate position is
+  O(1) from prefix sums) and is reported only under a two-part gate, because
+  a grid searched over n-1 positions *always* finds something: the split must
+  improve the BIC, and the SSE improvement of the final fit over the
+  single-segment fit must beat the same search re-run on moved-block
+  resamples of the series (the multiple-testing-corrected, autocorrelation-
+  aware p-value). A record that fails either gate is reported as one regime,
+  with the best candidate cut and its p kept in `best_break`,
+  `best_split_pct` and `notes` so a report can say what was looked at.
+  Deterministic under `seed`; `summary()` returns one row per segment
+  (start, end, n, slope, CI, per-year when timestamps are present).
+
 - **GUI: the trend is a step of the window.** The Decompose page gains a
-  *Trend test* box (the series -- the decomposition's emission part, its weather
-  part or the observed target; the seasonal period, `auto` or named; the
-  bootstrap's replicates) and a *Run* button; a finished emission decomposition
+  *Trend test* box (the series -- the decomposition's emission part, its
+  separated long-term trend, its weather part or the observed target; the
+  seasonal period, `auto` or named; the number of segments; the bootstrap's
+  replicates) and a *Run* button; a finished emission decomposition
   starts the test of its emission part under the box's settings (`Run after
-  each emission decomposition`, on by default). Its result is a Trend tab: the
-  series with its Theil-Sen line, a traffic-light verdict that says which p
-  stands for the trend, the test's notes and its tidy summary (the tab's light,
-  its CSV export and its command-log entry are the step's own; the Methods
-  paragraph says of the trend what it ran). The window's Assistant gained the
-  `trend` tool (series, seasonal; it runs the step as its button does and
-  returns the reading, `readings.trend_reading`), and the headless MCP server
-  `normet_trend` (a table's column, run in place).
+  each emission decomposition`, on by default).
+
+  **Segment 1 is the single-slope test** (`mann_kendall` + `theil_sen`, as
+  `normet.trend`). **Segments 2 to 4 run the segmented fit**
+  (`detect_trend_breaks`) on the chosen series: where the trend breaks, each
+  segment with its own Theil-Sen slope and Sen interval, and the block-bootstrap
+  p of the search. The separated *long-term trend* is a Series choice (and the
+  default once Segments is raised above 1): the emission decomposition's
+  `date_unix` contribution plus its base, the recurring calendar cycles already
+  taken into their own component columns, so the segmentation runs on the drift
+  plus one-off structural breaks rather than on the full, cycled `emi_total`.
+
+  Its result is a Trend tab: the series with its single robust line (one
+  segment) or its piecewise Theil-Sen lines with a marked break (two or more),
+  a traffic-light verdict that says which p stands (the classical MK or
+  Wald p for one segment, the block-bootstrap p of the search for the
+  segmented fit), the test's notes and its tidy summary -- one metric row per
+  segment (the tab's light, its CSV export and its command-log entry are the
+  step's own; the Methods paragraph says of the trend what it ran). The
+  window's Assistant gained the `trend` tool (series, seasonal; the single
+  slope) and the `trend_breaks` tool (series, segments; the segmented fit);
+  each runs the step as its button does and returns the reading
+  (`readings.trend_reading`, `readings.trend_breaks_reading`). The headless MCP
+  server gained `normet_trend` (a table's column, run in place) and
+  `normet_trend_breaks` (a table's column; `'long-term'` is the separated
+  component, the default).
 
 - **Skill scores: CRPS and the pinball loss** (`normet.analysis.verification`,
   exported at the top level). Point forecasts are verified by `modStats`, but a

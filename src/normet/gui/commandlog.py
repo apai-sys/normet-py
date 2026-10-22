@@ -264,6 +264,14 @@ _KNOWN: dict[str, tuple[str, str, str, str]] = {
         "from normet.gui._trend import trend_call",
         "The GUI's own helper around normet.trend on the series the window holds.",
     ),
+    "normet.gui._trend.trend_breaks_call": (
+        "Segmented trend test",
+        "trend_result",
+        "from normet.gui._trend import trend_breaks_call",
+        "The GUI's own helper around normet.detect_trend_breaks on the series the "
+        "window holds ('long-term' is its separated long-term component, not a "
+        "table column).",
+    ),
 }
 
 
