@@ -187,8 +187,59 @@ def main_figures(app):
         "  sd:",
         emi[["date_unix", "day_julian", "weekday", "hour", "emi_noise"]].std().round(2).to_dict(),
     )
+    # The emission decomposition's end already started the automatic Trend test
+    # (the box's tick, the box's settings) and its done handler moved the
+    # window's tabs to the Trend tab: put the Decompose tab back, so this
+    # grab shows what it is named.
+    win.tabs.setCurrentWidget(win.tab_decom)
     said(win.tab_decom)
     grab(win, "ui_decompose_emission.png")
+
+    print("trend on the emission part")
+    # "Run after each emission decomposition" is ticked (the box's default), so
+    # the emission decomposition's end already ran the Trend test of its
+    # emission part, under the box's settings -- the inline runner carried
+    # that automatic task through on this thread too, and its tab is up.
+    # Nothing is re-run here; the numbers the manual quotes are the
+    # automatic run's. (It must happen before the meteorology decomposition
+    # overwrites the table in results["decompose"].)
+    print(
+        "  box:",
+        win.trend_series.currentText(),
+        "/",
+        win.tre_seasonal.currentText(),
+        "/",
+        win.tre_segments.value(),
+        "/",
+        win.tre_n_bootstrap.value(),
+    )
+    win.show_panel_page("Decompose")  # the Trend test box sits on the panel page
+    win.tabs.setCurrentWidget(win.tab_trend)  # its tab was up; make it certain
+    t = win.results["trend"]
+    print(t.to_string())
+    said(win.tab_trend)
+    grab(win, "ui_trend.png")
+
+    print("segmented trend (two segments)")
+    # Raising the Segments row moves the still-default emission part to the
+    # separated long-term trend (the box's own behaviour), so the segmented
+    # fit runs on the cleaner input, under the box's settings.
+    win.tre_segments.setValue(2)
+    print(
+        "  box:",
+        win.trend_series.currentText(),
+        "/",
+        win.tre_segments.value(),
+        "/",
+        win.tre_n_bootstrap.value(),
+    )
+    win._run_trend()
+    t = win.results["trend"]
+    print(t.to_string())
+    said(win.tab_trend)
+    grab(win, "ui_trend_breaks.png")
+    win.tre_segments.setValue(1)  # the rest of the run stands on the default
+    win.trend_series.setCurrentText("emission part (emi_total)")
 
     print("decompose: meteorology, four groups")
     win.decom_method.setCurrentText("meteorology")

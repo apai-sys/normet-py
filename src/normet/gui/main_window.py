@@ -108,6 +108,7 @@ class MainWindow(
         self._trend_name = ""
         self._trend_note = ""
         self._trend_wanted = False
+        self._trend_segmented = False
 
         self.runner = TaskRunner(self)
         self.runner.started.connect(self._task_started)

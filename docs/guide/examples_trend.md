@@ -189,28 +189,54 @@ speed matters.
 
 The window runs the test as one of its steps. The **Trend test** box on the
 Decompose page names the series (the decomposition's emission part, its
-weather part, or the observed target), the seasonal period (`auto`, `none`,
-`24`, `7`, `12`) and the bootstrap's replicates, and a *Run* button starts
-it; with **Run after each emission decomposition** ticked (the default), a
+**separated long-term trend**, its weather part, or the observed target), the
+seasonal period (`auto`, `none`, `24`, `7`, `12`), the **number of segments**
+(`1` to `4`) and the bootstrap's replicates, and a *Run* button starts it;
+with **Run after each emission decomposition** ticked (the default), a
 finished emission decomposition starts the test of its emission part under
-those same settings. Its result opens on the **Trend** tab: the series with
-its Theil-Sen line, a verdict that says whether the trend is significant and
-*which p stands for it* -- the block-bootstrap's where the record is
-autocorrelated, the classical Mann-Kendall's elsewhere -- the test's notes,
-and its two-column summary. The tab carries its own CSV export (the summary)
-and a command-log entry, `trend_call(...)`, as a saved session's script.
-The box's `auto` seasonal is the *stated* choice of the table above, made
-from the record's step and spoken where it fell back to the classical test
-because the record was not a whole number of periods.
+those same settings.
+
+The number of segments picks which test runs on the chosen series:
+
+- **1 segment** (the default) — the single-slope test: `mann_kendall` +
+  `theil_sen`, exactly as `normet.trend` below. The series is shown with its
+  Theil-Sen line, the verdict says whether the trend is significant and
+  *which p stands for it* -- the block-bootstrap's where the record is
+  autocorrelated, the classical Mann-Kendall's elsewhere.
+- **2 to 4 segments** — the segmented fit, `detect_trend_breaks`, on the
+  chosen series: where the trend breaks, each segment with its own Theil-Sen
+  slope and Sen interval, and the block-bootstrap **p of the search** (the
+  one to quote). The series is shown with its piecewise Theil-Sen lines and a
+  marked break. The separated **long-term trend** is the cleaner input for
+  this: the emission decomposition's `date_unix` contribution plus its base,
+  with the recurring calendar cycles already taken into their own component
+  columns, so the segmentation runs on the drift plus one-off structural
+  breaks rather than on the full, cycled `emi_total`. Raising Segments above
+  `1` moves the default *emission part* choice to the long-term trend; the
+  choice stays until the analyst changes it.
+
+Its result opens on the **Trend** tab: the figure above, a traffic-light
+verdict, the test's notes, and its tidy summary (one row per segment for the
+segmented fit, the two-column metric table for one). The tab carries its own
+CSV export and a command-log entry (`trend_call(...)` for one segment,
+`trend_breaks_call(...)` for two or more), as a saved session's script. The
+box's `auto` seasonal is the *stated* choice of the table above, made from the
+record's step and spoken where it fell back to the classical test because the
+record was not a whole number of periods.
 
 The window's **Assistant** runs the step for you: ask `*is the emission
 signal trending?*` and it calls the `trend` tool (series `emission`, `met`
 or `observed`; seasonal `auto` or named), which runs the step as its button
 does and returns the reading -- `readings.trend_reading` -- the same numbers
-the tab shows, with its notes on which p to quote. The headless MCP server
-does the same in place: `normet_trend(path, column=...)` on a result table
-(a decomposition's `emi_total` or `met_total`, a normalised table's
-`normalised`, a raw table's target).
+the tab shows, with its notes on which p to quote. Ask `*where does the trend
+break?*` and it calls `trend_breaks` (series `long-term` (the default),
+`emission`, `met` or `observed`; segments `2` to `4`), returning
+`readings.trend_breaks_reading`. The headless MCP server does the same in
+place: `normet_trend(path, column=...)` on a result table (a decomposition's
+`emi_total` or `met_total`, a normalised table's `normalised`, a raw table's
+target) and `normet_trend_breaks(path, column=...)`, where `column='long-term'`
+(the default) is the separated long-term component and `'emission'` its
+`emi_total`.
 
 ## Performance note
 

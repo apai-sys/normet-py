@@ -185,6 +185,54 @@ class Tools:
         )
         return readings.trend_reading(result, name=name or column)
 
+    def trend_breaks(
+        self,
+        path: str,
+        column: str | None = None,
+        segments: int = 2,
+        n_bootstrap: int = 500,
+        seed: int = 7_654_321,
+        name: str | None = None,
+    ) -> str:
+        """normet.detect_trend_breaks on one column of a result table -- where the
+        trend breaks, if it does, each segment with its own Theil-Sen slope and
+        interval, and the block-bootstrap p of the search over every candidate
+        position. ``column`` names it where it has to; 'long-term' is the
+        emission decomposition's separated long-term component (date_unix plus
+        its base -- the cleaner input, the default), 'emission' its emi_total."""
+        df = self._table(self.path(path))
+        column = column or "long-term"
+        if column == "long-term":
+            for col in ("date_unix", "emi_base"):
+                if col not in df.columns:
+                    raise ValueError(
+                        f"{os.path.basename(path)} has no {col!r} column: it is not an "
+                        "emission decomposition, so it has no separated long-term "
+                        "component; give column=<one it has>"
+                    )
+            vals = df["date_unix"] + df["emi_base"]
+            col_name = "long-term"
+        else:
+            column = "emi_total" if column == "emission" else column
+            if column not in df.columns:
+                raise ValueError(f"{os.path.basename(path)} has no {column!r} column")
+            vals = df[column]
+            col_name = column
+        s = vals.copy()
+        if not isinstance(df.index, pd.DatetimeIndex) and "date" in df.columns:
+            s.index = pd.to_datetime(df["date"], errors="coerce")
+        s.name = col_name
+        from normet import detect_trend_breaks
+
+        result = detect_trend_breaks(
+            s,
+            name=name or col_name,
+            max_segments=int(segments),
+            n_bootstrap=int(n_bootstrap),
+            seed=seed,
+        )
+        return readings.trend_breaks_reading(result, name=name or col_name)
+
     # -- jobs -------------------------------------------------------------------
     @staticmethod
     def _options(**opts: Any) -> list[str]:
