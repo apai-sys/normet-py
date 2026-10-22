@@ -199,6 +199,63 @@ class AnalysePanelMixin(QMainWindow):
         mf.addRow(self.ms_button)
         return box
 
+    def _build_trend_box(self) -> QGroupBox:
+        """The trend test of the decomposition's series, the observed target, or both:
+        runs after each emission decomposition where its tick is on."""
+        box = QGroupBox("Trend test")
+        tf = QFormLayout(box)
+        tf.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        tf.addRow(
+            hint_label(
+                "Mann–Kendall and Theil–Sen on the series, with a block-bootstrap "
+                "correction where its residuals are autocorrelated -- which is which "
+                "p to quote said in the Trend tab."
+            )
+        )
+        self.trend_series = NoWheelComboBox()
+        self.trend_series.addItems(
+            ["emission part (emi_total)", "meteorology part (met_total)", "observed target"]
+        )
+        self.trend_series.setToolTip(
+            "Which series to test. The decomposition's parts need a decomposition "
+            "first; the observed target only the model.\n"
+            "The emission part is the series the whole toolkit exists to trend: what "
+            "weather does not explain."
+        )
+        tf.addRow("Series", self.trend_series)
+        self.tre_seasonal = NoWheelComboBox()
+        self.tre_seasonal.addItems(["auto", "none", "24", "7", "12"])
+        self.tre_seasonal.setToolTip(
+            "Sen's seasonal test pairs by calendar slot (hour 14 with hour 14, ...), "
+            "which is the right test of a record that carries a repeating cycle.\n"
+            "auto: from the record's step (hourly → 24, 30-minute → 48, daily → 7, "
+            "monthly → 12), falling back to the classical test where the record is "
+            "not a whole number of periods.\n"
+            "24 hourly / 7 daily / 12 monthly where auto would guess wrong."
+        )
+        tf.addRow("Seasonal period", self.tre_seasonal)
+        self.tre_n_bootstrap = NoWheelSpinBox()
+        self.tre_n_bootstrap.setRange(100, 20_000)
+        self.tre_n_bootstrap.setValue(1000)
+        tf.addRow("Bootstrap replicates", self.tre_n_bootstrap)
+        self.trend_after = QCheckBox("Run after each emission decomposition")
+        self.trend_after.setChecked(True)
+        self.trend_after.setToolTip(
+            "Each finished emission decomposition starts the test of its emission "
+            "part, in the background, under this box's settings; its tick says which "
+            "series (the emission part here)."
+        )
+        tf.addRow(self.trend_after)
+        self.trend_button = run_button(
+            "▶  Run trend test",
+            "Trend test of the chosen series: Mann–Kendall, Theil–Sen slope and its "
+            "interval, the block-bootstrap correction where the record is "
+            "autocorrelated. Seconds, not minutes.",
+        )
+        self.trend_button.clicked.connect(self._run_trend)
+        tf.addRow(self.trend_button)
+        return box
+
     def _build_pdp_box(self) -> QGroupBox:
         """Step 5: partial-dependence curves for the ticked variables."""
         box = QGroupBox("Partial dependence")

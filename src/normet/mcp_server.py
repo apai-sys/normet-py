@@ -54,7 +54,9 @@ your reasons and how sure you are; the user decides.
   weak, and what would test it further (normet_start_cv).
 - The result: describe what the normalised series and its meteorological part show,
   by year or month as the reading gives them; do not claim a trend or a cause the
-  numbers do not show.
+  numbers do not show. A trend is what normet_trend says (Mann-Kendall, Theil-Sen
+  slope, the block-bootstrap-corrected p where the record is autocorrelated):
+  quote the corrected p it names, not the classical one.
 - A synthetic control: propose the treated unit, the cutoff and the donor pool; judge
   the pre-period fit before reading the effect.
 Quote normet's numbers as the tools give them; do not compute or invent others.
@@ -72,7 +74,9 @@ De-weathering {what} with normet:
    month. Say what they show and where the model is weak. normet_figure draws them.
 4. If the user wants the change split by time scale or by meteorological variable,
    normet_start_decompose (method 'emission' or 'meteorology').
-5. normet_write_report for the run.
+5. If the user asks whether the tested series is increasing or decreasing and how fast,
+   normet_trend on the result table (its emi_total or met_total).
+6. normet_write_report for the run.
 
 Quote numbers only as the tools give them.
 """
@@ -311,6 +315,31 @@ def build_server(tools: Any = None) -> Any:
         columns), 'decomposition', 'scm' (with the `cutoff` it was run with) or
         'cv'."""
         return t.read_result(path, kind, cutoff=cutoff)
+
+    @tool
+    def normet_trend(
+        path: str,
+        column: str | None = None,
+        seasonal: int | None = None,
+        n_bootstrap: int = 1000,
+        seed: int = 7654321,
+        name: str | None = None,
+    ) -> str:
+        """The trend test of one column of a table (a decomposition's emi_total or
+        met_total, a normalised table's normalised, a raw table's target --
+        `column` names it where it has to): Mann-Kendall, Theil-Sen slope with its
+        interval, and the block-bootstrap-corrected interval and p where the record
+        is autocorrelated. `seasonal` is the repeating calendar period in steps of
+        the record (24 hourly, 7 daily, 12 monthly), else leave it out. Run once a
+        table is made; it is not a job."""
+        return t.trend(
+            path,
+            column=column,
+            seasonal=seasonal,
+            n_bootstrap=n_bootstrap,
+            seed=seed,
+            name=name,
+        )
 
     def normet_figure(source: str, kind: str, cutoff: str | None = None, dpi: int = 100) -> Any:
         caption, png = t.figure(source, kind, cutoff=cutoff, dpi=dpi)

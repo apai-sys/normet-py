@@ -279,6 +279,21 @@ def methods_paragraph(info: dict[str, Any], lang: str = "en") -> str | None:
             out.append(
                 f"Partial-dependence curves were computed for {_names(vs, 'en')} ({g} grid points)."
             )
+    if "trend_call" in ran:
+        call = ran["trend_call"]
+        seq = "seasonal (Sen 1968)" if call.get("seasonal_period") else "classical"
+        nm = call.get("series_name") or (call.get("args") or ["the series"])[1]
+        if zh:
+            out.append(
+                f"趋势检验（Mann–Kendall 与 Theil–Sen，残差自相关时以块自助法校正）施加于{nm}，"
+                f"采用{seq}形式。"
+            )
+        else:
+            out.append(
+                f"A Mann-Kendall test with a Theil-Sen slope, corrected by a moving-block "
+                f"bootstrap where the residuals are autocorrelated (normet.trend), was "
+                f"applied to {nm}, in its {seq} form."
+            )
 
     refs = sorted(set(cites)) + (
         REFERENCES["en"] if any(k in ran for k in ("normalise", "deweather")) else []

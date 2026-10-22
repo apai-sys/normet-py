@@ -32,6 +32,7 @@ log = logging.getLogger(__name__)
 VERSION = 1
 SUFFIX = ".normet"
 #: The steps whose result is a table handed back to its handler, in the order they ran.
+#: The trend step keeps its whole result (its banner is of more than its table).
 _STEPS = ("normalise", "decompose", "rolling", "pdp")
 
 
@@ -74,6 +75,12 @@ class SavedResultsMixin(QMainWindow):
             "trained_features": list(self.trained_features),
             "results": {k: v for k, v in self.results.items() if k in _STEPS},
             "multiscale": getattr(self, "_multiscale_raw", None),
+            # The trend test as it ran, not just its table: (result, name, note).
+            "trend": (
+                (self._trend_raw, self._trend_name, self._trend_note)
+                if getattr(self, "_trend_raw", None) is not None
+                else None
+            ),
             # Both methods' decompositions where both ran on this model.
             "decompositions": {
                 method: view[1]
@@ -279,6 +286,13 @@ class SavedResultsMixin(QMainWindow):
                     getattr(self, f"_{step}_done")(res)
                 if bundle.get("multiscale") is not None:
                     self._multiscale_done(bundle["multiscale"])
+                if bundle.get("trend") is not None:
+                    kept = bundle["trend"]
+                    res, name, note = (
+                        (*kept, "") if isinstance(kept, (tuple, list)) else (kept, "", "")
+                    )
+                    self._trend_name, self._trend_note = name or "", note or ""
+                    self._trend_done(res)
             self.command_log.entries = list(bundle.get("commands") or [])
             self._ran = dict(bundle.get("ran") or {})
             self._refresh_command_log()

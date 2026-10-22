@@ -7,6 +7,42 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ## [Unreleased]
 
 ### Added
+- **Trend analysis (`normet.trend`)** — honest trends on autocorrelated
+  environmental records. Three entry points:
+  - `mann_kendall` : Mann-Kendall S with tie correction (Hirsch et al. 1982)
+    and the seasonal variant of Sen (1968) for records that carry a repeating
+    calendar structure (e.g. `seasonal_period=24` for hourly).
+  - `theil_sen` : robust median pair-wise slope with the analytic Sen (1968)
+    95 % interval, reported per day for timestamped series and with a
+    per-year conversion.
+  - `trend` : the combined entry point. Runs both, diagnoses AR(1) serial
+    correlation of the OLS-residual ACF, and -- when it finds the
+    autocorrelation that hourly normalised records almost always have --
+    replaces the slope's error estimate with a moving-block bootstrap
+    (deterministic under `seed`) plus a Wald p-value. The classical
+    Mann-Kendall p-value is always reported *unadjusted* and labelled as
+    such: the result carries an explicit note that it is the anti-conservative
+    one under the detected autocorrelation, so a report can say which number
+    was quoted and why.
+  `res.summary()` returns a tidy two-column frame for reports. Nothing here
+  resamples the weather; it is statistics on a series you already have
+  (typically the emission component from `decompose` or a deweathered
+  `normalised` column). User guide: `guide/examples_trend.md`.
+
+- **GUI: the trend is a step of the window.** The Decompose page gains a
+  *Trend test* box (the series -- the decomposition's emission part, its weather
+  part or the observed target; the seasonal period, `auto` or named; the
+  bootstrap's replicates) and a *Run* button; a finished emission decomposition
+  starts the test of its emission part under the box's settings (`Run after
+  each emission decomposition`, on by default). Its result is a Trend tab: the
+  series with its Theil-Sen line, a traffic-light verdict that says which p
+  stands for the trend, the test's notes and its tidy summary (the tab's light,
+  its CSV export and its command-log entry are the step's own; the Methods
+  paragraph says of the trend what it ran). The window's Assistant gained the
+  `trend` tool (series, seasonal; it runs the step as its button does and
+  returns the reading, `readings.trend_reading`), and the headless MCP server
+  `normet_trend` (a table's column, run in place).
+
 - **GUI: window and figures refined.**
   - *Cycles*: `normet.cycle_profiles` (and `plotting.profile_axes`) draws a
     record's mean by hour of day, day of week and month with 95 % confidence
