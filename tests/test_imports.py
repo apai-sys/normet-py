@@ -35,6 +35,8 @@ def test_top_level_symbols_present():
         "trend",
         "mann_kendall",
         "theil_sen",
+        "detect_trend_breaks",
+        "TrendBreaks",
     }
     missing = must_have - set(nm.__all__)
     assert not missing, f"Missing top-level exports: {sorted(missing)}"

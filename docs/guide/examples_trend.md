@@ -93,6 +93,98 @@ module does not decide which is right for a given record -- that is a
 statement about the data's structure, and a report should say which was
 used.
 
+## When the trend changes: `nm.detect_trend_breaks`
+
+A single slope cannot say what happened on a record whose level or slope
+changes part-way through -- a policy year, a lockdown. Fit the whole record
+with one line and the change is diluted into a muddier trend: the pre-event
+segment drags the slope toward zero, the post-event segment drags it up,
+and either significance statement or the slope itself is a statement about
+*both* regimes mixed together. `detect_trend_breaks` asks the question
+directly: *where does the regime change, and what are the slopes of the
+regimes?*
+
+```python
+res = nm.detect_trend_breaks(
+    df_emi["emi_total"],                       # or any Series/DataFrame + value_col
+    name="MY1 NO2 emission",
+    max_segments=2,                            # one split (the default)
+    # min_segment=None  -> the longer of 28 and 5 % of the record
+    # alpha=0.05, n_bootstrap=500, seed=7654321
+)
+print(res)
+# MY1 NO2 emission: n=5793 | 2 segments | break at 2020-03-25 22:00 | SSE -39.9%
+# | seg1 slope 0.0216 u/m3/day | seg2 slope 0.0229 u/m3/day | p=0.002
+
+res.summary()   # one row per segment: start, end, n, slope, CI (+ per-year)
+```
+
+On MY1's emission part (January-August 2020, the record that holds the
+UK lockdown) the detector puts the break at **2020-03-25 22:00**, two days
+after the 23 March lockdown order, with the SSE falling 39.9 % when the
+record is allowed one break and the block-bootstrap p at 0.002. The two
+regimes split on exactly the question of interest: the pre-lockdown
+segment's 95 % CI is `[-0.0019, 0.0446]` (straddling 0, so not
+significantly trending), the post-lockdown segment's is `[0.0171,
+0.0286]` (entirely positive). A single slope for the whole record could
+not have made that distinction -- the point of the segmentation is that
+the two regimes carry their own, separately honest, intervals.
+
+### How the split is found, and why the gate exists
+
+The search is a full O(n) grid: the two-segment OLS residual sum of
+squares of *every* candidate position is O(1) from prefix sums, so the
+record is scanned once, and the split that most reduces the SSE wins.
+A grid searched over `n-1` positions, however, always finds *something* --
+pure noise contains a split that cuts its SSE by some amount -- so the
+candidate split passes two gates before it is reported:
+
+1. **BIC, per round.** Each split must beat the BIC of the current fit, so
+   the extra slope + intercept earn their keep. This is the *stopping*
+   rule for `max_segments > 2` (greedy forward segmentation).
+2. **Block-bootstrap p for the search.** The observed SSE reduction of the
+   final fit over the single-segment fit is compared with the *same
+   search re-run on every moved-block resample* of the series. The
+   resulting p is the probability that a record without a break --
+   searched exactly as hard, with its autocorrelation preserved by the
+   blocks -- produces a reduction at least that large. It is the
+   multiple-testing-corrected, autocorrelation-aware test; it is why a
+   grid search can be honest.
+
+If either gate fails, the series is reported as **one regime** and
+`summary()` has a single row; the search is not hidden -- `best_break`,
+`best_split_pct` and `notes` keep *where it wanted to cut* and *what the
+p was*, so a report can say "a cut at X lowers the SSE by Y % but the
+block-bootstrap p is Z, so it is not claimed as a break."
+
+| Quantity | Note |
+|---|---|
+| `starts`, `ends` | Index value of each segment's first and last point (timestamps for a datetime record, positions otherwise). The break is `starts[1]` -- the first point of the new regime. |
+| `segments[i].slope` | Theil-Sen per segment, in the same units as `theil_sen` (per day / per step, with `slope_per_year` when timestamps are present). Robust to the spikes a pollution event leaves inside a segment. |
+| `best_break`, `best_split_pct` | The first round's best candidate and its SSE reduction, recorded *even when the gates rejected it*. |
+| `sse_single`, `sse_segmented`, `improvement_pct` | The single- and segmented-fit residuals and their relative reduction. |
+| `bic_single`, `bic_segmented` | The BICs the gate compared (3 parameters per segment: slope, intercept, noise variance). |
+| `p_value`, `significant` | The block-bootstrap p and whether it fell below `alpha` (default 0.05). |
+| `min_segment` | Minimum points per segment (default: the longer of 28 and 5 % of the record). Bars splits pinned to an edge and keeps each piece long enough for a Theil-Sen to mean something. |
+
+The per-segment CIs are Sen intervals: compare adjacent segments against
+*their* intervals (here: the pre-lockdown CI straddles 0, the
+post-lockdown interval is entirely positive) rather than re-testing the
+split -- the split itself is what `p_value` certifies.
+
+### Performance
+
+The search is O(n) and the bootstrap O(n · n_bootstrap) with an O(n)
+search inside each replicate: MY1's 5,793-hour record runs in about a
+second at the default 500 replicates, and three years of hourly
+(26,280 points) takes about 20 seconds (measured). The block length uses
+the same heuristic as `nm.trend` (longer of `3 n^(1/3)` and a calendar
+week for sub-daily records). The per-segment Theil-Sen is the same
+median-of-pairs as everywhere else, so a *very* long single segment costs
+as much as `nm.theil_sen` would on the whole record; for multi-year
+hourly records prefer `max_segments=2` and a smaller record window when
+speed matters.
+
 ## In the window and the Assistant
 
 The window runs the test as one of its steps. The **Trend test** box on the
