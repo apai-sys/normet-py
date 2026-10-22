@@ -62,6 +62,7 @@
 | `nm.pdp` | Partial dependence plots |
 | `nm.modStats` | Model performance metrics (R², RMSE, MAE, …) |
 | `nm.trend` / `nm.mann_kendall` / `nm.theil_sen` | Trend tests with the block-bootstrap correction for autocorrelated records |
+| `nm.crps_from_quantiles` / `nm.crps_from_samples` / `nm.pinball_loss` / `nm.crps_observed` | Probabilistic skill scores (Gneiting & Raftery 2005): CRPS for quantile and ensemble forecasts, the pinball loss, and a point forecast's CRPS reference |
 | `nm.detect_events` / `nm.anomaly_scores` | Event detection on normalised residuals |
 | `nm.normalise_plot` / `nm.decomposition_stack` / `nm.scm_dashboard` | Plotting helpers for normalisation, decomposition, and SCM results |
 | `nm.bayesian_scm` / `nm.plot_bayesian_scm` | Bayesian (PyMC) posterior SCM with credible bands — **optional**, needs `pymc` + `arviz` |
