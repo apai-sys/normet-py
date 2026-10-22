@@ -678,7 +678,8 @@ Service); HYSPLIT (NOAA ARL).
   \item \tab{Normalise} and compare the normalised series with the observed
         (Chapter~\ref{ch:normalise}).
   \item \tab{Decompose}, \tab{Rolling} and \tab{Partial dependence} as the question
-        needs (Chapters~\ref{ch:decompose}--\ref{ch:pdp}).
+        needs (Chapters~\ref{ch:decompose}--\ref{ch:pdp}); the \tab{Trend} test says
+        whether the series the decomposition just drew is rising, falling or flat.
   \item \tab{Keep the result:} export the tables, an HTML report and the session as a
         script (Chapter~\ref{ch:export}).
 \end{enumerate}
@@ -711,7 +712,9 @@ Its pages, and what each holds (a page's first box goes untitled, the tab naming
         quantile band (Chapter~\ref{ch:normalise}).
   \item[Decompose] Emission or meteorology; for meteorology the attribution and the
         groups (Chapter~\ref{ch:decompose}). Under it \emph{Multi-scale decomposition}:
-        three window widths (Section~\ref{sec:multiscaleui}).
+        three window widths (Section~\ref{sec:multiscaleui}); and \emph{Trend}: the
+        series to test (a part of the decomposition, or the observed target), its
+        seasonal period and how many bootstrap resamples.
   \item[Rolling] Window, step and samples (Section~\ref{sec:rollingui}).
   \item[PDP] Variables and grid points (Chapter~\ref{ch:pdp}).
 \end{description}
@@ -730,6 +733,7 @@ Normalise   & observed and normalised series, the quantile band, their cycles & 
 Decompose   & the emission or meteorological components, the cycles & Run decomposition \\
 Rolling     & the mean of the rolling windows, with their spread & Run rolling normalisation \\
 Multi-scale & the scale-space cascade and the energy in each band & Multi-scale \\
+Trend       & the tested series, its Theil--Sen line, the two tests and the p value & Trend test \\
 PDP         & one partial-dependence panel per variable & Compute PDP \\
 \bottomrule
 \end{tabular}
@@ -781,6 +785,7 @@ Run normalisation     & a model, one variable to resample & \code{normalise} \\
 Run decomposition     & a model                  & \code{decompose} \\
 Run rolling normalisation & an AutoML model      & \code{rolling} \\
 Multi-scale decomposition & an AutoML model, a normalisation & \code{rolling} $\times 3$ \\
+Trend test          & an AutoML model (a decomposition, where it tests one) & \code{trend} \\
 Compute PDP           & an AutoML model, one variable ticked & \code{pdp} \\
 \bottomrule
 \end{tabular}
@@ -802,8 +807,8 @@ multi-scale run before the normalisation --- is answered by a \emph{notice} abov
 dialog: it says what is missing and carries the step that answers it on a button
 (\emph{Train model}, \emph{Run normalisation}); \(\times\) puts it away, and it goes by itself
 once the step has been taken. At the right of the status bar a light per step --- Data,
-Model, Normalised, Decomposed, Rolling, Multi-scale, PDP --- turns green when that step
-has a result.
+Model, Normalised, Decomposed, Rolling, Multi-scale, PDP, Trend --- turns green when
+that step has a result.
 
 \section{Menus and shortcuts}
 \begin{center}\small
