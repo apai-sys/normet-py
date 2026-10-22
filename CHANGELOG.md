@@ -43,6 +43,32 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   returns the reading, `readings.trend_reading`), and the headless MCP server
   `normet_trend` (a table's column, run in place).
 
+- **Skill scores: CRPS and the pinball loss** (`normet.analysis.verification`,
+  exported at the top level). Point forecasts are verified by `modStats`, but a
+  comparison with a baseline needs the spread's score. `pinball_loss` is the
+  quantile loss at one level (`max(q r, (q-1) r)`, half the MAE at `q=0.5`);
+  `crps_from_quantiles` scores a quantile forecast as the exact integral of the
+  CDF's squared distance from the observation's -- the continuous form the
+  pinball sum is a numerical rule for (Gneiting and Raftery 2005) -- and reads
+  `normalise`'s `qNNN` columns (or the sample table) directly; `crps_from_samples`
+  scores an ensemble, each sample at its rank; `crps_observed` is the point
+  forecast's reference -- its MAE read as a normal's own MAE and returned as
+  the sigma that would carry it, so the MAE times `sqrt(pi/2)` (a point mass's
+  own CRPS is its MAE exactly: the factor is the normal-scale convention, not
+  the degenerate integral) -- so model and baseline read on one scale.
+  Non-finite rows are dropped and rows meaned, as the package scores them.
+- **Notebook 06: the skill benchmark, on the bundled MY1 NO2 record.**
+  The lightgbm model trained through `do_all` on a `month_ts` split keeps
+  its quantiles (`return_quantiles`), so its spread is scored as the CRPS of
+  those five levels; persistence and three climatologies are scored as point
+  forecasts' references, and a Chronos-2 zero-shot row -- where the
+  `foundation` extra is installed -- joins them. The zero-shot model has no
+  forecast for its leading context (those rows carry the observed values),
+  and a third of the held-out hours fall there, so the final table is
+  re-scored on the hours the zero-shot model actually predicts and every
+  method is read on that one set: how many hours that excludes, and where the
+  window starts, is printed above the table rather than footnoted. The
+  expensive calls are memoised with `nm.make_memory`.
 - **GUI: window and figures refined.**
   - *Cycles*: `normet.cycle_profiles` (and `plotting.profile_axes`) draws a
     record's mean by hour of day, day of week and month with 95 % confidence
