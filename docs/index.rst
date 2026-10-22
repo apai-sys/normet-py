@@ -23,6 +23,7 @@ A Python toolbox for air-quality and environmental time-series analysis with:
    guide/examples_feature_engineering
    guide/examples_decomposition
    guide/examples_trend
+   guide/examples_uncertainty
    guide/examples_scm_guide
    guide/examples_multisite
    guide/examples_caching
