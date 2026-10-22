@@ -205,6 +205,16 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   trajectory window each had their own copy, identical down to the margins.
 
 ### Fixed
+- **`do_all(backend="chronos-2")` refused the meteorology its own error
+  message tells you to pass.** The shared `covariates must be provided` guard
+  ran before the backend dispatch, yet the zero-shot branch documents its
+  weather as passable through `variables_resample` instead of `covariates`
+  (nothing is trained); a call in exactly that documented shape died at the
+  guard before reaching the check that owns the error. The branch now
+  dispatches first, and hands `prepare_data` the resampled columns (the union
+  with any named covariates) so the frame carries what the de-weathering
+  conditions on -- the covariates-only and both-provided calls prepare the
+  same columns as before.
 - **Packaged app: Data → Find stations failed with "'rdata' is required but
   not installed"**. The data downloaders (requests, cdsapi, rdata) are
   imported by name at run time, which PyInstaller cannot see, and the build

@@ -768,6 +768,80 @@ def test_do_all_zero_shot_needs_meteorological_covariates():
         do_all(df, target="PM2.5", backend="chronos-2", covariates=[])
 
 
+def test_do_all_zero_shot_allows_the_meteorology_via_variables_resample(monkeypatch):
+    """The covariates guard must not fire for the zero-shot backend.
+
+    `_do_all_zero_shot` documents the meteorology as passable through
+    `variables_resample` instead of `covariates` (nothing is trained), but the
+    shared `covariates must be provided` guard sits before the branch dispatch
+    and rejected exactly that documented form -- the call never reached the
+    zero-shot check that owns the error. The branch is stubbed so the test
+    needs no checkpoint: only the dispatch matters here.
+    """
+    from normet import do_all
+
+    do_all_mod = importlib.import_module("normet.pipeline.do_all")
+    seen = []
+
+    def _fake_zero_shot(df, cfg):
+        seen.append(cfg)
+        return (None, None, None)
+
+    monkeypatch.setattr(do_all_mod, "_do_all_zero_shot", _fake_zero_shot)
+    df = pd.DataFrame(
+        {
+            "date": pd.date_range("2024-01-01", periods=48, freq="h"),
+            "PM2.5": range(48),
+            "t2m": 10.0,
+            "blh": 500.0,
+        }
+    )
+    do_all(
+        df,
+        target="PM2.5",
+        backend="chronos-2",
+        variables_resample=["t2m", "blh"],
+        n_samples=2,
+    )
+    assert len(seen) == 1
+    assert seen[0].variables_resample == ["t2m", "blh"]
+
+
+@needs_chronos
+def test_do_all_zero_shot_keeps_the_meteorology_in_the_prepared_frame(chronos2_pipeline):
+    """A variables_resample-only call must still carry the weather into the frame.
+
+    prepare keeps exactly the columns its covariates list names, so a call that
+    names the meteorology through variables_resample alone used to hand the
+    de-weathering a frame with no weather in it; the prepared frame must carry
+    the resampled columns for the condition to mean anything.
+    """
+    from normet import do_all
+
+    n = 900
+    rng = np.random.default_rng(3)
+    dates = pd.date_range("2024-01-01", periods=n, freq="h")
+    t = np.arange(n)
+    blh = 800 + 400 * np.sin(2 * np.pi * t / 24) + rng.normal(0, 40, n)
+    t2m = 10 + 8 * np.sin(2 * np.pi * t / (24 * 30)) + rng.normal(0, 1, n)
+    pm = np.clip(20 - 0.01 * blh + 0.2 * (t2m - t2m.mean()) ** 2 + rng.normal(0, 2, n), 0, None)
+    df = pd.DataFrame({"date": dates, "PM2.5": pm, "t2m": t2m, "blh": blh})
+
+    out, model, df_prep = do_all(
+        df,
+        target="PM2.5",
+        backend="chronos-2",
+        variables_resample=["t2m", "blh"],
+        n_samples=2,
+        model_config={"context_length": 512, "prediction_length": 48, "device": "cpu"},
+    )
+
+    assert {"t2m", "blh"} <= set(df_prep.columns)
+    assert {"observed", "normalised"} <= set(out.columns)
+    assert np.allclose(out["normalised"][:512], out["observed"][:512])
+    assert not np.allclose(out["normalised"][512:], out["observed"][512:])
+
+
 @needs_chronos
 def test_embed_multisite_returns_one_vector_per_site(chronos2_pipeline):
     """The long-to-wide pivot is what connects multi-site frames to the embedder.

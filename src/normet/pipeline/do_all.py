@@ -87,11 +87,16 @@ def _do_all_zero_shot(
             "pass variables_resample (or covariates), otherwise the run is a plain "
             "forecast rather than a de-weathering"
         )
+    # prepare keeps the columns its covariates list names: a call that names the
+    # meteorology through variables_resample alone would otherwise leave none of
+    # it in the frame the de-weathering conditions on. The union leaves the
+    # covariates-only and covariates-plus-identical-resample calls unchanged.
+    kept = covariates + [c for c in met if c not in covariates]
 
     df_prep = prepare_data(
         df,
         target=cfg.target,
-        covariates=covariates,
+        covariates=kept,
         split_method=cfg.split_method,
         train_fraction=cfg.train_fraction,
         seed=cfg.seed,
@@ -226,11 +231,15 @@ def do_all(
         _cfg.n_samples,
     )
 
-    if _cfg.covariates is None:
-        raise ValueError("covariates must be provided")
-
+    # The zero-shot branch dispatches before the covariates guard: it names
+    # its meteorology through variables_resample (nothing is trained), it owns
+    # the error when neither names a weather source, and the guard's raise is
+    # what tells mypy _cfg.covariates is a list on the AutoML path below.
     if _cfg.backend == CHRONOS_BACKEND:
         return _do_all_zero_shot(df, _cfg)
+
+    if _cfg.covariates is None:
+        raise ValueError("covariates must be provided")
     df_prep = prepare_data(
         df,
         target=_cfg.target,
