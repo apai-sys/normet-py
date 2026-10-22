@@ -741,6 +741,10 @@ def test_full_automatic_carries_a_lazy_model_through_the_window(win, qapp, monke
     win.decom_samples.setValue(5)
     dock = win.assistant
     dock.auto_btn.setChecked(True)
+    # This test checks the full-automatic chain (train, normalise, decompose); the
+    # window's own trend follow-up after a decomposition (see test_gui_trend) is not
+    # part of CHAIN, so it is switched off here.
+    win.trend_after.setChecked(False)
     step = {
         "data": llm.Call("d", "inspect_data", {}),
         "setup": llm.Call(
@@ -1043,6 +1047,11 @@ def test_tools_are_offered_as_the_window_holds_them(win, qapp):
     win.load_example()
     names = {t.name for t in tools.tools()}
     assert {"train", "inspect_data", "polar_plot"} <= names and "normalise" not in names
+    # The trend needs a decomposition to read: not offered until the window holds one.
+    assert "trend" not in names and "decompose first" in tools.not_offered("trend")
+    win.results["decompose"] = win.df_raw.iloc[:3]  # a decomposition's table, for the gate
+    assert "trend" in {t.name for t in tools.tools()}
+    del win.results["decompose"]
     described = {t.name: t for t in tools.tools()}["propose_setup"].schema["properties"]
     assert "0 to 1" in described["confidence"]["description"]
     assert "tool of yours" in tools.api_help("train")

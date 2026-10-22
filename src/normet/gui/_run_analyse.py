@@ -258,6 +258,127 @@ class AnalyseRunMixin(QMainWindow):
         self.statusBar().showMessage("Decomposition done.")
         self._log_history("decompose", method)
         log.info("Decomposition finished")
+        # The question a decomposition invites next: does its series trend? The box's
+        # tick says so; the runner's own finished slot starts it, because this one
+        # ends before the runner knows it is free.
+        self._trend_wanted = (
+            self.trend_after.isChecked() and method == "emission" and "emi_total" in result.columns
+        )
+        if getattr(self, "_restoring", False):
+            self._trend_wanted = False
+
+    def _trend_resolve(self) -> tuple[pd.DataFrame, str, str, int | None, str] | None:
+        """The box's choice as a testable series: its table, the column, a name and
+        the seasonal period (the auto's, spoken when it fell back to the
+        classical). Nothing the window can hold gives None; its why says so on
+        screen."""
+        target = self.target_combo.currentText()
+        choice = self.trend_series.currentText()
+        frame, column = self.df_prep, target
+        if not choice.startswith("observed"):
+            res = self.results.get("decompose")
+            if res is None:
+                self.notify(
+                    "Run the decomposition first: the trend is tested on its series.",
+                    key="need-decompose",
+                )
+                return None
+            column = "emi_total" if choice.startswith("emission") else "met_total"
+            if column not in res.columns:
+                self.notify(
+                    f"The decomposition has no {column!r} in it: the emission "
+                    "part needs the emission method (on chronos-2, a flaml or "
+                    "lightgbm model), the weather part the meteorology one.",
+                    key="need-decompose",
+                )
+                return None
+            frame = res
+        if not isinstance(frame, pd.DataFrame) or column not in frame.columns:
+            self.notify(
+                f"The table the window holds has no {column!r}: train again, or "
+                "test the decomposition's series.",
+                key="need-model",
+            )
+            return None
+        if frame.dropna(subset=[column]).shape[0] < 15:
+            self.notify(
+                "Fewer than 15 values in the series: the trend test needs more.",
+                key="need-trend",
+            )
+            return None
+        name = (
+            f"{target} (observed)"
+            if choice.startswith("observed")
+            else f"{target} — emission part"
+            if column == "emi_total"
+            else f"{target} — weather part"
+        )
+        period, note = None, ""
+        choice_seasonal = self.tre_seasonal.currentText()
+        if choice_seasonal == "auto":
+            from . import _trend
+
+            index = _trend._datetime_index(frame)
+            if index is not None:
+                n = int(frame[column].notna().sum())
+                period, note = _trend.auto_seasonal(index, n)
+        elif choice_seasonal != "none":
+            period = int(choice_seasonal)
+        return frame, column, name, period, note
+
+    def _run_trend(self) -> None:
+        if not self._check_model():
+            return
+        got = self._trend_resolve()
+        if got is None:
+            return
+        frame, column, name, period, note = got
+        from . import _trend
+
+        self._trend_note = note
+        self._trend_name = name
+        self._trend_table = (frame, column)
+        if not self.runner.submit(
+            "trend",
+            _trend.trend_call,
+            self._trend_done,
+            self._show_error,
+            frame,
+            column,
+            series_name=name,
+            seasonal_period=period,
+            n_bootstrap=self.tre_n_bootstrap.value(),
+            seed=self.seed_spin.value(),
+        ):
+            self._trend_note = ""
+
+    def _trend_done(self, result: pd.DataFrame) -> None:
+        from . import _trend
+
+        self._trend_wanted = False
+        self.results["trend"] = result.summary()  # the Trend tab's light, export and session
+        summary = result.summary()
+        frame, column = self._trend_table or (None, "")
+        try:
+            series = _trend.trend_series(frame, column) if frame is not None else None
+        except ValueError:
+            series = None
+        self._trend_series = series
+        self._trend_raw = result
+        verdict = _trend.trend_verdict(result, self._trend_name or column)
+        lines = ([self._trend_note] if self._trend_note else []) + list(result.notes)
+        rows = [list(r) for r in summary.itertuples(index=False, name=None)]
+        self.tab_trend.show_result(
+            _trend.trend_fig(series, result) if series is not None else None,
+            verdict=verdict,
+            lines=lines,
+            header=["metric", "value"],
+            rows=rows,
+        )
+        self.tabs.setCurrentWidget(self.tab_trend)
+        self.statusBar().showMessage("Trend test done.")
+        self._log_history("trend", self._trend_name)
+        log.info("Trend test finished (%s)", self._trend_name)
 
     def _run_rolling(self) -> None:
         if not self._check_model():

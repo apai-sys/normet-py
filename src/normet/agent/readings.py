@@ -427,3 +427,61 @@ def cv_reading(scores: pd.DataFrame) -> str:
         means = ", ".join(f"{c} {num(df[c].mean())}" for c in numeric if c not in ("fold",))
         lines += ["", f"Means over the folds: {means}."]
     return "\n".join(lines)
+
+
+def trend_reading(res: Any, name: str = "series") -> str:
+    """A trend test on a series (normet.trend result): its direction and the
+    Mann-Kendall test, the slope with its interval, and -- where the record is
+    autocorrelated -- the block-bootstrap interval and Wald p, which is the one
+    to quote (the classical MK p is anti-conservative there and says so)."""
+    t = res.test
+    s = res.slope
+    unit = "per day" if s.time_unit == "day" else "per step"
+    rows = [
+        ["series", res.name],
+        ["rows used", res.n],
+    ]
+    if res.n_dropped:
+        rows.append(["missing dropped", res.n_dropped])
+    rows += [
+        ["direction (5%)", t.direction],
+        ["Mann-Kendall S", res.test.S],
+        ["MK z", num(t.z, 3)],
+        ["MK p (two-sided, classical)", num(t.p, 4)],
+        [f"slope ({unit})", num(s.slope, 4)],
+        [f"slope 95% CI ({unit})", f"[{num(s.ci_low, 4)}, {num(s.ci_high, 4)}]"],
+    ]
+    if s.slope_per_year is not None:
+        rows.append(["slope per year", num(s.slope_per_year, 4)])
+    rows += [
+        ["AR(1) residual acf", num(res.ar1_acf, 3)],
+        ["AR(1) p", num(res.ar1_p, 4)],
+    ]
+    if res.ar_autocorrelated:
+        if res.boot_slope_se is not None:
+            rows += [
+                ["bootstrap SE (block)", num(res.boot_slope_se, 4)],
+                [
+                    f"bootstrap 95% CI ({unit})",
+                    f"[{num(res.boot_ci_low, 4)}, {num(res.boot_ci_high, 4)}]",
+                ],
+                ["p (Wald on block bootstrap)", num(res.p_wald_boot, 4)],
+                ["block length", res.block_length],
+                ["bootstrap replicates", res.n_bootstrap],
+            ]
+            rows.append(
+                [
+                    "quote",
+                    f"{res.name}: {t.direction} at 5%, slope {num(s.slope, 4)} {unit} "
+                    f"(bootstrap CI [{num(res.boot_ci_low, 4)}, {num(res.boot_ci_high, 4)}], "
+                    f"p_wald {num(res.p_wald_boot, 4)})",
+                ]
+            )
+        else:
+            rows.append(
+                ["quote", "AR(1) detected but the block bootstrap was unavailable — see the notes"]
+            )
+    lines = [f"Trend test on {name} (normet.trend):", ""]
+    lines.append(table(["", "value"], rows))
+    lines += ["", *res.notes]
+    return "\n".join(lines)
