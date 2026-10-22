@@ -209,18 +209,26 @@ class AnalysePanelMixin(QMainWindow):
             hint_label(
                 "Mann–Kendall and Theil–Sen on the series, with a block-bootstrap "
                 "correction where its residuals are autocorrelated -- which is which "
-                "p to quote said in the Trend tab."
+                "p to quote said in the Trend tab. With more than one segment, a "
+                "segmented fit instead: where the trend breaks, if it does."
             )
         )
         self.trend_series = NoWheelComboBox()
         self.trend_series.addItems(
-            ["emission part (emi_total)", "meteorology part (met_total)", "observed target"]
+            [
+                "emission part (emi_total)",
+                "long-term trend (separated)",
+                "meteorology part (met_total)",
+                "observed target",
+            ]
         )
         self.trend_series.setToolTip(
             "Which series to test. The decomposition's parts need a decomposition "
             "first; the observed target only the model.\n"
             "The emission part is the series the whole toolkit exists to trend: what "
-            "weather does not explain."
+            "weather does not explain. The long-term trend is the separated part of "
+            "it: the recurring calendar cycles already taken out, so a cleaner fit -- "
+            "the series the decomposition's Trend (long-term) panel draws."
         )
         tf.addRow("Series", self.trend_series)
         self.tre_seasonal = NoWheelComboBox()
@@ -234,6 +242,20 @@ class AnalysePanelMixin(QMainWindow):
             "24 hourly / 7 daily / 12 monthly where auto would guess wrong."
         )
         tf.addRow("Seasonal period", self.tre_seasonal)
+        self.tre_segments = NoWheelSpinBox()
+        self.tre_segments.setRange(1, 4)
+        self.tre_segments.setValue(1)
+        self.tre_segments.setToolTip(
+            "One segment: the single-slope test (Mann–Kendall, Theil-Sen).\n"
+            "Two or more: a segmented fit -- the record is split where the trend "
+            "breaks, if it breaks, each segment reported with its own slope and "
+            "interval; the break's p is the block bootstrap's, over the search.\n"
+            "The fit runs on the Series chosen above: the long-term trend is the "
+            "cleaner input (the cycles are in their own components), the emission "
+            "part it for the whole de-weathered signal. Raising this moves a "
+            "still-default emission-part choice to the long-term trend."
+        )
+        tf.addRow("Segments", self.tre_segments)
         self.tre_n_bootstrap = NoWheelSpinBox()
         self.tre_n_bootstrap.setRange(100, 20_000)
         self.tre_n_bootstrap.setValue(1000)
@@ -242,19 +264,30 @@ class AnalysePanelMixin(QMainWindow):
         self.trend_after.setChecked(True)
         self.trend_after.setToolTip(
             "Each finished emission decomposition starts the test of its emission "
-            "part, in the background, under this box's settings; its tick says which "
-            "series (the emission part here)."
+            "part, in the background, under this box's settings; the Segments row "
+            "says whether it is the single-slope test or the segmented fit."
         )
         tf.addRow(self.trend_after)
         self.trend_button = run_button(
             "▶  Run trend test",
-            "Trend test of the chosen series: Mann–Kendall, Theil–Sen slope and its "
-            "interval, the block-bootstrap correction where the record is "
-            "autocorrelated. Seconds, not minutes.",
+            "One segment: Mann–Kendall, Theil–Sen slope and its interval, the "
+            "block-bootstrap correction where the record is autocorrelated.\n"
+            "Two or more: the segmented fit -- where the trend breaks, each segment "
+            "with its own slope and interval. Seconds, not minutes.",
         )
         self.trend_button.clicked.connect(self._run_trend)
+        self.tre_segments.valueChanged.connect(self._trend_segments_changed)
         tf.addRow(self.trend_button)
         return box
+
+    def _trend_segments_changed(self, value: int) -> None:
+        """Going segmented moves the default emission-part choice to its separated
+        long-term trend: with the cycles in their own component columns, the
+        segmentation is cleaner there (the record can go back; the long-term one
+        stays until the analyst chooses otherwise). It fires on a change only,
+        never at the box's build."""
+        if value > 1 and self.trend_series.currentText().startswith("emission"):
+            self.trend_series.setCurrentText("long-term trend (separated)")
 
     def _build_pdp_box(self) -> QGroupBox:
         """Step 5: partial-dependence curves for the ticked variables."""

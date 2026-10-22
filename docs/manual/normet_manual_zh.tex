@@ -554,7 +554,8 @@ HYSPLIT（NOAA ARL）。
         （第\ref{ch:train}章）
   \item \tab{归一化}，比较归一化序列与观测序列（第\ref{ch:normalise}章）。
   \item 按问题需要进行\tab{分解}、\tab{滚动}和\tab{部分依赖}
-        （第\ref{ch:decompose}--\ref{ch:pdp}章）。
+        （第\ref{ch:decompose}--\ref{ch:pdp}章）；\tab{趋势}检验回答分解刚画出的
+        序列是在升、在降还是平的（第~\ref{sec:trend}~节）。
   \item \tab{保存结果：}导出表格、HTML 报告，并把会话保存为脚本（第\ref{ch:export}章）。
 \end{enumerate}
 
@@ -578,7 +579,8 @@ HYSPLIT（NOAA ARL）。
         则换成设备和微调（第\ref{ch:train}章）。
   \item[归一化] 重采样的变量、样本数、CPU 核心数和分位数带（第\ref{ch:normalise}章）。
   \item[分解] 排放或气象；气象分解还有归因方式和分组（第\ref{ch:decompose}章）。其下是
-        \emph{多尺度分解}：三种窗口宽度（第~\ref{sec:multiscaleui}~节）。
+        \emph{多尺度分解}：三种窗口宽度（第~\ref{sec:multiscaleui}~节）；其下还有\emph{趋势}：
+        要检验的序列（分解的分量或观测目标）、季节周期和自助法重采样次数。
   \item[滚动] 窗口、步长和样本数（第~\ref{sec:rollingui}~节）。
   \item[PDP] 变量和网格点数（第\ref{ch:pdp}章）。
 \end{description}
@@ -597,6 +599,7 @@ HYSPLIT（NOAA ARL）。
 分解     & 排放分量或气象分量，以及周期 & 运行分解 \\
 滚动     & 各滚动窗口的均值及其离散度 & 运行滚动归一化 \\
 多尺度   & 尺度空间级联和各频带的能量 & 多尺度 \\
+趋势     & 被检验的序列及其 Theil--Sen 直线，或其各段折线与断点、评估结论和 p 值 & 趋势检验 \\
 PDP      & 每个变量一幅部分依赖图 & 计算 PDP \\
 \bottomrule
 \end{tabular}
@@ -639,6 +642,7 @@ PDP      & 每个变量一幅部分依赖图 & 计算 PDP \\
 运行分解              & 一个模型                 & \code{decompose} \\
 运行滚动归一化        & 一个 AutoML 模型         & \code{rolling} \\
 多尺度分解            & 一个 AutoML 模型，一次归一化 & \code{rolling} $\times 3$ \\
+趋势检验              & 一个 AutoML 模型（有分解时检验分解的序列） & \code{trend}（1 段）/\code{detect\_trend\_breaks}（更多） \\
 计算 PDP              & 一个 AutoML 模型，至少勾选一个变量 & \code{pdp} \\
 \bottomrule
 \end{tabular}
@@ -653,7 +657,7 @@ FLAML 的时间预算——进度条随之推进，状态栏给出完成的比�
 在前提还不具备时要求运行某一步——模型还没训练就归一化，归一化之前就运行多尺度——窗口不弹
 对话框，而是在结果上方显示一条\emph{通知}：说明缺什么，并把能解决它的那一步放在按钮上
 （\emph{训练模型}、\emph{运行归一化}）；\(\times\) 可以关掉它，那一步完成后它也会自行消失。
-状态栏右侧每一步有一盏灯——数据、模型、归一化、分解、滚动、多尺度、PDP——那一步有了结果就
+状态栏右侧每一步有一盏灯——数据、模型、归一化、分解、滚动、多尺度、PDP、趋势——那一步有了结果就
 变绿。
 
 \section{菜单和快捷键}
@@ -875,6 +879,37 @@ $\sigma = 16.79$~\ugm{}）按精确 Shapley 值（16 个联盟）分摊到四个
 分解在顺序归因下运行 $k+1$ 次归一化，在 Shapley 归因下运行 $2^k$ 次，每次\emph{样本数}次
 抽样，所以开销随变量数迅速增长。十个变量用 Shapley 就是 1024 次归一化：请分组。与归一化
 不同，气象分解总是重采样训练用到的每一个气象变量；它不跟随\tab{归一化}页上的列表。
+
+\section{趋势}\label{sec:trend}
+分解画完的序列会引出一个问题：它是在升、在降还是平的？这个上升是真实的吗？\emph{分解}一栏下的
+\emph{趋势检验}方框对所选序列运行 Mann--Kendall 和 Theil--Sen 检验——当记录带有修正所针对的自相关
+（MY1 的排放分量：AR(1) 残差自相关 0.94）时，用块自助法代替斜率的经典误差棒。只要勾着
+\emph{每次排放分解后运行}，每次排放分解结束时它还会再运行一次。
+
+\emph{序列}指明检验哪一条：分解的排放分量（默认：气象解释不了的那部分）、\emph{分离出的长期
+趋势}——即第~\ref{sec:emission}~节画出、周期性已各自分离的长期分量，是更干净的趋势检验输入——气象分量，
+或观测目标本身。\emph{段数}指明分几段：1 段（默认）是上面这条单段检验；2～4 段则改运行
+\emph{分段拟合}——即对所选序列运行 \code{detect\_trend\_breaks}。它在趋势中断处切分序列（若果中断），
+每段各给一条 Theil--Sen 斜率及其区间，断点仅在两道门槛下才成立：BIC 须改善，且最终拟合相对单段的
+SSE 改善必须胜过把同一搜索在块自助法重采样上重跑（要引用的 p）。任一门槛不通过的记录按单段报告，
+最优候选切点及其 p 被保留下来，标签页据此说明搜索看了哪里。把\emph{段数}从 1 抬高时，仍为默认的
+\emph{排放分量}会自动改选长期趋势（更干净的输入）；选择保留，除非另行更改。
+
+单段检验在\tab{Trend}标签页（图~\ref{fig:trend}）显示序列及其 Theil--Sen 直线，以及一句评估结论，
+说明两个 p 值该引用哪一个：经典的 Mann--Kendall p 值在自相关记录上是偏乐观的那一个，而这条记录正是自相关的。
+两段以上则显示序列及其\emph{分段}Theil--Sen 直线和一个标记出的断点，一句评估结论说明搜索是否找到断点
+（在哪里、以及要引用的块自助法 p），或门槛拒绝了断点；表格列出每段一行（起、止、n、斜率、95\,\% 区间、
+每年），并有与单段运行相同的 CSV 导出和命令日志条目（脚本里是 \code{trend\_breaks\_call}，不是
+\code{trend\_call}）（图~\ref{fig:trend_breaks}）。
+
+\screenshot{ui_trend.png}{MY1 分解的排放分量的趋势检验（第~\ref{sec:emission}~节）：序列及其
+Theil--Sen 直线和两个 p 值——经典的 Mann--Kendall p 值，以及因记录自相关而给出的
+块自助法 p 值——图上方的评估结论说明该引用哪一个。}{fig:trend}
+
+\screenshot{ui_trend_breaks.png}{段数 2、对 MY1 分离出的长期趋势的分段拟合：搜索在 2020-03-18 19:00（2020-03-23
+封控的前奏）找到断点——相对单段的 SSE 下降 88.7\,\%，搜索的块自助法 p 为 0.001，要引用的是它。第 1 段
+斜率 +0.0812 每天（95\,\% [0.0761, 0.0863]），第 2 段降到 $-$0.0121 每天（95\,\% [$-$0.0134, $-$0.0108]）。
+图上方的评估结论和每段一行的表格就是\tab{趋势}标签页的内容。}{fig:trend_breaks}
 
 % ============================ 9. ROLLING ======================================
 \chapter{滚动与多尺度}\label{ch:rolling}
@@ -1354,6 +1389,8 @@ curves = nm.pdp(df_prep, model, var_list=["ws", "temp"])
 \code{detect\_events}, \code{anomaly\_scores} & 归一化序列中的事件 \\
 \code{normalise\_plot}, \code{decomposition\_stack}, \code{scm\_dashboard} & 窗口中的图 \\
 \code{make\_run}, \code{save\_run}, \code{generate\_html\_report} & 溯源和报告 \\
+\code{trend}, \code{mann\_kendall}, \code{theil\_sen} & 趋势检验及其块自助法修正（\tab{趋势}标签页，第~\ref{sec:trend}~节） \\
+\code{detect\_trend\_breaks} & 分段趋势：水平或斜率在哪处断掉（BIC + 块自助法门槛） \\
 \code{make\_memory}       & 磁盘缓存 \\
 \code{Chronos2Estimator}  & 零样本去气象化（\code{foundation} 扩展） \\
 \bottomrule

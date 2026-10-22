@@ -231,6 +231,11 @@ def _prepared(win, n: int = 500) -> pd.DataFrame:
         {"observed": emi + 1.0, "emi_total": emi, "met_total": 1.0},
         index=pd.DatetimeIndex(idx, name="date"),
     )
+    # The separated long-term component the boxed series choice reads: the drift plus
+    # a level step at the middle of the record, no cycles.
+    step = np.where(np.arange(n) >= n // 2, -4.0, 0.0)
+    result["date_unix"] = emi + step
+    result["emi_base"] = 0.0
     win.results["decompose"] = result
     win.tre_n_bootstrap.setValue(100)
     win.trend_after.setChecked(False)
@@ -296,3 +301,120 @@ def test_the_auto_trend_starts_when_the_decomposition_ends(win, qapp):
     win._task_finished()  # the runner's own end: the runner is free now, the trend may start
     _wait(qapp, lambda: "trend" in win.results)
     assert win._trend_wanted is False
+
+
+def test_the_segments_control_runs_the_segmented_fit(win, qapp):
+    """Segments > 1: the segmented fit on the separated long-term component, its
+    table and verdict on the Trend tab, and the single-slope path left unchanged
+    (Segments back to 1)."""
+    from PySide6.QtWidgets import QLabel
+
+    _prepared(win)
+    win.tre_segments.setValue(2)
+    # going segmented moves the default emission-part choice to the long-term one
+    assert win.trend_series.currentText() == "long-term trend (separated)"
+    win._run_trend()
+    _wait(
+        qapp,
+        lambda: "trend" in win.results and "#34c759" in win._step_lights["trend"].text(),
+    )
+    raw = win._trend_raw
+    assert type(raw).__name__ == "TrendBreaks"
+    assert raw.n_segments == 2
+    assert "2 segments" in win._trend_name
+    assert isinstance(win.results["trend"], pd.DataFrame)
+    assert {"start", "end", "slope"}.issubset(win.results["trend"].columns)
+    labels = "\n".join(lbl.text() for lbl in win.tab_trend.findChildren(QLabel))
+    assert "trend breaks" in labels and "block bootstrap" in labels, labels[:500]
+    # the single-slope path runs again as it always has
+    win.tre_segments.setValue(1)
+    win.trend_series.setCurrentText("emission part (emi_total)")
+    win._run_trend()
+    _wait(qapp, lambda: type(win._trend_raw).__name__ == "TrendResult")
+    assert win._trend_raw.test.n > 0
+
+
+def test_the_segmented_fit_says_one_regime_where_no_break_stands(win, qapp):
+    """No step in the record: the gates refuse the split and the tab says so."""
+    from PySide6.QtWidgets import QLabel
+
+    _prepared(win)
+    res = win.results["decompose"]
+    res.loc[:, "date_unix"] = 0.08 * np.arange(len(res)) / 24.0  # a plain slope, no step
+    win.tre_segments.setValue(2)
+    win.trend_series.setCurrentText("long-term trend (separated)")
+    win._run_trend()
+    _wait(
+        qapp,
+        lambda: "trend" in win.results and "#34c759" in win._step_lights["trend"].text(),
+    )
+    raw = win._trend_raw
+    assert type(raw).__name__ == "TrendBreaks" and raw.n_segments == 1
+    labels = "\n".join(lbl.text() for lbl in win.tab_trend.findChildren(QLabel))
+    assert "one regime" in labels, labels[:500]
+
+
+def test_the_segments_choice_goes_into_the_config_and_comes_back(win, qapp):
+    """The Segments row and the long-term series choice are the panel's settings:
+    saved with them and brought back with them."""
+    _prepared(win)
+    win.tre_segments.setValue(2)
+    win.trend_series.setCurrentText("long-term trend (separated)")
+    c = win.get_config()
+    assert c["tre_segments"] == 2
+    assert c["trend_series"] == "long-term trend (separated)"
+    win.tre_segments.setValue(1)
+    win.trend_series.setCurrentText("emission part (emi_total)")
+    win.apply_config(c)
+    assert win.tre_segments.value() == 2
+    assert win.trend_series.currentText() == "long-term trend (separated)"
+
+
+def test_going_segmented_off_a_decomposed_window_moves_the_choice(win, qapp):
+    """Going segmented moves the still-default emission-part choice to the
+    separated long-term component (the clean input) -- the choice, not the row."""
+    _prepared(win)
+    win.trend_series.setCurrentText("emission part (emi_total)")
+    win.tre_segments.setValue(2)
+    assert win.trend_series.currentText() == "long-term trend (separated)"
+    # back to one segment: the choice stays where the analyst left it
+    win.tre_segments.setValue(1)
+    assert win.trend_series.currentText() == "long-term trend (separated)"
+
+
+def test_the_assistants_trend_breaks_tool_runs_the_segmented_step(win, qapp):
+    _prepared(win)
+    box: dict = {}
+
+    def call() -> None:
+        box["said"] = win.assistant.tools.trend_breaks(series="long-term", segments=2)
+
+    t = threading.Thread(target=call)
+    t.start()
+    _wait(qapp, lambda: "said" in box)
+    t.join(timeout=30)
+    said = box["said"]
+    assert "Segmented trend test on NO2 — long-term trend (separated)" in said, said[:400]
+    assert "break" in said and "block bootstrap" in said.lower()
+
+
+def test_the_trend_breaks_tool_refuses_bad_settings(win, qapp):
+    _prepared(win)
+    box: dict = {}
+
+    def call() -> None:
+        try:
+            win.assistant.tools.trend_breaks(series="nope", segments=2)
+        except Exception as exc:  # noqa: BLE001
+            box["exc1"] = exc
+        try:
+            win.assistant.tools.trend_breaks(series="emission", segments=9)
+        except Exception as exc:  # noqa: BLE001
+            box["exc2"] = exc
+
+    t = threading.Thread(target=call)
+    t.start()
+    _wait(qapp, lambda: "exc2" in box or not t.is_alive(), timeout=60)
+    t.join(timeout=10)
+    assert "series is 'long-term'" in str(box["exc1"])
+    assert "segments is 2 to 4" in str(box["exc2"])

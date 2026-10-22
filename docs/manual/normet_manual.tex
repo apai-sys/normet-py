@@ -713,8 +713,9 @@ Its pages, and what each holds (a page's first box goes untitled, the tab naming
   \item[Decompose] Emission or meteorology; for meteorology the attribution and the
         groups (Chapter~\ref{ch:decompose}). Under it \emph{Multi-scale decomposition}:
         three window widths (Section~\ref{sec:multiscaleui}); and \emph{Trend}: the
-        series to test (a part of the decomposition, or the observed target), its
-        seasonal period and how many bootstrap resamples.
+        series to test (a part of the decomposition, its separated long-term trend, or
+        the observed target), its seasonal period, the number of segments and how
+        many bootstrap resamples.
   \item[Rolling] Window, step and samples (Section~\ref{sec:rollingui}).
   \item[PDP] Variables and grid points (Chapter~\ref{ch:pdp}).
 \end{description}
@@ -733,7 +734,7 @@ Normalise   & observed and normalised series, the quantile band, their cycles & 
 Decompose   & the emission or meteorological components, the cycles & Run decomposition \\
 Rolling     & the mean of the rolling windows, with their spread & Run rolling normalisation \\
 Multi-scale & the scale-space cascade and the energy in each band & Multi-scale \\
-Trend       & the tested series, its Theil--Sen line, the two tests and the p value & Trend test \\
+Trend       & the tested series with its Theil--Sen line, or its segments and marked break, the verdict and the p value & Trend test \\
 PDP         & one partial-dependence panel per variable & Compute PDP \\
 \bottomrule
 \end{tabular}
@@ -785,7 +786,7 @@ Run normalisation     & a model, one variable to resample & \code{normalise} \\
 Run decomposition     & a model                  & \code{decompose} \\
 Run rolling normalisation & an AutoML model      & \code{rolling} \\
 Multi-scale decomposition & an AutoML model, a normalisation & \code{rolling} $\times 3$ \\
-Trend test          & an AutoML model (a decomposition, where it tests one) & \code{trend} \\
+Trend test          & an AutoML model (a decomposition, where it tests one) & \code{trend} (1 segment), \code{detect\_trend\_breaks} (more) \\
 Compute PDP           & an AutoML model, one variable ticked & \code{pdp} \\
 \bottomrule
 \end{tabular}
@@ -1091,6 +1092,58 @@ The decomposition runs $k+1$ normalisations sequentially or $2^k$ by Shapley, ea
 variables by Shapley is 1024 normalisations: group them. Unlike the normalisation, the
 meteorological decomposition always resamples every meteorological variable trained on;
 it does not follow the \tab{Normalise} page's list.
+
+\section{Trend}\label{sec:trend}
+The question a decomposition invites: is the series it just drew rising, falling or flat,
+and is the rise real? The \emph{Trend test} box under \emph{Decompose} runs
+Mann--Kendall and Theil--Sen on the chosen series and, the record carrying the
+autocorrelation the correction exists for (MY1's emission part: AR(1) residual acf 0.94),
+replaces the slope's classical error bar with a moving-block bootstrap. It runs again
+each time an emission decomposition ends, if \emph{Run after each emission decomposition}
+is ticked.
+
+\emph{Series} names which one is tested: the decomposition's emission part
+(the default: what the weather does not explain), its \emph{separated long-term
+trend} --- the long-term component Section~\ref{sec:emission} drew, cycles already
+separated into their own components, so the cleaner input to a trend test --- its
+weather part, or the observed target itself. \emph{Segments} names how many:
+one (the default) is the single-slope test just described; two to four run the
+\emph{segmented fit} instead --- \code{detect\_trend\_breaks} on the chosen
+series. It splits the record where the trend breaks, if it does, each segment
+reported with its own Theil--Sen slope and interval, and the break accepted only
+under the two-part gate (Section~\ref{sec:emission} for the components it tests on):
+the BIC must improve, and the SSE improvement of the final fit over the single
+slope must beat the same search re-run on block-bootstrapped resamples (the p to
+quote). A record that fails a gate is reported as one regime, with the best
+candidate cut and its p kept so the tab can say what was looked at. Raising
+\emph{Segments} above one moves a still-default \emph{emission part} choice to
+the long-term trend (the clean input); the choice stays until changed.
+
+The \tab{Trend} tab (Figure~\ref{fig:trend}) for one segment shows the series
+with its Theil--Sen line and a verdict that says which of the two p values to
+quote: the classical Mann--Kendall one is the anti-conservative one on an
+autocorrelated record, and the record is autocorrelated. For two or more
+segments it shows the series with its \emph{piecewise} Theil--Sen lines and a
+marked break, a verdict that says whether the search found a break (where, and
+the block-bootstrap p to quote) or that the gates refused one, per-segment rows
+in the table (start, end, n, slope, 95\,\% interval, per year), and the same
+CSV export and command-log entry as the one-segment run
+(\code{trend\_breaks\_call} in the script, not \code{trend\_call})
+(Figure~\ref{fig:trend_breaks}).
+
+\screenshot{ui_trend.png}{The trend test of MY1's decomposition's emission part
+(Section~\ref{sec:emission}): the series with its Theil--Sen line and the two p values ---
+the classical Mann--Kendall one and, the record being autocorrelated, the
+block-bootstrap one --- with the verdict above the figure saying which to quote.}{fig:trend}
+
+\screenshot{ui_trend_breaks.png}{The segmented fit (Segments 2) on MY1's separated
+long-term trend: the search found the break at 2020-03-18 19:00 --- the 2020-03-23
+lockdown's lead-in --- the single-slope SSE down 88.7\,\% with the block-bootstrap
+p of the search 0.001, the one to quote. Segment 1 runs +0.0812 per day
+(95\,\% [0.0761, 0.0863]); segment 2 flattens to $-$0.0121 per day
+(95\,\% [$-$0.0134, $-$0.0108]). The piecewise Theil--Sen lines and the marked
+break are in the figure; the per-segment table and the verdict above it are the
+Trend tab's.}{fig:trend_breaks}
 
 % ============================ 9. ROLLING ======================================
 \chapter{Rolling and multi-scale}\label{ch:rolling}
@@ -1679,6 +1732,8 @@ Function & Does \\
 \code{detect\_events}, \code{anomaly\_scores} & events in a normalised series \\
 \code{normalise\_plot}, \code{decomposition\_stack}, \code{scm\_dashboard} & the window's figures \\
 \code{make\_run}, \code{save\_run}, \code{generate\_html\_report} & provenance and reports \\
+\code{trend}, \code{mann\_kendall}, \code{theil\_sen} & trend tests with the block-bootstrap correction (the \tab{Trend} tab, Section~\ref{sec:trend}) \\
+\code{detect\_trend\_breaks} & segmented trend: where the level or slope breaks (BIC + block-bootstrap gate) \\
 \code{make\_memory}       & on-disk caching \\
 \code{Chronos2Estimator}  & zero-shot de-weathering (\code{foundation} extra) \\
 \bottomrule

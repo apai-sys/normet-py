@@ -240,3 +240,62 @@ def test_both_decompositions_come_back_with_the_session(qapp, home, tmp_path):
         assert v.tab_decom.findChild(QComboBox).currentText() == "meteorology"
     finally:
         v.close()
+
+
+def test_the_segmented_trend_comes_back_with_the_session(qapp, home, tmp_path):
+    """A segment fit saved with the session restores to the segmented handler: its
+    banner and table are drawn again from the run's own table."""
+    import time
+
+    import joblib
+    from PySide6.QtWidgets import QApplication, QLabel
+
+    from normet import decompose
+    from normet.gui.main_window import MainWindow
+
+    w = _trained_window()
+    covs = ["date_unix", "day_julian", "weekday", "hour"]
+    res = w.results.get("decompose")
+    if res is None:
+        res = decompose(
+            w.df_prep,
+            w.model,
+            method="emission",
+            covariates=w._selected_features() + covs,
+            n_samples=5,
+            n_cores=1,
+        )
+    # A step in the emission part at the middle of the record: the search's break.
+    n = len(res)
+    col = "emi_total" if "emi_total" in res.columns else res.columns[0]
+    res2 = res.copy()
+    res2.iloc[n // 2 :, res2.columns.get_loc(col)] = (
+        res2.iloc[n // 2 :, res2.columns.get_loc(col)] - 3.0
+    )
+    w._decompose_done(res2)
+    w.tre_segments.setValue(2)  # goes segmented: the emission part keeps its choice
+    w.trend_series.setCurrentText("emission part (emi_total)")
+    w.tre_n_bootstrap.setValue(100)
+    w.trend_after.setChecked(False)
+    w._run_trend()
+    t0 = time.time()
+    while "trend" not in w.results or type(w._trend_raw).__name__ != "TrendBreaks":
+        if time.time() - t0 > 240:
+            raise TimeoutError("the segmented trend did not finish")
+        QApplication.instance().processEvents()
+        time.sleep(0.01)
+    path = tmp_path / "seg.normet"
+    joblib.dump(w.session_bundle(), path)
+    w.close()
+
+    v = MainWindow()
+    try:
+        v.load_results(str(path))
+        assert "trend" in v.results
+        assert type(v._trend_raw).__name__ == "TrendBreaks"
+        assert v.tre_segments.value() == 2
+        assert v.trend_series.currentText() == "emission part (emi_total)"
+        labels = "\n".join(lbl.text() for lbl in v.tab_trend.findChildren(QLabel))
+        assert "trend breaks" in labels or "one regime" in labels, labels[:400]
+    finally:
+        v.close()

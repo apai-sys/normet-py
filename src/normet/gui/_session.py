@@ -224,6 +224,7 @@ class SessionMixin(QMainWindow):
             "ms_slow": self.ms_slow.value(),
             "trend_series": self.trend_series.currentText(),
             "tre_seasonal": self.tre_seasonal.currentText(),
+            "tre_segments": self.tre_segments.value(),
             "tre_n_bootstrap": self.tre_n_bootstrap.value(),
             "trend_after": self.trend_after.isChecked(),
             "pdp_grid": self.pdp_grid.value(),
@@ -279,6 +280,10 @@ class SessionMixin(QMainWindow):
         self.ms_fast.setValue(c.get("ms_fast", 14))
         self.ms_meso.setValue(c.get("ms_meso", 90))
         self.ms_slow.setValue(c.get("ms_slow", 365))
+        # Segments before the series: raising the row moves a still-default
+        # emission-part choice to the long-term one, and the restored choice
+        # must stand after it.
+        self.tre_segments.setValue(int(c.get("tre_segments", 1)))
         self.trend_series.setCurrentText(c.get("trend_series", "emission part (emi_total)"))
         self.tre_seasonal.setCurrentText(c.get("tre_seasonal", "auto"))
         self.tre_n_bootstrap.setValue(c.get("tre_n_bootstrap", 1000))
