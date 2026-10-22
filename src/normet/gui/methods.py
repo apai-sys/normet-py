@@ -294,6 +294,21 @@ def methods_paragraph(info: dict[str, Any], lang: str = "en") -> str | None:
                 f"bootstrap where the residuals are autocorrelated (normet.trend), was "
                 f"applied to {nm}, in its {seq} form."
             )
+    if "trend_breaks_call" in ran:
+        call = ran["trend_breaks_call"]
+        nm = call.get("series_name") or (call.get("args") or ["the series"])[1]
+        k = call.get("max_segments", 2)
+        if zh:
+            out.append(
+                f"分段趋势检验（每个分量以 Theil–Sen 拟合，断点以块自助法在全部候选位置下检验，"
+                f"normet.detect_trend_breaks，最多 {k} 段）施加于{nm}。"
+            )
+        else:
+            out.append(
+                f"A segmented trend test (normet.detect_trend_breaks, up to {k} segments, "
+                f"each segment fitted with Theil-Sen, the break's position gated against "
+                f"the same search under a block bootstrap) was applied to {nm}."
+            )
 
     refs = sorted(set(cites)) + (
         REFERENCES["en"] if any(k in ran for k in ("normalise", "deweather")) else []

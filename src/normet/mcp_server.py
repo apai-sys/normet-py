@@ -341,6 +341,31 @@ def build_server(tools: Any = None) -> Any:
             name=name,
         )
 
+    @tool
+    def normet_trend_breaks(
+        path: str,
+        column: str | None = None,
+        segments: int = 2,
+        n_bootstrap: int = 500,
+        seed: int = 7654321,
+        name: str | None = None,
+    ) -> str:
+        """Whether a column's trend breaks (normet.detect_trend_breaks): where, each
+        segment's Theil-Sen slope with its interval, and the block-bootstrap p of
+        the search over every candidate position -- the one to quote. `column`
+        names the column; 'long-term' (the default) is the emission
+        decomposition's separated long-term component (cycles already taken
+        out, the cleaner input), 'emission' its emi_total. `segments` 2 to 4.
+        Run once a table is made; it is not a job."""
+        return t.trend_breaks(
+            path,
+            column=column,
+            segments=segments,
+            n_bootstrap=n_bootstrap,
+            seed=seed,
+            name=name,
+        )
+
     def normet_figure(source: str, kind: str, cutoff: str | None = None, dpi: int = 100) -> Any:
         caption, png = t.figure(source, kind, cutoff=cutoff, dpi=dpi)
         return [caption, Image(data=png, format="png")]

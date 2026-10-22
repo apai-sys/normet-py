@@ -20,6 +20,14 @@ This module therefore ships the test with the corrections the data demand:
   replaces the slope's error estimate with a moving-block bootstrap (block
   length long enough to keep the calendar structure together) and a Wald
   p-value computed from that bootstrap standard error.
+- :func:`detect_trend_breaks` : piecewise (segmented) trend, for records
+  whose level or slope changes part-way through -- a policy year, a
+  lockdown. Splits the record into up to ``max_segments`` linear segments,
+  each reported with its own Theil-Sen slope and Sen interval; a split is
+  accepted only when it beats the BIC penalty *and* the best possible split
+  on moved-block resamples (the search multiplicity corrected), so a record
+  with no change is reported as one regime, not as a break the grid happened
+  to find.
 
 Nothing here resamples the *weather*; this is statistics on the series the
 user has already normalised.
@@ -43,9 +51,11 @@ __all__ = [
     "TrendTest",
     "TrendSlope",
     "TrendResult",
+    "TrendBreaks",
     "mann_kendall",
     "theil_sen",
     "trend",
+    "detect_trend_breaks",
 ]
 
 
@@ -202,6 +212,108 @@ class TrendResult:
                     f" | AR(1) acf={self.ar1_acf:.2f} -> block bootstrap unavailable (see notes)"
                 )
         return line
+
+
+@dataclass
+class TrendBreaks:
+    """Piecewise (segmented) trend: where the series changes regime, if at all.
+
+    ``starts`` / ``ends`` hold the index value of each segment's first and
+    last point -- timestamps for a datetime-indexed series, positions for a
+    positional one -- and ``segments`` the matching Theil-Sen slope with its
+    Sen (1968) interval. ``p_value`` is the moving-block bootstrap p-value
+    for "is the best split better than pure noise searched over every
+    candidate position", and ``significant`` whether it passed ``alpha``.
+    When the gate fails, ``n_segments`` is 1 and the gate's numbers stay in
+    ``sse_single`` / ``sse_segmented`` / ``p_value`` / ``notes`` so a report
+    can say why the record was kept as one regime. ``best_break`` is the
+    position (index value) of the first round's best cut -- the start of the
+    would-be second regime -- and ``best_split_pct`` its SSE reduction,
+    reported even when the gates rejected it.
+    """
+
+    name: str
+    n: int
+    n_dropped: int
+    time_unit: str
+    starts: list[Any]
+    ends: list[Any]
+    segments: list[TrendSlope]
+    n_segments: int
+    best_break: Any | None = None
+    best_split_pct: float = 0.0
+    sse_single: float | None = None
+    sse_segmented: float | None = None
+    improvement_pct: float | None = None
+    bic_single: float | None = None
+    bic_segmented: float | None = None
+    p_value: float | None = None
+    significant: bool = False
+    alpha: float = 0.05
+    max_segments: int = 2
+    min_segment: int | None = None
+    block_length: int | None = None
+    n_bootstrap: int | None = None
+    notes: list[str] = field(default_factory=list)
+
+    def summary(self) -> pd.DataFrame:
+        """One row per segment, report-ready (start, end, n, slope, CI)."""
+        rows = []
+        per_year = self.time_unit == "day"
+        for seg, start, end in zip(self.segments, self.starts, self.ends, strict=True):
+            row: dict[str, Any] = {
+                "start": start,
+                "end": end,
+                "n": seg.n,
+                "slope": seg.slope,
+                "ci_low": seg.ci_low,
+                "ci_high": seg.ci_high,
+            }
+            if per_year and seg.slope_per_year is not None:
+                row = {
+                    **row,
+                    "slope_per_year": seg.slope_per_year,
+                    "ci_low_per_year": seg.ci_low_per_year,
+                    "ci_high_per_year": seg.ci_high_per_year,
+                }
+            rows.append(row)
+        return pd.DataFrame(rows)
+
+    def __str__(self) -> str:
+        unit = "u/m3/day" if self.time_unit == "day" else "u/step"
+        line = f"{self.name}: n={self.n}"
+        if self.n_dropped:
+            line += f" (dropped {self.n_dropped} missing)"
+        if self.n_segments > 1:
+            line += (
+                f" | {self.n_segments} segments | break at {_fmt_index(self.best_break)}"
+                f" | SSE -{self.improvement_pct:.1f}%"
+            )
+            for i, seg in enumerate(self.segments, 1):
+                line += f" | seg{i} slope {seg.slope:.3g} {unit}"
+            line += f" | p={self.p_value:.3g}"
+            if not self.significant:
+                line += " (no break; single regime reported)"
+        else:
+            seg = self.segments[0]
+            line += (
+                f" | 1 segment | slope {seg.slope:.3g} {unit}"
+                f" | 95% CI [{seg.ci_low:.3g}, {seg.ci_high:.3g}]"
+            )
+            if self.best_break is not None:
+                ptxt = f", p={self.p_value:.3g}" if self.p_value is not None else ""
+                line += (
+                    f" | best cut at {_fmt_index(self.best_break)} (SSE "
+                    f"{self.best_split_pct:.1f}% lower{ptxt}) -- not reported as a break"
+                )
+        return line
+
+
+def _fmt_index(value: Any) -> str:
+    """Format an index value for the one-line report (timestamps as date)."""
+    if isinstance(value, pd.Timestamp):
+        return value.strftime("%Y-%m-%d %H:%M")
+    return str(value)
 
 
 def _to_series(series: pd.Series | pd.DataFrame, value_col: str | None) -> tuple[pd.Series, bool]:
@@ -575,6 +687,523 @@ def _block_bootstrap_slopes(
         xb = x[idx]
         slopes[b] = _ols_slope(xb, y[idx])
     return slopes
+
+
+# ---------------------------------------------------------------------------
+# Piecewise (segmented) trend breaks
+# ---------------------------------------------------------------------------
+
+
+def _prefix_sums(
+    x: np.ndarray, y: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Cumulative sums of the five quantities an OLS fit on any sub-range needs.
+
+    Each array is padded with a leading zero, so the sum of the open range
+    ``[i, j)`` is the difference of two entries, ``S[j] - S[i]``, and the
+    OLS residual sum of squares of any segment is O(1) -- ``SSE = Syy_c -
+    Sxy_c^2 / Sxx_c`` on centered moments. That is what lets the whole-grid
+    split search below run in O(n) per segment instead of O(n^2).
+    """
+    zero = np.zeros(1)
+    return (
+        np.concatenate([zero, np.cumsum(x)]),
+        np.concatenate([zero, np.cumsum(y)]),
+        np.concatenate([zero, np.cumsum(x * x)]),
+        np.concatenate([zero, np.cumsum(y * y)]),
+        np.concatenate([zero, np.cumsum(x * y)]),
+    )
+
+
+def _segment_sse(
+    pre: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+    i: int,
+    j: int,
+) -> float:
+    """OLS residual sum of squares of the points ``[i, j)``, from prefix sums."""
+    Sx, Sy, Sxx, Syy, Sxy = pre
+    m = j - i
+    if m < 2:
+        return float("nan")
+    sx = Sx[j] - Sx[i]
+    sy = Sy[j] - Sy[i]
+    sxx = Sxx[j] - Sxx[i]
+    syy = Syy[j] - Syy[i]
+    sxy = Sxy[j] - Sxy[i]
+    sxx_c = sxx - sx * sx / m  # centered second moment of x
+    if sxx_c <= 1e-12:
+        # x (nearly) constant: only a mean is identifiable; the squared
+        # deviation of y from its own mean is the attainable fit.
+        return float(max(0.0, syy - sy * sy / m))
+    syy_c = syy - sy * sy / m
+    sxy_c = sxy - sx * sy / m
+    sse = syy_c - sxy_c * sxy_c / sxx_c
+    return float(max(0.0, sse))
+
+
+def _bic(sse: float, n: int, n_segments: int) -> float:
+    """BIC of a piecewise-linear fit: each segment carries slope + intercept.
+
+    Three parameters per segment (slope, intercept, noise variance). ``-inf``
+    for a perfect fit (SSE = 0) keeps the comparisons below total: two
+    perfect fits tie, so an exact linear record stops at one segment instead
+    of splitting on numerical noise.
+    """
+    if sse <= 0.0:
+        return float("-inf")
+    return float(n * np.log(sse / n) + 3.0 * n_segments * np.log(n))
+
+
+def _segment_sse_range(
+    pre: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+    i: int,
+    j: int,
+    c: np.ndarray,
+) -> np.ndarray:
+    """Two-segment OLS SSE, for every candidate split at once.
+
+    For each candidate ``k`` in the vector ``c``, returns the SSE of the
+    piecewise-linear fit with one break at ``k`` over the range ``[i, j)``
+    -- the SSE of ``[i, k)`` plus the SSE of ``[k, j)`` -- evaluated from
+    the prefix sums. One vectorised pass over all candidates instead of one
+    O(1) call per candidate is what keeps the bootstrap search (which
+    replays this scan ``n_bootstrap`` times) cheap. Small numerical
+    negatives are clipped at zero, same as :func:`_segment_sse`.
+    """
+    Sx, Sy, Sxx, Syy, Sxy = pre
+    # left pieces [i, k) + right pieces [k, j), both at once:
+    return _sse_vec(Sx, Sy, Sxx, Syy, Sxy, i, c) + _sse_vec_rev(Sx, Sy, Sxx, Syy, Sxy, c, j)
+
+
+def _sse_vec(
+    Sx: np.ndarray,
+    Sy: np.ndarray,
+    Sxx: np.ndarray,
+    Syy: np.ndarray,
+    Sxy: np.ndarray,
+    i: int,
+    c: np.ndarray,
+) -> np.ndarray:
+    """SSE of the pieces ``[i, k)`` for each candidate end ``k`` in ``c``."""
+    m = c - i
+    sx = Sx[c] - Sx[i]
+    sy = Sy[c] - Sy[i]
+    sxx = Sxx[c] - Sxx[i]
+    syy = Syy[c] - Syy[i]
+    sxy = Sxy[c] - Sxy[i]
+    sxx_c = sxx - sx * sx / m
+    syy_c = syy - sy * sy / m
+    sxy_c = sxy - sx * sy / m
+    sse = syy_c - sxy_c * sxy_c / sxx_c
+    return np.clip(sse, 0.0, None)
+
+
+def _sse_vec_rev(
+    Sx: np.ndarray,
+    Sy: np.ndarray,
+    Sxx: np.ndarray,
+    Syy: np.ndarray,
+    Sxy: np.ndarray,
+    c: np.ndarray,
+    j: int,
+) -> np.ndarray:
+    """SSE of the pieces ``[k, j)`` for each candidate start ``k`` in ``c``."""
+    m = j - c
+    sx = Sx[j] - Sx[c]
+    sy = Sy[j] - Sy[c]
+    sxx = Sxx[j] - Sxx[c]
+    syy = Syy[j] - Syy[c]
+    sxy = Sxy[j] - Sxy[c]
+    sxx_c = sxx - sx * sx / m
+    syy_c = syy - sy * sy / m
+    sxy_c = sxy - sx * sy / m
+    sse = syy_c - sxy_c * sxy_c / sxx_c
+    return np.clip(sse, 0.0, None)
+
+
+def _scan_split(
+    pre: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+    i: int,
+    j: int,
+    min_segment: int,
+) -> tuple[int | None, float, float]:
+    """Best single split of segment ``[i, j)`` by SSE reduction.
+
+    Vectorised over every admissible candidate position at once (both
+    pieces at least ``min_segment`` points; the break sits *after* point
+    ``c-1``, so a candidate ``c`` means the new regime starts at point
+    ``c``). Returns ``(best_c, sse_before, sse_after)`` -- ``best_c`` is
+    None when the segment is too short to split.
+    """
+    now = _segment_sse(pre, i, j)
+    lo = i + min_segment
+    hi = j - min_segment
+    if hi < lo:
+        return None, now, float("inf")
+    c = np.arange(lo, hi + 1)
+    after = _segment_sse_range(pre, i, j, c)
+    k = int(np.argmin(after))
+    return int(c[k]), now, float(after[k])
+
+
+def _greedy_segments(
+    x: np.ndarray,
+    y: np.ndarray,
+    max_segments: int,
+    min_segment: int,
+) -> tuple[list[tuple[int, int]], float, int, tuple[int, float] | None]:
+    """Greedy forward segmentation: repeatedly split the worst segment.
+
+    Each round picks the split (over all current segments) with the largest
+    SSE reduction, and accepts it only when BIC says the extra parameters
+    earn their keep -- BIC is the per-round *stopping* rule, the bootstrap
+    gate in :func:`detect_trend_breaks` being the one that decides what is
+    reported. Returns ``(segments, sse, n_segments, first_candidate)``;
+    ``segments`` is sorted by start, and ``first_candidate`` is
+    ``(position, sse_reduction_pct)`` of the best split the first round
+    found *before* the BIC gate -- so a record that ends up as one regime
+    still shows where the search wanted to cut and how much it gained.
+    """
+    n = x.size
+    pre = _prefix_sums(x, y)
+    total = _segment_sse(pre, 0, n)
+    segs: list[tuple[int, int]] = [(0, n)]
+    first_candidate: tuple[int, float] | None = None
+    k = 1
+    while k < max_segments:
+        best_gain: float | None = None
+        best_cut: tuple[int, int, int] | None = None  # (i, j, c)
+        bic_now = _bic(total, n, k)
+        for i, j in segs:
+            c, now, after = _scan_split(pre, i, j, min_segment)
+            if c is None:
+                continue
+            if k == 1 and i == 0:
+                # positive pct = the split's SSE reduction, recorded even
+                # when the BIC gate below rejects the split.
+                first_candidate = (c, 100.0 * (now - after) / now) if now > 0 else (c, 0.0)
+            gain = now - after
+            if gain <= 0.0 or _bic(total - gain, n, k + 1) >= bic_now:
+                continue
+            if best_gain is None or gain > best_gain:
+                best_gain = gain
+                best_cut = (i, j, c)
+        if best_cut is None or best_gain is None:
+            break
+        i, j, c = best_cut
+        segs = [seg for seg in segs if seg != (i, j)] + [(i, c), (c, j)]
+        total -= best_gain
+        k += 1
+    segs.sort()
+    return segs, total, k, first_candidate
+
+
+def _block_indices(n: int, block_length: int, rng: np.random.Generator) -> np.ndarray:
+    """Indices of one moved-block resample of ``n`` points (same scheme as
+    :func:`_block_bootstrap_slopes`: full blocks, truncated tail)."""
+    positions = np.arange(n)
+    n_starts = n - block_length + 1
+    full = n // block_length
+    remain = n - full * block_length
+    idx = (
+        np.concatenate(
+            [positions[s : s + block_length] for s in rng.integers(0, n_starts, size=full)]
+        )
+        if full
+        else np.empty(0, dtype=int)
+    )
+    if remain > 0:
+        s0 = int(rng.integers(0, n_starts))
+        idx = np.concatenate([idx, positions[s0 : s0 + remain]])
+    return idx
+
+
+def _break_search_p(
+    x: np.ndarray,
+    y: np.ndarray,
+    max_segments: int,
+    min_segment: int,
+    improvement_obs: float,
+    block_length: int,
+    n_bootstrap: int,
+    seed: int,
+) -> float:
+    """Block-bootstrap p-value for the best-split improvement.
+
+    Each replicate re-runs the *entire* greedy search on a moved-block
+    resample of the (time, value) pairs and records how much pure-noise
+    searching improved over that replicate's single-segment fit. Comparing
+    the observed improvement against that null distribution corrects for
+    having looked at n-1 possible positions (and for the autocorrelation,
+    which the block sampling preserves) -- the two things a grid search and
+    a classical F-test both get wrong on this kind of record.
+    """
+    n = x.size
+    rng = np.random.default_rng(seed)
+    ge = 0
+    for _ in range(n_bootstrap):
+        idx = _block_indices(n, block_length, rng)
+        xb, yb = x[idx], y[idx]
+        pre = _prefix_sums(xb, yb)
+        sse_single_rep = _segment_sse(pre, 0, n)
+        _, sse_best_rep, _, _ = _greedy_segments(xb, yb, max_segments, min_segment)
+        if sse_single_rep - sse_best_rep >= improvement_obs - 1e-9:
+            ge += 1
+    return (1 + ge) / (1 + n_bootstrap)
+
+
+def _segment_theil_sen(
+    xtime: np.ndarray,
+    y: np.ndarray,
+    i: int,
+    j: int,
+    *,
+    positional: bool,
+) -> TrendSlope:
+    """Theil-Sen slope of one segment ``[i, j)`` straight off the time grid.
+
+    The fit goes on the *time coordinates themselves*, not on a re-sliced
+    original series: slicing a positional record would renumber its index
+    (or leave the hole ``trend()`` documents) and a datetime slice would
+    re-run the whole ``_to_series`` machinery for no reason. The per-year
+    conversion is applied when the spacing is temporal, mirroring
+    :func:`theil_sen`.
+    """
+    stats = require_scipy_stats()
+    res = stats.theilslopes(y[i:j], xtime[i:j])
+    slope = float(res.slope)
+    out = TrendSlope(
+        slope=slope,
+        ci_low=float(res.low_slope),
+        ci_high=float(res.high_slope),
+        n=j - i,
+        time_unit="step" if positional else "day",
+    )
+    if not positional:
+        out = TrendSlope(
+            slope=out.slope,
+            ci_low=out.ci_low,
+            ci_high=out.ci_high,
+            n=out.n,
+            time_unit=out.time_unit,
+            slope_per_year=out.slope * 365.25,
+            ci_low_per_year=out.ci_low * 365.25,
+            ci_high_per_year=out.ci_high * 365.25,
+        )
+    return out
+
+
+def detect_trend_breaks(
+    series: pd.Series | pd.DataFrame,
+    *,
+    value_col: str | None = None,
+    name: str | None = None,
+    max_segments: int = 2,
+    min_segment: int | None = None,
+    alpha: float = 0.05,
+    block_length: int | None = None,
+    n_bootstrap: int = 500,
+    seed: int = 7_654_321,
+) -> TrendBreaks:
+    """Piecewise (segmented) trend test: where does the trend break, if it does.
+
+    A single-slope record that changes level or slope part-way through
+    (a policy year, a lockdown) either shows the change diluted into a
+    weaker, muddier trend or hides it behind the significance threshold --
+    the honest question is *where* the regime changes and *how* the slope
+    differs between regimes. This function splits the record into at most
+    ``max_segments`` linear segments, each reported with its own Theil-Sen
+    slope and Sen (1968) interval (robust to the spikes a pollution event
+    leaves inside a segment).
+
+    The split itself comes from a full O(n) grid search -- the two-segment
+    SSE of every candidate position is O(1) from prefix sums -- and it is
+    accepted only under a two-part gate, because a grid searched over n-1
+    positions *always* finds something:
+
+    1. per round, the split must improve the BIC over the current fit, so
+       the extra slope + intercept earn their keep;
+    2. the SSE improvement of the final fit over the single-segment fit is
+       compared with the same search re-run on moved-block resamples of the
+       series: the p-value of observing an improvement at least that large
+       is what a record without a break would produce, and it is the
+       multiple-testing-corrected, autocorrelation-aware test.
+
+    A break is reported only when both gates pass; otherwise the record is
+    reported as one regime, with the best split's position and p kept in
+    ``p_value`` and ``notes`` so a report can say what was looked at.
+
+    Parameters
+    ----------
+    series : Series or DataFrame
+        The series to segment -- typically the emission component from
+        :func:`normet.decompose`. Missing values are dropped and counted.
+    value_col : str, optional
+        Column when ``series`` is a DataFrame.
+    name : str, optional
+        Label for the one-line report; defaults to the series name.
+    max_segments : int, default 2
+        Upper bound on segments (one split with the default). Greedy
+        forward segmentation stops earlier when no further split improves
+        the BIC.
+    min_segment : int, optional
+        Minimum points per segment. Defaults to the longer of 28 and 5 % of
+        the record, which for hourly data keeps each regime at least a few
+        days and bars splits pinned to one end of the record.
+    alpha : float, default 0.05
+        Threshold the bootstrap p-value must fall below for a break to be
+        reported.
+    block_length : int, optional
+        Bootstrap block length in points; defaults to the same heuristic as
+        :func:`trend` (longer of ``3 n^(1/3)`` and a calendar week for
+        sub-daily records).
+    n_bootstrap : int, default 500
+        Replicates of the search under the block-bootstrapped null.
+    seed : int, default 7654321
+        RNG seed; the result is bit-identical across runs.
+
+    Returns
+    -------
+    TrendBreaks
+    """
+    s, positional = _to_series(series, value_col)
+    x = s.dropna()
+    n_dropped = int(s.size - x.size)
+    n = x.size
+    if n < 40:
+        raise DataError(
+            f"detect_trend_breaks needs at least 40 observed values, got {n} -- "
+            "a split test on fewer is a statement about the noise, not the record."
+        )
+    if int(max_segments) < 2:
+        raise DataError(f"max_segments must be at least 2, got {max_segments}.")
+    if not 0.0 < alpha < 1.0:
+        raise DataError(f"alpha must lie in (0, 1), got {alpha}.")
+    if int(n_bootstrap) < 50:
+        raise DataError(
+            f"n_bootstrap must be at least 50 (the p-value's resolution is "
+            f"1/{n_bootstrap}), got {n_bootstrap}."
+        )
+
+    min_seg = int(min_segment) if min_segment is not None else max(28, n // 20)
+    if min_seg < 2:
+        raise DataError(f"min_segment must be at least 2, got {min_seg}.")
+    if 2 * min_seg > n:
+        raise DataError(
+            f"min_segment={min_seg} leaves no room for two segments "
+            f"({2 * min_seg} > {n} observed values); pass a smaller min_segment."
+        )
+
+    xtime = _time_grid(s, x, positional)
+    y = x.to_numpy()
+
+    pre = _prefix_sums(xtime, y)
+    sse_single = _segment_sse(pre, 0, n)
+    segs, sse_final, k, first_candidate = _greedy_segments(xtime, y, int(max_segments), min_seg)
+    bic_single = _bic(sse_single, n, 1)
+    bic_final = _bic(sse_final, n, k)
+    # The first round's best candidate is the *reportable* break: it exists
+    # whether or not the BIC gate accepted it, so a record reported as one
+    # regime still says where the search wanted to cut.
+    best_break = None if first_candidate is None else x.index[first_candidate[0]]
+    best_split_pct = 0.0 if first_candidate is None else float(first_candidate[1])
+
+    result = TrendBreaks(
+        name=name or (str(s.name) if s.name is not None else "series"),
+        n=n,
+        n_dropped=n_dropped,
+        time_unit="day" if not positional else "step",
+        starts=[],
+        ends=[],
+        segments=[],
+        n_segments=1,
+        best_break=best_break,
+        best_split_pct=best_split_pct,
+        sse_single=sse_single,
+        sse_segmented=sse_final,
+        improvement_pct=0.0 if sse_single <= 0 else 100.0 * (1.0 - sse_final / sse_single),
+        bic_single=bic_single,
+        bic_segmented=bic_final,
+        alpha=float(alpha),
+        max_segments=int(max_segments),
+        min_segment=min_seg,
+    )
+
+    if k == 1:
+        result.notes.append(
+            "No split passed the BIC gate; the record is one regime. The "
+            f"search's best candidate cut is recorded (best_break="
+            f"{_fmt_index(result.best_break)}, best_split_pct="
+            f"{result.best_split_pct:.1f})."
+        )
+        result.segments = [theil_sen(s)]
+        result.starts = [x.index[0]]
+        result.ends = [x.index[-1]]
+        return result
+
+    bl = (
+        int(block_length)
+        if block_length is not None
+        else _default_block_length(n, med_days=_median_index_days(s, is_dt=not positional))
+    )
+    bl = max(1, min(bl, n // 3))
+    improvement_obs = sse_single - sse_final
+    p = _break_search_p(
+        xtime,
+        y,
+        int(max_segments),
+        min_seg,
+        improvement_obs,
+        bl,
+        int(n_bootstrap),
+        int(seed),
+    )
+    result.block_length = bl
+    result.n_bootstrap = int(n_bootstrap)
+    result.p_value = float(p)
+    result.significant = p < alpha
+    log.debug(
+        "detect_trend_breaks(%s): %d segments, SSE %.4g -> %.4g, bootstrap p=%.4g",
+        result.name,
+        k,
+        sse_single,
+        sse_final,
+        p,
+    )
+
+    if not result.significant:
+        # The grid found a split and BIC liked it, but the search under the
+        # null found splits just as good: report one regime and say why.
+        result.notes.append(
+            f"Best split at {_fmt_index(result.best_break)} cuts the SSE by "
+            f"{result.improvement_pct:.1f}%, but the same search on "
+            f"{int(n_bootstrap)} block-bootstrapped resamples reaches an "
+            f"improvement at least that large with p={p:.3g} >= alpha="
+            f"{alpha}: one regime reported, no break claimed."
+        )
+        result.segments = [theil_sen(s)]
+        result.starts = [x.index[0]]
+        result.ends = [x.index[-1]]
+        return result
+
+    result.n_segments = k
+    result.starts = [x.index[i] for i, _ in segs]
+    result.ends = [x.index[j - 1] for _, j in segs]
+    # Theil-Sen per segment, fit on the time grid directly (see
+    # _segment_theil_sen) so a positional record with holes is neither
+    # renumbered nor misread, and the Sen interval / per-year units follow
+    # the whole-record code path. min_segment keeps each piece long enough
+    # for a median-of-pairs to mean anything.
+    result.segments = [_segment_theil_sen(xtime, y, i, j, positional=positional) for i, j in segs]
+    nbreaks = f"{k - 1} break" + ("" if k - 1 == 1 else "s")
+    result.notes.append(
+        f"{nbreaks} accepted: each passed the BIC gate and the block-"
+        f"bootstrap gate (p={p:.3g} < alpha={alpha}, {n_bootstrap} resamples, "
+        f"block length {bl}). Segment slopes are Theil-Sen per segment; "
+        "compare adjacent segments against their Sen intervals rather than "
+        "re-testing the split."
+    )
+    return result
 
 
 # ---------------------------------------------------------------------------

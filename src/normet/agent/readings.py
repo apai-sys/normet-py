@@ -485,3 +485,82 @@ def trend_reading(res: Any, name: str = "series") -> str:
     lines.append(table(["", "value"], rows))
     lines += ["", *res.notes]
     return "\n".join(lines)
+
+
+def trend_breaks_reading(res: Any, name: str = "series") -> str:
+    """A segmented trend test on a series (normet.detect_trend_breaks result): where
+    the trend breaks, each segment with its own Theil-Sen slope and Sen (1968)
+    interval, and the block-bootstrap p of the search over every candidate
+    position -- the multiple-testing-corrected, autocorrelation-aware one to
+    quote; the record's reason for staying one regime where the gates refused a
+    split."""
+    unit = "per day" if res.time_unit == "day" else "per step"
+    rows = [
+        ["series", res.name],
+        ["rows used", res.n],
+        ["segments", res.n_segments],
+    ]
+    if res.n_dropped:
+        rows.append(["missing dropped", res.n_dropped])
+    header = ["start", "end", "n", f"slope ({unit})", "slope 95% CI", "slope per year"]
+    seg_rows = []
+    for start, end, seg in zip(res.starts, res.ends, res.segments, strict=False):
+        row = [
+            str(start)[:16],
+            str(end)[:16],
+            seg.n,
+            num(seg.slope, 4),
+            f"[{num(seg.ci_low, 4)}, {num(seg.ci_high, 4)}]",
+        ]
+        row.append(num(seg.slope_per_year, 3) if seg.slope_per_year is not None else "n/a")
+        seg_rows.append(row)
+    lines = [f"Segmented trend test on {name} (normet.detect_trend_breaks):", ""]
+    if res.n_segments > 1:
+        from normet.analysis.trend import _fmt_index
+
+        breaks = ", ".join(_fmt_index(v) for v in res.starts[1:])
+        rows += [
+            ["break(s)", breaks],
+            ["single-slope SSE", num(res.sse_single, 6)],
+            ["segmented SSE", num(res.sse_segmented, 6)],
+            ["SSE improvement", f"{num(res.improvement_pct, 1)} %"],
+            [
+                "BIC (single / segmented)",
+                f" {num(res.bic_single, 6)} / {num(res.bic_segmented, 6)}",
+            ],
+            ["p (block bootstrap of the search)", num(res.p_value, 4)],
+            ["alpha", res.alpha],
+        ]
+        if res.n_bootstrap is not None:
+            rows += [
+                ["bootstrap replicates", res.n_bootstrap],
+                ["block length", res.block_length],
+            ]
+        lines.append(table(["", "value"], rows))
+        lines += ["", table(header, seg_rows)]
+        lines += [
+            "",
+            f"Quote: {res.n_segments} segments, break(s) at {breaks}; "
+            f"p={num(res.p_value, 4)} (block bootstrap over {res.n_bootstrap} resamples "
+            f"is the multiple-testing-corrected, autocorrelation-aware test -- the one "
+            f"to quote). Each segment's Theil-Sen slope above, with its interval; "
+            "compare adjacent segments against their Sen intervals, do not re-test.",
+        ]
+    else:
+        rows += [
+            ["single-slope SSE", num(res.sse_single, 6)],
+            ["BIC (single / searched)", f" {num(res.bic_single, 6)} / {num(res.bic_segmented, 6)}"],
+        ]
+        if res.p_value is not None:
+            rows += [
+                [
+                    "best candidate cut",
+                    str(res.best_break)[:16] if res.best_break is not None else "n/a",
+                ],
+                ["best candidate SSE improvement", f"{num(res.best_split_pct, 1)} %"],
+                ["p (block bootstrap of the search)", num(res.p_value, 4)],
+            ]
+        lines.append(table(["", "value"], rows))
+        # the notes say where the search wanted to cut and why it was refused
+    lines += ["", *res.notes]
+    return "\n".join(lines)

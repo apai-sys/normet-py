@@ -329,3 +329,100 @@ def test_headless_trend_runs_on_a_result_table(tools, tmp_path):
     assert "direction (5%)" in said.replace("  ", " ") and "increasing" in said
     with pytest.raises(ValueError, match="no 'nope' column"):
         tools.trend(path, column="nope")
+
+
+def test_headless_trend_breaks_runs_on_a_result_table(tools, tmp_path):
+    """Where the headless segment fit reads a table: the long-term as its separated
+    component (the default), and the columns it names, with no long-term there a
+    no-nonsense error."""
+    import numpy as np
+    import pandas as pd
+
+    rng = np.random.default_rng(0)
+    n = 24 * 45
+    idx = pd.date_range("2024-01-01", periods=n, freq="h")
+    b = n // 2
+    emi = np.empty(n)
+    emi[:b] = 0.02 * np.arange(b) + rng.normal(0, 0.3, b) + 10
+    emi[b:] = 0.005 * np.arange(n - b) + rng.normal(0, 0.3, n - b)
+    dux = np.empty(n)
+    dux[:b] = 0.01 * np.arange(b) + rng.normal(0, 0.2, b)
+    dux[b:] = 0.01 * np.arange(n - b) + rng.normal(0, 0.2, n - b) + 4.0  # a step: the break
+    frame = pd.DataFrame(
+        {
+            "date": idx,
+            "emi_total": emi,
+            "date_unix": dux,
+            "emi_base": 8.0,
+        }
+    )
+    path = str(tmp_path / "decomp2.csv")
+    frame.to_csv(path, index=False)
+    said = tools.trend_breaks(path)
+    assert said.startswith("Segmented trend test on long-term (normet.detect_trend_breaks):")
+    assert "p (block bootstrap of the search)" in said
+    on_emission = tools.trend_breaks(path, column="emission")
+    assert "break" in on_emission or "one regime" in on_emission
+    plain = pd.DataFrame({"date": idx, "a": np.arange(n, dtype=float)})
+    p2 = str(tmp_path / "plain.csv")
+    plain.to_csv(p2, index=False)
+    with pytest.raises(ValueError, match="no 'date_unix' column"):
+        tools.trend_breaks(p2)
+    with pytest.raises(ValueError, match="no 'nope' column"):
+        tools.trend_breaks(path, column="nope")
+
+
+def test_trend_breaks_reading_says_where_and_whose_p():
+    import pandas as pd
+
+    from normet.analysis.trend import TrendBreaks, TrendSlope
+
+    def mk(n_segments: int, p: float) -> TrendBreaks:
+        idx = pd.date_range("2024-01-01", periods=400, freq="h")
+        return TrendBreaks(
+            name="demo",
+            n=400,
+            n_dropped=0,
+            time_unit="day",
+            starts=[idx[0]] + [idx[200]] * (n_segments - 1),
+            ends=[idx[199]] * (n_segments - 1) + [idx[-1]],
+            segments=[
+                TrendSlope(
+                    slope=0.05,
+                    ci_low=0.04,
+                    ci_high=0.06,
+                    n=200,
+                    time_unit="day",
+                    slope_per_year=18.0,
+                    ci_low_per_year=14.0,
+                    ci_high_per_year=22.0,
+                )
+                for _ in range(n_segments)
+            ],
+            n_segments=n_segments,
+            best_break=idx[200],
+            best_split_pct=40.0,
+            sse_single=100.0,
+            sse_segmented=60.0,
+            improvement_pct=40.0,
+            bic_single=500.0,
+            bic_segmented=480.0,
+            p_value=p,
+            significant=p < 0.05,
+            alpha=0.05,
+            max_segments=2,
+            min_segment=28,
+            block_length=16,
+            n_bootstrap=500,
+            notes=[],
+        )
+
+    two = readings.trend_breaks_reading(mk(2, 0.004), name="MY1's emission part")
+    assert two.startswith(
+        "Segmented trend test on MY1's emission part (normet.detect_trend_breaks):"
+    )
+    assert "2024-01-09" in two and "SSE improvement" in two
+    assert "p (block bootstrap of the search)" in two and "0.004" in two
+    one = readings.trend_breaks_reading(mk(1, 0.42), name="flat")
+    assert "one regime" not in one
+    assert "best candidate cut" in one and "0.42" in one

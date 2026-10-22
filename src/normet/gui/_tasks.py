@@ -46,11 +46,13 @@ class TaskMixin(QMainWindow):
         self.trend_button.setEnabled(not busy and has_model)
         if not has_model:
             self.trend_button.setToolTip("Train a model first.")
-        elif self._is_chronos() and self.trend_series.currentText().startswith("emission"):
+        elif self._is_chronos() and self.trend_series.currentText().startswith(
+            ("emission", "long-term")
+        ):
             self.trend_button.setToolTip(
-                "The emission part needs the emission decomposition, which chronos-2 "
-                "cannot make: choose the observed target, or train with flaml or "
-                "lightgbm."
+                "The emission part and its separated long-term trend need the "
+                "emission decomposition, which chronos-2 cannot make: choose the "
+                "observed target, or train with flaml or lightgbm."
             )
         # A notice asking for a step that has now been taken has been answered.
         for key, done in (

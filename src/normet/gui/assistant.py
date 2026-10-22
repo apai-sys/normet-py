@@ -73,7 +73,8 @@ the window holds and run its steps the way its buttons do.
 Work in the window's order, as the analyst asks: look at the data (inspect_data, with
 the target), agree the target and predictors (propose_setup), train (train), read the
 model (model_fit), normalise (normalise), read it (normalised), decompose
-(decompose, then decomposition), and test the trend of a series (trend).
+(decompose, then decomposition), and test the trend of a series (trend; its
+segmented form, where the trend breaks, is trend_breaks).
 
 Which tool does what the analyst asks:
 - The window's own steps are tools, each run as its button runs it, with the settings
@@ -374,6 +375,7 @@ class WindowTools:
         ("normalise", "model"),
         ("decompose", "model"),
         ("trend", "decomposed"),
+        ("trend_breaks", "decomposed"),
         ("rolling", "model"),
         ("multiscale", "normalised"),
         ("pdp", "model"),
@@ -404,6 +406,10 @@ class WindowTools:
         "decompose": "a decomposition with any other setting is normet's decompose in "
         "carry_out (api_help('decompose'))",
         "trend": "a trend of any other series is normet's trend in carry_out (api_help('trend'))",
+        "trend_breaks": (
+            "a segment split of any other series is normet's detect_trend_breaks in "
+            "carry_out (api_help('detect_trend_breaks'))"
+        ),
         "api_help": "name is one of normet's calls, as api_help('') lists them",
         "carry_out": "code is normet's calls on the table open; reasons are said to the analyst",
     }
@@ -440,6 +446,11 @@ class WindowTools:
         ("trend", "seasonal"): "'auto' (the window's own choice), 'none' (the "
         "classical test), or '24' (hourly), '7' (daily), '12' (monthly) calendar "
         "periods",
+        ("trend_breaks", "series"): "'long-term' (the separated long-term trend, "
+        "the default -- the cycles already taken out), 'emission' (its emission "
+        "part), 'met' (its weather part) or 'observed' (the target as recorded)",
+        ("trend_breaks", "segments"): "2 to 4: the most segments the fit may split "
+        "the record into (it stops earlier where a split earns no keep)",
         ("scm_fit", "cutoff"): "the intervention date, YYYY-MM-DD",
     }
 
@@ -822,6 +833,9 @@ class WindowTools:
             )
 
         def start() -> None:
+            # The single segment: this tool is the one-slope test (its segments go
+            # to trend_breaks), so a Segments row left higher is brought back.
+            self.win.tre_segments.setValue(1)
             self.win.trend_series.setCurrentText(
                 {
                     "emission": "emission part (emi_total)",
@@ -836,6 +850,54 @@ class WindowTools:
             start,
             lambda: self.win.results.get("trend"),
             lambda: readings.trend_reading(
+                self.win._trend_raw, name=self.win._trend_name or "series"
+            ),
+        )
+
+    def trend_breaks(
+        self, series: str = "long-term", segments: int = 2, n_bootstrap: int | None = None
+    ) -> str:
+        """The window's segmented trend test (normet.detect_trend_breaks): where the
+        trend breaks, if it does, each segment with its own Theil-Sen slope and
+        interval, and the block-bootstrap p of the search. series is 'long-term'
+        (the decomposition's separated long-term component -- the cleaner input,
+        the default), 'emission' (its emission part), 'met' (its weather part) or
+        'observed' (the target as recorded); segments is 2 to 4; n_bootstrap the
+        replicates of the search under the null. Returns the verdict -- where the
+        break is, and which p stands for it."""
+        if series not in ("long-term", "emission", "met", "observed"):
+            raise ValueError("series is 'long-term' (the default), 'emission', 'met' or 'observed'")
+        if not 2 <= int(segments) <= 4:
+            raise ValueError("segments is 2 to 4")
+        if series in ("emission", "long-term") and self._gui(self.win._is_chronos):
+            raise ValueError(
+                "the emission part and its separated long-term trend do not exist "
+                "on chronos-2: its decomposition cannot make them. Take "
+                "series='observed' instead, or 'met' once the meteorological "
+                "decomposition has run."
+            )
+
+        def start() -> None:
+            # Segments first, then the series: raising the Segments row may move a
+            # default emission-part choice to the long-term one, and the series
+            # named here must be the one that stands.
+            self.win.tre_segments.setValue(int(segments))
+            self.win.trend_series.setCurrentText(
+                {
+                    "long-term": "long-term trend (separated)",
+                    "emission": "emission part (emi_total)",
+                    "met": "meteorology part (met_total)",
+                    "observed": "observed target",
+                }[series]
+            )
+            if n_bootstrap is not None:
+                self.win.tre_n_bootstrap.setValue(int(n_bootstrap))
+            self.win._run_trend()
+
+        return self._step(
+            start,
+            lambda: self.win.results.get("trend"),
+            lambda: readings.trend_breaks_reading(
                 self.win._trend_raw, name=self.win._trend_name or "series"
             ),
         )
@@ -1109,6 +1171,7 @@ class WindowTools:
                 self.normalise,
                 self.decompose,
                 self.trend,
+                self.trend_breaks,
                 self.rolling,
                 self.multiscale,
                 self.pdp,
