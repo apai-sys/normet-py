@@ -32,6 +32,9 @@ def test_top_level_symbols_present():
         "wind_to_uv",
         "time_series_cv",
         "cv_score",
+        "trend",
+        "mann_kendall",
+        "theil_sen",
     }
     missing = must_have - set(nm.__all__)
     assert not missing, f"Missing top-level exports: {sorted(missing)}"

@@ -138,6 +138,53 @@ class Tools:
         path = self._source(data, example)
         return readings.data_reading(self._table(path), target, name=os.path.basename(path))
 
+    # -- the trend (synchronous: it is statistics on a table, it is no job) ----
+    def trend(
+        self,
+        path: str,
+        column: str | None = None,
+        seasonal: int | None = None,
+        n_bootstrap: int = 1000,
+        seed: int = 7_654_321,
+        name: str | None = None,
+    ) -> str:
+        """normet.trend on one column of a result table (a decomposition's emi_total
+        or met_total, a normalised table's normalised, a raw table's target):
+        Mann-Kendall, the Theil-Sen slope, and the block-bootstrap-corrected
+        interval and p where the record is autocorrelated -- reading as the
+        window's own trend does."""
+        df = self._table(self.path(path))
+        if column is None:
+            column = next(
+                (
+                    c
+                    for c in ("emi_total", "met_total", "normalised", "observed")
+                    if c in df.columns
+                ),
+                None,
+            )
+            if column is None:
+                raise ValueError(
+                    f"{os.path.basename(path)} has no trendable column in it: give "
+                    "column=<one it has>"
+                )
+        if column not in df.columns:
+            raise ValueError(f"{os.path.basename(path)} has no {column!r} column")
+        s = df[column].copy()
+        if not isinstance(df.index, pd.DatetimeIndex) and "date" in df.columns:
+            s.index = pd.to_datetime(df["date"], errors="coerce")
+        s.name = column
+        from normet import trend
+
+        result = trend(
+            s,
+            name=name or column,
+            seasonal_period=seasonal,
+            n_bootstrap=n_bootstrap,
+            seed=seed,
+        )
+        return readings.trend_reading(result, name=name or column)
+
     # -- jobs -------------------------------------------------------------------
     @staticmethod
     def _options(**opts: Any) -> list[str]:

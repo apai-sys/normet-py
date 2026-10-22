@@ -40,6 +40,18 @@ class TaskMixin(QMainWindow):
             if has_y_inf
             else "Run the normalisation first — it provides Y_∞, the full-record baseline."
         )
+        # The trend tests a series: the decomposition's part (the default) or the
+        # observed target, so a model is all it needs to be ticked; the choice that
+        # needs a decomposition says why on the click.
+        self.trend_button.setEnabled(not busy and has_model)
+        if not has_model:
+            self.trend_button.setToolTip("Train a model first.")
+        elif self._is_chronos() and self.trend_series.currentText().startswith("emission"):
+            self.trend_button.setToolTip(
+                "The emission part needs the emission decomposition, which chronos-2 "
+                "cannot make: choose the observed target, or train with flaml or "
+                "lightgbm."
+            )
         # A notice asking for a step that has now been taken has been answered.
         for key, done in (
             ("need-data", has_data),
@@ -65,6 +77,12 @@ class TaskMixin(QMainWindow):
 
     def _task_finished(self) -> None:
         self._sync_enabled()
+        # A decomposition's end asked for the trend: the runner is free now, so it
+        # can start (its button's own click does the same).
+        if getattr(self, "_trend_wanted", False):
+            self._trend_wanted = False
+            if self.trend_after.isChecked():
+                self._run_trend()
         self.autosave_session()  # File -> Reopen Last Session, should the window go
 
     def _abandon_task(self) -> None:

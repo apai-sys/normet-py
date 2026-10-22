@@ -98,6 +98,16 @@ class MainWindow(
         self._data_window = None
         self._transport_window = None
         self._polar_window = None
+        #: The trend step: its result (the Trend tab's verdict is of it), its series
+        #: (where the figure draws it), its name and note (the auto seasonal's fallback,
+        #: said once the result is in), the table it came from, and whether a
+        #: decomposition's end started it.
+        self._trend_raw: object | None = None
+        self._trend_table: tuple | None = None
+        self._trend_series = None
+        self._trend_name = ""
+        self._trend_note = ""
+        self._trend_wanted = False
 
         self.runner = TaskRunner(self)
         self.runner.started.connect(self._task_started)
@@ -145,7 +155,11 @@ class MainWindow(
                         (self._build_data_box(), self._build_columns_box()),
                         (self._build_train_box(),),
                         (self._build_normalise_box(),),
-                        (self._build_decompose_box(), self._build_multiscale_box()),
+                        (
+                            self._build_decompose_box(),
+                            self._build_multiscale_box(),
+                            self._build_trend_box(),
+                        ),
                         (self._build_rolling_box(),),
                         (self._build_pdp_box(),),
                     ),
@@ -160,6 +174,7 @@ class MainWindow(
             self.decom_button,
             self.roll_button,
             self.ms_button,
+            self.trend_button,
             self.pdp_button,
         ]
         self.panel_stack, self.panel_bar, self.param_scroll = panel.stack, panel.bar, panel.scroll

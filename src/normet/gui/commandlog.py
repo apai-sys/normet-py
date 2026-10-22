@@ -258,6 +258,12 @@ _KNOWN: dict[str, tuple[str, str, str, str]] = {
         "from normet.gui._multiscale import compute_multiscale",
         "The GUI's own helper over normet.rolling at three window widths.",
     ),
+    "normet.gui._trend.trend_call": (
+        "Trend test",
+        "trend_result",
+        "from normet.gui._trend import trend_call",
+        "The GUI's own helper around normet.trend on the series the window holds.",
+    ),
 }
 
 

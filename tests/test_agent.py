@@ -276,3 +276,56 @@ def test_mcp_server_lists_and_calls_tools(tools):
     assert "my1" in str(said)
     with pytest.raises(Exception, match="no example"):
         asyncio.run(server.call_tool("normet_inspect_data", {"example": "nope"}))
+
+
+# -- the trend ------------------------------------------------------------------------
+
+
+def test_trend_reading_says_which_p_to_quote():
+    from normet.analysis.trend import TrendResult, TrendSlope, TrendTest
+
+    def mk(ar: bool, p_boot: float | None) -> TrendResult:
+        return TrendResult(
+            name="demo",
+            n=400,
+            n_dropped=0,
+            test=TrendTest(S=120, var_S=1.0, z=4.0, p=0.001, n=400),
+            slope=TrendSlope(slope=0.02, ci_low=0.01, ci_high=0.03, n=400, time_unit="day"),
+            ar1_acf=0.5,
+            ar1_p=1e-6,
+            ar_autocorrelated=ar,
+            boot_slope_se=(0.002 if p_boot is not None else None),
+            boot_ci_low=(0.012 if p_boot is not None else None),
+            boot_ci_high=(0.028 if p_boot is not None else None),
+            p_wald_boot=p_boot,
+            block_length=(16 if p_boot is not None else None),
+            n_bootstrap=(500 if p_boot is not None else None),
+            notes=[],
+        )
+
+    text = readings.trend_reading(mk(True, 0.002), name="MY1's emission part")
+    assert text.startswith("Trend test on MY1's emission part (normet.trend):")
+    assert "Mann-Kendall S" in text and "slope (per day)" in text and "increasing" in text
+    assert "p (Wald on block bootstrap)" in text
+    assert "0.002" in text
+    plain = readings.trend_reading(mk(False, None))
+    assert "p (Wald on block bootstrap)" not in plain
+    none_boot = readings.trend_reading(mk(True, None))
+    assert "bootstrap was unavailable" in none_boot
+
+
+def test_headless_trend_runs_on_a_result_table(tools, tmp_path):
+    import numpy as np
+    import pandas as pd
+
+    rng = np.random.default_rng(0)
+    n = 24 * 45
+    idx = pd.date_range("2024-01-01", periods=n, freq="h")
+    frame = pd.DataFrame({"date": idx, "emi_total": 0.01 * np.arange(n) + rng.normal(0, 0.3, n)})
+    path = str(tmp_path / "decomposition.csv")
+    frame.to_csv(path, index=False)
+    said = tools.trend(path)
+    assert said.startswith("Trend test on emi_total (normet.trend):")
+    assert "direction (5%)" in said.replace("  ", " ") and "increasing" in said
+    with pytest.raises(ValueError, match="no 'nope' column"):
+        tools.trend(path, column="nope")
