@@ -68,6 +68,7 @@ coverage.xml
 *.py,cover
 .hypothesis/
 .pytest_cache/
+.normet_cache/
 test_out.joblib
 test_*.joblib
 notebooks/*.joblib
