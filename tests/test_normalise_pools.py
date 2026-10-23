@@ -189,3 +189,69 @@ def test_cache_tells_pools_apart(tmp_path):
 
     assert (other["normalised"] != first["normalised"]).all()
     pd.testing.assert_frame_equal(first, again)
+
+
+# ---------------------------------------------------------------------------
+# log_transform: df and model on the log1p scale, result back in original units
+# ---------------------------------------------------------------------------
+
+
+class _LogModel:
+    """Small log-scale predictions, so expm1 stays in a sane range."""
+
+    backend = "flaml"
+    feature_names_in_ = np.array(["w"])
+    feature_importances_ = np.ones(1)
+
+    def predict(self, X: pd.DataFrame) -> np.ndarray:
+        return 0.5 + 0.2 * X["w"].to_numpy(float)
+
+
+def _log_frame() -> tuple[pd.DataFrame, pd.DataFrame]:
+    """(original-unit frame, its log1p-space twin) for the log tests."""
+    n = 20
+    df_orig = pd.DataFrame(
+        {
+            "date": pd.date_range("2024-01-01", periods=n, freq="h"),
+            "value": 1.0 + np.arange(n) / 10.0,  # 1.0 .. 2.9 in original units
+            "w": np.tile([0.0, 1.0, 2.0], n // 3 + 1)[:n],
+        }
+    )
+    df_log = df_orig.copy()
+    df_log["value"] = np.log1p(df_orig["value"])  # the log-space frame do_all hands over
+    return df_orig, df_log
+
+
+def _log_run(**kw) -> pd.DataFrame:
+    kw = {"covariates": ["w"], "n_samples": 12, "seed": 3, "n_cores": 1, **kw}
+    _, df_log = _log_frame()
+    return normalise(df_log, _LogModel(), **kw)
+
+
+def test_log_transform_inverts_point_and_quantiles():
+    """The log path = the linear path run on the same log-space frame, with
+    every column inverted: observed, normalised and the quantiles."""
+    df_orig, _ = _log_frame()
+    lin = _log_run(return_quantiles=[0.1, 0.5, 0.9])
+    log = _log_run(log_transform=True, return_quantiles=[0.1, 0.5, 0.9])
+    assert np.allclose(np.expm1(lin["normalised"]), log["normalised"])
+    for q in ("q100", "q500", "q900"):
+        assert np.allclose(np.expm1(lin[q]), log[q])
+    # observed comes back in the original units the user gave
+    assert np.allclose(log["observed"], df_orig["value"])
+    assert (log["normalised"] >= 0).all()
+
+
+def test_log_transform_default_is_bit_identical():
+    plain = _run()
+    explicit = _run(log_transform=False)
+    pd.testing.assert_frame_equal(plain, explicit)
+
+
+def test_log_transform_aggregate_false_wide_table_inverts():
+    lin = _log_run(aggregate=False)
+    log = _log_run(aggregate=False, log_transform=True)
+    seed_cols = [c for c in lin.columns if c != "observed"]
+    assert set(seed_cols) == {c for c in log.columns if c != "observed"}
+    for c in seed_cols:
+        assert np.allclose(np.expm1(lin[c]), log[c])

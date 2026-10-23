@@ -18,6 +18,8 @@ __all__ = [
     "impute_values",
     "add_date_variables",
     "split_into_sets",
+    "log1p_target",
+    "expm1_columns",
 ]
 
 
@@ -434,4 +436,72 @@ def split_into_sets(
     else:
         raise ValueError(f"Unknown split_method '{split_method}'.")
 
+    return out
+
+
+def log1p_target(df: pd.DataFrame, target: str = "value") -> pd.DataFrame:
+    """Replace ``target`` with ``log1p(target)``, for a log-scale fit.
+
+    A pollutant that ranges from sub-unit to hundreds of µg/m³ spends most of
+    its variance in its high hours, so a model fitted on the raw scale buys
+    accuracy there at the expense of the low values -- and those are the ones a
+    policy or a health assessment reads. Fitting on ``log1p`` makes errors count
+    in relative rather than absolute terms: a fixed relative miss maps to a
+    bounded error at every level (its weight grows from half a relative unit at
+    level 1 toward the full unit), while its absolute error grows without bound.
+    The transform also keeps the target non-negative by construction when the
+    result is back-transformed.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Frame carrying ``target``; already prepared (dates parsed, target
+        named ``value``) -- this is the step between :func:`prepare_data` and
+        the split-aware fit.
+    target : str, default "value"
+        Column to transform, in place on a copy.
+
+    Returns
+    -------
+    pandas.DataFrame
+        A copy with ``target`` replaced by its ``log1p``.
+
+    Raises
+    ------
+    ValueError
+        If ``target`` is missing, or carries negative values: ``log1p`` is
+        undefined below -1, and a concentration that is negative in the
+        original units (a de-weathered residual, a difference) is not a
+        quantity a log-scale fit can represent.
+    """
+    if target not in df.columns:
+        raise ValueError(f"`log1p_target`: column {target!r} not found.")
+    values = pd.to_numeric(df[target], errors="coerce")
+    negative = values < 0
+    if bool(negative.any()):
+        n_bad = int(negative.sum())
+        worst = float(values[negative].min())
+        raise ValueError(
+            f"`log_transform` needs non-negative {target!r}, but {n_bad} rows are "
+            f"negative (min {worst:g}). Log-scale normalisation cannot represent them; "
+            "drop or floor those rows first, or leave `log_transform=False`."
+        )
+    out = df.copy()
+    out[target] = np.log1p(values.to_numpy(dtype=float))
+    return out
+
+
+def expm1_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Invert :func:`log1p_target`: every numeric column back through ``expm1``.
+
+    Applied to the whole result, not just the point estimate, because every
+    column is a value of the same target -- the observations, the normalised
+    series and each quantile. ``expm1`` is monotone, so a quantile of the log
+    space is the quantile of the original space, and the back-transform cannot
+    produce a negative concentration.
+    """
+    out = df.copy()
+    numeric = out.select_dtypes(include=[np.number]).columns
+    if len(numeric):
+        out[numeric] = np.expm1(out[numeric].to_numpy(dtype=float))
     return out

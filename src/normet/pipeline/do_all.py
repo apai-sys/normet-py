@@ -24,7 +24,7 @@ from ..model.train import build_model
 from ..utils._config import resolve_config
 from ..utils.logging import _progress_str, get_logger
 from ..utils.metrics import modStats
-from ..utils.prepare import prepare_data
+from ..utils.prepare import expm1_columns, log1p_target, prepare_data
 
 log = get_logger(__name__)
 
@@ -51,6 +51,18 @@ class SingleConfig:
     resample_df: pd.DataFrame | None = None
     memory_save: bool = False
     verbose: bool = False
+    log_transform: bool = False
+    """Fit on ``log1p(value)`` instead of raw ``value``.
+
+    A pollutant that spans sub-unit to hundreds of µg/m³ spends most of its
+    raw-scale variance on high hours; fitting on the log scale makes errors
+    count in relative terms, so a fixed relative miss maps to a bounded error
+    at every level while its absolute error grows without bound. The model
+    trains on ``log1p(value)``,
+    :func:`normalise` resamples-and-predicts on that scale, and its result is
+    returned through ``expm1`` so every column is back in the original units.
+    Default False keeps the existing behaviour bit-identical.
+    """
 
 
 @dataclass
@@ -101,6 +113,8 @@ def _do_all_zero_shot(
         train_fraction=cfg.train_fraction,
         seed=cfg.seed,
     )
+    if cfg.log_transform:
+        df_prep = log1p_target(df_prep)
     indexed = to_indexed_frame(df_prep)
 
     estimator = Chronos2Estimator(met_covariates=met, **(cfg.model_config or {}))
@@ -122,6 +136,8 @@ def _do_all_zero_shot(
         schema="normet",
     )
     out.index.name = "date"
+    if cfg.log_transform:
+        out = expm1_columns(out)
 
     seeded = min(estimator.context_length, len(out))
     log.info(
@@ -159,6 +175,7 @@ def do_all(
     memory_save: bool = False,
     verbose: bool = False,
     aggregate: bool = True,
+    log_transform: bool = False,
     **kwargs: Any,
 ) -> tuple[pd.DataFrame, object, pd.DataFrame]:
     r"""Run the standard pipeline: prepare → build_model → normalise.
@@ -183,6 +200,17 @@ def do_all(
     config : SingleConfig or None, default=None
         Optional :class:`SingleConfig` holding all parameters.
         Individual keyword arguments override fields on *config*\ .
+    log_transform : bool, default False
+        Fit on ``log1p(value)`` instead of the raw target. A pollutant that
+        spans sub-unit to hundreds of µg/m³ spends most of its raw-scale
+        variance on its high hours; the log scale makes errors count in
+        relative terms, and the back-transform through ``expm1``
+        keeps the result non-negative by construction. With it on, the model
+        trains and the de-weathering runs on the log scale, and every column
+        of the normalised result comes back in the original units; the
+        prepared frame that is returned, however, carries ``log1p(value)`` in
+        its ``value`` column -- it is the frame the model was trained on.
+        Default False leaves the existing behaviour untouched.
     **kwargs
         Any additional keyword arguments are forwarded to
         :func:`_resolve_single_config`.
@@ -217,6 +245,7 @@ def do_all(
         memory_save=memory_save,
         verbose=verbose,
         aggregate=aggregate,
+        log_transform=log_transform,
         **kwargs,
     )
 
@@ -248,6 +277,11 @@ def do_all(
         train_fraction=_cfg.train_fraction,
         seed=_cfg.seed,
     )
+    if _cfg.log_transform:
+        # After the split is known, before the fit: the model, the de-weathering
+        # and their metrics all live on the log scale; the result comes back
+        # through expm1 inside normalise.
+        df_prep = log1p_target(df_prep)
     log.info(
         "Data prepared: %d rows (%d training, %d testing)",
         len(df_prep),
@@ -281,6 +315,7 @@ def do_all(
         resample_df=_cfg.resample_df,
         memory_save=_cfg.memory_save,
         verbose=_cfg.verbose,
+        log_transform=_cfg.log_transform,
     )
 
     log.info("do_all finished: %d timestamps", len(out))
@@ -307,6 +342,7 @@ def do_all_unc(
     memory_save: bool = False,
     verbose: bool = False,
     weighted_method: str = "r2",
+    log_transform: bool = False,
     **kwargs: Any,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     r"""Run the uncertainty pipeline: :func:`do_all` repeated *n_models* times.
@@ -321,6 +357,12 @@ def do_all_unc(
     config : UncConfig or None, default=None
         Optional :class:`UncConfig` holding all parameters.
         Individual keyword arguments override fields on *config*\ .
+    log_transform : bool, default False
+        As in :func:`do_all`: every ensemble member trains and de-weather on
+        the log scale, and the ensemble output (means, bounds, the weighted
+        series) is reported in the original units. The per-member statistics
+        that drive the weights are then computed on the log scale, which is
+        the scale each member was fitted on.
     **kwargs
         Any additional keyword arguments are forwarded to
         :func:`_resolve_unc_config`.
@@ -347,6 +389,7 @@ def do_all_unc(
         resample_df=resample_df,
         memory_save=memory_save,
         verbose=verbose,
+        log_transform=log_transform,
         **kwargs,
     )
 
@@ -386,6 +429,7 @@ def do_all_unc(
             resample_df=_cfg.resample_df,
             memory_save=_cfg.memory_save,
             aggregate=True,
+            log_transform=_cfg.log_transform,
         )
 
         if observed_ref is None:
