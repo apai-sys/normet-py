@@ -330,6 +330,17 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   `scm_diagnostics` now carries the fit's verdict under a new `pre_trend`
   key (everything it returned before is unchanged), so the assistant's
   SCM reading reports the pre-trend line as well.
+- **Event-study plot: `plot_event_study`** (`normet.causal`, exported at the
+  top level). The visual half of the pre-trend check: the treated effect drawn
+  against *periods since the cutoff* — grey before the intervention, red after
+  — so the pre-period points that a credible fit should scatter about zero sit
+  in their own colour, and any slope in them is visible before the step that
+  is read as the effect. Event time counts panel periods, so a monthly panel
+  and a daily one read the same and the points line up row by row with
+  `placebo_in_time(...)["ref_band_event_time"]`; pass that frame as `band=` to
+  shade the post-period with the placebo band (`ci_lo`/`ci_hi`, or
+  `low`/`high`, or `p10`/`p90`). No band is drawn over the pre-period, because
+  placebo cutoffs have no pre-period of their own to estimate one from.
 
 ### Changed
 - **`rolling` names its windows `window_01`, `window_02`, …** (was
