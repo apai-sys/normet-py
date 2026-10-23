@@ -10,7 +10,14 @@ __version__ = _version("normet")
 
 # --- Exceptions ---
 from . import datasets
-from .exceptions import ConfigError, DataError, ExperimentalWarning, ModelError, NormetError
+from .exceptions import (
+    CalibrationWarning,
+    ConfigError,
+    DataError,
+    ExperimentalWarning,
+    ModelError,
+    NormetError,
+)
 
 # --- Modelling ---
 from .model import (
@@ -140,12 +147,15 @@ from .counterfactual import HarmonicCounterfactual, HarmonicCounterfactualResult
 
 # --- Foundation Models (Chronos) ---
 from .foundation import (
+    CalibratedEstimator,
     Chronos2Estimator,
     ChronosEmbedder,
     CounterfactualResult,
     InsufficientContextError,
     IrregularIndexError,
+    QuantileCalibration,
     add_calendar_covariates,
+    calibrate_quantiles,
     resolve_device,
     to_indexed_frame,
     to_normet_frame,
@@ -173,6 +183,7 @@ __all__ = [
     "DataError",
     "ConfigError",
     "ModelError",
+    "CalibrationWarning",
     "ExperimentalWarning",
     # --- Config classes ---
     "DecomposeConfig",
@@ -306,6 +317,9 @@ __all__ = [
     # --- Foundation Models (Chronos) ---
     "ChronosEmbedder",
     "Chronos2Estimator",
+    "CalibratedEstimator",
+    "QuantileCalibration",
+    "calibrate_quantiles",
     "CounterfactualResult",
     "InsufficientContextError",
     "IrregularIndexError",
