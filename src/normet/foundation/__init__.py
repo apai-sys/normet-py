@@ -1,5 +1,6 @@
 """Foundation model embeddings, zero-shot de-weathering, and counterfactual inference."""
 
+from .calibration import CalibratedEstimator, QuantileCalibration, calibrate_quantiles
 from .chronos import ChronosEmbedder
 from .estimator import (
     CHRONOS_BACKEND,
@@ -19,8 +20,11 @@ from .estimator import (
 __all__ = [
     "CHRONOS_BACKEND",
     "CHRONOS_DEFAULT_SAMPLES",
+    "CalibratedEstimator",
     "ChronosEmbedder",
+    "QuantileCalibration",
     "add_calendar_covariates",
+    "calibrate_quantiles",
     "Chronos2Estimator",
     "CounterfactualResult",
     "InsufficientContextError",
