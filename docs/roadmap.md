@@ -57,10 +57,10 @@ notes); the table below is its snapshot.
 | ✅ | Chronos-2 quantile calibration (`calibrate_quantiles`, hold-out conformal thresholds) (P1) |
 | ✅ | SCM pre-trend test `pre_trend_test` and the event-study figure (P1) |
 | ✅ | Log-scale fits (`log_transform`: train on log1p, report in original units) (P2) |
-| 🔨 | Embedding diagnostics: silhouette curve, projection, the two-panel figure (P2, PR #64) |
-| 🔨 | Donor spatial diagnostics: per-donor distance, bearing and sector; the pool's centroid and sector coverage (P2, PR #65) |
-| 🔨 | Staggered adoption `run_scm_staggered`, per-unit placebo p-values and the cross-unit permutation test (P2, PR #66, #67) |
-| 🔍 | numpy 2.x / Python 3.13 upgrade — non-blocking CI probe jobs collect the breakage list; the matrix widens once it is fixed (P3, PR #68) |
+| ✅ | Embedding diagnostics: silhouette curve, projection, the two-panel figure (P2, PR #64) |
+| ✅ | Donor spatial diagnostics: per-donor distance, bearing and sector; the pool's centroid and sector coverage (P2, PR #65) |
+| ✅ | Staggered adoption `run_scm_staggered`, per-unit placebo p-values and the cross-unit permutation test (P2, PR #66, #67) |
+| 🔍 | numpy 2.x / Python 3.13 upgrade — probe jobs on main (PR #68); Python 3.13 passed the probe, the numpy 2.x breakage list is tracked in issue #69; the matrix widens as the list is fixed (P3) |
 | 📋 | China data adapters — scoped as issue + data-format doc; not in the 1.1 schedule (data licences and station coordinates first) (P3) |
 | ⏸ | Performance — measure first, then touch: profile the normalise paths, the optional `device` passthrough; the bit-identical promise is why it is last (P3) |
 
