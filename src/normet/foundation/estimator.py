@@ -28,6 +28,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from .calibration import QuantileCalibration, calibrate_quantiles
+
 log = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "amazon/chronos-2"
@@ -308,6 +310,11 @@ class CounterfactualResult:
     conditions. It is the placebo check: an unbiased counterfactual should score
     near zero there, and any intervention effect smaller than this bias is not
     separable from counterfactual error.
+
+    ``calibration`` carries the quantile calibration when the counterfactual
+    ran with ``calibrated=True``: the fit, its cross-validated coverage table
+    and the levels it could not bring onto target. ``None`` on the default
+    path, where the band is the model's own.
     """
 
     observed: pd.Series
@@ -318,6 +325,7 @@ class CounterfactualResult:
     relative_impact_pct_p50: pd.Series
     pre_intervention_bias_pct: float
     summary: dict[str, Any] = field(default_factory=dict)
+    calibration: QuantileCalibration | None = None
 
     def to_dataframe(self) -> pd.DataFrame:
         """Convert counterfactual time series to a unified DataFrame."""
@@ -1299,6 +1307,7 @@ class Chronos2Estimator:
         quantiles: Sequence[float] = (0.1, 0.5, 0.9),
         validation_hours: int = 720,
         max_horizon: int | None = None,
+        calibrated: bool = False,
     ) -> CounterfactualResult:
         """Business-as-usual projection across an intervention.
 
@@ -1326,6 +1335,19 @@ class Chronos2Estimator:
             Truncate the projection after this many hours. Counterfactual skill
             decays with horizon; use this to keep claims inside the range where
             the hold-out shows the projection is trustworthy.
+        calibrated : bool, default False
+            Take the band through :func:`~normet.foundation.calibration.calibrate_quantiles`
+            before projecting: the fit and its hold-out both end at
+            ``intervention_date``, so the correction is measured under the same
+            conditioning the projection is made under, and the placebo run goes
+            through the same fit. The median -- and with it
+            ``pre_intervention_bias_pct`` and the roll-forward itself -- is a
+            centre quantity the correction never touches; what changes is the
+            band (``counterfactual_p10`` / ``counterfactual_p90`` and
+            ``fraction_outside_interval``). The fit rides along on the result
+            (``calibration``) with its cross-validated coverage table, and a
+            :class:`~normet.exceptions.CalibrationWarning` names the level it
+            could not bring onto target.
         """
         self._check_index(df.index)
         interv = pd.to_datetime(intervention_date)
@@ -1342,10 +1364,20 @@ class Chronos2Estimator:
         if max_horizon is not None:
             post = post.iloc[: int(max_horizon)]
 
+        # --- the calibration, when asked for: fit and hold-out both end at the
+        # intervention, the same conditioning the projection is made under.
+        calibration: QuantileCalibration | None = None
+        if calibrated:
+            calibration = calibrate_quantiles(
+                self, pre, target, interv, quantiles=quantiles, covariates=cols
+            ).calibration
+
         # --- placebo: project the pre-intervention hold-out under identical rules
         val = pre.iloc[-validation_hours:]
         val_ctx = pre.iloc[:-validation_hours]
-        val_p50 = self._roll_forward(val_ctx, val, target, cols, {0.5: self._q_index(0.5)})[0.5]
+        val_p50 = self._roll_forward(
+            val_ctx, val, target, cols, {0.5: self._q_index(0.5)}, calibration
+        )[0.5]
         val_obs = val[target].to_numpy(dtype=float)
         ok = np.isfinite(val_obs)
         bias_pct = (
@@ -1356,7 +1388,7 @@ class Chronos2Estimator:
 
         # --- the counterfactual itself
         i_q = {q: self._q_index(q) for q in quantiles}
-        proj = self._roll_forward(pre, post, target, cols, i_q)
+        proj = self._roll_forward(pre, post, target, cols, i_q, calibration)
 
         p50 = pd.Series(proj[0.5], index=post.index)
         p10 = pd.Series(proj[min(quantiles)], index=post.index)
@@ -1381,6 +1413,9 @@ class Chronos2Estimator:
             "fraction_outside_interval": round(outside, 3),
             "validation_hours": int(validation_hours),
         }
+        if calibration is not None:
+            summary["calibrated"] = True
+            summary["calibration"] = str(calibration)
         log.info(
             "counterfactual %s: effect %.2f%% against a pre-intervention bias of %.2f%%",
             interv.date(),
@@ -1397,6 +1432,7 @@ class Chronos2Estimator:
             relative_impact_pct_p50=impact_pct,
             pre_intervention_bias_pct=bias_pct,
             summary=summary,
+            calibration=calibration,
         )
 
     def _roll_forward(
@@ -1406,12 +1442,18 @@ class Chronos2Estimator:
         target: str,
         cols: Sequence[str],
         q_index: dict[float, int],
+        calibration: QuantileCalibration | None = None,
     ) -> dict[float, np.ndarray]:
         """Project across ``horizon_frame`` without ever seeing its observations.
 
         Blocks longer than :attr:`prediction_length` are rolled forward on the
         model's own median, which is what makes the projection independent of the
         post-intervention record — and also why its error compounds with horizon.
+
+        ``calibration`` takes each raw block's band through the fitted
+        correction before the rows are read; the roll-forward feedback is the
+        median row, which the correction never touches, so a calibrated run
+        walks the identical median trajectory and differs only in its band.
         """
         self._check_index(context.index)
         self._check_index(horizon_frame.index)
@@ -1425,6 +1467,8 @@ class Chronos2Estimator:
             future = horizon_frame.iloc[s:e]
             past_cov = cov_hist.iloc[-self.context_length :]
             block = self._forecast_block(hist[-self.context_length :], past_cov, future, cols)
+            if calibration is not None:
+                block = calibration.rescale_block(block, self._q_index)
             for q, qi in q_index.items():
                 out[q][s:e] = block[qi]
             # roll the model's own median forward as pseudo-history

@@ -156,6 +156,26 @@ res.to_normet_frame()                # same observed/normalised/qNNN shape
 Any effect smaller than `pre_intervention_bias_pct` is not separable from the
 counterfactual's own error, so read the two numbers together or not at all.
 
+### Calibrating the band
+
+The p10/p90 the projection carries are the model's own quantiles, and their
+nominal coverage is only as honest as the weather in the model's training
+data. `calibrated=True` checks them on the record's own pre-intervention
+history — the fit and its hold-out both end at the intervention date, the
+same conditioning the projection is made under — and takes the band through
+the fitted thresholds:
+
+```python
+res = est.counterfactual(df, "NO2", intervention_date="2020-03-23", features=met, calibrated=True)
+res.calibration.coverage   # per level: nominal, uncalibrated, calibrated coverage
+```
+
+The median — and with it `pre_intervention_bias_pct` — is a centre quantity
+the correction never touches; what changes is the band and
+`fraction_outside_interval`. Where the record's behaviour went beyond the
+hold-out, a `CalibrationWarning` names the level still off target, and the
+band is returned corrected and labelled rather than silently trusted.
+
 ## From the command line
 
 ```bash

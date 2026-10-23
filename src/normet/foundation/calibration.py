@@ -46,7 +46,7 @@ from __future__ import annotations
 
 import logging
 import warnings
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -195,6 +195,36 @@ class QuantileCalibration:
             f"{self.n_blocks} blocks over {len(self.levels)} band levels; levels off "
             f"target: {bad}"
         )
+
+    def rescale_block(self, block: np.ndarray, q_index: Callable[[float], int]) -> np.ndarray:
+        """Apply the fit's move to one raw forecast block.
+
+        The same move :meth:`CalibratedEstimator._rescale` makes on a
+        ``predict_quantiles`` frame, on the estimator's native block: each
+        corrected band's edges go to the median plus or minus the fitted
+        multiple of the block's own reference span (its 5th-to-95th
+        percentile half-width, at every step). The median and the levels the
+        fit does not carry come back as the model made them -- the correction
+        acts on the band, never on the centre. ``block`` is
+        ``(n_native_quantiles, horizon)`` and ``q_index`` maps a level to its
+        row the way the estimator does (nearest native level), so the move
+        acts on the very quantities the thresholds were fit on. A block whose
+        span is not positive anywhere comes back as made: there is no
+        reference for the multiple to act on.
+        """
+        med_i = int(q_index(0.5))
+        lo_i = int(q_index(float(_SPAN[0])))
+        hi_i = int(q_index(float(_SPAN[1])))
+        med = block[med_i]
+        span = (block[hi_i] - block[lo_i]) / 2.0
+        if not (span > 0).any():
+            return block
+        out = block.copy()
+        for bi, b in enumerate(self.levels):
+            t = self.threshold[bi]
+            out[int(q_index(b))] = med + span * t
+            out[int(q_index(_round_q(1.0 - b)))] = med - span * t
+        return out
 
 
 def _fit_pass(
@@ -488,10 +518,10 @@ class CalibratedEstimator:
     acting on it is the same move. The median, the levels the fit does not
     carry, ``predict``, and everything the estimator has that the
     calibration does not shadow (``finetune``, the context lengths, the
-    whole rest of its surface) are carried through. ``deweather`` and the
-    counterfactual reach the base's own paths and so stay uncorrected until
-    the wiring takes them (the counterfactual's ``calibrated`` flag); the
-    correction is on :meth:`predict_quantiles`, which is what they call.
+    whole rest of its surface) are carried through. ``deweather`` stays on
+    the base's own path; the counterfactual's ``calibrated`` flag takes its
+    band through this same fit, block by block, via
+    :meth:`QuantileCalibration.rescale_block`.
 
     ``coverage`` is the table a paper quotes and ``calibration`` the fit
     behind it; its ``warnings`` are the levels the fit could not bring onto
