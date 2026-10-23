@@ -602,6 +602,40 @@ is made of.}
         2021); \code{rmspe\_ratio\_test} gives Abadie's post/pre RMSPE-ratio test.
 \end{description}
 
+\subsection{Staggered adoption}\label{sec:scmstaggered}
+When the intervention rolls out unit by unit — the UK ULEZ 2021 expansion, staggered
+driving restrictions across cities — each adopting unit has its own cutoff.
+\code{run\_scm\_staggered} fits each treated unit on its own pre- and post-period, with
+the \emph{other treated units excluded from every run's donor pool}, so one unit's
+intervention cannot leak into another unit's synthetic control. Each unit's effect is
+the post-cutoff average of its effect path,
+\begin{equation}
+  \bar{e}_j = \frac{1}{|T_j|} \sum_{t \ge c_j} \bigl(\text{observed}_t -
+  \text{synthetic}_t\bigr),
+\end{equation}
+where $c_j$ is the unit's cutoff and $T_j$ its post-cutoff dates; the result is one row
+per unit ($c_j$, the pre- and post-period lengths, the pre-period fit $R^2$, the effect,
+and $p_j$, the unit's own placebo-in-space test at its own cutoff) plus mean and median
+rows over the units' effects.
+
+The \emph{mean} row's $p$-value is the cross-unit permutation test: each donor in turn
+takes every treated unit's role — the full set of cutoffs — and its pseudo-effects are
+averaged the same way the real units' are,
+\begin{equation}
+  p = \frac{1 + \#\{\,u : |\bar{e}_u| \ge |\bar{\bar{e}}|\,\}}{1 + J},
+\end{equation}
+for $J$ donors and $\bar{\bar{e}}$ the mean of the treated units' effects. The real
+treated units are not permuted into the reference: their data already carry the
+intervention, and in a staggered design a unit given a later cutoff than its own has its
+real effect inside its new ``pre-period'', while one given an earlier cutoff has a
+``post-period'' that is partly effect-free. Permuting treated identities is contaminated
+by the true effect, and with few treated units the test degenerates — with two there is
+one non-identity permutation, and it is contaminated. A donor-only reference is the clean
+null: a donor never intervened on draws from the null distribution. Each placebo fit
+needs a pool of its own, and with the default \code{scm} backend that is at least three
+donors; with a smaller pool the $p$-values come back NaN while the effects are still
+read.
+
 % ============================ 4. GETTING STARTED ==============================
 \chapter{Getting started}\label{ch:start}
 
