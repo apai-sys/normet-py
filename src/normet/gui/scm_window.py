@@ -146,6 +146,25 @@ def fit_verdict(diagnostics: dict, shuffled_r2: float | None = None) -> tuple[st
     )
 
 
+def donor_layout(
+    df: pd.DataFrame,
+    unit_col: str,
+    treated: str,
+    donors: list[str],
+    lat_col: str,
+    lon_col: str,
+    weights: pd.Series | None = None,
+) -> tuple[pd.DataFrame, dict]:
+    """The donor pool placed around the treated unit: each donor's distance,
+    bearing and sector, plus the pool's centroid offset and sector coverage."""
+    from normet.causal.spatial import donor_spatial_summary, spatial_summary
+
+    table = donor_spatial_summary(
+        df, donors, treated, unit_col=unit_col, lat_col=lat_col, lon_col=lon_col, weights=weights
+    )
+    return table, spatial_summary(table, n_donors=len(donors))
+
+
 def _checked(widget: QListWidget) -> list[str]:
     return [
         widget.item(i).text()
@@ -285,6 +304,18 @@ class SCMWindow(QMainWindow):
         cf.addRow("Date", self.date_combo)
         cf.addRow("Unit", self.unit_combo)
         cf.addRow("Outcome", self.outcome_combo)
+        self.lat_combo = NoWheelComboBox()
+        self.lat_combo.setToolTip(
+            "Optional: the unit's latitude column. Needed only for the\n"
+            "Spatial tab (donor layout around the treated unit)."
+        )
+        self.lon_combo = NoWheelComboBox()
+        self.lon_combo.setToolTip(
+            "Optional: the unit's longitude column. Needed only for the\n"
+            "Spatial tab (donor layout around the treated unit)."
+        )
+        cf.addRow("Latitude", self.lat_combo)
+        cf.addRow("Longitude", self.lon_combo)
         self.date_combo.currentTextChanged.connect(self._columns_changed)
         self.unit_combo.currentTextChanged.connect(self._columns_changed)
         self.outcome_combo.currentTextChanged.connect(self._redraw_panel_tab)
@@ -344,6 +375,13 @@ class SCMWindow(QMainWindow):
         keep.addWidget(self.sim_tick_btn)
         gf.addRow(keep)
         self._similarity: pd.DataFrame | None = None
+        self.spatial_btn = run_button(
+            "▶  Show donor layout",
+            "Place each checked donor around the treated unit by great-circle\ndistance and compass bearing: where the counterfactual is\n"
+            "borrowed from, which the weights alone do not say.\nNeeds the Latitude/Longitude columns above.",
+        )
+        self.spatial_btn.clicked.connect(self._run_spatial)
+        gf.addRow(self.spatial_btn)
 
         # ---- Estimator
         est_box = QGroupBox("Estimator")
@@ -440,6 +478,7 @@ class SCMWindow(QMainWindow):
             self.placebo_time_btn,
             self.unc_btn,
             self.all_btn,
+            self.spatial_btn,
         ]
 
         self._backend_changed(self.backend_combo.currentText())
@@ -494,6 +533,10 @@ class SCMWindow(QMainWindow):
             "Rank donors by similarity (Chronos-2) to compare every unit's pre-period with the treated unit's."
         )
         self.tabs.addTab(self.tab_sim, "Similarity")
+        self.tab_spatial = CanvasTab(
+            "Run 'Show donor layout' to see where the donors sit around the treated unit."
+        )
+        self.tabs.addTab(self.tab_spatial, "Spatial")
         self.tabs.currentChanged.connect(lambda i: self.exp_btn.setEnabled(i in self._tab_data))
         return self.tabs
 
@@ -604,6 +647,12 @@ class SCMWindow(QMainWindow):
         wn = next((c for c in num_cols if c.lower().endswith("wn")), None)
         if wn:
             self.outcome_combo.setCurrentText(wn)
+        self.lat_combo.clear()
+        self.lat_combo.addItems([c for c in num_cols if c.lower() in ("lat", "latitude")])
+        self.lon_combo.clear()
+        self.lon_combo.addItems(
+            [c for c in num_cols if c.lower() in ("lon", "long", "longitude", "lng")]
+        )
         self._updating = False
 
         self.file_label.setText(f"{label}\n{len(df):,} rows × {df.shape[1]} columns")
@@ -802,6 +851,12 @@ class SCMWindow(QMainWindow):
         is_bayes = self.backend_combo.currentText() == "bayesian"
         for b in (self.placebo_space_btn, self.placebo_time_btn, self.unc_btn, self.all_btn):
             b.setEnabled(not busy and has_df and not is_bayes)
+        self.spatial_btn.setEnabled(
+            not busy
+            and has_df
+            and bool(self.lat_combo.currentText())
+            and bool(self.lon_combo.currentText())
+        )
         self.cancel_btn.setEnabled(busy)
 
     def _task_started(self, name: str) -> None:
@@ -1297,6 +1352,167 @@ class SCMWindow(QMainWindow):
             item.setCheckState(
                 Qt.CheckState.Checked if item.text() in keep else Qt.CheckState.Unchecked
             )
+
+    def _run_spatial(self) -> None:
+        """Place the checked donors around the treated unit by distance and bearing."""
+        if self.df is None:
+            return
+        treated = self.treated_combo.currentText()
+        if not treated:
+            QMessageBox.information(self, "No treated unit", "Pick the treated unit.")
+            return
+        lat_col = self.lat_combo.currentText()
+        lon_col = self.lon_combo.currentText()
+        if not lat_col or not lon_col:
+            QMessageBox.information(
+                self,
+                "No coordinates",
+                "The Spatial tab needs the panel's latitude and longitude columns —\n"
+                "pick them in the Columns group.",
+            )
+            return
+        donors = _checked(self.donor_list)
+        if not donors:
+            QMessageBox.information(self, "No donors", "Tick at least one donor in the pool.")
+            return
+        unit_col = self.unit_combo.currentText()
+        weights = None
+        if isinstance(self.result, dict) and self.result.get("weights") is not None:
+            weights = self.result["weights"]
+        self.runner.submit(
+            "donor spatial layout",
+            donor_layout,
+            self._spatial_done,
+            self._show_error,
+            self.df,
+            unit_col,
+            treated,
+            donors,
+            lat_col,
+            lon_col,
+            weights,
+        )
+
+    def _spatial_done(self, payload: tuple[pd.DataFrame, dict]) -> None:
+        import matplotlib.pyplot as plt
+
+        table, s = payload
+        treated = self.treated_combo.currentText()
+        # Each donor as an (east, north) offset vector from the treated unit,
+        # which is what a compass reading means on the ground.
+        rad = np.deg2rad(table["bearing_deg"].to_numpy(dtype=float))
+        d = table["distance_km"].to_numpy(dtype=float)
+        east = d * np.sin(rad)
+        north = d * np.cos(rad)
+        finite = np.isfinite(d)
+
+        fig, ax = plt.subplots(figsize=(6, 5))
+        if "weight" in table.columns:
+            w = table["weight"].abs().to_numpy(dtype=float)
+            w_f = w[finite]
+            wmax = float(np.nanmax(w_f)) if w_f.size and np.isfinite(w_f).any() else 0.0
+            sizes = 30 + (
+                230.0 * np.where(np.isfinite(w_f) & (w_f > 0), w_f, 0.0) / wmax if wmax > 0 else 0.0
+            )
+            ax.scatter(
+                east[finite],
+                north[finite],
+                s=sizes,
+                color=S.COMPONENT,
+                alpha=0.85,
+                edgecolor="white",
+                zorder=3,
+            )
+        else:
+            ax.scatter(
+                east[finite],
+                north[finite],
+                s=60,
+                color=S.COMPONENT,
+                alpha=0.85,
+                edgecolor="white",
+                zorder=3,
+            )
+        for i, donor in enumerate(table.index):
+            if finite[i]:
+                ax.annotate(
+                    str(donor),
+                    (east[i], north[i]),
+                    xytext=(4, 3),
+                    textcoords="offset points",
+                    fontsize=7,
+                    color="0.35",
+                )
+        ax.scatter([0], [0], marker="*", s=220, color=S.INK, zorder=5)
+        scale = max(
+            float(np.nanmax(np.abs(east[finite]))) if finite.any() else 0.0,
+            float(np.nanmax(np.abs(north[finite]))) if finite.any() else 0.0,
+            1.0,
+        )
+        for a in range(0, 360, 45):  # the compass sectors, as faint spokes
+            r = np.deg2rad(a)
+            ax.plot([0, scale * np.sin(r)], [0, scale * np.cos(r)], color="0.85", lw=0.8, zorder=1)
+        for label, (fx, fy) in {
+            "N": (0, 1.12),
+            "S": (0, -1.18),
+            "E": (1.16, -0.04),
+            "W": (-1.18, -0.04),
+        }.items():
+            ax.text(
+                fx * scale, fy * scale, label, ha="center", va="center", fontsize=8, color="0.4"
+            )
+        if "weight" in table.columns and wmax > 0:
+            handles = [
+                plt.Line2D(
+                    [],
+                    [],
+                    marker="o",
+                    ls="",
+                    ms=6 + 8 * f,
+                    color=S.COMPONENT,
+                    label=f"weight {f:.0%} of max",
+                )
+                for f in (0.5, 1.0)
+            ]
+            ax.legend(handles=handles, loc="best", fontsize=7)
+        ax.set_aspect("equal")
+        ax.set_xlabel("east (km)")
+        ax.set_ylabel("north (km)")
+        ax.set_title(f"Donor layout around {treated}")
+        S.grid(ax)
+
+        missing = int(s["n_donors_missing"])
+        lines = [
+            f"{int(s['n_donors_placed'])} of {len(table)} donors placed"
+            + (f" — {missing} without a coordinate fix." if missing else "."),
+        ]
+        if np.isfinite(s["centroid_offset_km"]):
+            lines.append(
+                f"Pool centroid {s['centroid_offset_km']:.0f} km from the treated unit at "
+                f"bearing {s['centroid_bearing_deg']:.0f}°; the donors span "
+                f"{s['sector_fraction']:.0%} of the compass."
+            )
+        lines.append(
+            "A reading of where the counterfactual is borrowed from — the weights say "
+            "how much each donor contributes, this says where they sit."
+        )
+        cols = ["donor", "distance_km", "bearing_deg", "sector"] + (
+            ["weight"] if "weight" in table.columns else []
+        )
+        rows = []
+        for t in table.itertuples(index=True):
+            row = [
+                str(t.Index),
+                "" if not np.isfinite(t.distance_km) else f"{t.distance_km:.0f}",
+                "" if not np.isfinite(t.bearing_deg) else f"{t.bearing_deg:.0f}°",
+                str(t.sector),
+            ]
+            if "weight" in table.columns:
+                row.append("" if not np.isfinite(t.weight) else f"{t.weight:.3f}")
+            rows.append(row)
+        self.tab_spatial.show_result(fig, lines=lines, header=cols, rows=rows)
+        self._show_tab(self.tab_spatial, table)
+        self._sync_enabled()
 
     def _run_all_units(self) -> None:
         design = self._design()

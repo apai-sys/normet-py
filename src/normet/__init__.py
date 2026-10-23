@@ -120,10 +120,13 @@ from .analysis import (
 # --- Synthetic control ---
 from .causal import (
     bayesian_scm,
+    bearing,
     conformal_effect_interval,
     did_baseline,
+    donor_spatial_summary,
     effect_bands_space,
     effect_bands_time,
+    haversine,
     loo_weight_stability,
     mlscm,
     placebo_in_space,
@@ -141,6 +144,7 @@ from .causal import (
     scm_diagnostics,
     scm_mcnnm,
     scm_robust,
+    spatial_summary,
     uncertainty_bands,
 )
 
@@ -247,6 +251,10 @@ __all__ = [
     "scm_diagnostics",
     "loo_weight_stability",
     "pre_trend_test",
+    "bearing",
+    "donor_spatial_summary",
+    "haversine",
+    "spatial_summary",
     "scm_abadie",
     "did_baseline",
     "scm_mcnnm",

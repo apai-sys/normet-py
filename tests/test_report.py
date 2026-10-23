@@ -248,3 +248,24 @@ def test_cli_report_in_chinese(tmp_path):
     )
     assert res.exit_code == 0, res.output
     assert "结果预览" in out.read_text("utf-8")
+
+
+def test_log_scale_note_only_when_the_flag_is_on(tmp_path):
+    """A run whose config carries log_transform=True gets a scale note with the
+    low-value share; a linear run's report is exactly what it was before."""
+    dates = pd.date_range("2024-01-01", periods=20, freq="D")
+    observed = np.concatenate([np.linspace(0.1, 0.9, 10), np.linspace(2.0, 80.0, 10)])
+    result = pd.DataFrame({"observed": observed, "normalised": observed * 1.1}, index=dates)
+    log_run = make_run(result=result, kind="normalise", seed=7, config={"log_transform": True})
+    content = generate_html(log_run, tmp_path / "log.html").read_text("utf-8")
+    assert "Log-scale fit" in content
+    assert "log1p(value)" in content
+    assert "50%" in content  # 10 of 20 observations sit below 1
+
+    lin_run = make_run(result=result, kind="normalise", seed=7, config={"backend": "flaml"})
+    lin = generate_html(lin_run, tmp_path / "lin.html").read_text("utf-8")
+    assert "Log-scale fit" not in lin
+    assert "nm-note" not in lin
+
+    zh = generate_html(log_run, tmp_path / "log_zh.html", lang="zh").read_text("utf-8")
+    assert "对数尺度拟合" in zh

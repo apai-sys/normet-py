@@ -105,3 +105,48 @@ def test_prepare_data_full_pipeline(synthetic_aq):
     train_max = out.loc[out["set"] == "training", "date"].max()
     test_min = out.loc[out["set"] == "testing", "date"].min()
     assert train_max <= test_min
+
+
+# ---------------------------------------------------------------------------
+# log1p_target / expm1_columns (the log-scale fit's transform pair)
+# ---------------------------------------------------------------------------
+
+
+def test_log1p_target_transforms_only_the_named_column():
+    from normet.utils.prepare import log1p_target
+
+    df = pd.DataFrame({"value": [0.0, 1.0, 10.0], "other": [5.0, 5.0, 5.0]})
+    out = log1p_target(df, "value")
+    assert np.allclose(out["value"], np.log1p(df["value"].to_numpy()))
+    assert np.allclose(out["other"], 5.0)
+    # the input is not modified
+    assert np.allclose(df["value"], [0.0, 1.0, 10.0])
+
+
+def test_log1p_target_rejects_negative_values():
+    from normet.utils.prepare import log1p_target
+
+    df = pd.DataFrame({"value": [0.0, -0.5, 3.0]})
+    with pytest.raises(ValueError, match="non-negative"):
+        log1p_target(df, "value")
+    # the message names how bad it is
+    df = pd.DataFrame({"value": [0.0, -2.0, -0.5, 3.0]})
+    with pytest.raises(ValueError, match="2 rows"):
+        log1p_target(df, "value")
+
+
+def test_log1p_target_rejects_a_missing_column():
+    from normet.utils.prepare import log1p_target
+
+    with pytest.raises(ValueError, match="not found"):
+        log1p_target(pd.DataFrame({"value": [1.0]}), "nope")
+
+
+def test_exm1_columns_inverts_log1p_target_on_all_numeric_columns():
+    from normet.utils.prepare import expm1_columns, log1p_target
+
+    df = pd.DataFrame({"value": [0.0, 1.0, 10.0], "q500": [0.0, 2.0, 8.0], "note": ["a", "b", "c"]})
+    out = expm1_columns(log1p_target(df, "value"))
+    assert np.allclose(out["value"], df["value"].to_numpy())
+    assert np.allclose(out["q500"], np.expm1(df["q500"].to_numpy()))
+    assert list(out["note"]) == ["a", "b", "c"]
