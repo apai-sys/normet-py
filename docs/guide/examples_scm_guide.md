@@ -73,6 +73,44 @@ nm.plot_event_study(out, cutoff_date="2020-01-23",
                     title="Effect by event time (placebo-in-time band)")
 ```
 
+## Spatial layout of the donor pool
+
+The weights say how much each donor contributes to the synthetic control, not
+*where* the donors sit relative to the treated unit. For a policy that acts
+through local or regional processes — a city's emissions regime, a river
+basin's meteorology — a donor pool clustered on one side of the treated site
+is a different object from one that surrounds it, and the two can carry the
+same weights. If the panel carries a latitude and longitude column, the
+reading is one call:
+
+```python
+table = nm.donor_spatial_summary(
+    panel, donors, treated_unit,
+    unit_col="ID", lat_col="lat", lon_col="lon",
+)
+# per donor: distance_km, bearing_deg (0 = north), compass sector
+# (+ the fit's weight when weights= is given)
+
+nm.spatial_summary(table)
+# centroid_offset_km, centroid_bearing_deg — where the pool's centroid sits;
+# sector_coverage — how many donors in each compass sector;
+# sector_fraction — the share of the compass the pool actually spans
+```
+
+A donor with no coordinate in the panel gets a row of NaNs and sector `"?"`
+rather than being dropped — a missing fix is itself information. The same
+section is appended to the full report when the panel supports it:
+
+```python
+nm.scm_diagnostics(
+    out, cutoff_date="2020-01-23",
+    panel=panel, treated_unit="Beijing", unit_col="ID", lat_col="lat", lon_col="lon",
+)["spatial"]
+```
+
+It is a diagnostic, not a fitter: nothing here changes the weights, and no
+distance or bearing is fed back into the fit.
+
 ## Inference
 
 Two flavours of significance test:
@@ -87,3 +125,31 @@ pl  = nm.placebo_in_space(panel, ..., scm_backend="scm")
 rmt = nm.rmspe_ratio_test(pl, cutoff_date="2020-01-23")
 # treated_ratio, placebo_ratios, p_value, rank
 ```
+
+## Staggered adoption (several treated units)
+
+When the intervention rolls out unit by unit — the UK ULEZ 2021 expansion,
+staggered driving restrictions across cities — each adopting unit gets its own
+cutoff, and each is fitted against the units that have not adopted:
+
+```python
+res = nm.run_scm_staggered(
+    panel,
+    treated_units=["London", "Manchester", "Leeds"],
+    cutoff_dates={"London": "2021-09-26", "Manchester": "2022-01-06", "Leeds": "2022-04-04"},
+    date_col="date", unit_col="ID", outcome_col="NO2wn",
+)
+# one row per adopting unit: cutoff_date, n_pre, n_post, pre_r2, effect, p_value
+# + summary rows: mean / median of the units' effects
+```
+
+Every treated unit is fitted with its own pre- and post-period, and the other
+treated units are excluded from every run's donor pool, so one city's
+intervention cannot leak into another city's synthetic control. Each unit's
+``p_value`` is its own placebo-in-space test at its own cutoff, and the
+``mean`` row's ``p_value`` is the cross-unit permutation test: each donor in
+turn takes every adopting unit's role (the full set of cutoffs) and its
+pseudo-effects are averaged the same way the real units' are. The real treated
+units are not permuted into the reference — their data already carries the
+intervention, and a staggered design's permuted treated identities are
+contaminated by it; the donor-only reference keeps the null honest.

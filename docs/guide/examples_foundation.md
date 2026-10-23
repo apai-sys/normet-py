@@ -272,6 +272,46 @@ clustering or a plain correlation matrix are each a few lines of scikit-learn,
 and the choices that matter -- the metric, the number of groups, whether to
 normalise first -- are yours rather than this package's to make.
 
+## Reading the embedding space before you group it
+
+The grouping decision starts with two readings of the vectors, and
+`normet` supplies them without making the decision:
+
+```python
+# How many separated groups of behaviour are there, roughly?
+curve = nm.silhouette_curve(vectors, k_range=range(2, 12))
+# k  silhouette
+# 2      0.87   <- the best single cut
+# 3      0.55
+# ...
+
+# What does the space look like, at a glance?
+pts = nm.embedding_projection(vectors)              # pure-numpy PCA
+fig = nm.plot_embedding_diagnostics(vectors)        # both panels together
+```
+
+`silhouette_curve` scores the mean silhouette for each ``k`` in
+``k_range`` and returns one row per ``k`` (infeasible ``k`` -- ``k >= n`` or
+a collapsed cluster -- get a NaN row rather than being dropped, so the curve
+is honest about what was not scored). The clustering it uses as a yardstick
+is discarded before the score: the result carries no membership information,
+and the module emits no labels and no recommended k. That is deliberate --
+``cluster_multisite`` was removed because the recommendation is the user's
+to make -- so read the peak's *position* as a reading, and group (or not)
+with the metric, the k and the normalisation you chose.
+
+`embedding_projection` projects the vectors to two dimensions: `"pca"` is
+pure numpy and adds no dependency; `"umap"` (needs `umap-learn`) keeps local
+neighbourhoods better. Both are views for the eye, not statistics to compare
+numerically -- PCA component signs in particular are not stable across
+platforms.
+
+`plot_embedding_diagnostics` draws the two panels together. Pass your own
+grouping through `groups=["A", "B", ...]` (one label per site, in the
+input's order) and the scatter is coloured by it -- your grouping, drawn as
+you chose it; without it, every point shares one colour. With 20 or fewer
+sites each point is annotated with its site name.
+
 ## Several species at one site
 
 Chronos-2 takes a 2-D target and attends across the variates, so the species
