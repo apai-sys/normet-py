@@ -258,6 +258,41 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
     set; panels lettered; a title, label or tick's numbers edited by
     double-clicking. Every change is undone when the dialog closes.
 
+- **Quantile calibration for zero-shot forecasters: `calibrate_quantiles`**
+  (`normet.foundation`, exported at the top level, with the
+  `CalibratedEstimator` wrapper and the `QuantileCalibration` record, and
+  `CalibrationWarning` in `normet.exceptions`). A zero-shot Chronos-2 band is
+  only as honest as the weather in its training data -- a record from a
+  climate or regime the training set never saw earns a nominal coverage it
+  did not buy, and the band is the number a policy question is compared
+  against, so it should be checked, not assumed. `calibrate_quantiles`
+  works for any estimator that scores with `predict_quantiles` (the
+  duck-typed contract plus `prediction_length` / `context_length`, the
+  chronos-2 estimator first among them): it lays whole forecast blocks of
+  `prediction_length` steps back from `anchor` (up to seven, each with its
+  context of rows behind it), so every forecast the model makes is one it
+  could actually have made, and scores the held-out errors in the band's own
+  5th–95th percentile half-width, so the correction is scale-free across
+  heteroscedastic horizons. Each band level's threshold is the
+  split-conformal order statistic of the held-out error multiples -- the
+  `ceil((n+1) x nominal)`-th smallest, the extra step being the honesty
+  margin for a fit made on hold-out data -- passed through a hand-rolled PAVA
+  leg so corrected edges cannot cross, and the fit degrades to one constant
+  threshold, named `method="constant"` in the result, where the record gives
+  fewer than 30 error multiples per level and a per-level quantile is not a
+  split. The wrapper's `predict_quantiles` rescales each requested band edge
+  about the median to median x threshold x span and returns only the levels
+  asked for; the median and every other method delegate to the base model
+  unchanged, so nothing existing moves. `coverage` is the cross-validated
+  scorecard -- per level the nominal, the uncalibrated and the calibrated
+  empirical coverage, each scoring pass fitting its thresholds without the
+  blocks it scores -- and `CalibrationWarning` names the level still off
+  target by more than `tolerance` (10 points by default, either direction);
+  the fit is returned, corrected and labelled, not suppressed, because a
+  regime jump the hold-out cannot see is information, not failure.
+  Deterministic; numpy/pandas only. The `counterfactual(...,
+  calibrated=...)` wiring is its companion change.
+
 ### Changed
 - **`rolling` names its windows `window_01`, `window_02`, …** (was
   `rolling_0`, `rolling_1`, …): counted from 1 and zero-padded, to three
