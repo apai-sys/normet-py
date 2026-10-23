@@ -68,6 +68,7 @@
 | `nm.normalise_plot` / `nm.decomposition_stack` / `nm.scm_dashboard` | Plotting helpers for normalisation, decomposition, and SCM results |
 | `nm.bayesian_scm` / `nm.plot_bayesian_scm` | Bayesian (PyMC) posterior SCM with credible bands — **optional**, needs `pymc` + `arviz` |
 | `nm.scm_diagnostics` / `nm.pre_trend_test` / `nm.plot_event_study` / `nm.loo_weight_stability` / `nm.conformal_effect_interval` | SCM fit diagnostics, pre-period parallel-trends test and its event-study figure, donor-weight stability, conformal intervals |
+| `nm.donor_spatial_summary` / `nm.spatial_summary` | Where the donor pool sits around the treated unit: per-donor distance, compass bearing and sector, the pool's centroid offset and sector coverage (a reading, not a fit input) |
 | `nm.Chronos2Estimator` | Zero-shot de-weathering, counterfactuals and quantiles with the Chronos-2 foundation model — **optional**, needs `normet[foundation]` |
 | `nm.calibrate_quantiles` | Quantile calibration for the zero-shot band: per-level conformal half-width thresholds on a rolling hold-out of forecast blocks, with a cross-validated coverage table; `counterfactual(..., calibrated=True)` takes the band through it — **optional**, needs `normet[foundation]` |
 | `nm.ChronosEmbedder` | 768-D station embeddings describing each site's dynamics — **optional**, needs `normet[foundation]` |
@@ -240,6 +241,12 @@ df_norm_ref = nm.normalise(
     n_samples=300,
 )
 ```
+
+For a target that spans sub-unit to hundreds of µg/m³, fit on the log scale:
+`nm.do_all(..., log_transform=True)` (also on `do_all_unc` and `normalise`)
+trains on `log1p(value)` and back-transforms every result column through
+`expm1`, so the output is in the original units and non-negative by
+construction. See the user guide's "Log-scale fits" section.
 
 ---
 

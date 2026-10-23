@@ -22,7 +22,7 @@ from ..model.predict import ml_predict
 from ..utils import progress
 from ..utils._config import resolve_config
 from ..utils.logging import get_logger
-from ..utils.prepare import check_data, process_date
+from ..utils.prepare import check_data, expm1_columns, process_date
 
 log = get_logger(__name__)
 
@@ -99,6 +99,21 @@ class NormaliseConfig:
     weather is still drawn from the whole record.
 
     ``conditional_on`` filters ``resample_df`` only; filter a pool yourself.
+    """
+    log_transform: bool = False
+    """Whether ``df`` and ``model`` live on the ``log1p`` scale.
+
+    True says the caller fitted the model on ``log1p(value)`` and hands the
+    frame in that space -- what :func:`normet.do_all` does with
+    ``log_transform=True``. The resampling, the predictions and their
+    aggregation all happen on that scale (which is the point: an error then
+    counts in relative rather than absolute terms, so a fixed relative miss
+    maps to a bounded error at every level while its absolute error grows
+    without bound), and the finished frame is returned in the original units
+    via ``expm1``, so
+    ``observed``, ``normalised`` and the quantile columns are all comparable
+    with the input the user gave. False, the default, leaves the result
+    untouched.
     """
 
 
@@ -321,6 +336,9 @@ def normalise(
         fields (e.g. ``n_samples=300``, ``n_cores=4``, ``cache=".normet_cache"``)
         without constructing a config object. Any field passed both via
         ``config`` and as a keyword is resolved in favour of the keyword.
+        ``log_transform=True`` reads ``df`` and ``model`` on the ``log1p``
+        scale and returns the result in the original units -- see
+        :attr:`NormaliseConfig.log_transform`.
 
     Examples
     --------
@@ -419,6 +437,9 @@ def normalise(
         list(_cfg.return_quantiles) if _cfg.return_quantiles else None,
         dict(_cfg.conditional_on) if _cfg.conditional_on else None,
         _cfg.batch_size,
+        # Joins the key only when on, so caches written by the linear path keep
+        # their key (and their hits) -- the flag cannot change a linear result.
+        *([True] if _cfg.log_transform else []),
         dataframe_hash(df_keyed[[c for c in key_cols if c in df_keyed.columns]]),
         dataframe_hash(resample_pool[resample_key_cols]),
         model_hash(model),
@@ -683,6 +704,8 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
                 )
 
     (log.info if _cfg.verbose else log.debug)("Finished normalisation.")
+    if _cfg.log_transform:
+        df_out = expm1_columns(df_out)
     return df_out
 
 

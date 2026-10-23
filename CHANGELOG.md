@@ -341,6 +341,33 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   shade the post-period with the placebo band (`ci_lo`/`ci_hi`, or
   `low`/`high`, or `p10`/`p90`). No band is drawn over the pre-period, because
   placebo cutoffs have no pre-period of their own to estimate one from.
+- **Spatial diagnostics for the donor pool: `donor_spatial_summary` /
+  `spatial_summary`** (`normet.causal.spatial`, exported at the top level,
+  with the pure-numpy `haversine` / `bearing` primitives the (since-removed)
+  `normet.physics` graph builder used). The weights say how much each donor
+  contributes to the synthetic control, not where the donors sit relative to
+  the treated unit — and for a policy that acts through local or regional
+  processes, a pool clustered on one side of the treated site is a different
+  object from one that surrounds it, at the same weights.
+  `donor_spatial_summary(panel, donors, treated_unit, *, unit_col, lat_col,
+  lon_col, n_sectors=8, weights=None)` places each donor: great-circle
+  distance to the treated unit, compass bearing (0 = north, forward azimuth)
+  and compass sector, plus the fit's weight when given. A donor with no
+  coordinate in the panel gets a row of NaNs and sector `"?"` rather than
+  being dropped — a missing fix is itself information.
+  `spatial_summary(table, *, n_donors=None, n_sectors=8)` reads the pool:
+  the centroid offset and bearing (the donors' (east, north) offset vectors
+  averaged — the honest way to average directions, since a mean of angles
+  wraps), the per-sector donor counts, and the share of the compass the pool
+  actually spans. `scm_diagnostics` now appends the section under a `spatial`
+  key when called with `panel=`, `treated_unit=` and the coordinate columns
+  present (donors default to the fit's weights' index); without them the
+  result is exactly what it was before. It is a diagnostic, not a fitter:
+  nothing here changes the weights, and no distance or bearing is fed back
+  into the fit. The SCM Studio window gains the matching readout: Latitude /
+  Longitude column pickers, a "▶ Show donor layout" button, and a Spatial tab
+  with the donors scattered around the treated unit, compass spokes, the
+  pool's centroid and sector coverage.
 
 ### Changed
 - **`rolling` names its windows `window_01`, `window_02`, …** (was
@@ -364,6 +391,12 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   shrinks. Tabs are named without ①②③ numbers.
 
 ### Internal
+- **CI: two non-blocking probe jobs for the version upgrades.**
+  `probe: numpy 2.x (py3.12)` installs the suite's dependencies and then forces
+  `numpy>=2.0` on top of the deliberate `numpy<2.0` pin; `probe: python 3.13`
+  runs the same suite on 3.13. Both have `continue-on-error`, so they can
+  never block a merge — a failure is the breakage list for the upgrade, to be
+  fixed before the matrix widens.
 - **The GUI's left panel is built one workflow step at a time.**
   `_build_param_panel` had grown to 420 lines, one straight run of layout from
   Data to PDP; each step is now its own `_build_*_box()` returning the group
@@ -997,6 +1030,25 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   `causal/variants`, `causal/run_scm`, and `analysis/{rolling,normalise}`.
 - Brought the repository into `ruff` 0.5.6 compliance (UP038 `isinstance`
   unions; import ordering and formatting across the test suite and docs).
+- **Log-scale normalisation (`log_transform`)** for pollutants that span
+  sub-unit to hundreds of µg/m³. `normalise`, `do_all` and `do_all_unc`
+  accept `log_transform: bool = False`: with it on, the model trains on
+  `log1p(value)` and the de-weathering runs on that scale, so errors count in
+  relative rather than absolute terms (a fixed relative miss maps to a bounded
+  error at every level); every column
+  of the result (`observed`, `normalised`, the quantile columns, the
+  ensemble's means and bounds) is back-transformed through `expm1` and is
+  therefore in the original units and non-negative by construction. A
+  negative target is rejected with an error that names the offending rows.
+  The prepared frame returned by `do_all` carries `log1p(value)`, the frame
+  the model was trained on; `do_all_unc`'s per-member statistics that drive
+  the weights are computed on that same log scale. `Stats`/`modStats` gain
+  `logMAE` and `logRMSE` — accuracy in log1p space, the space a log fit
+  optimises (pairs with either side below -1 are dropped from those two
+  metrics only). The HTML report notes the scale when a run's config carries
+  the flag, with the share of observations below 1 in the original units.
+  Default `False` is bit-identical to before. User guide:
+  `guide/examples_normalisation.md` ("Log-scale fits").
 - **Embedding diagnostics (`normet.foundation`)** for the choice the
   package deliberately does not make for you. `embed_multisite` returns one
   768-D vector per site and stops there (the removed `cluster_multisite`
