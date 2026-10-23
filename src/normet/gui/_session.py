@@ -60,6 +60,7 @@ _TASK_WORDS = {
     "multiscale": "Multi-scale",
     "pdp": "PDP",
     "trend": "Trend",
+    "uncertainty": "Uncertainty",
 }
 
 
@@ -74,6 +75,7 @@ class SessionMixin(QMainWindow):
         5: "multiscale",
         6: "pdp",
         7: "trend",
+        8: "uncertainty",
     }
 
     def _record_task(self, fn, args, kwargs):  # noqa: ANN001, ANN202 - TaskRunner.record
@@ -228,6 +230,9 @@ class SessionMixin(QMainWindow):
             "tre_n_bootstrap": self.tre_n_bootstrap.value(),
             "trend_after": self.trend_after.isChecked(),
             "pdp_grid": self.pdp_grid.value(),
+            "unc_samples": self.unc_samples.value(),
+            "unc_models": self.unc_models.value(),
+            "unc_backend": self.unc_backend.currentText(),
         }
 
     def apply_config(self, c: dict) -> None:
@@ -289,6 +294,9 @@ class SessionMixin(QMainWindow):
         self.tre_n_bootstrap.setValue(c.get("tre_n_bootstrap", 1000))
         self.trend_after.setChecked(c.get("trend_after", True))
         self.pdp_grid.setValue(c.get("pdp_grid", 50))
+        self.unc_samples.setValue(c.get("unc_samples", 300))
+        self.unc_models.setValue(c.get("unc_models", 4))
+        self.unc_backend.setCurrentText(c.get("unc_backend", "lightgbm"))
 
     def save_config(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
