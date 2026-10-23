@@ -91,7 +91,13 @@ def test_train_backend_budget_row(qapp):
 
 
 def test_data_window_construction(qapp):
-    from normet.gui.data_window import DEFAULT_POLLUTANTS, NETWORKS, DataWindow
+    from normet.gui.data_window import (
+        DEFAULT_POLLUTANTS,
+        EEA_NETWORK,
+        NETWORKS,
+        OPENAQ_NETWORK,
+        DataWindow,
+    )
 
     win = DataWindow()
     try:
@@ -101,9 +107,14 @@ def test_data_window_construction(qapp):
         assert win.find_btn.isEnabled()
         assert not win.fetch_btn.isEnabled()
         assert not win.save_btn.isEnabled()
-        # Network picker defaults to AURN and offers all six UK networks.
-        assert win._current_source() == "aurn"
-        assert win.net_combo.count() == len(NETWORKS) == 6
+        # Network picker defaults to AURN and offers the six UK networks
+        # plus the two non-UK families.
+        assert win._provider() == ("uk", "aurn", "")
+        assert win.net_combo.count() == len(NETWORKS) + 2
+        assert win.net_combo.findText(EEA_NETWORK) >= 0
+        assert win.net_combo.findText(OPENAQ_NETWORK) >= 0
+        # The UK default needs no context fields.
+        assert win.ctx_box.isHidden()
     finally:
         win.close()
 
@@ -113,7 +124,7 @@ def test_data_window_network_change_clears_stations(qapp):
     otherwise Fetch would run a code from network A against network B."""
     import pandas as pd
 
-    from normet.gui.data_window import DataWindow
+    from normet.gui.data_window import EEA_NETWORK, OPENAQ_NETWORK, DataWindow
 
     win = DataWindow()
     try:
@@ -136,7 +147,18 @@ def test_data_window_network_change_clears_stations(qapp):
         win.net_combo.setCurrentIndex(1)
         assert win.stations is None
         assert win.station_table.rowCount() == 0
-        assert win._current_source() != "aurn"
+        assert win._provider()[1] != "aurn"
+        # The EEA row swaps in its source fields; UK rows hide them.
+        # isHidden() tracks the explicit setVisible calls; isVisible() would
+        # also need the window shown, which offscreen tests avoid.
+        win.net_combo.setCurrentText(EEA_NETWORK)
+        assert win._provider()[:1] == ("eea",)
+        assert not win.country_edit.isHidden()
+        assert win.openaq_key.isHidden()
+        win.net_combo.setCurrentText(OPENAQ_NETWORK)
+        assert not win.openaq_key.isHidden()
+        win.net_combo.setCurrentIndex(0)
+        assert win.ctx_box.isHidden()
     finally:
         win.close()
 
@@ -180,7 +202,7 @@ def test_find_stations_aggregates_metadata_per_station(monkeypatch):
     # (libQt6Core Qt_6.6_PRIVATE_API) like the rest of this file.
     monkeypatch.setattr("normet.list_ukaq_stations", lambda *a, **k: meta)
 
-    df = data_window._find_stations(["PM2.5", "NO2"], "aurn")
+    df = data_window._find_stations(data_window.PROV_UK, "aurn", "", ["PM2.5", "NO2"], None)
 
     assert set(df["code"]) == {"MAN3", "GLAZ", "OLD1"}
     man3 = df[df["code"] == "MAN3"].iloc[0]
@@ -193,6 +215,82 @@ def test_find_stations_aggregates_metadata_per_station(monkeypatch):
     assert man3["to"] == pd.Timestamp.today().strftime("%Y-%m-%d")
     closed = df[df["code"] == "OLD1"].iloc[0]
     assert closed["to"] == "2015-06-30"
+
+
+def test_find_stations_dispatches_per_provider(monkeypatch):
+    """EEA and OpenAQ finds hand their own arguments to the right adapter and
+    return the shared picker columns — the fetch then reads codes off them."""
+    import pandas as pd
+
+    from normet.gui import data_window
+
+    calls: dict = {}
+    eea_df = pd.DataFrame(
+        [
+            {
+                "site": "Berlin",
+                "code": "DE0001",
+                "site_type": "",
+                "country": "DE",
+                "pollutants": "PM2.5",
+                "n": 1,
+                "from": "",
+                "to": "",
+                "lat": 52.5,
+                "lon": 13.4,
+                "links": '{"PM2.5": {"url": "https://x/DE_1.parquet", "from": 2013, "to": 2024}}',
+            }
+        ]
+    )
+    monkeypatch.setattr(
+        "normet.io.eea.list_eea_stations", lambda **kw: calls.update(eea=kw) or eea_df
+    )
+    locs = pd.DataFrame(
+        [
+            {
+                "id": 77,
+                "name": "Seoul Station",
+                "provider": "KOR",
+                "lat": 37.5,
+                "lon": 126.9,
+                "parameters": ["pm25", "o3"],
+                "last_updated": "2026-01-01T00:00:00Z",
+            }
+        ]
+    )
+    monkeypatch.setattr(
+        "normet.io.openaq.openaq_locations", lambda **kw: calls.update(oaq=kw) or locs
+    )
+
+    out = data_window._find_stations(data_window.PROV_EEA, None, "de", ["PM2.5", "NO2"], None)
+    assert calls["eea"] == {"country": "de", "pollutants": ["PM2.5", "NO2"]}
+    assert out.loc[0, "code"] == "DE0001"
+    # The year bounds become full dates so the picker's snap logic is reused.
+    assert out.loc[0, "from"] == "2013-01-01" and out.loc[0, "to"] == "2024-12-31"
+    assert "links" not in out.columns
+
+    out = data_window._find_stations(data_window.PROV_OPENAQ, None, "KR", ["PM2.5", "NO2"], "k")
+    assert calls["oaq"]["country"] == "KR" and calls["oaq"]["api_key"] == "k"
+    assert out.loc[0, "pollutants"] == "PM2.5"  # NO2 not measured at this one
+    assert out.loc[0, "code"] == "77"
+    assert out.loc[0, "to"] == "2026-01-01"
+
+
+def test_fetch_and_merge_unknown_provider_raises():
+    from normet.gui import data_window
+
+    with pytest.raises(ValueError, match="Unknown provider"):
+        data_window._fetch_and_merge(
+            {"site": "x", "code": "x", "lat": 0, "lon": 0},
+            ["NO2"],
+            "2020-01-01",
+            "2020-01-31",
+            "Open-Meteo (ERA5, no key needed)",
+            "nope",
+            None,
+            "",
+            None,
+        )
 
 
 def test_train_includes_time_features(qapp):
