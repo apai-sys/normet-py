@@ -37,6 +37,7 @@ from .bands import (
 from .batch import scm_all
 from .diagnostics import loo_weight_stability, scm_diagnostics
 from .inference import conformal_effect_interval, rmspe_ratio_test
+from .prediagnostics import PreTrend, pre_trend_test
 
 # Bayesian SCM is heavy (PyMC); graceful fallback if PyMC missing.
 try:
@@ -93,6 +94,8 @@ __all__ = [
     # diagnostics
     "scm_diagnostics",
     "loo_weight_stability",
+    "PreTrend",
+    "pre_trend_test",
     # variants
     "scm_abadie",
     "did_baseline",
