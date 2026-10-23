@@ -87,3 +87,31 @@ pl  = nm.placebo_in_space(panel, ..., scm_backend="scm")
 rmt = nm.rmspe_ratio_test(pl, cutoff_date="2020-01-23")
 # treated_ratio, placebo_ratios, p_value, rank
 ```
+
+## Staggered adoption (several treated units)
+
+When the intervention rolls out unit by unit — the UK ULEZ 2021 expansion,
+staggered driving restrictions across cities — each adopting unit gets its own
+cutoff, and each is fitted against the units that have not adopted:
+
+```python
+res = nm.run_scm_staggered(
+    panel,
+    treated_units=["London", "Manchester", "Leeds"],
+    cutoff_dates={"London": "2021-09-26", "Manchester": "2022-01-06", "Leeds": "2022-04-04"},
+    date_col="date", unit_col="ID", outcome_col="NO2wn",
+)
+# one row per adopting unit: cutoff_date, n_pre, n_post, pre_r2, effect, p_value
+# + summary rows: mean / median of the units' effects
+```
+
+Every treated unit is fitted with its own pre- and post-period, and the other
+treated units are excluded from every run's donor pool, so one city's
+intervention cannot leak into another city's synthetic control. Each unit's
+``p_value`` is its own placebo-in-space test at its own cutoff, and the
+``mean`` row's ``p_value`` is the cross-unit permutation test: each donor in
+turn takes every adopting unit's role (the full set of cutoffs) and its
+pseudo-effects are averaged the same way the real units' are. The real treated
+units are not permuted into the reference — their data already carries the
+intervention, and a staggered design's permuted treated identities are
+contaminated by it; the donor-only reference keeps the null honest.
