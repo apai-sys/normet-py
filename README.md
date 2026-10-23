@@ -52,7 +52,7 @@
 | `nm.normalise` | Monte Carlo meteorological normalisation (deweathering) |
 | `nm.decompose` | Split time series into emission-driven and met-driven components |
 | `nm.rolling` | Rolling-window normalisation for trend analysis |
-| `nm.run_scm` / `nm.scm` | Synthetic Control Method (classic, augmented ridge) |
+| `nm.run_scm` / `nm.scm` | Synthetic Control Method (classic, augmented ridge); several treated units each with its own cutoff via `nm.run_scm_staggered` (staggered adoption: per-unit effects and placebo p-values, plus the pooled mean/median with a cross-unit permutation test — rolling-out schemes such as the UK ULEZ expansion) |
 | `nm.mlscm` | ML-augmented SCM (**experimental** — see [Counterfactual modelling](#counterfactual-modelling-synthetic-control)) |
 | `nm.placebo_in_space` / `nm.placebo_in_time` | Placebo significance tests |
 | `nm.uncertainty_bands` | Bootstrap / Jackknife confidence intervals |
