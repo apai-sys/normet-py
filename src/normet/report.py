@@ -173,6 +173,9 @@ _REPORT_ZH = {
     "config_hash": "配置哈希",
     "type": "类型",
     "backend": "后端",
+    "scale": "尺度",
+    "Log-scale fit: the model was fitted on log1p(value) and every column of the result is back-transformed through expm1, so the numbers below are in the original units (and non-negative by construction).": "对数尺度拟合：模型在 log1p(value) 上训练，结果的每一列都经 expm1 反变换回原单位（按构造非负）。",
+    " {share:.0%} of the observations sit below 1 in the original units — the low-concentration tail where a linear fit spends most of its error budget on the high values instead.": " 原单位下有 {share:.0%} 的观测低于 1——正是对数尺度所针对的低浓度尾部，线性拟合的误差预算大多花在了高值上。",
 }
 
 
@@ -285,6 +288,7 @@ _TEMPLATE = """<!doctype html>
 {kv_rows}
 </dl>
 
+{scale_block}
 <h2>{h_plot}</h2>
 {plot_block}
 
@@ -302,6 +306,54 @@ _TEMPLATE = """<!doctype html>
 
 </body></html>
 """
+
+
+def _low_value_share(result: Any) -> float | None:
+    """The share of the run's observed series below 1 in the original units.
+
+    That population is what the log scale is for: below 1, ``expm1`` is nearly
+    linear, so a log fit's relative accuracy is exactly what a linear fit's
+    absolute error budget would otherwise spend on the high values instead.
+    None when the result carries no usable ``observed`` column.
+    """
+    if isinstance(result, pd.DataFrame) and "observed" in result.columns:
+        obs = pd.to_numeric(result["observed"], errors="coerce")
+        obs = obs[pd.notna(obs)]
+        if len(obs):
+            return float((obs < 1.0).mean())
+    return None
+
+
+def _log_scale_note(run: NormetRun, lang: str) -> str:
+    """A paragraph saying the run was fitted on the log scale and back-transformed.
+
+    The flag rides in the run's provenance -- ``metadata["config"]["log_transform"]``
+    when the caller recorded its config, or ``metadata["log_transform"]`` -- and
+    the note adds the share of low observations the scale exists for, when the
+    result carries an observed column. Empty string when the flag is off, so a
+    linear run's report is byte-for-byte what it was before.
+    """
+    meta = run.metadata or {}
+    cfg = meta.get("config")
+    flag = cfg.get("log_transform") if isinstance(cfg, dict) else meta.get("log_transform")
+    if not flag:
+        return ""
+    text = _say(
+        "Log-scale fit: the model was fitted on log1p(value) and every column of "
+        "the result is back-transformed through expm1, so the numbers below are "
+        "in the original units (and non-negative by construction).",
+        lang,
+    )
+    share = _low_value_share(run.result)
+    if share is not None:
+        text += _say(
+            " {share:.0%} of the observations sit below 1 in the original units — "
+            "the low-concentration tail where a linear fit spends most of its "
+            "error budget on the high values instead.",
+            lang,
+            share=share,
+        )
+    return f'<p class="nm-note">{html.escape(text)}</p>'
 
 
 def generate_html(
@@ -408,6 +460,7 @@ def generate_html(
     body = _TEMPLATE.format(
         title=html.escape(title),
         kv_rows=kv_rows,
+        scale_block=_log_scale_note(run, lang),
         plot_block=plot_block,
         table_block=table_block,
         meta_block=meta_block,

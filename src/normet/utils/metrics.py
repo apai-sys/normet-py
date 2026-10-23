@@ -59,7 +59,8 @@ def _stats_from_arrays(
         Observed (ground-truth) values.
     statistic : List[str]
         A list of metric names to compute. Supported keys:
-        {"n","FAC2","MB","MGE","NMB","NMGE","RMSE","r","COE","IOA","R2"}.
+        {"n","FAC2","MB","MGE","NMB","NMGE","RMSE","r","COE","IOA","R2",
+        "logMAE","logRMSE"}.
 
     Returns
     -------
@@ -103,6 +104,23 @@ def _stats_from_arrays(
         res["MGE"] = float(np.mean(adiff))
     if "RMSE" in statistic:
         res["RMSE"] = float(np.sqrt(np.mean(diff * diff)))
+
+    # Log-scale errors: accuracy in log1p space, where a fixed relative miss
+    # maps to a bounded error at every level while its absolute error grows
+    # without bound. This is the scale a log-transformed fit optimises, so
+    # these are the right yardsticks when comparing against a linear fit on
+    # skewed, multi-decade data. Pairs
+    # with either side below -1 -- outside log1p's domain, e.g. de-weathered
+    # residuals -- are dropped from these two metrics only; every other
+    # statistic keeps them.
+    if "logMAE" in statistic or "logRMSE" in statistic:
+        lmask = (yhat > -1.0) & (yobs > -1.0)
+        if bool(lmask.any()):
+            ldiff = np.log1p(yhat[lmask]) - np.log1p(yobs[lmask])
+            if "logMAE" in statistic:
+                res["logMAE"] = float(np.mean(np.abs(ldiff)))
+            if "logRMSE" in statistic:
+                res["logRMSE"] = float(np.sqrt(np.mean(ldiff * ldiff)))
 
     # Normalized bias / error (sum-based)
     sum_obs = float(np.sum(yobs))
