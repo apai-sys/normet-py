@@ -29,6 +29,7 @@ from .bands import (
     effect_bands_space,
     effect_bands_time,
     plot_effect_with_bands,
+    plot_event_study,
     plot_uncertainty_bands,
     uncertainty_bands,
 )
@@ -86,6 +87,7 @@ __all__ = [
     "effect_bands_time",
     "uncertainty_bands",
     "plot_effect_with_bands",
+    "plot_event_study",
     "plot_uncertainty_bands",
     # panel prep
     "prepare_panel",

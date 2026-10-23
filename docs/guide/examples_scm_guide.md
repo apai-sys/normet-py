@@ -33,6 +33,46 @@ diag = nm.scm_diagnostics(out, cutoff_date="2020-01-23")
 stability = nm.loo_weight_stability(panel, ..., donors=donors)
 ```
 
+## Pre-trend and event study
+
+The parallel-trends check a reviewer asks for first: is the treated unit tracking
+its synthetic control *before* the intervention?
+
+```python
+pre = nm.pre_trend_test(out, cutoff_date="2020-01-23")
+print(pre)            # verdict: ok / caution / fail / insufficient
+# slope, p_slope, rmpe_drift — the pre-period residual trend, and how much the
+# fit quality deteriorates towards the cutoff
+```
+
+`ok` means the pre-period residuals show no slope at the 5% level and the
+RMS-prediction-error of the last third of the pre-period is within 1.25× of the
+first two thirds. `fail` is a significant slope at the 1% level — a trending
+pre-period is not parallel whatever the drift says. `caution` is either. The
+diagnostic is also part of the full report:
+
+```python
+nm.scm_diagnostics(out, cutoff_date="2020-01-23")["pre_trend"]
+```
+
+The companion figure is the event study — the effect by periods since the
+cutoff, pre-period in grey and post-period in red:
+
+```python
+nm.plot_event_study(out, cutoff_date="2020-01-23", title="Effect by event time")
+```
+
+A placebo-in-time band can be laid over the post-period; its rows are already
+aligned to event time 0, 1, 2, ... so it lines up row by row (a date-indexed
+frame from `nm.effect_bands_space` works too, aligned by date):
+
+```python
+pt = nm.placebo_in_time(panel, ..., cutoff_date="2020-01-23", placebo_every=7)
+nm.plot_event_study(out, cutoff_date="2020-01-23",
+                    band=pt["ref_band_event_time"],
+                    title="Effect by event time (placebo-in-time band)")
+```
+
 ## Inference
 
 Two flavours of significance test:

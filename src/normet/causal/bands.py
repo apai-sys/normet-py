@@ -30,6 +30,7 @@ __all__ = [
     "effect_bands_time",
     "uncertainty_bands",
     "plot_effect_with_bands",
+    "plot_event_study",
     "plot_uncertainty_bands",
 ]
 
@@ -727,6 +728,145 @@ def plot_uncertainty_bands(
         S.format_time_axis(ax)
     ax.set_ylabel("Effect (observed − synthetic)")
     ax.margins(x=0)
+    S.legend(ax)
+    S.grid(ax)
+    return ax
+
+
+@styled
+def plot_event_study(
+    eff_by_period: pd.DataFrame | dict,
+    cutoff_date: object,
+    *,
+    band: pd.DataFrame | None = None,
+    title: str = "Event study",
+    ax: Any = None,
+) -> Any:
+    """
+    Plot the treated effect against event time, the pre- and post-period apart.
+
+    This is the visual companion of :func:`pre_trend_test`: a synthetic control
+    that is credible has pre-period points scattered about zero, and a post-
+    period path that leaves them. Event time counts *periods* of the panel (days
+    for a daily panel, months for a monthly one), so a slow panel does not get
+    a wide, unreadable x axis, and the plotted points line up row by row with
+    ``placebo_in_time(...)["ref_band_event_time"]``.
+
+    Parameters
+    ----------
+    eff_by_period : pandas.DataFrame or dict
+        A result from :func:`run_scm` (index=date, column ``"effect"``), or a
+        mapping that holds one under ``"treated"`` — the shape
+        :func:`placebo_in_time` returns.
+    cutoff_date : str or pandas.Timestamp
+        The intervention date. The first observation at or after it is event
+        time 0; every observation before it gets a negative event time.
+    band : pandas.DataFrame, optional
+        A post-period band: ``placebo_in_time(...)["ref_band_event_time"]``
+        (aligned to event time 0, 1, 2, ... by **row position**), or a
+        date-indexed frame from :func:`effect_bands_space`, which is aligned by
+        date. Columns are read as ``ci_lo``/``ci_hi``, else ``lower``/``upper``,
+        else ``low``/``high``, else ``p10``/``p90``. The band starts at the
+        cutoff, so no band is drawn over the pre-period: placebo cutoffs have
+        no pre-period of their own to estimate one from, and a shaded
+        pre-period would claim a coverage the data cannot back.
+    title : str, default="Event study"
+        Plot title.
+    ax : matplotlib.axes.Axes, optional
+        Axes to draw on. Creates a new figure if None.
+
+    Returns
+    -------
+    matplotlib.axes.Axes
+
+    Notes
+    -----
+    Pre-period in the neutral grey and post-period in the modelled red, the
+    same split in every figure of the library. Reading it: the pre-period
+    points sit in a band around zero narrower than the post-period effect,
+    and a level shift at event time 0 is the effect under study; pre-period
+    points that slope away from zero are the pre-trend failure
+    :func:`pre_trend_test` flags.
+    """
+    df = eff_by_period.get("treated") if isinstance(eff_by_period, dict) else eff_by_period
+    if not isinstance(df, pd.DataFrame) or "effect" not in df.columns:
+        raise ValueError("`eff_by_period` must be a DataFrame with an 'effect' column.")
+    if not isinstance(df.index, pd.DatetimeIndex):
+        raise ValueError("`eff_by_period` must be indexed by dates.")
+
+    df = df.sort_index()
+    cutoff_ts = pd.to_datetime(cutoff_date)  # type: ignore[call-overload]
+    post = np.asarray(df.index >= cutoff_ts, dtype=bool)
+    n_pre = int((~post).sum())
+    n_post = int(post.sum())
+    event_time = np.arange(-n_pre, n_post)
+    effect = df["effect"].to_numpy(dtype=float)
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=(8, 3), layout="constrained")
+
+    if band is not None and n_post:
+        lo_col = hi_col = None
+        for lo, hi in (
+            ("ci_lo", "ci_hi"),
+            ("lower", "upper"),
+            ("low", "high"),
+            ("p10", "p90"),
+        ):
+            if lo in band.columns and hi in band.columns:
+                lo_col, hi_col = lo, hi
+                break
+        if lo_col is None:
+            raise ValueError(
+                "`band` must have ci_lo/ci_hi, lower/upper, low/high or p10/p90 columns."
+            )
+
+        if isinstance(band.index, pd.DatetimeIndex):
+            # effect_bands_space returns dates; ref_band_event_time returns rows.
+            band = band.reindex(df.index[post]).reset_index(drop=True)
+        else:
+            band = band.reset_index(drop=True)
+        if len(band) == 0 or band[lo_col].isna().all():
+            raise ValueError("`band` does not cover the post-period.")
+        n_draw = min(n_post, len(band))
+        ax.fill_between(
+            event_time[post][:n_draw],
+            band[lo_col].to_numpy(dtype=float)[:n_draw],
+            band[hi_col].to_numpy(dtype=float)[:n_draw],
+            color=S.MODELLED,
+            alpha=0.18,
+            lw=0,
+            label="placebo band",
+        )
+
+    if n_pre:
+        ax.plot(
+            event_time[:n_pre],
+            effect[:n_pre],
+            lw=1.0,
+            color=S.NEUTRAL,
+            marker="o",
+            ms=3,
+            label="pre-period",
+        )
+    if n_post:
+        ax.plot(
+            event_time[post],
+            effect[post],
+            lw=1.0,
+            color=S.MODELLED,
+            marker="o",
+            ms=3,
+            label="post-period",
+        )
+
+    S.zero_line(ax)
+    S.cutoff_line(ax, 0)
+
+    ax.set_title(title)
+    ax.set_xlabel("Periods since cutoff")
+    ax.set_ylabel("Effect (observed − synthetic)")
+    ax.margins(x=0.02)
     S.legend(ax)
     S.grid(ax)
     return ax
