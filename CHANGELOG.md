@@ -426,6 +426,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   runs the same suite on 3.13. Both have `continue-on-error`, so they can
   never block a merge — a failure is the breakage list for the upgrade, to be
   fixed before the matrix widens.
+- **CI: Python 3.13 joins the blocking test matrix.** Its non-blocking probe
+  job is retired: the probe's first run (the full suite with every extra
+  installed, 2026-10-23) passed, so per the execution plan the version
+  graduates from probe to a first-class matrix row. `pyproject.toml` gains the
+  `Programming Language :: Python :: 3.13` classifier.
 - **numpy 2.x support: the `numpy<2.0` pin is lifted** and the matrix now
   resolves numpy 2.x. Two things stood in the way. The probe's breakage list
   (issue #69) held exactly one failure: this test's own CRPS reference
