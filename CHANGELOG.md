@@ -427,15 +427,22 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   never block a merge — a failure is the breakage list for the upgrade, to be
   fixed before the matrix widens.
 - **numpy 2.x support: the `numpy<2.0` pin is lifted** and the matrix now
-  resolves numpy 2.x. The probe's breakage list (issue #69) held exactly one
-  failure — this test's own CRPS reference integral called `np.trapz`, removed
-  in numpy 2.0; it now reads `getattr(np, "trapezoid", np.trapz)`, which works
-  on both. With the pin gone, `pyarrow<26` goes with it (it existed only
-  because pyarrow 26 needs NumPy 2, which the old pin ruled out), and the
-  `probe: numpy 2.x` job retires. The "generic unit" timedelta
-  DeprecationWarnings the probe showed under numpy 2.5 come from pandas' own
-  Timestamp/Timedelta arithmetic, not from normet call sites — issue #69
-  carries the attribution.
+  resolves numpy 2.x. Two things stood in the way. The probe's breakage list
+  (issue #69) held exactly one failure: this test's own CRPS reference
+  integral called `np.trapz`, removed in numpy 2.0; it now reads
+  `getattr(np, "trapezoid", None) or np.trapz`, which works on both (the
+  naively suggested `getattr(np, "trapezoid", np.trapz)` is itself broken on
+  numpy 2 — the default is evaluated eagerly). Separately, strict mypy fails
+  on three reassignments whose declared shape comes from the pandas stubs
+  while the new value comes from numpy stubs that disagree on the shape
+  parameter (different pairs fail under 2.2.x and 2.5.x; 2.4.x is clean); the
+  three variables now carry an explicit `np.ndarray` annotation, stable
+  across every numpy 2.x stub generation. With the pin gone, `pyarrow<26`
+  goes with it (it existed only because pyarrow 26 needs NumPy 2, which the
+  old pin ruled out), and the `probe: numpy 2.x` job retires. The "generic
+  unit" timedelta DeprecationWarnings the probe showed under numpy 2.5 come
+  from pandas' own Timestamp/Timedelta arithmetic, not from normet call sites
+  — issue #69 carries the attribution.
 - **The GUI's left panel is built one workflow step at a time.**
   `_build_param_panel` had grown to 420 lines, one straight run of layout from
   Data to PDP; each step is now its own `_build_*_box()` returning the group
