@@ -240,6 +240,12 @@ df_norm_ref = nm.normalise(
 )
 ```
 
+For a target that spans sub-unit to hundreds of µg/m³, fit on the log scale:
+`nm.do_all(..., log_transform=True)` (also on `do_all_unc` and `normalise`)
+trains on `log1p(value)` and back-transforms every result column through
+`expm1`, so the output is in the original units and non-negative by
+construction. See the user guide's "Log-scale fits" section.
+
 ---
 
 ## Decomposition

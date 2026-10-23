@@ -732,6 +732,42 @@ def test_do_all_runs_the_zero_shot_path_and_returns_the_estimator(chronos2_pipel
 
 
 @needs_chronos
+def test_do_all_zero_shot_log_transform_back_transforms(chronos2_pipeline):
+    """The chronos branch honours log_transform: the de-weathering runs on the
+    log1p scale and the result comes back through expm1, so the observed
+    column is exactly the input target and nothing is negative."""
+    from normet import do_all
+
+    n = 900
+    rng = np.random.default_rng(3)
+    dates = pd.date_range("2024-01-01", periods=n, freq="h")
+    t = np.arange(n)
+    blh = 800 + 400 * np.sin(2 * np.pi * t / 24) + rng.normal(0, 40, n)
+    t2m = 10 + 8 * np.sin(2 * np.pi * t / (24 * 30)) + rng.normal(0, 1, n)
+    pm = np.clip(20 - 0.01 * blh + 0.2 * (t2m - t2m.mean()) ** 2 + rng.normal(0, 2, n), 0, None)
+    df = pd.DataFrame({"date": dates, "PM2.5": pm, "t2m": t2m, "blh": blh})
+
+    out, _, df_prep = do_all(
+        df,
+        target="PM2.5",
+        backend="chronos-2",
+        covariates=["t2m", "blh"],
+        variables_resample=["t2m", "blh"],
+        n_samples=2,
+        log_transform=True,
+        model_config={"context_length": 512, "prediction_length": 48, "device": "cpu"},
+    )
+
+    # The prepared frame is the log1p space the estimator conditioned on.
+    assert np.allclose(df_prep["value"], np.log1p(pm))
+    # The result is in the original units: observed is exactly the input.
+    assert np.allclose(out["observed"], pm)
+    assert (out["normalised"] >= 0).all()
+    # The seeded context is an exact expm1(log1p(x)) round-trip.
+    assert np.allclose(out["normalised"][:512], out["observed"][:512])
+
+
+@needs_chronos
 def test_do_all_zero_shot_defaults_to_a_sane_sample_count(chronos2_pipeline):
     """300 Monte-Carlo samples is a tree-ensemble budget, not a transformer one.
 
