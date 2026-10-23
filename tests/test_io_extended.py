@@ -91,6 +91,91 @@ def test_openaq_locations_mocked(monkeypatch):
 
 
 @pytest.mark.skipif(not requests_available, reason="requests not installed")
+def test_openaq_locations_paging_and_cap(monkeypatch):
+    """Measured v3 behaviour (2026-10-23): limit above 1000 is a hard 422, so
+    the adapter caps the request at 1000 and walks the `page` cursor until a
+    short page; a location that never reported has datetimeLast null."""
+    import requests
+
+    pages = {
+        1: {"results": [{"id": i, "coordinates": {}} for i in range(1000)]},
+        2: {
+            "results": [
+                {"id": 9999, "coordinates": {}, "datetimeLast": None},
+            ]
+        },
+    }
+    seen: list[tuple[int, int]] = []
+
+    def mock_get(url, params=None, headers=None, timeout=None):
+        page = (params or {}).get("page", 1)
+        seen.append((page, params["limit"]))
+        return MockResponse(json_data=pages[page])
+
+    monkeypatch.setattr(requests, "get", mock_get)
+    df = openaq.openaq_locations(country="GB", limit=2500, api_key="k")
+    assert [s[0] for s in seen] == [1, 2]  # stopped on the short page 2
+    assert all(s[1] == 1000 for s in seen)  # the 2500 request was capped
+    assert len(df) == 1001
+    assert df.iloc[-1]["last_updated"] is None  # datetimeLast null, not a crash
+
+
+@pytest.mark.skipif(not requests_available, reason="requests not installed")
+def test_openaq_locations_union_parameter_ids(monkeypatch):
+    """A slug union goes out as repeated parameters_id keys, resolving each
+    slug to its full id family (mass first)."""
+    import requests
+
+    captured = {}
+
+    def mock_get(url, params=None, headers=None, timeout=None):
+        captured["params"] = params
+        return MockResponse(json_data={"results": []})
+
+    monkeypatch.setattr(requests, "get", mock_get)
+    openaq.openaq_locations(country="GB", parameters=["pm25", "no2"], api_key="k")
+    ids = captured["params"]["parameters_id"]
+    assert ids[:3] == [2, 5, 7]  # pm25 then no2 mass+ppm+ppb
+    assert 15 in ids  # and no2's third id
+
+
+def test_openaq_parameter_id_families():
+    """Each slug resolves to its unit-family ids, µg/m3 mass first (live
+    /parameters, 2026-10-23), so a fetch prefers mass to ppm/ppb."""
+    assert openaq._resolve_parameter_ids("no2") == (5, 7, 15)
+    assert openaq._resolve_parameter_ids("pm25") == (2,)
+    assert openaq._resolve_parameter_ids("o3") == (3, 10, 32)
+    assert openaq._resolve_parameter_ids(42) == (42,)  # raw id passes through
+
+
+@pytest.mark.skipif(not requests_available, reason="requests not installed")
+def test_openaq_resolve_sensor_prefers_mass_id(monkeypatch):
+    """A location with both a ppm and a µg/m3 sensor for one pollutant must
+    return the mass one, so values land on the same scale as UK/EEA data."""
+    import requests
+
+    def mock_get(url, params=None, headers=None, timeout=None):
+        return MockResponse(
+            json_data={
+                "results": [
+                    {
+                        "coordinates": {"latitude": 1.0, "longitude": 2.0},
+                        # ppm sensor first in the list; mass (id 5) must still win
+                        "sensors": [
+                            {"id": 10, "parameter": {"id": 7, "name": "no2"}},
+                            {"id": 5, "parameter": {"id": 5, "name": "no2"}},
+                        ],
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr(requests, "get", mock_get)
+    sid, lat, lon = openaq._resolve_sensor(1, openaq._resolve_parameter_ids("no2"), {})
+    assert sid == 5
+
+
+@pytest.mark.skipif(not requests_available, reason="requests not installed")
 def test_openaq_sensors_mocked(monkeypatch):
     import requests
 
@@ -321,6 +406,180 @@ def test_fetch_eea_data_no_rows_is_empty_frame(monkeypatch):
     )
     df = eea.fetch_eea_data(country="ZZ", pollutant="PM10", year_from=2024, year_to=2024)
     assert df.empty
+
+
+# --- station level: ArcGIS layer + popup blobs -----------------------------
+
+
+def _eea_feature(code: str, name: str, lon: float, lat: float, full: bool) -> dict:
+    """One geojson feature shaped like the map service's real replies
+    (GB capture, 2026-10-23): anchor text is the notation, prose titles
+    carry "<" and <sup> markup, an empty href means "no blob"."""
+    lines = []
+    if full:
+        lines.append(
+            ' - Particulate matter < 2.5 µm (aerosol): <a target="_blank" '
+            'href="https://blob/PM25.parquet" style="color: Blue;">PM2.5</a>, '
+            "ug/m<sup>3</sup>, (2013 - 2019)"
+        )
+        lines.append(
+            ' - Nitrogen dioxide (air): <a href="https://blob/NO2.parquet">NO2</a>, '
+            "ug/m<sup>3</sup>, (2013 - 2019)"
+        )
+        lines.append(
+            ' - Nitrogen oxides (air): <a href="https://blob/NOX.parquet">NOX as NO2</a>, '
+            "ug/m<sup>3</sup>, (2015 - 2018)"
+        )
+        lines.append(
+            ' - Benzene (air): <a href="" style="color: Blue;">C6H6</a>, '
+            "ug/m<sup>3</sup>, (2014 - 2017)"
+        )
+        lines.append(
+            ' - Benzo(a)pyrene in PM10 (aerosol): <a href="https://blob/BaP.parquet">'
+            "BaP in PM10</a>, ng/m<sup>3</sup>, (2013 - 2019)"
+        )
+    lines.append(
+        ' - Ozone (air): <a href="https://blob/O3.parquet">O3</a>, ug/m<sup>3</sup>, (2016 - 2020)'
+    )
+    popup = "<p> Air Quality Station:<strong>x</strong></p>" + "".join(
+        f"<p>{line} </p>" for line in lines
+    )
+    return {
+        "type": "Feature",
+        "properties": {
+            "AirQualityStationEoICode": code,
+            "AQStationName": name,
+            "CountryCode": "GB",
+            "PopupInfo": popup,
+        },
+        "geometry": {"type": "Point", "coordinates": [lon, lat]},
+    }
+
+
+def _eea_layer_response(features: list[dict]):
+    import json
+
+    body = json.dumps({"type": "FeatureCollection", "features": features})
+
+    class _Resp:
+        status_code = 200
+        text = body
+        content = body.encode("utf-8")
+
+        def raise_for_status(self) -> None:
+            return None
+
+    return _Resp()
+
+
+@pytest.mark.skipif(not requests_available, reason="requests not installed")
+def test_list_eea_stations_parses_popup_blobs(monkeypatch):
+    """The popup grammar the layer really returns (GB capture, 2026-10-23):
+    anchor text is the reporting notation; benzene's empty href and the
+    heavy-metal species ("BaP in PM10") are skipped, while "NOX as NO2"
+    normalises to the app notation and every line carries its year range."""
+    import json
+
+    import requests
+
+    feats = [
+        _eea_feature("GB0777A", "Liverpool Speke", -2.84, 53.35, True),
+        _eea_feature("GB0742A", "Inverness", -4.24, 57.48, False),
+    ]
+    monkeypatch.setattr(requests, "get", lambda url, **kw: _eea_layer_response(feats))
+
+    df = eea.list_eea_stations(country="GB", pollutants=["PM2.5", "O3"])
+    # Sorted by n desc: Liverpool (PM2.5 + O3) first.
+    assert list(df["code"]) == ["GB0777A", "GB0742A"]
+    assert df["pollutants"].tolist() == ["PM2.5, O3", "O3"]
+    assert df["lat"].iloc[0] == pytest.approx(53.35)
+
+    links = json.loads(df[df["code"] == "GB0777A"].iloc[0]["links"])
+    assert set(links) == {"PM2.5", "NO2", "NOXasNO2", "O3"}
+    assert links["PM2.5"]["url"].endswith("PM25.parquet")
+    assert (links["PM2.5"]["from"], links["PM2.5"]["to"]) == (2013, 2019)
+    assert (links["NOXasNO2"]["from"], links["NOXasNO2"]["to"]) == (2015, 2018)
+
+
+@pytest.mark.skipif(not requests_available, reason="requests not installed")
+def test_list_eea_stations_pages_past_the_layer_cap(monkeypatch):
+    """One query answers at most _ARCGIS_PAGE features; the adapter must ask
+    for the next offset until a short page arrives, or a big country loses
+    its tail of stations."""
+    import requests
+
+    monkeypatch.setattr(eea, "_ARCGIS_PAGE", 2)
+    feats = [_eea_feature(f"GB000{i}A", f"S{i}", 0.0, 50.0, False) for i in range(3)]
+    offsets: list[int] = []
+
+    def mock_get(url, params=None, **kw):
+        offsets.append(params["resultOffset"])
+        return _eea_layer_response(feats[params["resultOffset"] :][:2])
+
+    monkeypatch.setattr(requests, "get", mock_get)
+    df = eea.list_eea_stations(country="GB")
+    assert offsets == [0, 2]
+    assert len(df) == 3
+
+
+def _eea_blob_bytes() -> bytes:
+    """A station blob in the service's own columns: one pollutant (code 8 =
+    NO2), hourly, with the -99 sentinel."""
+    from decimal import Decimal
+
+    raw = pd.DataFrame(
+        {
+            "Samplingpoint": ["GB/GB_SamplingPoint_61464"] * 3,
+            "Pollutant": [8, 8, 8],
+            "Start": ["2013-01-01 01:00:00", "2013-01-01 02:00:00", "2013-01-01 03:00:00"],
+            "End": ["2013-01-01 02:00:00", "2013-01-01 03:00:00", "2013-01-01 04:00:00"],
+            "Value": [Decimal("3.2"), Decimal("-99.0"), Decimal("4.4")],
+            "Unit": ["ug.m-3"] * 3,
+            "AggType": ["hour"] * 3,
+            "Validity": [1, -1, 1],
+        }
+    )
+    buf = io.BytesIO()
+    raw.to_parquet(buf)
+    return buf.getvalue()
+
+
+@pytest.mark.skipif(not requests_available, reason="requests not installed")
+@pytest.mark.skipif(importlib.util.find_spec("pyarrow") is None, reason="pyarrow not installed")
+def test_fetch_eea_station_mocked(monkeypatch):
+    """Station lookup then one blob download: the whole per-station pull is
+    two GETs, and the tidy frame carries the station's name and coordinates
+    so the GUI can join met without another call."""
+    import requests
+
+    feats = [
+        _eea_feature("GB0777A", "Liverpool Speke", -2.84, 53.35, True),
+        _eea_feature("GB0742A", "Inverness", -4.24, 57.48, False),
+    ]
+    blob = _eea_blob_bytes()
+    urls: list[str] = []
+
+    def mock_get(url, **kw):
+        urls.append(url)
+        if url.endswith("/query"):
+            return _eea_layer_response(feats)
+        return _BytesResponse(blob)
+
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    df = eea.fetch_eea_station(station="gb0777a", country="GB", pollutant="NO2")
+    assert urls[0].endswith("/query") and len(urls) == 2  # code case-insensitive
+    assert df["pollutant"].unique().tolist() == ["NO2"]
+    assert df["site"].iloc[0] == "Liverpool Speke"
+    assert df["value"].isna().sum() == 1  # the -99 sentinel
+    assert df["lat"].iloc[0] == pytest.approx(53.35)
+    assert df["date"].dt.tz is not None
+
+    # O3-only station has no PM2.5 blob; an unknown code has no station at all.
+    with pytest.raises(RuntimeError, match="no PM2.5 blob"):
+        eea.fetch_eea_station(station="GB0742A", country="GB", pollutant="PM2.5")
+    with pytest.raises(RuntimeError, match="No EEA station"):
+        eea.fetch_eea_station(station="GB9999", country="GB", pollutant="NO2")
 
 
 # ---------------------------------------------------------------------------
