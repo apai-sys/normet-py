@@ -42,6 +42,16 @@ features, and it commits the project to API stability for downstream users.
 | ✅ | `cross_learning=True` for joint multi-site prediction (`predict_quantiles_multisite`) |
 | ✅ | Multivariate targets (`predict_quantiles_multivariate`): several species at one site, or neighbouring stations as variates |
 | ✅ | Categorical covariates encoded natively, no one-hotting |
+| ✅ | Trend statistics `nm.trend` (Mann-Kendall + Theil-Sen, block-bootstrap-corrected) and the segmented fit `detect_trend_breaks` |
+| ✅ | Probabilistic skill verification: CRPS / pinball scores and the baseline-comparison notebook |
+| ✅ | `decompose_uncertainty` — a de-weathered estimate's spread attributed to weather vs model form |
+| ✅ | Chronos-2 quantile calibration (`calibrate_quantiles`, hold-out conformal thresholds) |
+| ✅ | SCM pre-trend test `pre_trend_test` and the event-study figure |
+| ✅ | Log-scale fits (`log_transform`: train on log1p, report in original units) |
+| ✅ | Embedding diagnostics: silhouette curve, projection, the two-panel figure |
+| ✅ | Donor spatial diagnostics: per-donor distance, bearing and sector; the pool's centroid and sector coverage |
+| ✅ | Staggered adoption `run_scm_staggered`, per-unit placebo p-values and the cross-unit permutation test |
+| ✅ | numpy 2.x and Python 3.13 support: the `numpy<2.0` / `pyarrow<26` pins are lifted and the CI matrix spans 3.10–3.13 |
 
 ## Open
 
@@ -51,21 +61,11 @@ notes); the table below is its snapshot.
 
 | Status | Item |
 |:------:|------|
-| ✅ | Trend statistics `nm.trend` (Mann-Kendall + Theil-Sen, block-bootstrap-corrected) and the segmented fit `detect_trend_breaks` (P0) |
-| ✅ | Probabilistic skill verification: CRPS / pinball scores and the baseline-comparison notebook (P0) |
-| ✅ | `decompose_uncertainty` — a de-weathered estimate's spread attributed to weather vs model form (P1) |
-| ✅ | Chronos-2 quantile calibration (`calibrate_quantiles`, hold-out conformal thresholds) (P1) |
-| ✅ | SCM pre-trend test `pre_trend_test` and the event-study figure (P1) |
-| ✅ | Log-scale fits (`log_transform`: train on log1p, report in original units) (P2) |
-| ✅ | Embedding diagnostics: silhouette curve, projection, the two-panel figure (P2, PR #64) |
-| ✅ | Donor spatial diagnostics: per-donor distance, bearing and sector; the pool's centroid and sector coverage (P2, PR #65) |
-| ✅ | Staggered adoption `run_scm_staggered`, per-unit placebo p-values and the cross-unit permutation test (P2, PR #66, #67) |
-| 🔍 | numpy 2.x / Python 3.13 upgrade — probe jobs on main (PR #68); Python 3.13 passed the probe, the numpy 2.x breakage list is tracked in issue #69; the matrix widens as the list is fixed (P3) |
 | 📋 | China data adapters — scoped as issue + data-format doc; not in the 1.1 schedule (data licences and station coordinates first) (P3) |
 | ⏸ | Performance — measure first, then touch: profile the normalise paths, the optional `device` passthrough; the bit-identical promise is why it is last (P3) |
 
-Once the batch lands, the finished rows join the Shipped table above and this
-section empties again.
+The finished 1.1 rows have joined the Shipped table above; what remains is
+the unscheduled P3 work below.
 
 What is deliberately *not* a roadmap item: whether fine-tuning, cross-learning
 or a multivariate stack improves a given analysis. Each is a question about a
