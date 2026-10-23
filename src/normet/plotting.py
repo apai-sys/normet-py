@@ -193,6 +193,9 @@ def _rose(
 def _class_edges(values: pd.Series, breaks: Iterable[float] | None, n: int = 5) -> np.ndarray:
     """Class edges for a rose: *breaks* given, else *n* classes from 0 at round steps up
     to the 95th percentile, the last open-ended."""
+    # Explicit: np.asarray's and np.arange's stub return shapes disagree
+    # across numpy 2.x stub generations.
+    edges: np.ndarray
     if breaks is not None:
         edges = np.asarray(sorted(float(b) for b in breaks))
     else:

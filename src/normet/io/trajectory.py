@@ -669,7 +669,9 @@ def join_trajectory_features(
     out = df.copy()
     replaced = [c for c in cols if c in df.columns]
     for c in cols:
-        values = block[c].to_numpy()
+        # Explicit: np.where's stub return shape disagrees with to_numpy's
+        # across numpy 2.x stub generations.
+        values: np.ndarray = block[c].to_numpy()
         if not in_scope.all():
             prior = out[c].to_numpy() if c in replaced else np.full(len(out), np.nan)
             values = np.where(in_scope, values, prior)

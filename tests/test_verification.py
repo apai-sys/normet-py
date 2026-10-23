@@ -15,6 +15,11 @@ from normet.analysis.verification import (
 )
 from normet.exceptions import DataError
 
+# numpy 2.0 renamed `np.trapz` to `np.trapezoid` and removed the old name. The
+# getattr must not take `np.trapz` as its default: that expression is evaluated
+# eagerly and would itself raise on numpy 2.x, defeating the shim.
+_trapz = getattr(np, "trapezoid", None) or np.trapz
+
 
 def _reference(q, tau, y, n=2_000_001):
     """The CRPS of one row's quantile forecast by dense integration, as an
@@ -40,7 +45,7 @@ def _reference(q, tau, y, n=2_000_001):
     lo = min(v.min(), y)
     hi = max(v.max(), y)
     xs = np.linspace(lo, hi, n)
-    return float(np.trapz((F(xs) - (xs >= y).astype(float)) ** 2, xs))
+    return float(_trapz((F(xs) - (xs >= y).astype(float)) ** 2, xs))
 
 
 # --------------------------------------------------------------- pinball
