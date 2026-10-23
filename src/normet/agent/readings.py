@@ -408,13 +408,19 @@ def scm_reading(result: pd.DataFrame, cutoff: str) -> str:
         ]
     pre_mean = df.loc[df.index < pd.Timestamp(cutoff), "observed"].mean()
     rows.append(["treated unit's pre-period mean", pre_mean])
-    return "\n".join(
-        [
-            f"Synthetic control, cutoff {cutoff} (normet.scm_diagnostics):",
-            "",
-            table(["", "value"], rows),
-        ]
-    )
+    pt = d.get("pre_trend") or {}
+    rows += [
+        ["pre-trend p-value (slope)", pt.get("p_slope")],
+        ["pre-trend drift (final third vs rest)", pt.get("rmpe_drift")],
+    ]
+    lines = [
+        f"Synthetic control, cutoff {cutoff} (normet.scm_diagnostics):",
+        "",
+        table(["", "value"], rows),
+    ]
+    if pt.get("verdict"):
+        lines += ["", f"pre-trend: {pt['verdict']}"]
+    return "\n".join(lines)
 
 
 def cv_reading(scores: pd.DataFrame) -> str:
