@@ -205,41 +205,122 @@ def test_fetch_openaq_measurements_mocked(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+class _BytesResponse:
+    """Minimal response for the Parquet service: bytes and a status code."""
+
+    def __init__(self, content: bytes) -> None:
+        self.content = content
+        self.status_code = 200
+
+    def raise_for_status(self) -> None:
+        return None
+
+
+def _eea_parquet_bytes() -> bytes:
+    """A response frame in the service's own columns and dtypes: Decimals
+    for Value, sampling-point ids for Samplingpoint, and the -99 sentinel."""
+    from decimal import Decimal
+
+    raw = pd.DataFrame(
+        {
+            "Samplingpoint": [
+                "GB/GB_SamplingPoint_65449",
+                "GB/GB_SamplingPoint_65449",
+                "GB/GB_SamplingPoint_76934",
+            ],
+            "Pollutant": [5, 5, 5],
+            "Start": ["2024-01-03 01:00:00", "2024-01-03 02:00:00", "2024-01-03 01:00:00"],
+            "End": ["2024-01-03 02:00:00", "2024-01-03 03:00:00", "2024-01-03 02:00:00"],
+            "Value": [Decimal("3.865"), Decimal("-99.0"), Decimal("8.696")],
+            "Unit": ["ug.m-3"] * 3,
+            "AggType": ["hour"] * 3,
+            "Validity": [2, -1, 2],
+        }
+    )
+    buf = io.BytesIO()
+    raw.to_parquet(buf)
+    return buf.getvalue()
+
+
 @pytest.mark.skipif(not requests_available, reason="requests not installed")
+@pytest.mark.skipif(importlib.util.find_spec("pyarrow") is None, reason="pyarrow not installed")
 def test_fetch_eea_data_mocked(monkeypatch):
+    """The Parquet download-service round trip, service mocked.
+
+    Covers what the live service is relied on for: the POST query document
+    (the service takes a body, not query parameters), the column mapping to
+    the tidy names, the -99 sentinel becoming NaN, the numeric pollutant
+    code resolved to its notation, and the client-side station filter.
+    """
     import requests
 
-    csv_data = (
-        "DatetimeBegin,AirQualityStation,Concentration,UnitOfMeasurement,Latitude,Longitude,Pollutant,CountryCode\n"
-        "2024-01-01 00:00:00,GB0001A,10.0,ug/m3,51.5,-0.1,PM2.5,GB\n"
-    )
+    payload = _eea_parquet_bytes()
+    empty_zip = b"PK\x05\x06" + b"\x00" * 18
+    bodies: list = []
+    urls: list = []
 
-    def mock_get(url, params=None, headers=None, timeout=None):
-        if "AQData_Extract.fmw" in url:
-            # Discovery service returns URLs
-            return MockResponse({}, text_data="http://mock-eea-csv.com/file.csv")
-        else:
-            # CSV download endpoint
-            return MockResponse({}, text_data=csv_data)
+    def mock_post(url, params=None, json=None, headers=None, timeout=None):
+        urls.append(url)
+        bodies.append(json)
+        # Data for January only: the service answers other empty months with
+        # a 22-byte zip, which the adapter must skip rather than read.
+        month = json["dateTimeStart"][:7]
+        return _BytesResponse(payload if month == "2024-01" else empty_zip)
 
-    monkeypatch.setattr(requests, "get", mock_get)
+    monkeypatch.setattr(requests, "post", mock_post)
 
     df = eea.fetch_eea_data(
-        country="GB",
-        pollutant="PM2.5",
+        country="gb",
+        pollutant=5,  # numeric EEA code: must reach the service as "PM10"
         year_from=2024,
         year_to=2024,
-        station="GB0001A",
+        station="65449",
     )
 
-    assert len(df) == 1
-    assert df.loc[0, "site"] == "GB0001A"
-    assert df.loc[0, "value"] == 10.0
-    assert df.loc[0, "unit"] == "ug/m3"
-    assert df.loc[0, "lat"] == 51.5
-    assert df.loc[0, "lon"] == -0.1
-    assert df.loc[0, "pollutant"] == "PM2.5"
-    assert df.loc[0, "country"] == "GB"
+    # One request per calendar month: the service caps a synchronous answer
+    # ("Request too large..."), so a year is twelve monthly requests.
+    assert len(bodies) == 12
+    assert all(u.endswith("/ParquetFile/dynamic") for u in urls)
+    assert bodies[0]["dateTimeStart"] == "2024-01-01T00:00:00"
+    assert bodies[-1]["dateTimeEnd"] == "2024-12-31T23:59:59"
+    assert bodies[0]["countries"] == ["GB"]
+    assert bodies[0]["cities"] == []  # required key: "every city"
+    assert bodies[0]["pollutants"] == ["PM10"]
+    assert all("source" not in b for b in bodies)  # the "All" default stays unsent
+
+    assert list(df.columns) == [
+        "date",
+        "site",
+        "country",
+        "pollutant",
+        "value",
+        "unit",
+        "aggregation",
+        "validity",
+    ]
+    assert len(df) == 2  # the station filter dropped the 76934 row
+    assert (df["site"] == "GB/GB_SamplingPoint_65449").all()
+    assert df["pollutant"].unique().tolist() == ["PM10"]
+    assert df["country"].unique().tolist() == ["GB"]
+    assert df["value"].isna().sum() == 1  # the -99 sentinel
+    assert df["value"].dropna().iloc[0] == pytest.approx(3.865)
+    assert df["date"].dt.tz is not None
+    assert df["validity"].dropna().isin([2, -1]).all()
+
+
+@pytest.mark.skipif(not requests_available, reason="requests not installed")
+@pytest.mark.skipif(importlib.util.find_spec("pyarrow") is None, reason="pyarrow not installed")
+def test_fetch_eea_data_no_rows_is_empty_frame(monkeypatch):
+    """A query matching nothing answers every month with a 22-byte empty zip,
+    not Parquet; reading it as Parquet would raise, so the adapter guards on
+    the magic and returns an empty frame."""
+    import requests
+
+    monkeypatch.setattr(
+        requests, "post", lambda url, **kw: _BytesResponse(b"PK\x05\x06" + b"\x00" * 18)
+    )
+    df = eea.fetch_eea_data(country="ZZ", pollutant="PM10", year_from=2024, year_to=2024)
+    assert df.empty
 
 
 # ---------------------------------------------------------------------------

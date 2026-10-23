@@ -40,11 +40,25 @@ def test_eea_module_importable():
     from normet.io import eea
 
     assert eea.EEA_POLLUTANT_CODES["PM2.5"] == 6001
-    assert eea._resolve_pollutant_code("NO2") == 8
-    assert eea._resolve_pollutant_code(7) == 7
+    # The Parquet download service names pollutants by notation; the
+    # numeric EEA codes resolve to the notation that carries the same name.
+    assert eea._resolve_pollutant_notation("no2") == "NO2"
+    assert eea._resolve_pollutant_notation(7) == "O3"
 
     with pytest.raises(ValueError):
-        eea._resolve_pollutant_code("XYZ")
+        eea._resolve_pollutant_notation("XYZ")
+    with pytest.raises(ValueError):
+        eea._resolve_pollutant_notation(42)
+
+
+def test_eea_month_windows():
+    from normet.io.eea import _month_windows
+
+    w = _month_windows(2023, 2024)
+    assert len(w) == 24
+    assert w[0] == ("2023-01-01T00:00:00", "2023-01-31T23:59:59")
+    assert ("2024-02-01T00:00:00", "2024-02-29T23:59:59") in w  # leap February
+    assert w[-1] == ("2024-12-01T00:00:00", "2024-12-31T23:59:59")
 
 
 needs_requests = pytest.mark.skipif(

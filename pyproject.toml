@@ -59,7 +59,9 @@ flaml = ["flaml[automl]>=2.1"]
 lgb = ["lightgbm>=4.0"]
 
 dask = ["dask[dataframe]>=2023.1"]
-data = ["requests>=2.31", "cdsapi>=0.6", "rdata>=0.9"]
+# requests: the HTTP adapters; cdsapi: ERA5; rdata: the .RData readers;
+# pyarrow: the EEA download service answers in Parquet.
+data = ["requests>=2.31", "cdsapi>=0.6", "rdata>=0.9", "pyarrow>=10.0.1"]
 cli = ["click>=8.0", "pyyaml>=6.0"]
 # The readers pandas needs for the tables Open Data offers beyond text: Parquet and
 # Feather (pyarrow), .xlsx/.xlsm (openpyxl), .xls (xlrd).
