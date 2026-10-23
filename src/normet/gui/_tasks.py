@@ -54,6 +54,16 @@ class TaskMixin(QMainWindow):
                 "emission decomposition, which chronos-2 cannot make: choose the "
                 "observed target, or train with flaml or lightgbm."
             )
+        # The uncertainty attribution trains its own members, so it needs a model
+        # to exist at all and the feature set to vary a model form; chronos-2's
+        # zero-shot forecasts carry neither to speak of.
+        self.unc_button.setEnabled(not busy and has_model and not self._is_chronos())
+        if not has_model:
+            self.unc_button.setToolTip("Train a model first.")
+        elif self._is_chronos():
+            self.unc_button.setToolTip(
+                "Not available for chronos-2 -- train with flaml or lightgbm first."
+            )
         # A notice asking for a step that has now been taken has been answered.
         for key, done in (
             ("need-data", has_data),

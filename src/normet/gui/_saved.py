@@ -88,6 +88,9 @@ class SavedResultsMixin(QMainWindow):
                 if getattr(self, "_trend_raw", None) is not None
                 else None
             ),
+            # The uncertainty run as it came back: its figure and the tab's words
+            # are of the dataclass, not of its table -- so it is kept whole.
+            "uncertainty": getattr(self, "_unc_raw", None),
             # Both methods' decompositions where both ran on this model.
             "decompositions": {
                 method: view[1]
@@ -316,6 +319,8 @@ class SavedResultsMixin(QMainWindow):
                         else self._trend_done
                     )
                     handler(res)
+                if bundle.get("uncertainty") is not None:
+                    self._unc_done(bundle["uncertainty"])
             self.command_log.entries = list(bundle.get("commands") or [])
             self._ran = dict(bundle.get("ran") or {})
             self._refresh_command_log()

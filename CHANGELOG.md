@@ -107,6 +107,20 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   `normet_trend_breaks` (a table's column; `'long-term'` is the separated
   component, the default).
 
+- **GUI: the uncertainty decomposition is a step of the window.** The Decompose
+  page gains an *Uncertainty decomposition* box under the Trend box (the number
+  of ensemble members, the met draws they all share, and the members' backend)
+  and a *Run* button; it needs an AutoML model -- it trains its own members
+  from the table as loaded, the button greys for chronos-2, whose zero-shot
+  forecasts carry no model form to vary -- and reuses the trained feature set
+  and the variables ticked on the Normalise page. Its result is an
+  Uncertainty tab: the per-date variance stacked by source (met resampling,
+  model form, the interaction), a verdict that says which source carries the
+  larger median share of the total spread, and the median share and median
+  variance per source as the table, with the tab's light, CSV export,
+  command-log entry (`decompose_uncertainty`) and Methods paragraph of its
+  own; a saved session brings the run back whole, its figure re-drawn.
+
 - **Skill scores: CRPS and the pinball loss** (`normet.analysis.verification`,
   exported at the top level). Point forecasts are verified by `modStats`, but a
   comparison with a baseline needs the spread's score. `pinball_loss` is the
