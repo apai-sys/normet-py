@@ -75,7 +75,7 @@
 | `nm.silhouette_curve` / `nm.embedding_projection` / `nm.plot_embedding_diagnostics` | Diagnostics for choosing how to use site embeddings — the silhouette against the number of groups, a 2-D projection, and the two-panel figure. No cluster labels, no recommended k — **optional**, needs `scikit-learn` for the curve |
 | `nm.make_run` / `nm.save_run` / `nm.generate_html_report` | Provenance tracking and auto-generated HTML/Markdown run reports |
 | `nm.make_memory` | On-disk caching for expensive pipelines |
-| `normet.io` | ERA5, EEA, DEFRA, OpenAQ data adapters |
+| `normet.io` | ERA5, EEA, OpenAQ, UK air-quality network data adapters |
 
 ---
 
@@ -670,10 +670,10 @@ tasks can be abandoned from the status bar.
 |---|---|
 | Core | `numpy`, `pandas`, `scipy`, `scikit-learn`, `joblib`, `matplotlib` |
 | AutoML | `flaml` (recommended) or `lightgbm` |
-| I/O (data adapters) | `requests`, `cdsapi` |
+| I/O (data adapters) | `requests`, `cdsapi`, `rdata`, `pyarrow` |
 | Parallel/large data | `dask` |
 | CLI | `click`, `pyyaml` |
-| GUI | `PySide6` |
+| GUI | `PySide6`, `pyarrow`, `openpyxl`, `xlrd` |
 
 ---
 
