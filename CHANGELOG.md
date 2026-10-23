@@ -426,6 +426,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   runs the same suite on 3.13. Both have `continue-on-error`, so they can
   never block a merge — a failure is the breakage list for the upgrade, to be
   fixed before the matrix widens.
+- **CI: Python 3.13 joins the blocking test matrix.** Its non-blocking probe
+  job is retired: the probe's first run (the full suite with every extra
+  installed, 2026-10-23) passed, so per the execution plan the version
+  graduates from probe to a first-class matrix row. `pyproject.toml` gains the
+  `Programming Language :: Python :: 3.13` classifier.
 - **The GUI's left panel is built one workflow step at a time.**
   `_build_param_panel` had grown to 420 lines, one straight run of layout from
   Data to PDP; each step is now its own `_build_*_box()` returning the group
