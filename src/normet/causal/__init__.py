@@ -35,7 +35,7 @@ from .bands import (
 )
 
 # --- Batch runner ------------------------------------------------------------
-from .batch import scm_all
+from .batch import run_scm_staggered, scm_all
 from .diagnostics import loo_weight_stability, scm_diagnostics
 from .inference import conformal_effect_interval, rmspe_ratio_test
 from .prediagnostics import PreTrend, pre_trend_test
@@ -93,6 +93,7 @@ __all__ = [
     # panel prep
     "prepare_panel",
     # batch
+    "run_scm_staggered",
     "scm_all",
     # diagnostics
     "scm_diagnostics",
