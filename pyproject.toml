@@ -39,7 +39,7 @@ classifiers = [
 
 # Core dependencies
 dependencies = [
-    "numpy>=1.22,<2.0",
+    "numpy>=1.22",
     # 2.0 for `format="mixed"` in to_datetime (see normet.utils._time): on 1.5 a
     # format inferred from the first value was applied to the rest, silently
     # coercing anything that did not match to NaT.
@@ -62,9 +62,8 @@ dask = ["dask[dataframe]>=2023.1"]
 data = ["requests>=2.31", "cdsapi>=0.6", "rdata>=0.9"]
 cli = ["click>=8.0", "pyyaml>=6.0"]
 # The readers pandas needs for the tables Open Data offers beyond text: Parquet and
-# Feather (pyarrow), .xlsx/.xlsm (openpyxl), .xls (xlrd). pyarrow 26 needs NumPy 2,
-# which the numpy pin above rules out: installed, it fails to import.
-gui = ["PySide6>=6.5", "pyarrow>=10.0.1,<26", "openpyxl>=3.1", "xlrd>=2.0"]
+# Feather (pyarrow), .xlsx/.xlsm (openpyxl), .xls (xlrd).
+gui = ["PySide6>=6.5", "pyarrow>=10.0.1", "openpyxl>=3.1", "xlrd>=2.0"]
 geo = ["shapely>=2.0", "pyshp>=2.3"]
 stats = ["statsmodels>=0.14"]
 # Chronos-2 time-series foundation model (normet.foundation).
