@@ -391,6 +391,12 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   shrinks. Tabs are named without ①②③ numbers.
 
 ### Internal
+- **CI: two non-blocking probe jobs for the version upgrades.**
+  `probe: numpy 2.x (py3.12)` installs the suite's dependencies and then forces
+  `numpy>=2.0` on top of the deliberate `numpy<2.0` pin; `probe: python 3.13`
+  runs the same suite on 3.13. Both have `continue-on-error`, so they can
+  never block a merge — a failure is the breakage list for the upgrade, to be
+  fixed before the matrix widens.
 - **The GUI's left panel is built one workflow step at a time.**
   `_build_param_panel` had grown to 420 lines, one straight run of layout from
   Data to PDP; each step is now its own `_build_*_box()` returning the group
