@@ -448,6 +448,10 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   unit" timedelta DeprecationWarnings the probe showed under numpy 2.5 come
   from pandas' own Timestamp/Timedelta arithmetic, not from normet call sites
   — issue #69 carries the attribution.
+- **The `[all]` extra kept a `pyarrow<26` cap the NumPy pin's lift had
+  already made redundant**: the same workaround existed in both extras and
+  only `[gui]` was cleared. `normet[all]` now resolves pyarrow 26+ (and,
+  with it, whatever NumPy the rest of the tree wants).
 - **The GUI's left panel is built one workflow step at a time.**
   `_build_param_panel` had grown to 420 lines, one straight run of layout from
   Data to PDP; each step is now its own `_build_*_box()` returning the group
