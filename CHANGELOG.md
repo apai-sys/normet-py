@@ -1049,6 +1049,24 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   the flag, with the share of observations below 1 in the original units.
   Default `False` is bit-identical to before. User guide:
   `guide/examples_normalisation.md` ("Log-scale fits").
+- **Embedding diagnostics (`normet.foundation`)** for the choice the
+  package deliberately does not make for you. `embed_multisite` returns one
+  768-D vector per site and stops there (the removed `cluster_multisite`
+  existed so the grouping is the user's decision); these functions supply
+  the readings that decision starts from, and no more. `silhouette_curve`
+  scores the mean silhouette for each `k` in `k_range` — infeasible `k`
+  (`k >= n`, a collapsed cluster) get a NaN row rather than being dropped,
+  so the curve is honest about what was not scored; the KMeans it uses as a
+  yardstick is discarded before the score, so the result carries no
+  membership and no recommended k. `embedding_projection` projects the
+  vectors to two dimensions — `"pca"` is pure numpy (no new dependency),
+  `"umap"` needs `umap-learn` — a view for the eye, not a statistic: PCA
+  component signs are not stable across platforms. `plot_embedding_diagnostics`
+  draws the two panels together, coloured by a grouping *you* supply through
+  `groups` (or one colour otherwise), and annotates site names at 20 or
+  fewer sites. Both optional imports (scikit-learn, umap-learn) are lazy.
+  User guide: `guide/examples_foundation.md` ("Reading the embedding space
+  before you group it").
 
 ## [0.4.0] — 2026-06-20
 
