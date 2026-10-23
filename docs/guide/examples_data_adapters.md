@@ -98,7 +98,7 @@ df_met = nm.io.fetch_era5_timeseries(
 
 ## EEA (European Environment Agency)
 
-For European users, `normet` provides an adapter to download historical air quality datasets directly from the EEA:
+For European users, `normet` provides an adapter to download historical air quality datasets directly from the EEA. It queries the agency's official **Parquet download service** — no account or key — which serves the "verified and Up To Date" reporting dataset: hourly measurements from 2013. Reading the answer needs `pyarrow` (`pip install "normet[data]"`).
 
 ```python
 df_eea = nm.io.fetch_eea_data(
@@ -106,9 +106,26 @@ df_eea = nm.io.fetch_eea_data(
     pollutant="PM2.5",
     year_from=2023,
     year_to=2023,
-    station="FR0101A",
 )
+# Returns long-format columns: [date, site, country, pollutant, value, unit,
+# aggregation, validity]
 ```
+
+Two things differ from the Discomap/FME service this adapter used before it
+was closed behind authentication (2026), and both show up in the frame:
+
+- **Sites.** `site` carries the reporting sampling-point identifier
+  (`FR/FR_SamplingPoint_12345`); the old station codes (`FR0101A`) appear
+  nowhere in the service's response, which reports no latitude/longitude
+  either. `station="12345"` keeps the rows whose identifier contains the
+  string (client-side filter: the service has no station parameter).
+- **Missing data.** The service's `-99` sentinel becomes `NaN` in `value`;
+  `validity` is the reported validity code (`2` for validated rows) —
+  filter on it if only validated measurements will do.
+
+The service caps what one synchronous request may answer, so the adapter
+asks one calendar month at a time and concatenates the results: a multi-year
+pull is one request per month and takes minutes.
 
 ---
 
