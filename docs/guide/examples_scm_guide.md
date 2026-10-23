@@ -73,6 +73,44 @@ nm.plot_event_study(out, cutoff_date="2020-01-23",
                     title="Effect by event time (placebo-in-time band)")
 ```
 
+## Spatial layout of the donor pool
+
+The weights say how much each donor contributes to the synthetic control, not
+*where* the donors sit relative to the treated unit. For a policy that acts
+through local or regional processes — a city's emissions regime, a river
+basin's meteorology — a donor pool clustered on one side of the treated site
+is a different object from one that surrounds it, and the two can carry the
+same weights. If the panel carries a latitude and longitude column, the
+reading is one call:
+
+```python
+table = nm.donor_spatial_summary(
+    panel, donors, treated_unit,
+    unit_col="ID", lat_col="lat", lon_col="lon",
+)
+# per donor: distance_km, bearing_deg (0 = north), compass sector
+# (+ the fit's weight when weights= is given)
+
+nm.spatial_summary(table)
+# centroid_offset_km, centroid_bearing_deg — where the pool's centroid sits;
+# sector_coverage — how many donors in each compass sector;
+# sector_fraction — the share of the compass the pool actually spans
+```
+
+A donor with no coordinate in the panel gets a row of NaNs and sector `"?"`
+rather than being dropped — a missing fix is itself information. The same
+section is appended to the full report when the panel supports it:
+
+```python
+nm.scm_diagnostics(
+    out, cutoff_date="2020-01-23",
+    panel=panel, treated_unit="Beijing", unit_col="ID", lat_col="lat", lon_col="lon",
+)["spatial"]
+```
+
+It is a diagnostic, not a fitter: nothing here changes the weights, and no
+distance or bearing is fed back into the fit.
+
 ## Inference
 
 Two flavours of significance test:
