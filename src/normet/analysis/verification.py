@@ -96,6 +96,10 @@ def _levels_and_values(
     is the levels, and then ``quantiles`` must be given. One level is a
     point prediction, not a distribution to score.
     """
+    # The branches below assign from pandas and numpy stubs that disagree on
+    # the shape parameter; one explicit annotation keeps the reassignment
+    # clean under every numpy 2.x stub generation.
+    p: np.ndarray
     if isinstance(preds, pd.DataFrame):
         frame = preds
         if quantiles is None:
