@@ -302,6 +302,13 @@ TEXTS = {
     "PDP done.": "PDP 完成。",
     "No variables": "没有变量",
     "Tick at least one variable for the PDP.": "请为 PDP 至少勾选一个变量。",
+    # -- Step 6: uncertainty decomposition -------------------------------------------------
+    "Uncertainty decomposition": "不确定度分解",
+    "Member backend": "成员后端",
+    "Models": "模型数",
+    "▶ Run uncertainty decomposition": "▶ 运行不确定度分解",
+    "Uncertainty decomposition done.": "不确定度分解完成。",
+    "Not available for chronos-2 -- train with flaml or lightgbm first.": "chronos-2 不可用——请先用 flaml 或 lightgbm 训练。",
     # -- config, history, export --------------------------------------------------------------
     "Save config": "保存配置",
     "Load config": "载入配置",
@@ -926,6 +933,8 @@ TEXTS.update(
         "Multi-scale: not run yet": "多尺度：尚未运行",
         "PDP: done": "PDP：已完成",
         "PDP: not run yet": "PDP：尚未运行",
+        "Uncertainty: done": "不确定度：已完成",
+        "Uncertainty: not run yet": "不确定度：尚未运行",
     }
 )
 INNER.update(

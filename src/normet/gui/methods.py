@@ -310,6 +310,30 @@ def methods_paragraph(info: dict[str, Any], lang: str = "en") -> str | None:
                 f"the same search under a block bootstrap) was applied to {nm}."
             )
 
+    # -- the uncertainty's attribution -----------------------------------------
+    if "decompose_uncertainty" in ran:
+        call = ran["decompose_uncertainty"]
+        n = call.get("n_samples")
+        k = call.get("n_models")
+        backend = call.get("backend", "lightgbm")
+        cite = REFERENCES["lightgbm"] if backend == "lightgbm" else REFERENCES["flaml"]
+        cites.append(cite)
+        if zh:
+            out.append(
+                f"不确定度分解（normet.decompose_uncertainty）将总方差按来源分摊：以 "
+                f"{k} 个成员，各用 {backend} 在各自种子上训练，共同使用同一组 {n} 次"
+                f"气象重采样，逐时刻的响应被正交地拆为气象、模型形式与二者交互三项。"
+            )
+        else:
+            out.append(
+                "The total per-date spread was attributed to its sources "
+                "(normet.decompose_uncertainty): an ensemble of "
+                f"{k} {backend} members, each trained on its own seed, predicts the same "
+                f"{n} met resamples shared across members, and each timestamp's response "
+                "is split orthogonally into the weather, the model form and their "
+                "interaction."
+            )
+
     refs = sorted(set(cites)) + (
         REFERENCES["en"] if any(k in ran for k in ("normalise", "deweather")) else []
     )

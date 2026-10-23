@@ -79,6 +79,7 @@ STEP_LIGHTS = (
     ("multiscale", "Multi-scale"),
     ("pdp", "PDP"),
     ("trend", "Trend"),
+    ("uncertainty", "Uncertainty"),
 )
 LIGHT_ON, LIGHT_OFF = "#34c759", "#aeaeb2"
 
@@ -314,6 +315,12 @@ class ShellMixin(QMainWindow):
             "and which p stands for it."
         )
         self.tabs.addTab(self.tab_trend, "Trend")
+        self.tab_unc = CanvasTab(
+            "Run the uncertainty decomposition to see where the band's spread comes "
+            "from -- met resampling, the model form, and the two's interaction, each "
+            "date and in the median."
+        )
+        self.tabs.addTab(self.tab_unc, "Uncertainty")
         self._sync_welcome()
         return self.tabs
 
