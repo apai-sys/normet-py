@@ -341,6 +341,15 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   shade the post-period with the placebo band (`ci_lo`/`ci_hi`, or
   `low`/`high`, or `p10`/`p90`). No band is drawn over the pre-period, because
   placebo cutoffs have no pre-period of their own to estimate one from.
+- **User manual: a Staggered adoption section** in the synthetic-control
+  chapter of both books (`normet_manual.tex` / `normet_manual_zh.tex`, PDFs
+  rebuilt). It sets out the staggered reading — each treated unit fitted on its
+  own pre- and post-period with the other treated units kept out of every
+  donor pool — and, in full, why the cross-unit permutation test's reference is
+  donor-only: a treated unit's data already carry the intervention, so a
+  staggered design's permuted treated identities are contaminated by the true
+  effect (and with two treated units the single non-identity permutation is
+  contaminated), while a donor never intervened on draws from the null.
 
 ### Changed
 - **`rolling` names its windows `window_01`, `window_02`, …** (was
