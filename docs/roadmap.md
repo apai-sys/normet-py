@@ -45,8 +45,27 @@ features, and it commits the project to API stability for downstream users.
 
 ## Open
 
-Nothing. The items listed as 1.0 gates -- and the Chronos-2 capabilities that
-followed them -- are all shipped; see the table above.
+The 1.1 scope is tracked in the execution plan
+(`docs/plans/execution_plan.md`, which also carries the per-milestone progress
+notes); the table below is its snapshot.
+
+| Status | Item |
+|:------:|------|
+| ✅ | Trend statistics `nm.trend` (Mann-Kendall + Theil-Sen, block-bootstrap-corrected) and the segmented fit `detect_trend_breaks` (P0) |
+| ✅ | Probabilistic skill verification: CRPS / pinball scores and the baseline-comparison notebook (P0) |
+| ✅ | `decompose_uncertainty` — a de-weathered estimate's spread attributed to weather vs model form (P1) |
+| ✅ | Chronos-2 quantile calibration (`calibrate_quantiles`, hold-out conformal thresholds) (P1) |
+| ✅ | SCM pre-trend test `pre_trend_test` and the event-study figure (P1) |
+| ✅ | Log-scale fits (`log_transform`: train on log1p, report in original units) (P2) |
+| ✅ | Embedding diagnostics: silhouette curve, projection, the two-panel figure (P2, PR #64) |
+| ✅ | Donor spatial diagnostics: per-donor distance, bearing and sector; the pool's centroid and sector coverage (P2, PR #65) |
+| ✅ | Staggered adoption `run_scm_staggered`, per-unit placebo p-values and the cross-unit permutation test (P2, PR #66, #67) |
+| 🔍 | numpy 2.x / Python 3.13 upgrade — probe jobs on main (PR #68); Python 3.13 passed the probe, the numpy 2.x breakage list is tracked in issue #69; the matrix widens as the list is fixed (P3) |
+| 📋 | China data adapters — scoped as issue + data-format doc; not in the 1.1 schedule (data licences and station coordinates first) (P3) |
+| ⏸ | Performance — measure first, then touch: profile the normalise paths, the optional `device` passthrough; the bit-identical promise is why it is last (P3) |
+
+Once the batch lands, the finished rows join the Shipped table above and this
+section empties again.
 
 What is deliberately *not* a roadmap item: whether fine-tuning, cross-learning
 or a multivariate stack improves a given analysis. Each is a question about a
