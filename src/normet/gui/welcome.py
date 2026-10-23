@@ -223,8 +223,8 @@ class Welcome(QWidget):
             self.cards["recent"] = card
         card = Card("Get data")
         card.add(
-            "UK air quality + meteorology",
-            "AURN, AQE, SAQN, WAQN, NI, LMAM with ERA5 (no API key)",
+            "Air quality + meteorology",
+            "Six UK networks, the EEA (Europe) or OpenAQ (world), with ERA5",
             a["data_studio"],
         )
         card.add(

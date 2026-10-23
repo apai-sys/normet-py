@@ -24,11 +24,23 @@ again:
 
 The service answers in Parquet, so reading it needs ``pyarrow`` (carried by
 the ``[data]`` extra).
+
+Station level
+-------------
+The bulk service above has no per-station query path: its ``cities``
+parameter accepts neither the station (EoI) codes nor city names (both
+probed empty against it, 2026-10-23). The agency's own web viewer therefore
+lists stations from the ArcGIS map service and downloads *one Parquet file
+per station and pollutant* from the public Azure blobs it publishes there.
+:func:`list_eea_stations` (the map service, keyless, one country at a time)
+and :func:`fetch_eea_station` (those blobs) follow exactly that mechanism;
+together they are what feeds the GUI's per-station workflow.
 """
 
 from __future__ import annotations
 
 import io
+import re
 from collections.abc import Iterable
 from typing import Any
 
@@ -40,7 +52,7 @@ from ._http import request_with_retry
 
 log = get_logger(__name__)
 
-__all__ = ["EEA_POLLUTANT_CODES", "fetch_eea_data"]
+__all__ = ["EEA_POLLUTANT_CODES", "fetch_eea_data", "list_eea_stations", "fetch_eea_station"]
 
 
 EEA_POLLUTANT_CODES = {
@@ -240,3 +252,251 @@ def fetch_eea_data(
     ]
     cols = list(keep_columns) if keep_columns else [c for c in default_keep if c in df.columns]
     return df[cols].reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
+# Station level: the ArcGIS map service + its public per-pollutant blobs
+# ---------------------------------------------------------------------------
+
+# The agency's own web viewer lists stations here (keyless, no account) and
+# serves one Parquet file per station and pollutant from the Azure blobs the
+# layer's per-station HTML names. The bulk download service has no per-station
+# query path, so this is the mechanism a single-station workflow must use.
+_STATIONS_MAP = (
+    "https://air.discomap.eea.europa.eu/arcgis/rest/services/AirQuality/"
+    "AirQualityDownloadServiceEUMonitoringStations/MapServer/0/query"
+)
+# One ArcGIS query answers at most this many features; page with the offset.
+_ARCGIS_PAGE = 2000
+
+# The blob links sit in the station's popup HTML, one line per pollutant:
+#   - Nitrogen dioxide (air): <a … href="….parquet">NO2</a>, ug/m<sup>3</sup>,
+#     (2013 - 2019)
+# The anchor text is exactly the reporting notation ("NO2", "PM2.5",
+# "NOX as NO2"), so it — not the prose title — is what identifies a pollutant:
+# the titles carry "<" ("Particulate matter < 2.5 µm") and share words with
+# heavy-metal species ("Benzo(a)pyrene in PM10"), which makes them unreliable
+# to match, while the anchor grammar is what the agency's own viewer keys on.
+# The unit between the anchor and the year range carries markup
+# ("ug/m<sup>3</sup>"), so it is skipped with [^()] rather than [^<].
+_BLOB_LINE = re.compile(r'href="([^"]+\.parquet)"[^>]*>([^<]*)</a>[^()]*\((\d{4})\s*-\s*(\d{4})\)')
+# Anchor text (normalised) -> normet notation. Anything else (PAHs, metals,
+# benzene, black carbon) is not in the app's pollutant set and is skipped.
+_NOTATION_BY_ANCHOR = {
+    "pm2.5": "PM2.5",
+    "pm10": "PM10",
+    "no2": "NO2",
+    "no": "NO",
+    "nox as no2": "NOXasNO2",
+    "o3": "O3",
+    "so2": "SO2",
+    "co": "CO",
+}
+
+
+def _notation_for_anchor(text: str) -> str | None:
+    """normet notation for a popup anchor text, or None if not our set."""
+    return _NOTATION_BY_ANCHOR.get(" ".join(text.lower().split()))
+
+
+def _list_features(country: str) -> list[dict[str, Any]]:
+    """Every station feature for *country* from the ArcGIS layer, paged."""
+    rows: list[dict[str, Any]] = []
+    offset = 0
+    while True:
+        params = {
+            "where": f"CountryCode='{country.upper()}'",
+            "outFields": "*",
+            "f": "geojson",
+            "outSR": "4326",
+            "resultOffset": offset,
+            "resultRecordCount": _ARCGIS_PAGE,
+        }
+        resp = request_with_retry(
+            _STATIONS_MAP, params=params, timeout=120.0, source="EEA:stations"
+        )
+        import json as _json
+
+        data = _json.loads(resp.text)
+        feats = data.get("features") or []
+        rows.extend(feats)
+        offset += len(feats)
+        if len(feats) < _ARCGIS_PAGE:
+            break
+    return rows
+
+
+def _parse_feature(f: dict[str, Any], country: str) -> dict[str, Any] | None:
+    """One ArcGIS feature row -> (code, name, lat, lon, {notation: blob_url})."""
+    a = f.get("properties") or f.get("attributes") or {}
+    code = a.get("AirQualityStationEoICode") or a.get("AirQualityStation") or ""
+    if not code:
+        return None
+    name = a.get("AQStationName") or ""
+    g = f.get("geometry") or {}
+    if "coordinates" in g:  # geojson
+        lon, lat = g["coordinates"][:2]
+    else:  # standard JSON
+        lat, lon = g.get("y"), g.get("x")
+    if lat is None or lon is None:
+        return None
+    html = a.get("PopupInfo") or ""
+    pollutants: dict[str, str] = {}
+    years: dict[str, tuple[int, int]] = {}
+    for m in _BLOB_LINE.finditer(html):
+        url, anchor, y0, y1 = m.group(1), m.group(2), int(m.group(3)), int(m.group(4))
+        norm = _notation_for_anchor(anchor)
+        if norm and norm not in pollutants:
+            pollutants[norm] = url
+            years[norm] = (y0, y1)
+    return {
+        "site": name or str(code),
+        "code": str(code),
+        "site_type": "",
+        "country": country.upper(),
+        "lat": float(lat),
+        "lon": float(lon),
+        "pollutants": pollutants,
+        "years": years,
+    }
+
+
+def list_eea_stations(
+    *,
+    country: str,
+    pollutants: Iterable[str] | None = None,
+) -> pd.DataFrame:
+    """The stations of one EEA country that measure any of *pollutants*.
+
+    Parameters
+    ----------
+    country : str
+        ISO-2 code as EEA reporting uses it (``"GB"``, ``"DE"``, ``"FR"``,
+        ``"PL"``, ...). One country at a time: the ArcGIS layer answers it
+        without paging for every member state (a few hundred to under a
+        thousand stations each).
+    pollutants : iterable of str, optional
+        Restrict to stations reporting any of these normet notations. When
+        omitted, every station is returned (the picker then shows what it has).
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per station: ``site`` (the reporting name), ``code`` (the EoI
+        id), ``lat``/``lon``, ``country``, ``pollutants`` (the ticked ones the
+        station reports, comma-joined), ``n``, and ``links`` (a JSON object of
+        notation -> public Parquet URL, kept so the fetch can reuse it without
+        a second map-service round trip).
+    """
+    import json as _json
+
+    feats = _list_features(country)
+    rows = []
+    for f in feats:
+        p = _parse_feature(f, country)
+        if p is None:
+            continue
+        have = [k for k in (list(pollutants) if pollutants else []) if k in p["pollutants"]]
+        if pollutants and not have:
+            continue
+        rows.append(
+            {
+                "site": p["site"],
+                "code": p["code"],
+                "site_type": p["site_type"],
+                "country": p["country"],
+                "pollutants": ", ".join(have) if have else "see links",
+                "n": len(have) if have else len(p["pollutants"]),
+                "from": "",
+                "to": "",
+                "lat": p["lat"],
+                "lon": p["lon"],
+                # notation -> {url, from, to}: the picker reads the years to
+                # prefill its date range, the fetch reads the url.
+                "links": _json.dumps(
+                    {
+                        k: {
+                            "url": u,
+                            "from": p["years"][k][0],
+                            "to": p["years"][k][1],
+                        }
+                        for k, u in p["pollutants"].items()
+                    }
+                ),
+            }
+        )
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df = df.sort_values(["n", "site"], ascending=[False, True]).reset_index(drop=True)
+    return df
+
+
+def fetch_eea_station(
+    *,
+    station: str,
+    country: str,
+    pollutant: str,
+) -> pd.DataFrame:
+    """One station's full history for one pollutant, from its public blob.
+
+    The blob is one Parquet file holding the whole record (2013 to now) for
+    that station and pollutant, so this is the cheapest possible per-station
+    pull: a single download. Caller trims to the wanted date range.
+
+    Parameters
+    ----------
+    station : str
+        EoI id (``"GB0777A"``); resolved to the sampling-point blob via the
+        ArcGIS layer (one map-service call).
+    country : str
+        ISO-2 code; narrows the station lookup to one feature set.
+    pollutant : str
+        A normet notation in :data:`EEA_POLLUTANT_CODES`.
+
+    Raises
+    ------
+    RuntimeError
+        If the station has no blob for that pollutant or it fails to download.
+    """
+
+    feats = _list_features(country)
+    links: dict[str, str] = {}
+    site_name = ""
+    lat = lon = None
+    for f in feats:
+        p = _parse_feature(f, country)
+        if p is not None and p["code"].upper() == str(station).upper():
+            site_name, links, lat, lon = p["site"], p["pollutants"], p["lat"], p["lon"]
+            break
+    if not links:
+        raise RuntimeError(f"No EEA station {station!r} found for country {country!r}.")
+    url = links.get(pollutant)
+    if url is None:
+        raise RuntimeError(
+            f"EEA station {station} ({site_name}) reports no {pollutant} blob. "
+            f"Its pollutants: {', '.join(links) or 'none'}."
+        )
+    resp = request_with_retry(url, timeout=300.0, source="EEA:blob")
+    require("pyarrow", hint="pip install 'normet[data]' -- the EEA service answers in Parquet")
+    raw = pd.read_parquet(io.BytesIO(resp.content))
+    if raw.empty:
+        return pd.DataFrame()
+    df = _tidy(raw, country)
+    df = df[df["pollutant"] == pollutant]
+    df["site"] = site_name or str(station)
+    df["lat"] = lat
+    df["lon"] = lon
+    return df[
+        [
+            "date",
+            "site",
+            "country",
+            "pollutant",
+            "value",
+            "unit",
+            "aggregation",
+            "validity",
+            "lat",
+            "lon",
+        ]
+    ].reset_index(drop=True)
