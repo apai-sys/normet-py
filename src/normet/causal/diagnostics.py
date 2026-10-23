@@ -108,6 +108,14 @@ def scm_diagnostics(
     scm_result: dict[str, Any] | pd.DataFrame,
     cutoff_date: str,
     top_k: int = 5,
+    *,
+    panel: pd.DataFrame | None = None,
+    donors: list[str] | None = None,
+    treated_unit: str | None = None,
+    unit_col: str = "unit",
+    lat_col: str = "lat",
+    lon_col: str = "lon",
+    n_sectors: int = 8,
 ) -> dict[str, Any]:
     """
     Summarise the quality of a synthetic-control fit.
@@ -123,6 +131,23 @@ def scm_diagnostics(
         Treatment cutoff. Parseable by ``pd.to_datetime``.
     top_k : int, default 5
         How many top donors (by absolute weight) to include in the summary.
+    panel : pandas.DataFrame, optional
+        The long-format donor panel. When given with ``treated_unit`` and
+        carrying ``lat_col``/``lon_col``, a ``spatial`` section is appended:
+        each donor's distance and compass sector from the treated unit, the
+        pool's centroid offset, and its sector coverage -- a reading of where
+        the counterfactual is borrowed from, which the weights alone do not
+        say (see :func:`normet.causal.spatial.donor_spatial_summary`).
+    donors : list of str, optional
+        The donor units to place. Defaults to the fit's weights' index;
+        without weights and without this, the section is skipped.
+    treated_unit : str, optional
+        The treated unit the bearings are taken from; required for the
+        ``spatial`` section.
+    unit_col, lat_col, lon_col : str
+        Column names in ``panel`` for the unit id, latitude and longitude.
+    n_sectors : int, default 8
+        Compass sectors the bearings are divided into (8 = N/NE/E/...).
 
     Returns
     -------
@@ -136,6 +161,11 @@ def scm_diagnostics(
           - ``pre_trend`` (dict: ``slope``, ``p_slope``, ``rmpe_drift``,
             ``n_periods``, ``verdict``) -- whether the pre-period was
             parallel, from :func:`pre_trend_test`
+          - ``spatial`` (dict, only when the panel supports it: a ``donors``
+            table plus ``centroid_offset_km``, ``centroid_bearing_deg``,
+            ``sector_coverage``, ``sector_fraction``, ``n_donors_placed``,
+            ``n_donors_missing``) -- the donor pool's layout around the
+            treated unit
     """
     cutoff_ts = pd.to_datetime(cutoff_date)
 
@@ -162,6 +192,39 @@ def scm_diagnostics(
         "n_periods": pt.n_periods,
         "verdict": pt.verdict,
     }
+
+    # Spatial section: only when the panel carries the coordinates it is
+    # about. Absent panel, absent columns, or an unnamed treated unit, the
+    # summary is exactly what it was before -- the section is a reading, not
+    # a requirement.
+    if (
+        panel is not None
+        and treated_unit is not None
+        and lat_col in getattr(panel, "columns", [])
+        and lon_col in getattr(panel, "columns", [])
+    ):
+        from .spatial import donor_spatial_summary, spatial_summary
+
+        donor_names = (
+            list(donors)
+            if donors is not None
+            else (list(weights.index) if weights is not None else None)
+        )
+        if donor_names:
+            table = donor_spatial_summary(
+                panel,
+                donor_names,
+                treated_unit,
+                unit_col=unit_col,
+                lat_col=lat_col,
+                lon_col=lon_col,
+                n_sectors=n_sectors,
+                weights=weights,
+            )
+            out["spatial"] = {
+                "donors": table,
+                **spatial_summary(table, n_donors=len(donor_names), n_sectors=n_sectors),
+            }
     return out
 
 
