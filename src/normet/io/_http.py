@@ -35,13 +35,14 @@ def request_with_retry(
     url: str,
     *,
     params: dict[str, Any] | None = None,
+    json: dict[str, Any] | None = None,
     headers: dict[str, str] | None = None,
     timeout: float = 30.0,
     retries: int = 3,
     backoff: float = 1.0,
     source: str = "HTTP",
 ) -> Any:
-    """GET ``url`` and return the ``requests.Response`` on success.
+    """GET ``url`` — or POST it, when ``json`` is given — and return the response.
 
     Retries on connection errors, timeouts, HTTP 429 (rate limit), and 5xx
     responses using exponential backoff (honouring ``Retry-After`` on 429).
@@ -50,6 +51,11 @@ def request_with_retry(
 
     Parameters
     ----------
+    json : dict, optional
+        When given, the request is a POST carrying this object as its JSON
+        body: the EEA download service takes a query document, not query
+        parameters. Both request kinds are idempotent reads, so the retry
+        loop below is safe for either.
     source : str
         Human-readable adapter name used in log and error messages.
 
@@ -62,7 +68,12 @@ def request_with_retry(
     last_err: Exception | None = None
     for attempt in range(retries):
         try:
-            resp = requests.get(url, params=params, headers=headers, timeout=timeout)
+            if json is None:
+                resp = requests.get(url, params=params, headers=headers, timeout=timeout)
+            else:
+                resp = requests.post(
+                    url, params=params, json=json, headers=headers, timeout=timeout
+                )
             if resp.status_code == 429:
                 wait = _retry_after(resp, backoff, attempt)
                 log.warning("%s rate-limited (429); sleeping %.1fs.", source, wait)

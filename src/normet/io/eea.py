@@ -2,27 +2,39 @@
 """
 European Environment Agency (EEA) air-quality download adapter.
 
-Uses the EEA's "Discomap" download-by-URL service. Given a country, station,
-pollutant and year range, this function emits a tidy long-format DataFrame
-ready for ``normet``.
+Fetches measurement time series from the EEA's official Parquet download
+service, which answers a JSON query document with a single Parquet file and
+needs no account or key. The dataset behind it is the agency's "verified and
+Up To Date" reporting: hourly measurements from 2013, reported by member
+countries.
 
-EEA download portal:
-    https://eeadmz1-downloads-webapp.azurewebsites.net/
+The adapter used to scrape the Discomap FME service instead
+(``fme.discomap.eea.europa.eu/.../AQData_Extract.fmw``). That service is
+gone: every request now answers ``401`` with
+``WWW-Authenticate: Basic realm="FME Server Authentication"`` (observed
+2026-10-23), and the agency's datahub points scripted access at the download
+service above. Two consequences callers should know, beyond the call working
+again:
 
-The discovery endpoint returns a *list of CSV URLs* per (country, pollutant,
-year, station). We fetch each CSV and concatenate.
+- sites are identified by the reporting sampling-point id
+  (``"GB/GB_SamplingPoint_65449"``), not by the FME-era station codes
+  (``GB0001A``), and the response carries no latitude/longitude;
+- missing observations arrive as the numeric sentinel ``-99``, converted to
+  ``NaN`` here before the frame is returned.
 
-Pollutant codes (subset):
-    PM2.5 → 6001, PM10 → 5, NO2 → 8, O3 → 7, SO2 → 1, CO → 10
+The service answers in Parquet, so reading it needs ``pyarrow`` (carried by
+the ``[data]`` extra).
 """
 
 from __future__ import annotations
 
 import io
 from collections.abc import Iterable
+from typing import Any
 
 import pandas as pd
 
+from ..utils._lazy import require
 from ..utils.logging import get_logger
 from ._http import request_with_retry
 
@@ -40,19 +52,81 @@ EEA_POLLUTANT_CODES = {
     "CO": 10,
 }
 
-_DISCOVERY = (
-    "https://fme.discomap.eea.europa.eu/fmedatastreaming/AirQualityDownload/AQData_Extract.fmw"
-)
+_NOTATION_BY_CODE = {code: name for name, code in EEA_POLLUTANT_CODES.items()}
+
+_DOWNLOAD_API = "https://eeadmz1-downloads-api-appservice.azurewebsites.net/ParquetFile/dynamic"
+
+# The datahub lists exactly one dataset behind the service ("verified and Up
+# To Date", 2013-now), and the request is rejected outright without it
+# ("Dataset parameter is mandatory").
+_DATASET = 1
 
 
-def _resolve_pollutant_code(pollutant: str | int) -> int:
+def _month_windows(year_from: int, year_to: int) -> list[tuple[str, str]]:
+    """Calendar-month ``(start, end)`` timestamp strings for the range.
+
+    The service caps what one synchronous request may answer ("Request too
+    large...", observed 2026-10-23 at six months for GB, while one month of
+    Germany's PM10 -- 4.5 MB -- passes). A month per country and pollutant
+    is therefore the unit of request; a year range becomes one POST per
+    month, concatenated.
+    """
+    starts = pd.date_range(f"{int(year_from):04d}-01-01", f"{int(year_to):04d}-12-01", freq="MS")
+    return [
+        (
+            s.strftime("%Y-%m-%dT00:00:00"),
+            (s + pd.offsets.MonthEnd(1)).strftime("%Y-%m-%dT23:59:59"),
+        )
+        for s in starts
+    ]
+
+
+def _resolve_pollutant_notation(pollutant: str | int) -> str:
+    """The pollutant as the service names it: a notation, not a numeric code.
+
+    Accepts the notations in :data:`EEA_POLLUTANT_CODES` (case-insensitive)
+    and the EEA codes they map to, so the names that worked against the FME
+    service keep working with the same meanings.
+    """
     if isinstance(pollutant, int):
-        return pollutant
-    code = EEA_POLLUTANT_CODES.get(pollutant.upper())
-    if code is None:
+        notation = _NOTATION_BY_CODE.get(pollutant)
+    else:
+        key = str(pollutant).upper()
+        notation = key if key in EEA_POLLUTANT_CODES else None
+    if notation is None:
         valid = ", ".join(EEA_POLLUTANT_CODES)
         raise ValueError(f"Unknown pollutant '{pollutant}'. Known: {valid}")
-    return code
+    return notation
+
+
+def _tidy(raw: pd.DataFrame, country: str) -> pd.DataFrame:
+    """A Parquet response frame, renamed to the tidy normet columns.
+
+    The mapping exists because the service speaks the reporting schema
+    (``Samplingpoint``/``Value``/``AggType``/...) and every normet table
+    speaks ``site``/``value``/``aggregation``. The pollutant's numeric code
+    becomes the notation that names it, where one is known.
+    """
+    values = pd.to_numeric(raw["Value"], errors="coerce").astype(float)
+    # -99 is EEA's sentinel for "no measurement" (a reporting convention, not
+    # a concentration); left as a number it would poison every mean.
+    values = values.mask(values == -99.0)
+    return pd.DataFrame(
+        {
+            "date": pd.to_datetime(raw["Start"], utc=True, errors="coerce"),
+            "site": raw["Samplingpoint"].astype(str),
+            "country": country.upper(),
+            "pollutant": (
+                pd.to_numeric(raw["Pollutant"])
+                .astype(int)
+                .map(lambda c: _NOTATION_BY_CODE.get(c, str(c)))
+            ),
+            "value": values,
+            "unit": raw["Unit"].astype(str),
+            "aggregation": raw["AggType"].astype(str),
+            "validity": pd.to_numeric(raw["Validity"], errors="coerce").astype("Int64"),
+        }
+    )
 
 
 def fetch_eea_data(
@@ -63,100 +137,106 @@ def fetch_eea_data(
     year_to: int,
     station: str | None = None,
     source: str = "All",
-    output: str = "TEXT",
     keep_columns: Iterable[str] | None = None,
 ) -> pd.DataFrame:
-    """
-    Download air-quality CSV files from the EEA and concatenate them.
+    """One country's and pollutant's hourly measurement table from the EEA.
 
     Parameters
     ----------
     country : str
-        ISO-2 country code (e.g., ``"GB"``, ``"FR"``, ``"DE"``, ``"ES"``).
+        ISO-2 country code as the EEA reporting uses it (``"FR"``, ``"DE"``,
+        ``"GB"``, ...). An unknown code is not an error: the service answers
+        with no rows.
     pollutant : str or int
-        Pollutant code or name. Names supported: ``PM2.5``, ``PM10``,
-        ``NO2``, ``O3``, ``SO2``, ``CO``. Integer codes also accepted.
+        Notation (``"PM2.5"``, ``"PM10"``, ``"NO2"``, ``"O3"``, ``"SO2"``,
+        ``"CO"``) or the numeric EEA code (6001, 5, 8, 7, 1, 10).
     year_from, year_to : int
-        Inclusive year range.
+        Inclusive year range. The service caps what one synchronous request
+        may answer ("Request too large..."), so the adapter asks one calendar
+        month at a time and concatenates the results: expect one request per
+        month of the range, and minutes of waiting for a multi-year pull.
     station : str, optional
-        Specific station code (e.g., ``"GB0001A"``). If ``None``, all
-        stations in ``country`` are returned.
-    source : {"All", "E1a", "E2a"}, default "All"
-        EEA dataflow source.
-    output : str, default "TEXT"
-        Format requested from the EEA service.
-    timezone : str, default "Europe%2FBrussels"
-        URL-encoded timezone string forwarded to the discovery service.
+        Keep only sampling points whose identifier contains this string
+        (case-insensitive) -- e.g. ``"65449"`` for
+        ``GB/GB_SamplingPoint_65449``. The service has no station parameter,
+        so this filter runs client side, after the download.
+    source : str, default "All"
+        EEA reporting source (``"E1a"``, ``"E2a"``); the default asks for
+        every source.
     keep_columns : iterable of str, optional
-        Restrict the returned DataFrame to these columns; defaults to a
-        useful subset (see Returns).
+        Restrict the returned DataFrame to these columns.
 
     Returns
     -------
     pandas.DataFrame
-        Long-format DataFrame with at least:
-        ``[date, site, country, pollutant, value, unit, lat, lon]``.
+        Long-format ``[date, site, country, pollutant, value, unit,
+        aggregation, validity]``, sorted by ``site`` then ``date``. ``date``
+        is the measurement's opening hour as UTC; ``site`` is the reporting
+        sampling-point identifier; ``value`` has the service's ``-99``
+        missing sentinel converted to ``NaN``; ``validity`` is the reported
+        validity code (2 = validated -- filter on it if only validated data
+        will do). No latitude/longitude: the service does not report them.
+        An empty frame when the query matches nothing.
+
+    Raises
+    ------
+    ValueError
+        On an unknown pollutant notation or code.
+    RuntimeError
+        If the service request fails after retries.
     """
-    code = _resolve_pollutant_code(pollutant)
-
-    params = {
-        "CountryCode": country.upper(),
-        "CityName": "",
-        "Pollutant": code,
-        "Year_from": int(year_from),
-        "Year_to": int(year_to),
-        "Station": station or "",
-        "Samplingpoint": "",
-        "Source": source,
-        "Output": output,
-        "UpdateDate": "",
-        "TimeCoverage": "Year",
-        "TimeZone": "Europe/Brussels",
-    }
-    log.info("Querying EEA discovery for %s %s %d-%d", country, pollutant, year_from, year_to)
-    resp = request_with_retry(_DISCOVERY, params=params, timeout=60, source="EEA")
-    csv_urls = [u.strip() for u in resp.text.splitlines() if u.strip().startswith("http")]
-    if not csv_urls:
-        log.warning("EEA returned no CSV URLs for the given query.")
-        return pd.DataFrame()
-
-    pieces: list[pd.DataFrame] = []
-    for i, url in enumerate(csv_urls, 1):
-        try:
-            r = request_with_retry(url, timeout=60, source="EEA")
-            df = pd.read_csv(io.BytesIO(r.content), low_memory=False)
-            pieces.append(df)
-            if i % 25 == 0:
-                log.info("EEA: %d/%d CSVs", i, len(csv_urls))
-        except Exception as e:
-            log.warning("EEA CSV fetch failed (%s): %s", url, e)
-
-    if not pieces:
-        return pd.DataFrame()
-
-    raw = pd.concat(pieces, ignore_index=True)
-    # Friendly canonical column names (EEA uses verbose headers like
-    # "DatetimeBegin", "Concentration", etc.).
-    rename = {
-        "DatetimeBegin": "date",
-        "AirQualityStation": "site",
-        "Concentration": "value",
-        "UnitOfMeasurement": "unit",
-        "Latitude": "lat",
-        "Longitude": "lon",
-        "Pollutant": "pollutant",
-        "CountryCode": "country",
-    }
-    raw = raw.rename(columns={k: v for k, v in rename.items() if k in raw.columns})
-    if "date" in raw.columns:
-        raw["date"] = pd.to_datetime(raw["date"], errors="coerce", utc=True)
-
-    default_keep = ["date", "site", "country", "pollutant", "value", "unit", "lat", "lon"]
-    cols = list(keep_columns) if keep_columns else [c for c in default_keep if c in raw.columns]
-    if not cols:
-        return raw
-    return (
-        raw[cols].sort_values(["site", "date"]).reset_index(drop=True)
-        if "site" in raw.columns
-        else raw[cols]
+    notation = _resolve_pollutant_notation(pollutant)
+    windows = _month_windows(year_from, year_to)
+    log.info(
+        "Querying the EEA download service for %s %s %d-%d (%d monthly request(s))",
+        country,
+        notation,
+        year_from,
+        year_to,
+        len(windows),
     )
+    require("pyarrow", hint="pip install 'normet[data]' -- the EEA service answers in Parquet")
+
+    frames: list[pd.DataFrame] = []
+    for t0, t1 in windows:
+        body: dict[str, Any] = {
+            "countries": [country.upper()],
+            "cities": [],  # a required key; [] means "every city of the country"
+            "pollutants": [notation],
+            "dataset": _DATASET,
+            "dateTimeStart": t0,
+            "dateTimeEnd": t1,
+            "compress": False,  # a bare Parquet file; the zip adds nothing here
+        }
+        if source and source.upper() != "ALL":
+            body["source"] = source
+        resp = request_with_retry(_DOWNLOAD_API, json=body, timeout=300.0, source="EEA")
+        if not resp.content or not resp.content.startswith(b"PAR1"):
+            # A month with nothing to report answers with a 22-byte empty zip,
+            # not an error and not a (readable) empty Parquet file.
+            continue
+        raw = pd.read_parquet(io.BytesIO(resp.content))
+        if not raw.empty:
+            frames.append(_tidy(raw, country))
+
+    if not frames:
+        log.warning("EEA returned no rows for %s %s %d-%d.", country, notation, year_from, year_to)
+        return pd.DataFrame()
+
+    df = pd.concat(frames, ignore_index=True)
+    if station:
+        df = df[df["site"].str.contains(str(station), case=False, regex=False)]
+
+    df = df.sort_values(["site", "date"])
+    default_keep = [
+        "date",
+        "site",
+        "country",
+        "pollutant",
+        "value",
+        "unit",
+        "aggregation",
+        "validity",
+    ]
+    cols = list(keep_columns) if keep_columns else [c for c in default_keep if c in df.columns]
+    return df[cols].reset_index(drop=True)
