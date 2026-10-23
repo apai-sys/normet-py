@@ -308,6 +308,28 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   `fraction_outside_interval`), and the fit rides along on
   `result.calibration` with its cross-validated coverage table and the
   levels a `CalibrationWarning` names as still off target.
+- **Pre-trend diagnostics for synthetic controls: `pre_trend_test`**
+  (`normet.causal`, exported at the top level, with the `PreTrend` result).
+  The first question a reviewer asks of an SCM is whether the pre-period was
+  parallel, and nothing in the diagnostics answered it: `scm_diagnostics`
+  reports how close the fit is on average before the cutoff, but not whether
+  it is *getting* closer or further as the intervention approaches -- which
+  is what a violation looks like when it is about to happen.
+  `pre_trend_test(result, cutoff_date)` reads the pre-period residuals
+  (`observed - synthetic`) two complementary ways: the OLS slope against the
+  period index with its classical t-test (a slow linear drift shows up here
+  even when nothing else is alarming), and the RMSPE of the final third of
+  the pre-period over that of the first two thirds -- 1 is a stable fit,
+  above 1 the residuals grow toward the cutoff (a late fit breakdown shows
+  up here while the slope test, diluted over the whole span, stays quiet).
+  The `verdict` is a traffic light that reads them together, with the
+  numbers in the text: `fail` when the slope is significant at the 1 %
+  level (a pre-period that is trending is not parallel), `caution` when the
+  slope is borderline or the drift ratio exceeds 1.25, `ok` otherwise, and
+  `insufficient` when the record has too few pre-period points for a test.
+  `scm_diagnostics` now carries the fit's verdict under a new `pre_trend`
+  key (everything it returned before is unchanged), so the assistant's
+  SCM reading reports the pre-trend line as well.
 
 ### Changed
 - **`rolling` names its windows `window_01`, `window_02`, …** (was

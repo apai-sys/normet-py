@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 
 from ..utils.logging import get_logger
+from .prediagnostics import pre_trend_test
 
 log = get_logger(__name__)
 
@@ -132,6 +133,9 @@ def scm_diagnostics(
           - ``hhi``, ``effective_n_donors``, ``n_donors``
           - ``top_donors`` (list of (donor, weight) tuples)
           - ``top_donor_share`` (sum of ``|w|`` over top_k)
+          - ``pre_trend`` (dict: ``slope``, ``p_slope``, ``rmpe_drift``,
+            ``n_periods``, ``verdict``) -- whether the pre-period was
+            parallel, from :func:`pre_trend_test`
     """
     cutoff_ts = pd.to_datetime(cutoff_date)
 
@@ -150,6 +154,14 @@ def scm_diagnostics(
     out.update(_pre_period_fit(synthetic_df, cutoff_ts))
     out.update(_post_period_effect(synthetic_df, cutoff_ts))
     out.update(_weight_concentration(weights, top_k=top_k))
+    pt = pre_trend_test(synthetic_df, cutoff_date)
+    out["pre_trend"] = {
+        "slope": pt.slope,
+        "p_slope": pt.p_slope,
+        "rmpe_drift": pt.rmpe_drift,
+        "n_periods": pt.n_periods,
+        "verdict": pt.verdict,
+    }
     return out
 
 
