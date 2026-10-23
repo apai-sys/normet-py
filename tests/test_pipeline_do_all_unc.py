@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib.util
 
 import numpy as np
+import pandas as pd
 import pytest
 
 needs_lgb = pytest.mark.skipif(
@@ -102,3 +103,97 @@ def test_do_all_unc_rejects_bad_weighted_method(synthetic_aq):
             n_models=2,
             weighted_method="bogus",
         )
+
+
+# ---------------------------------------------------------------------------
+# log_transform: fit on log1p(value), report in the original units
+# ---------------------------------------------------------------------------
+
+
+def _multiplicative_aq(rng: np.random.Generator) -> pd.DataFrame:
+    """A target with *multiplicative* noise spanning roughly 1 to 15.
+
+    The level of the noise grows with the level of the signal, which is the
+    regime a log-scale fit exists for: in log1p space the noise is roughly
+    homoscedastic, so a log fit should beat a linear one on logRMSE.
+    """
+    n = 720
+    dates = pd.date_range("2024-01-01", periods=n, freq="h")
+    t2m = 10 + 8 * np.sin(2 * np.pi * np.arange(n) / (24 * 30)) + rng.normal(0, 1, n)
+    blh = 800 + 400 * np.sin(2 * np.pi * np.arange(n) / 24) + rng.normal(0, 50, n)
+    log_pm = 1.5 + 0.004 * (t2m - 10) + 0.0004 * (blh - 800) + rng.normal(0, 0.3, n)
+    pm = np.expm1(log_pm) * np.exp(rng.normal(0, 0.5, n))
+    return pd.DataFrame({"date": dates, "PM2.5": pm, "t2m": t2m, "blh": blh})
+
+
+LOG_COMMON = dict(
+    backend="lightgbm",
+    covariates=["t2m", "blh"],
+    split_method="ts",
+    train_fraction=0.8,
+    model_config=FAST_LGB,
+    n_samples=5,
+    n_cores=1,
+)
+
+
+@needs_lgb
+def test_do_all_log_transform_original_scale_and_log_space_prep():
+    from normet.pipeline.do_all import do_all
+
+    df = _multiplicative_aq(np.random.default_rng(7))
+    out_lin, _, dfp_lin = do_all(df, target="PM2.5", **LOG_COMMON)
+    out_log, _, dfp_log = do_all(df, target="PM2.5", log_transform=True, **LOG_COMMON)
+
+    # The prepared frame is the frame the model trained on: log1p of the
+    # linear one, same rows, same split.
+    assert np.allclose(dfp_log["value"], np.log1p(dfp_lin["value"]))
+    assert (dfp_log["set"] == dfp_lin["set"]).all()
+
+    # The result is in the original units: observed is exactly the input
+    # target, and the back-transform keeps normalised non-negative.
+    assert np.allclose(out_log["observed"], df.set_index("date")["PM2.5"].reindex(out_log.index))
+    assert (out_log["normalised"] >= 0).all()
+
+
+@needs_lgb
+def test_do_all_log_transform_default_path_bit_identical():
+    """An explicit log_transform=False must equal the legacy call exactly."""
+    from normet.pipeline.do_all import do_all
+
+    df = _multiplicative_aq(np.random.default_rng(7))
+    out_default, _, dfp_default = do_all(df, target="PM2.5", **LOG_COMMON)
+    out_explicit, _, dfp_explicit = do_all(df, target="PM2.5", log_transform=False, **LOG_COMMON)
+    assert out_default.equals(out_explicit)
+    assert dfp_default.equals(dfp_explicit)
+
+
+@needs_lgb
+def test_do_all_log_transform_log_fit_wins_on_logrmse():
+    from normet.pipeline.do_all import do_all
+    from normet.utils.metrics import Stats
+
+    df = _multiplicative_aq(np.random.default_rng(7))
+    out_lin, _, _ = do_all(df, target="PM2.5", **LOG_COMMON)
+    out_log, _, _ = do_all(df, target="PM2.5", log_transform=True, **LOG_COMMON)
+    s_lin = Stats(out_lin, mod="normalised", obs="observed", statistic=["logRMSE"])
+    s_log = Stats(out_log, mod="normalised", obs="observed", statistic=["logRMSE"])
+    assert s_log.loc[0, "logRMSE"] < s_lin.loc[0, "logRMSE"]
+
+
+@needs_lgb
+def test_do_all_unc_log_transform_original_scale():
+    from normet.pipeline.do_all import do_all_unc
+
+    df = _multiplicative_aq(np.random.default_rng(7))
+    out, mod_stats = do_all_unc(
+        df=df,
+        target="PM2.5",
+        n_models=3,
+        log_transform=True,
+        **LOG_COMMON,
+    )
+    assert np.allclose(out["observed"], df.set_index("date")["PM2.5"].reindex(out.index))
+    for col in ("mean", "median", "lower_bound", "upper_bound", "weighted"):
+        assert (out[col] >= 0).all()
+    assert not mod_stats.empty

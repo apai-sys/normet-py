@@ -997,6 +997,25 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   `causal/variants`, `causal/run_scm`, and `analysis/{rolling,normalise}`.
 - Brought the repository into `ruff` 0.5.6 compliance (UP038 `isinstance`
   unions; import ordering and formatting across the test suite and docs).
+- **Log-scale normalisation (`log_transform`)** for pollutants that span
+  sub-unit to hundreds of µg/m³. `normalise`, `do_all` and `do_all_unc`
+  accept `log_transform: bool = False`: with it on, the model trains on
+  `log1p(value)` and the de-weathering runs on that scale, so errors count in
+  relative rather than absolute terms (a fixed relative miss maps to a bounded
+  error at every level); every column
+  of the result (`observed`, `normalised`, the quantile columns, the
+  ensemble's means and bounds) is back-transformed through `expm1` and is
+  therefore in the original units and non-negative by construction. A
+  negative target is rejected with an error that names the offending rows.
+  The prepared frame returned by `do_all` carries `log1p(value)`, the frame
+  the model was trained on; `do_all_unc`'s per-member statistics that drive
+  the weights are computed on that same log scale. `Stats`/`modStats` gain
+  `logMAE` and `logRMSE` — accuracy in log1p space, the space a log fit
+  optimises (pairs with either side below -1 are dropped from those two
+  metrics only). The HTML report notes the scale when a run's config carries
+  the flag, with the share of observations below 1 in the original units.
+  Default `False` is bit-identical to before. User guide:
+  `guide/examples_normalisation.md` ("Log-scale fits").
 
 ## [0.4.0] — 2026-06-20
 
