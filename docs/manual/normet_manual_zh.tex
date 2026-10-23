@@ -144,8 +144,9 @@
   \item 面板数据上的合成控制：增广 SCM、经典 Abadie SCM、双重差分、矩阵补全、稳健 SCM、
         ML-SCM 和贝叶斯 SCM，配有空间安慰剂和时间安慰剂检验、刀切法和自助法区间，以及
         全部单元批量运行。
-  \item 数据工作室：来自六个监测网络的英国空气质量数据加再分析气象，无需 API 密钥即可
-        合并成可建模的表。
+  \item 数据工作室：来自六个英国网络、覆盖全欧的 EEA 报告网络或覆盖世界大部分地区的
+        OpenAQ 的空气质量数据，加再分析气象，合并成可建模的表（英国网络和 EEA 无需
+        API 密钥）。
   \item 传输工作室：把 HYSPLIT 后向轨迹转换为传输预测变量，并合并到记录上。
   \item 命令日志：把每个操作写成能重复它的调用；带溯源信息的 HTML 报告；按期刊栏宽
         排版的图。
@@ -653,7 +654,7 @@ PDP      & 每个变量一幅部分依赖图 & 计算 PDP \\
 \emph{方法}选择器在两者之间切换，保存的会话也会把两者都恢复。
 
 \section{操作栏}
-标签页上方依次是：\emph{折叠 / 展开面板}；并排的几个工作室——\emph{获取英国数据}（数据
+标签页上方依次是：\emph{折叠 / 展开面板}；并排的几个工作室——\emph{获取数据}（数据
 工作室，第~\ref{sec:datastudio}~节）、\emph{传输工作室}（第~\ref{sec:transport}~节）和
 \emph{SCM 工作室}（第\ref{ch:scm}章）；然后是对结果的操作——\emph{导出结果 CSV}（当前
 标签页的表）和\emph{HTML 报告}（当前标签页的结果，连同其溯源信息生成报告）。
@@ -698,7 +699,7 @@ FLAML 的时间预算——进度条随之推进，状态栏给出完成的比�
 \midrule
 文件     & 打开数据…                            & Ctrl+O \\
          & 载入示例（各示例、SCM 的示例）       & \\
-         & 获取英国数据（空气质量网络 + 气象）… & Ctrl+D \\
+         & 获取数据（空气质量网络 + 气象）…     & Ctrl+D \\
          & 最近打开（八张表）                   & \\
          & 保存结果… / 载入结果…                & Ctrl+S \\
          & 重新打开上次会话                     & \\
@@ -1153,16 +1154,21 @@ MY1 一样好，所以只有它的干预前 $R^2$ 不予解读。经典 SCM 根�
 到下次会话；更改它会重新读取已打开的文件。在脚本中，
 \code{nm.io.read\_time\_series(path, zone=\ldots)} 以同样的方式读表。
 
-\section{数据工作室：英国空气质量和气象}\label{sec:datastudio}
-\emph{获取英国数据}（Ctrl+D）无需离开应用即可拼出一张可建模的表（图~\ref{fig:datastudio}）：
+\section{数据工作室：空气质量监测网络与气象}\label{sec:datastudio}
+\emph{获取数据}（Ctrl+D）无需离开应用即可拼出一张可建模的表（图~\ref{fig:datastudio}）：
 \begin{enumerate}\nosep
-  \item \textbf{空气质量。}选择一个监测网络——AURN（国家网络，约 210 个站点）、AQE、SAQN、
-        WAQN、NI 或 LMAM（地方管理），共约 1500 个站点——勾选污染物（默认 \PMtwo{}、
-        \NOtwo{} 和 O\textsubscript{3}），然后\emph{查找站点}。\tab{站点}标签页列出测量这些
-        污染物的站点；可按名称或官方代码搜索（\code{MAN3} 是 Manchester Piccadilly），选中
-        一个。
-  \item \textbf{日期范围。}档案按整个日历年提供，从各站点开始运行时起；选中站点后，日期
-        范围会对齐到它的记录。
+  \item \textbf{空气质量。}选择一个监测网络。六个英国网络是 AURN（国家网络，约 210 个
+        站点）、AQE、SAQN、WAQN、NI 和 LMAM（地方管理），共约 1500 个站点；它们既不需要
+        国家也不需要密钥。\emph{EEA} 一行按国家（ISO-2，例如 \code{DE}）搜索欧洲环境署的
+        报告网络：几百到上千个站点，同样无需密钥。\emph{OpenAQ} 覆盖世界大部分地区，需要
+        一个免费 API 密钥——粘贴到\emph{来源设置}里，或设置 \code{OPENAQ\_API\_KEY}。
+        勾选污染物（默认 \PMtwo{}、\NOtwo{} 和 O\textsubscript{3}），然后\emph{查找站点}。
+        \tab{站点}标签页列出测量这些污染物的站点；可按名称或官方代码搜索（\code{MAN3} 是
+        Manchester Piccadilly），选中一个。
+  \item \textbf{日期范围。}英国档案按整个日历年提供，从各站点开始运行时起；选中站点后，
+        日期范围会对齐到它的记录。EEA 的记录按污染物标注年份——其英国站点止于 2019 年，
+        因为英国在脱欧后停止向该机构报告——日期范围会对齐到所选站点覆盖的年份；OpenAQ
+        站点则带有它最后一次报告的日期。
   \item \textbf{气象。}Open-Meteo 的 ERA5 档案（无需密钥）或 Copernicus CDS（需要
         \code{\textasciitilde/.cdsapirc}）。Open-Meteo 会加入 \code{t2m}、
         \code{d2m}、\code{rh2m}、\code{sp}、\code{tcc}、\code{tp}、\code{ssrd}、\code{ws}、
@@ -1172,12 +1178,18 @@ MY1 一样好，所以只有它的干预前 $R^2$ 不予解读。经典 SCM 根�
         \tab{表格}显示结果；\emph{保存合并的 CSV…}把它写出，\emph{发送到主窗口}在主窗口
         中打开它。
 \end{enumerate}
-这些档案就是 R 的 \code{importUKAQ()} 读取的 openair \code{.RData} 文件，不经 R 直接解析，
-所以数据与 openair 工作流一致。数据工作室需要联网；从它发送来的表保存在内存中，命令日志会
-如实说明这一点，而不是写一条无法重复的 \code{read\_csv}。
+英国的档案就是 R 的 \code{importUKAQ()} 读取的 openair \code{.RData} 文件，不经 R 直接
+解析，所以数据与 openair 工作流一致。EEA 通路读取该机构自己的站点图，并为每个站点、每种
+污染物下载一个公开的 Parquet 文件——一次下载就是整条记录。OpenAQ 按传感器作答；同一位置
+注册了多个传感器时优先取 \ugm{} 的那个，因此它的数值与英国、EEA 数据同量纲（只有 ppm
+传感器的位置保留自己的单位，写在该行的 \code{unit} 里），且它提供的是六种常见污染物：
+勾选的 NO 或 NO\textsubscript{x} 对它会被跳过，并在日志中记一行。数据工作室需要联网；
+从它发送来的表保存在内存中，命令日志会如实说明这一点，而不是写一条无法重复的
+\code{read\_csv}。
 
-\screenshot{ui_data_studio.png}{搜索前的数据工作室：左侧是监测网络、污染物、日期范围和气象
-来源；右侧是站点表、预览和合并后的表。}{fig:datastudio}
+\screenshot{ui_data_studio.png}{搜索前的数据工作室，停在 EEA 网络、国家 \code{DE}——
+\emph{来源设置}一组只在非英国网络下出现。左侧是监测网络、污染物、日期范围和气象来源；
+右侧是站点表、预览和合并后的表。}{fig:datastudio}
 
 \section{传输工作室：后向轨迹预测变量}\label{sec:transport}
 本地气象不会告诉你空气从哪里来。传输工作室把 HYSPLIT 后向轨迹转换成能说明这一点的预测
