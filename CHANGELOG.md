@@ -341,6 +341,33 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   shade the post-period with the placebo band (`ci_lo`/`ci_hi`, or
   `low`/`high`, or `p10`/`p90`). No band is drawn over the pre-period, because
   placebo cutoffs have no pre-period of their own to estimate one from.
+- **Spatial diagnostics for the donor pool: `donor_spatial_summary` /
+  `spatial_summary`** (`normet.causal.spatial`, exported at the top level,
+  with the pure-numpy `haversine` / `bearing` primitives the (since-removed)
+  `normet.physics` graph builder used). The weights say how much each donor
+  contributes to the synthetic control, not where the donors sit relative to
+  the treated unit — and for a policy that acts through local or regional
+  processes, a pool clustered on one side of the treated site is a different
+  object from one that surrounds it, at the same weights.
+  `donor_spatial_summary(panel, donors, treated_unit, *, unit_col, lat_col,
+  lon_col, n_sectors=8, weights=None)` places each donor: great-circle
+  distance to the treated unit, compass bearing (0 = north, forward azimuth)
+  and compass sector, plus the fit's weight when given. A donor with no
+  coordinate in the panel gets a row of NaNs and sector `"?"` rather than
+  being dropped — a missing fix is itself information.
+  `spatial_summary(table, *, n_donors=None, n_sectors=8)` reads the pool:
+  the centroid offset and bearing (the donors' (east, north) offset vectors
+  averaged — the honest way to average directions, since a mean of angles
+  wraps), the per-sector donor counts, and the share of the compass the pool
+  actually spans. `scm_diagnostics` now appends the section under a `spatial`
+  key when called with `panel=`, `treated_unit=` and the coordinate columns
+  present (donors default to the fit's weights' index); without them the
+  result is exactly what it was before. It is a diagnostic, not a fitter:
+  nothing here changes the weights, and no distance or bearing is fed back
+  into the fit. The SCM Studio window gains the matching readout: Latitude /
+  Longitude column pickers, a "▶ Show donor layout" button, and a Spatial tab
+  with the donors scattered around the treated unit, compass spokes, the
+  pool's centroid and sector coverage.
 
 ### Changed
 - **`rolling` names its windows `window_01`, `window_02`, …** (was
