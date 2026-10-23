@@ -341,6 +341,27 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   shade the post-period with the placebo band (`ci_lo`/`ci_hi`, or
   `low`/`high`, or `p10`/`p90`). No band is drawn over the pre-period, because
   placebo cutoffs have no pre-period of their own to estimate one from.
+- **Staggered adoption: `run_scm_staggered`** (`normet.causal.batch`,
+  exported at the top level). For an intervention that rolls out unit by unit
+  (the UK ULEZ 2021 expansion, staggered driving restrictions across cities),
+  several treated units each get their own cutoff and their own `run_scm` fit,
+  with the *other treated units excluded from every run's donor pool* so one
+  unit's intervention cannot leak into another unit's synthetic control. The
+  runs (real and placebo) share the one joblib pool `scm_all` uses.
+  The result is one row per treated unit — `cutoff_date`, `n_pre`, `n_post`,
+  `pre_r2`, `effect` (post-cutoff mean or `sum` of the effect path) and
+  `p_value` (that unit's placebo-in-space test at its own cutoff) — followed
+  by `mean` / `median` summary rows of the units' effects. The `mean` row's
+  `p_value` is the cross-unit permutation test: each donor in turn takes every
+  treated unit's role (the full set of cutoffs) and its pseudo-effects are
+  averaged the same way the real units' are. The real treated units are
+  deliberately not permuted into the reference — their data already carries
+  the intervention, and permuting treated identities in a staggered design is
+  contaminated by it; the donor-only reference keeps the null honest.
+  `cutoff_dates` takes a list aligned with `treated_units` or a dict keyed by
+  unit. A unit whose cutoff falls after its last observation is an error, as
+  is a treated unit inside `donors`.
+>>>>>>> Stashed changes
 
 ### Changed
 - **`rolling` names its windows `window_01`, `window_02`, …** (was
