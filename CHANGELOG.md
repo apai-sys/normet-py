@@ -290,8 +290,24 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   target by more than `tolerance` (10 points by default, either direction);
   the fit is returned, corrected and labelled, not suppressed, because a
   regime jump the hold-out cannot see is information, not failure.
-  Deterministic; numpy/pandas only. The `counterfactual(...,
-  calibrated=...)` wiring is its companion change.
+  Deterministic; numpy/pandas only.
+
+- **`counterfactual(..., calibrated=True)`** (the chronos-2 estimator). The
+  counterfactual's p10/p90 are the model's own quantiles, whose nominal
+  coverage is only as honest as the weather in the model's training data --
+  and the band is what the effect is compared against, so it should be the
+  checked band, not the claimed one. `calibrated=True` runs the record's own
+  pre-intervention history through `calibrate_quantiles` -- the fit and its
+  hold-out both end at the intervention date, the same conditioning the
+  projection is made under -- and takes the band through the fitted
+  thresholds block by block, the placebo run through the same fit. The
+  default stays off and the default path bit-identical: the median is a
+  centre quantity the correction never touches, so the roll-forward
+  trajectory and `pre_intervention_bias_pct` are unchanged in either mode;
+  what changes is the band (`counterfactual_p10` / `counterfactual_p90` and
+  `fraction_outside_interval`), and the fit rides along on
+  `result.calibration` with its cross-validated coverage table and the
+  levels a `CalibrationWarning` names as still off target.
 
 ### Changed
 - **`rolling` names its windows `window_01`, `window_02`, …** (was

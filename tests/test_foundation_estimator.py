@@ -19,11 +19,13 @@ import pandas as pd
 import pytest
 
 from normet.analysis.decomposition import DecomposeConfig, _rank_by_sensitivity
+from normet.exceptions import ConfigError
 from normet.foundation import (
     Chronos2Estimator,
     CounterfactualResult,
     InsufficientContextError,
     IrregularIndexError,
+    QuantileCalibration,
     to_normet_frame,
     to_regular_index,
 )
@@ -1369,3 +1371,116 @@ def test_full_finetune_returns_a_new_estimator_on_tuned_weights(
     )
     assert len(out) == 12
     assert np.isfinite(out.to_numpy()).all()
+
+
+# ------------------------------------------------- calibrated counterfactual
+#
+# The real counterfactual and calibration machinery on a stubbed forward pass:
+# no checkpoint, no torch. The stub's band is deterministic -- at level q it
+# says ``median + 2 s (q - 0.5)`` -- so its 5th-95th span is ``0.9 s`` and its
+# 10-90 band ``0.8 s`` around the median.
+
+
+#: The native levels the stub emits and the observation noise it is scored on.
+CF_LEVELS = (0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95)
+CF_SIGMA = 2.0
+#: The ``s`` whose 10-90 band covers 80 % of ``N(0, CF_SIGMA)``:
+#: ``0.8 s = 1.2816 CF_SIGMA``.
+CF_HONEST_S = 1.602 * CF_SIGMA
+
+
+def _cf_estimator(s: float) -> Chronos2Estimator:
+    est = Chronos2Estimator(context_length=96, prediction_length=48, device="cpu")
+    est._pipeline = object()
+    est._quantiles = np.asarray(CF_LEVELS)
+
+    def forecast(items, cols, horizon):
+        return np.stack(
+            [
+                np.vstack(
+                    [
+                        np.full(horizon, float(np.median(hist))) + 2.0 * s * (q - 0.5)
+                        for q in CF_LEVELS
+                    ]
+                )
+                for hist, _, _ in items
+            ]
+        )
+
+    est._forecast_blocks = forecast  # type: ignore[method-assign]
+    return est
+
+
+@pytest.fixture
+def cf_record() -> pd.DataFrame:
+    """1200 h of level-50 Gaussian noise, then 96 h of post-intervention."""
+    rng = np.random.default_rng(11)
+    n = 1296
+    idx = pd.date_range("2020-01-01", periods=n, freq="h")
+    value = 50.0 + CF_SIGMA * rng.standard_normal(n)
+    return pd.DataFrame({"value": value, "ws": 2.0 + rng.standard_normal(n)}, index=idx)
+
+
+def test_counterfactual_default_keeps_the_models_own_band(cf_record):
+    est = _cf_estimator(CF_HONEST_S)
+    res = est.counterfactual(cf_record, "value", cf_record.index[1200], validation_hours=240)
+
+    assert res.calibration is None
+    assert "calibrated" not in res.summary
+    assert len(res.counterfactual_p50) == 96
+    width = res.counterfactual_p90 - res.counterfactual_p50
+    assert np.abs(width.to_numpy() - 0.8 * CF_HONEST_S).max() < 1e-9
+
+
+def test_counterfactual_calibrated_is_the_identity_for_an_honest_band(cf_record):
+    """Fitting a band that already covers 80 % must not move the numbers."""
+    est = _cf_estimator(CF_HONEST_S)
+    plain = est.counterfactual(cf_record, "value", cf_record.index[1200], validation_hours=240)
+    cal = est.counterfactual(
+        cf_record, "value", cf_record.index[1200], validation_hours=240, calibrated=True
+    )
+
+    assert isinstance(cal.calibration, QuantileCalibration)
+    # The median is a centre quantity the correction never touches: the
+    # roll-forward walks the identical trajectory, so the placebo reads
+    # identically.
+    assert (cal.counterfactual_p50 == plain.counterfactual_p50).all()
+    assert cal.pre_intervention_bias_pct == plain.pre_intervention_bias_pct
+    # The 80 % point of the honest band's own errors is ~0.89 span units.
+    assert 0.75 < cal.calibration.threshold[0] < 1.05
+    cv = cal.calibration.coverage["empirical_calibrated"].iloc[0]
+    assert abs(cv - 0.8) < 0.1
+    assert cal.calibration.warnings == ()
+    # The band moves by the fit's sampling wiggle, not by a redesign.
+    assert (cal.counterfactual_p90 - plain.counterfactual_p90).abs().max() < 0.5
+    assert cal.summary["calibrated"] is True
+    assert "calibration" in cal.summary
+
+
+def test_counterfactual_calibrated_widens_a_narrow_band(cf_record):
+    s = CF_HONEST_S * 0.6
+    est = _cf_estimator(s)
+    plain = est.counterfactual(cf_record, "value", cf_record.index[1200], validation_hours=240)
+    cal = est.counterfactual(
+        cf_record, "value", cf_record.index[1200], validation_hours=240, calibrated=True
+    )
+
+    w_plain = (plain.counterfactual_p90 - plain.counterfactual_p50).to_numpy()
+    w_cal = (cal.counterfactual_p90 - cal.counterfactual_p50).to_numpy()
+    assert np.all(w_cal > w_plain)
+    # The 80 % point of the narrow band's errors is ~1.48 span units.
+    assert 1.2 < cal.calibration.threshold[0] < 1.85
+    cv = cal.calibration.coverage["empirical_calibrated"].iloc[0]
+    assert abs(cv - 0.8) < 0.1
+    assert cal.calibration.warnings == ()
+    # and the median, again, is where the model put it.
+    assert (cal.counterfactual_p50 == plain.counterfactual_p50).all()
+
+
+def test_counterfactual_calibrated_refuses_a_record_without_room(cf_record):
+    """The counterfactual fits context plus 16 validation hours; the fit's span
+    (context plus one block) does not, and says so."""
+    est = _cf_estimator(CF_HONEST_S)
+    short = cf_record.iloc[: 112 + 49]
+    with pytest.raises(ConfigError, match="held-out span"):
+        est.counterfactual(short, "value", short.index[112], validation_hours=16, calibrated=True)
