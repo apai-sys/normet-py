@@ -629,14 +629,15 @@ the legend and set its columns, set line widths and markers, letter the panels,
 double-click any text or tick numbers to edit them -- and saves it at that exact
 width on a white page, leaving the figure on its tab as it was.
 
-**Data Studio** (🌐 toolbar button, or File → Get UK Data) — assemble a
-model-ready dataset without leaving the app: pick a network (AURN, AQE,
-SAQN, WAQN, NI, LMAM), browse/search its stations by the pollutants they
-measure or official site code (e.g. "MAN3" for Manchester Piccadilly),
-pick a date range, and fetch the hourly measurements together with
-ERA5-derived meteorology from Open-Meteo (no API key; Copernicus CDS
-optional). The merged hourly table can be saved as CSV or sent straight
-into Step 1.
+**Data Studio** (🌐 toolbar button, or File → Get Data) — assemble a
+model-ready dataset without leaving the app: pick a network — the six UK
+networks (AURN, AQE, SAQN, WAQN, NI, LMAM), the EEA reporting network for
+Europe (country code, no key), or OpenAQ for most of the world (free API
+key) — then browse/search its stations by the pollutants they measure or
+official site code (e.g. "MAN3" for Manchester Piccadilly), pick a date
+range, and fetch the hourly measurements together with ERA5-derived
+meteorology from Open-Meteo (no API key; Copernicus CDS optional). The
+merged hourly table can be saved as CSV or sent straight into Step 1.
 
 **SCM Studio** (Analysis → Synthetic Control, or the 🧪 toolbar button) — the
 counterfactual workflow on panel data: map date/unit/outcome columns, pick the

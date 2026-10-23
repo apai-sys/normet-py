@@ -31,28 +31,35 @@ __all__ = ["fetch_openaq_measurements", "openaq_locations", "openaq_sensors"]
 
 _BASE = "https://api.openaq.org/v3"
 
-# OpenAQ v3 identifies pollutants by numeric `parameters_id`, not by slug.
-# Verified against this package's own mocked test fixtures (parameter id 2 ==
-# "pm25"); other common ids per the OpenAQ v3 /parameters reference.
-_PARAMETER_IDS = {
-    "pm25": 2,
-    "pm10": 1,
-    "o3": 10,
-    "co": 8,
-    "no2": 7,
-    "so2": 9,
+# OpenAQ v3 identifies pollutants by numeric `parameters_id`, not by slug —
+# and the /parameters endpoint (live, 2026-10-23) shows each pollutant under
+# several ids that differ by UNIT FAMILY: ids 1-6 are the mass-concentration
+# family (µg/m3, what EEA-sourced records such as the UK AURN use), ids 7-10
+# the legacy ppm family, ids 15/32/101/102 ppb. A slug therefore resolves to
+# an ordered set, mass ids first: a location is registered under only one of
+# them, and preferring µg/m3 keeps values on the same scale as the UK/EEA
+# adapters. The sensor lookup tries the ids in order, so a location that
+# registers only ppm still works (its unit comes through as reported).
+_PARAMETER_IDS: dict[str, tuple[int, ...]] = {
+    "pm25": (2,),
+    "pm10": (1,),
+    "o3": (3, 10, 32),
+    "co": (4, 8, 102),
+    "no2": (5, 7, 15),
+    "so2": (6, 9, 101),
 }
 
 
-def _resolve_parameter_id(parameter: str | int) -> int:
-    """Map a pollutant slug (``"pm25"``) or raw numeric id to the OpenAQ v3 id."""
+def _resolve_parameter_ids(parameter: str | int) -> tuple[int, ...]:
+    """The OpenAQ v3 ids for a slug (``"pm25"``), mass unit first; a raw
+    numeric id passes through as the single-element set."""
     if isinstance(parameter, int):
-        return parameter
+        return (parameter,)
     try:
         return _PARAMETER_IDS[parameter.lower()]
     except KeyError:
         try:
-            return int(parameter)
+            return (int(parameter),)
         except (TypeError, ValueError) as e:
             raise ValueError(
                 f"Unknown OpenAQ parameter {parameter!r}; pass a known slug "
@@ -83,6 +90,7 @@ def openaq_locations(
     city: str | None = None,
     bbox: tuple[float, float, float, float] | None = None,
     parameter: str | None = None,
+    parameters: Iterable[str] | None = None,
     limit: int = 1000,
     api_key: str | None = None,
 ) -> pd.DataFrame:
@@ -99,75 +107,105 @@ def openaq_locations(
         Geographic bounding box.
     parameter : str, optional
         Pollutant filter (e.g., ``"pm25"``, ``"no2"``).
+    parameters : iterable of str, optional
+        Several pollutant slugs, combined as a union: the server answers with
+        locations carrying a sensor for *any* of them (verified against v3,
+        2026-10-23: GB pm25 546 + no2 127 -> pm25|no2 575). Combined with
+        ``parameter`` when both are given.
     limit : int, default 1000
-        Maximum locations returned (server-side cap may apply).
+        Maximum locations returned. The server answers at most 1000 per call,
+        so larger values are fetched over several pages (and a value above
+        1000 was once a straight 422).
     api_key : str, optional
         Overrides ``OPENAQ_API_KEY``.
 
     Returns
     -------
     pandas.DataFrame
-        Columns include ``id``, ``name``, ``city``, ``country``, ``lat``, ``lon``,
-        ``parameters``, ``last_updated``.
+        Columns include ``id``, ``name``, ``city``, ``country``, ``lat``,
+        ``lon``, ``parameters``, ``last_updated``.
     """
     headers = {"X-API-Key": _resolve_key(api_key)}
 
-    params: dict[str, Any] = {"limit": int(limit)}
+    # The v3 endpoint 422s above limit=1000 (measured); cap it rather than
+    # pass a value the server rejects outright.
+    params: dict[str, Any] = {"limit": min(int(limit), 1000)}
     if country:
         params["iso"] = country
     if city:
         params["city"] = city
-    if parameter:
-        params["parameters_id"] = _resolve_parameter_id(parameter)
+    if parameter or parameters:
+        ids: list[int] = []
+        for p in [parameter] if parameter else []:
+            ids.extend(i for i in _resolve_parameter_ids(p) if i not in ids)
+        for p in list(parameters or []):
+            ids.extend(i for i in _resolve_parameter_ids(p) if i not in ids)
+        # A list value serialises to repeated parameters_id keys, the union form.
+        params["parameters_id"] = ids
     if bbox:
         params["bbox"] = ",".join(f"{float(x):.4f}" for x in bbox)
 
-    data = _get(f"{_BASE}/locations", params, headers)
+    # Paginate: one answer carries at most 1000 locations, and `page` is the
+    # cursor the endpoint honours (`offset` is silently ignored, measured
+    # 2026-10-23). Stop on the first short page or when `limit` is filled.
+    want = int(limit)
+    page_size = min(want, 1000)
     rows: list[dict[str, Any]] = []
-    for r in data.get("results", []) or []:
-        coords = r.get("coordinates") or {}
-        params_list = [s.get("parameter", {}).get("name") for s in (r.get("sensors") or [])]
-        sensors_parsed = []
-        for s in r.get("sensors") or []:
-            param_info = s.get("parameter") or {}
-            sensors_parsed.append(
+    page = 1
+    while True:
+        data = _get(f"{_BASE}/locations", dict(params, page=page) if page > 1 else params, headers)
+        chunk = data.get("results", []) or []
+        for r in chunk:
+            coords = r.get("coordinates") or {}
+            params_list = [s.get("parameter", {}).get("name") for s in (r.get("sensors") or [])]
+            sensors_parsed = []
+            for s in r.get("sensors") or []:
+                param_info = s.get("parameter") or {}
+                sensors_parsed.append(
+                    {
+                        "id": s.get("id"),
+                        "name": s.get("name"),
+                        "parameter_id": param_info.get("id"),
+                        "parameter_name": param_info.get("name"),
+                        "parameter_units": param_info.get("units"),
+                    }
+                )
+            rows.append(
                 {
-                    "id": s.get("id"),
-                    "name": s.get("name"),
-                    "parameter_id": param_info.get("id"),
-                    "parameter_name": param_info.get("name"),
-                    "parameter_units": param_info.get("units"),
+                    "id": r.get("id"),
+                    "name": r.get("name"),
+                    "city": (r.get("locality") or {})
+                    if isinstance(r.get("locality"), dict)
+                    else r.get("locality"),
+                    "country": (r.get("country") or {}).get("code"),
+                    "lat": coords.get("latitude"),
+                    "lon": coords.get("longitude"),
+                    "parameters": [p for p in params_list if p],
+                    "sensors": sensors_parsed,
+                    "provider": (r.get("provider") or {}).get("name"),
+                    "owner": (r.get("owner") or {}).get("name"),
+                    # a location that has never reported data carries datetimeLast: null,
+                    # so the default {} does not apply and .get would hit None.
+                    "last_updated": (r.get("datetimeLast") or {}).get("utc"),
                 }
             )
-        rows.append(
-            {
-                "id": r.get("id"),
-                "name": r.get("name"),
-                "city": (r.get("locality") or {})
-                if isinstance(r.get("locality"), dict)
-                else r.get("locality"),
-                "country": (r.get("country") or {}).get("code"),
-                "lat": coords.get("latitude"),
-                "lon": coords.get("longitude"),
-                "parameters": [p for p in params_list if p],
-                "sensors": sensors_parsed,
-                "provider": (r.get("provider") or {}).get("name"),
-                "owner": (r.get("owner") or {}).get("name"),
-                "last_updated": r.get("datetimeLast", {}).get("utc"),
-            }
-        )
-    return pd.DataFrame(rows)
+        if len(chunk) < page_size or len(rows) >= want:
+            break
+        page += 1
+    return pd.DataFrame(rows[:want])
 
 
 def _resolve_sensor(
-    loc: int, parameter_id: int, headers: dict[str, str]
+    loc: int, parameter_ids: tuple[int, ...], headers: dict[str, str]
 ) -> tuple[int | None, float | None, float | None]:
-    """Look up the sensor id (and site lat/lon) for `parameter_id` at `loc`.
+    """Look up the sensor id (and site lat/lon) for any of *parameter_ids* at *loc*.
 
     OpenAQ v3 has no `/locations/{id}/measurements` endpoint (a 404 in
     practice) -- measurements are only served per-sensor, via
     `/sensors/{sensors_id}/measurements`. Each location exposes multiple
     single-parameter sensors, so the sensor id has to be resolved first.
+    The ids are tried in the order given (mass µg/m3 first), so a location
+    carrying both a mass and a ppm sensor for one pollutant yields the mass one.
     """
     data = _get(f"{_BASE}/locations/{loc}", {}, headers)
     results = data.get("results") or []
@@ -175,9 +213,10 @@ def _resolve_sensor(
         return None, None, None
     r = results[0]
     coords = r.get("coordinates") or {}
-    for s in r.get("sensors") or []:
-        if (s.get("parameter") or {}).get("id") == parameter_id:
-            return s.get("id"), coords.get("latitude"), coords.get("longitude")
+    by_id = {(s.get("parameter") or {}).get("id"): s.get("id") for s in (r.get("sensors") or [])}
+    for pid in parameter_ids:
+        if by_id.get(pid) is not None:
+            return by_id[pid], coords.get("latitude"), coords.get("longitude")
     return None, coords.get("latitude"), coords.get("longitude")
 
 
@@ -218,7 +257,7 @@ def fetch_openaq_measurements(
     """
     headers = {"X-API-Key": _resolve_key(api_key)}
     locs = [location_id] if isinstance(location_id, int) else list(location_id)
-    parameter_id = _resolve_parameter_id(parameter)
+    parameter_ids = _resolve_parameter_ids(parameter)
 
     df_from = pd.to_datetime(date_from, utc=True)
     df_to = pd.to_datetime(date_to, utc=True)
@@ -226,10 +265,13 @@ def fetch_openaq_measurements(
     rows: list[dict[str, Any]] = []
     for loc in locs:
         loc = int(loc)
-        sensor_id, lat, lon = _resolve_sensor(loc, parameter_id, headers)
+        sensor_id, lat, lon = _resolve_sensor(loc, parameter_ids, headers)
         if sensor_id is None:
             log.debug(
-                "OpenAQ location %s has no sensor for parameter id %s; skipping.", loc, parameter_id
+                "OpenAQ location %s has no sensor for parameter %s (ids %s); skipping.",
+                loc,
+                parameter,
+                parameter_ids,
             )
             continue
 

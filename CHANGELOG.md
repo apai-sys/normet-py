@@ -397,6 +397,24 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   staggered design's permuted treated identities are contaminated by the true
   effect (and with two treated units the single non-identity permutation is
   contaminated), while a donor never intervened on draws from the null.
+ - **Data Studio is no longer UK-only**: the Network picker now also offers
+   the **EEA** reporting network (all of Europe) and **OpenAQ** (most of the
+   world, free API key), and the entry point is renamed accordingly — the
+   toolbar button is "🌐 Get data" and the menu is File → Get &Data
+   (AQ networks + met)… The window gains a *Source settings* group, shown
+   only for the non-UK networks: an ISO-2 country code (both) and an OpenAQ
+   key field falling back to `OPENAQ_API_KEY`. EEA stations come from the
+   agency's own keyless ArcGIS layer (new `normet.io.eea.list_eea_stations`),
+   whose per-station popup names one public Parquet blob per pollutant with
+   its year range — the picker prefills from/to from those years and the
+   fetch downloads exactly that blob (`fetch_eea_station`), two GETs per
+   station. The EEA layer serves the E1a validated dataset, whose UK record
+   ends in 2019; the up-to-date country-level bulk path (`fetch_eea_data`)
+   is unchanged. OpenAQ finds send the ticked pollutants to the server as one
+   union filter (paginated past the 1000-per-call cap). Only the six mass
+   pollutants OpenAQ registers (PM2.5/PM10/NO2/O3/SO2/CO) are offered; NO and
+   NOx are ticked away for OpenAQ as the adapter's set does not include them.
+   The met join is shared: every provider carries coordinates.
 
 ### Changed
 - **`rolling` names its windows `window_01`, `window_02`, …** (was
@@ -481,6 +499,20 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   trajectory window each had their own copy, identical down to the margins.
 
 ### Fixed
+- **OpenAQ adapter: fetches came back empty for UK/EEA-sourced records.**
+  Live verification (2026-10-23) against the `/parameters` endpoint showed
+  each pollutant registered under several `parameters_id`s that differ by
+  unit family — ids 1-6 µg/m3 (what EEA-sourced records, e.g. the UK AURN,
+  use), ids 7-10 ppm, ids 15/32/101/102 ppb — and the adapter's single-id
+  map held only the ppm ids for no2/o3/co/so2, so those sensors were never
+  found. A slug now resolves to its full id family with the mass id first:
+  sensor lookup takes µg/m3 when both exist, values arrive on the same scale
+  as the UK/EEA adapters, and ppm-only locations still work (unit as
+  reported). Same pass, same endpoint: a location that never reported data
+  carries `datetimeLast: null` and crashed the locations parse; `limit`
+  above 1000 is a hard 422 so it is now capped and `openaq_locations` walks
+  the `page` cursor (`offset` is silently ignored); several slugs can go out
+  as one union filter, which the Data Studio's station find now uses.
 - **`do_all(backend="chronos-2")` refused the meteorology its own error
   message tells you to pass.** The shared `covariates must be provided` guard
   ran before the backend dispatch, yet the zero-shot branch documents its

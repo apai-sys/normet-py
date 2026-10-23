@@ -105,7 +105,7 @@ class ShellMixin(QMainWindow):
         act = ex_menu.addAction("Synthetic control panel (SCM Studio)", self.open_scm_example)
         act.setToolTip("Opens the SCM Studio with its example panel loaded.")
         ex_menu.setToolTipsVisible(True)
-        act = fm.addAction("Get &UK Data (AQ networks + met)…", self.open_data_studio)
+        act = fm.addAction("Get &Data (AQ networks + met)…", self.open_data_studio)
         act.setShortcut("Ctrl+D")
         self.recent_menu = fm.addMenu("Open &Recent")
         self._rebuild_recent_menu()
@@ -623,11 +623,11 @@ class ShellMixin(QMainWindow):
             "Synthetic-control (counterfactual) analysis on panel data\n— treated unit vs. donor pool."
         )
         self.scm_btn.clicked.connect(self.open_scm_studio)
-        self.data_btn = QPushButton("🌐  Get UK data")
+        self.data_btn = QPushButton("🌐  Get data")
         self.data_btn.setToolTip(
-            "Fetch UK air quality (AURN, AQE, SAQN, WAQN, NI, LMAM) plus\n"
-            "reanalysis meteorology and merge them into a model-ready table\n"
-            "(no API key)."
+            "Fetch air quality (six UK networks, the EEA reporting network,\n"
+            "or OpenAQ) plus reanalysis meteorology and merge them into a\n"
+            "model-ready table. The UK networks and the EEA need no key."
         )
         self.data_btn.clicked.connect(self.open_data_studio)
         self.transport_btn = QPushButton("🧭  Transport Studio")
