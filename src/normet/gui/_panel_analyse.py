@@ -289,6 +289,63 @@ class AnalysePanelMixin(QMainWindow):
         if value > 1 and self.trend_series.currentText().startswith("emission"):
             self.trend_series.setCurrentText("long-term trend (separated)")
 
+    def _build_unc_box(self) -> QGroupBox:
+        """The spread's sources: weather, model form, their interaction.
+
+        A model behind the box is not what it runs on -- the decomposition trains
+        its own members from the table as loaded. What the model gates is the
+        choice: an AutoML model at all (chronos-2's zero-shot forecasts carry
+        no model form to vary), and the feature set and the ticked resample
+        variables it was trained with.
+        """
+        box = QGroupBox("Uncertainty decomposition")
+        uf = QFormLayout(box)
+        uf.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        uf.addRow(
+            hint_label(
+                "Of the band a model's estimate carries, how much is the met "
+                "resampling and how much the model form? An ensemble of members, "
+                "each trained on its own seed, predicts the same shared met "
+                "draws; the per-date spread splits orthogonally into weather, "
+                "model and their interaction. Minutes, not seconds: every "
+                "member is a fresh fit."
+            )
+        )
+        self.unc_samples = NoWheelSpinBox()
+        self.unc_samples.setRange(2, 10_000)
+        self.unc_samples.setValue(300)
+        self.unc_samples.setToolTip(
+            "Met resamples shared by every member (the weather factor).\n"
+            "The Normalise page's count, kept here so the two agree."
+        )
+        uf.addRow("Samples", self.unc_samples)
+        self.unc_models = NoWheelSpinBox()
+        self.unc_models.setRange(2, 30)
+        self.unc_models.setValue(4)
+        self.unc_models.setToolTip(
+            "Ensemble members, each trained on its own seed (the model-form "
+            "factor). Two is the floor: with one member there is no model-form "
+            "variance to attribute. The cost is this many fits, so the default "
+            "stays small."
+        )
+        uf.addRow("Models", self.unc_models)
+        self.unc_backend = NoWheelComboBox()
+        self.unc_backend.addItems(["lightgbm", "flaml"])
+        self.unc_backend.setToolTip(
+            "How each member is trained. lightgbm: a fast random search on "
+            "every member.\nflaml: an AutoML search per member, at the cost of "
+            "its budget each."
+        )
+        uf.addRow("Member backend", self.unc_backend)
+        self.unc_button = run_button(
+            "▶  Run uncertainty decomposition",
+            "Split the total per-date spread into weather, model form and "
+            "their\ninteraction, each member on the same met draws.",
+        )
+        self.unc_button.clicked.connect(self._run_unc)
+        uf.addRow(self.unc_button)
+        return box
+
     def _build_pdp_box(self) -> QGroupBox:
         """Step 5: partial-dependence curves for the ticked variables."""
         box = QGroupBox("Partial dependence")

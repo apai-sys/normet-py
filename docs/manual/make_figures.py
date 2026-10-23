@@ -23,6 +23,8 @@ import sys
 import tempfile
 import traceback
 
+import numpy as np
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.join(HERE, "..", "..")
 sys.path.insert(0, os.path.join(ROOT, "src"))
@@ -278,6 +280,25 @@ def main_figures(app):
     win.pdp_grid.setValue(40)
     win._run_pdp()
     grab(win, "ui_pdp.png")
+
+    print("uncertainty decomposition")
+    # The box on the panel page; its members train fresh from the table as
+    # loaded, so a lightgbm backend and a small search keep the figure run a
+    # minute or two, not an hour.
+    win.show_panel_page("Decompose")  # the panel page the box sits on
+    win.unc_backend.setCurrentText("lightgbm")
+    win.budget_spin.setValue(5)
+    win.unc_models.setValue(3)
+    win.unc_samples.setValue(50)
+    win._run_unc()
+    u = win.results["uncertainty"]
+    print(
+        "  median share:",
+        {c: float(np.median(u[c])) for c in ("pct_weather", "pct_model", "pct_interaction")},
+    )
+    print("  median spread:", u["var_total"].median())
+    said(win.tab_unc)
+    grab(win, "ui_uncertainty.png")
 
     print("command log")
     win.show_log_page(1)  # View → Command Log…: a window of its own

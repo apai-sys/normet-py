@@ -109,6 +109,9 @@ class MainWindow(
         self._trend_note = ""
         self._trend_wanted = False
         self._trend_segmented = False
+        #: The uncertainty run as it came back (its figure and the tab's verdict
+        #: are of the dataclass, not of its table -- the session brings it back).
+        self._unc_raw: object | None = None
 
         self.runner = TaskRunner(self)
         self.runner.started.connect(self._task_started)
@@ -160,6 +163,7 @@ class MainWindow(
                             self._build_decompose_box(),
                             self._build_multiscale_box(),
                             self._build_trend_box(),
+                            self._build_unc_box(),
                         ),
                         (self._build_rolling_box(),),
                         (self._build_pdp_box(),),
@@ -177,6 +181,7 @@ class MainWindow(
             self.ms_button,
             self.trend_button,
             self.pdp_button,
+            self.unc_button,
         ]
         self.panel_stack, self.panel_bar, self.param_scroll = panel.stack, panel.bar, panel.scroll
         self.param_panel = panel  # folded and unfolded by toggle_panel (._shell)

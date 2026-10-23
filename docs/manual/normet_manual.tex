@@ -679,7 +679,8 @@ Service); HYSPLIT (NOAA ARL).
         (Chapter~\ref{ch:normalise}).
   \item \tab{Decompose}, \tab{Rolling} and \tab{Partial dependence} as the question
         needs (Chapters~\ref{ch:decompose}--\ref{ch:pdp}); the \tab{Trend} test says
-        whether the series the decomposition just drew is rising, falling or flat.
+        whether the series the decomposition just drew is rising, falling or flat, and
+        the \tab{Uncertainty} tab where the band's spread comes from (Section~\ref{sec:uncertainty}).
   \item \tab{Keep the result:} export the tables, an HTML report and the session as a
         script (Chapter~\ref{ch:export}).
 \end{enumerate}
@@ -712,10 +713,12 @@ Its pages, and what each holds (a page's first box goes untitled, the tab naming
         quantile band (Chapter~\ref{ch:normalise}).
   \item[Decompose] Emission or meteorology; for meteorology the attribution and the
         groups (Chapter~\ref{ch:decompose}). Under it \emph{Multi-scale decomposition}:
-        three window widths (Section~\ref{sec:multiscaleui}); and \emph{Trend}: the
+        three window widths (Section~\ref{sec:multiscaleui}); \emph{Trend}: the
         series to test (a part of the decomposition, its separated long-term trend, or
         the observed target), its seasonal period, the number of segments and how
-        many bootstrap resamples.
+        many bootstrap resamples; and \emph{Uncertainty decomposition}: the number
+        of ensemble members, the met draws they all share, and the members' backend
+        (Section~\ref{sec:uncertainty}).
   \item[Rolling] Window, step and samples (Section~\ref{sec:rollingui}).
   \item[PDP] Variables and grid points (Chapter~\ref{ch:pdp}).
 \end{description}
@@ -736,6 +739,7 @@ Rolling     & the mean of the rolling windows, with their spread & Run rolling n
 Multi-scale & the scale-space cascade and the energy in each band & Multi-scale \\
 Trend       & the tested series with its Theil--Sen line, or its segments and marked break, the verdict and the p value & Trend test \\
 PDP         & one partial-dependence panel per variable & Compute PDP \\
+Uncertainty & the per-date spread stacked by source (weather, model, interaction) and the median's shares & Uncertainty decomposition \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -788,6 +792,7 @@ Run rolling normalisation & an AutoML model      & \code{rolling} \\
 Multi-scale decomposition & an AutoML model, a normalisation & \code{rolling} $\times 3$ \\
 Trend test          & an AutoML model (a decomposition, where it tests one) & \code{trend} (1 segment), \code{detect\_trend\_breaks} (more) \\
 Compute PDP           & an AutoML model, one variable ticked & \code{pdp} \\
+Uncertainty decomposition & an AutoML model & \code{decompose\_uncertainty} \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -808,8 +813,8 @@ multi-scale run before the normalisation --- is answered by a \emph{notice} abov
 dialog: it says what is missing and carries the step that answers it on a button
 (\emph{Train model}, \emph{Run normalisation}); \(\times\) puts it away, and it goes by itself
 once the step has been taken. At the right of the status bar a light per step --- Data,
-Model, Normalised, Decomposed, Rolling, Multi-scale, PDP, Trend --- turns green when
-that step has a result.
+Model, Normalised, Decomposed, Rolling, Multi-scale, PDP, Trend, Uncertainty --- turns
+green when that step has a result.
 
 \section{Menus and shortcuts}
 \begin{center}\small
@@ -1144,6 +1149,48 @@ p of the search 0.001, the one to quote. Segment 1 runs +0.0812 per day
 (95\,\% [$-$0.0134, $-$0.0108]). The piecewise Theil--Sen lines and the marked
 break are in the figure; the per-segment table and the verdict above it are the
 Trend tab's.}{fig:trend_breaks}
+
+\section{Uncertainty decomposition}\label{sec:uncertainty}
+The question a de-weathered estimate invites: of the band around an effect, how
+much is the met resampling and how much is the model form? The \emph{Uncertainty
+decomposition} box under \emph{Trend} answers by attribution, not by another
+Monte-Carlo run. It trains \emph{Models} (default 4) members, each on its own
+seed and on the table as loaded, from the trained variable set; every member then
+predicts the same \emph{Samples} (default 300, the variables ticked on the
+\tab{Normalise} page) met resamples, the draws seeded once by the window's seed
+so that draw $j$ is identical across members. Each timestamp's
+(members $\times$ draws) prediction matrix splits its variance orthogonally into
+the between-draw term --- the weather variance --- the between-member term, the
+model-form variance, and the interaction: what a member reacts to in a draw that
+the ensemble on average does not. The three summands sum to the total per-date
+variance exactly --- an identity the package pins in a test --- so the
+attribution cannot quietly stop adding up. The \emph{Member backend} chooses how each member
+is trained: \code{lightgbm} (the default: a fast random search with the Model
+page's budget as its trials) or \code{flaml} (an AutoML search per member, at
+that member's budget each).
+
+The \tab{Uncertainty} tab (Figure~\ref{fig:uncertainty}) stacks the per-date
+variance, weather under model under interaction, the line over the stack the
+total, and says the headline above the figure: the median share of the total by
+source. For MY1, three members and 50 shared draws under the figure's settings,
+the median spread is 96\,\% met resampling, 3\,\% the interaction and 0\,\%
+model form --- the fitted model is nearly certain about what the weather does,
+and the band an effect is tested against is the weather's, not the model's. The
+table gives each source's median variance and median share; the shares are
+medians across the record, so a single extreme day does not re-weight them. The
+run is added to the command log as the \code{decompose\_uncertainty} call the
+window made, and a saved session brings the run back whole, its figure re-drawn.
+The cost is \emph{Models} fits and \emph{Models} normalisations of
+\emph{Samples} draws --- the same number of predictions as one
+\code{do\_all\_unc} run, and no more; a run of MY1's settings takes a minute or
+two, not an hour.
+
+\screenshot{ui_uncertainty.png}{The attribution of MY1's per-date spread: the
+stacked bands (met resampling, model form, the interaction) total 144.3
+(\ugm{})$^{2}$ of variance in the median, and the verdict above says where it
+goes --- 96\,\% met resampling, 3\,\% interaction, 0\,\% model form (three
+members sharing 50 met draws, lightgbm members). An effect smaller than that band
+is not separated from the weather by the model form at all.}{fig:uncertainty}
 
 % ============================ 9. ROLLING ======================================
 \chapter{Rolling and multi-scale}\label{ch:rolling}
@@ -1734,6 +1781,7 @@ Function & Does \\
 \code{make\_run}, \code{save\_run}, \code{generate\_html\_report} & provenance and reports \\
 \code{trend}, \code{mann\_kendall}, \code{theil\_sen} & trend tests with the block-bootstrap correction (the \tab{Trend} tab, Section~\ref{sec:trend}) \\
 \code{detect\_trend\_breaks} & segmented trend: where the level or slope breaks (BIC + block-bootstrap gate) \\
+\code{decompose\_uncertainty} & the total spread attributed to weather, model form and their interaction (the \tab{Uncertainty} tab, Section~\ref{sec:uncertainty}) \\
 \code{make\_memory}       & on-disk caching \\
 \code{Chronos2Estimator}  & zero-shot de-weathering (\code{foundation} extra) \\
 \bottomrule

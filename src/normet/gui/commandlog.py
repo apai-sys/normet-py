@@ -272,6 +272,12 @@ _KNOWN: dict[str, tuple[str, str, str, str]] = {
         "window holds ('long-term' is its separated long-term component, not a "
         "table column).",
     ),
+    "normet.analysis.uncertainty.decompose_uncertainty": (
+        "Uncertainty decomposition",
+        "uncertainty",
+        "from normet import decompose_uncertainty",
+        "",
+    ),
 }
 
 

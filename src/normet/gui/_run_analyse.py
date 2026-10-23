@@ -476,6 +476,64 @@ class AnalyseRunMixin(QMainWindow):
         self._log_history("trend", self._trend_name)
         log.info("Segmented trend finished (%s)", self._trend_name)
 
+    def _run_unc(self) -> None:
+        if not self._check_model():
+            return
+        if self._is_chronos():
+            self.notify(
+                "Not available for chronos-2: its zero-shot forecasts carry no "
+                "model form to vary, and the attribution needs several members "
+                "each fitted to the record. Train with flaml or lightgbm.",
+                key="need-model",
+            )
+            return
+        from normet import decompose_uncertainty
+
+        variables_resample = self._selected_norm_vars() or None
+        cfg = (
+            {"time_budget": self.budget_spin.value()}
+            if self.unc_backend.currentText() == "flaml"
+            else {"n_trials": self.budget_spin.value()}
+        )
+        self.runner.submit(
+            "uncertainty decomposition",
+            decompose_uncertainty,
+            self._unc_done,
+            self._show_error,
+            self.df_raw,
+            self.target_combo.currentText(),
+            backend=self.unc_backend.currentText(),
+            covariates=self.trained_features + list(TIME_VARS),
+            variables_resample=variables_resample,
+            model_config=cfg,
+            n_samples=self.unc_samples.value(),
+            n_models=self.unc_models.value(),
+            seed=self.seed_spin.value(),
+            n_cores=self._n_cores(self.norm_cores),
+            verbose=True,
+        )
+
+    def _unc_done(self, result: Any) -> None:
+        from . import _uncertainty
+
+        self._unc_raw = result
+        self.results["uncertainty"] = result.frame()  # the tab's light, export and session
+        summary = result.summary()
+        # The run's own numbers, read off the result: a restored session re-shows
+        # the saved run under its own settings, whatever the panel stands at now.
+        name = f"{result.target} ({result.n_models} members x {result.n_weather_draws} met draws)"
+        self.tab_unc.show_result(
+            result.plot(),
+            verdict=_uncertainty.verdict(result, name),
+            lines=list(result.notes),
+            header=list(summary.columns),
+            rows=[list(r) for r in summary.itertuples(index=False, name=None)],
+        )
+        self.tabs.setCurrentWidget(self.tab_unc)
+        self.statusBar().showMessage("Uncertainty decomposition done.")
+        self._log_history("uncertainty", f"n_models={self.unc_models.value()}")
+        log.info("Uncertainty decomposition finished (%s)", result)
+
     def _run_rolling(self) -> None:
         if not self._check_model():
             return
