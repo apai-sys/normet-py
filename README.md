@@ -71,6 +71,7 @@
 | `nm.Chronos2Estimator` | Zero-shot de-weathering, counterfactuals and quantiles with the Chronos-2 foundation model — **optional**, needs `normet[foundation]` |
 | `nm.calibrate_quantiles` | Quantile calibration for the zero-shot band: per-level conformal half-width thresholds on a rolling hold-out of forecast blocks, with a cross-validated coverage table; `counterfactual(..., calibrated=True)` takes the band through it — **optional**, needs `normet[foundation]` |
 | `nm.ChronosEmbedder` | 768-D station embeddings describing each site's dynamics — **optional**, needs `normet[foundation]` |
+| `nm.silhouette_curve` / `nm.embedding_projection` / `nm.plot_embedding_diagnostics` | Diagnostics for choosing how to use site embeddings — the silhouette against the number of groups, a 2-D projection, and the two-panel figure. No cluster labels, no recommended k — **optional**, needs `scikit-learn` for the curve |
 | `nm.make_run` / `nm.save_run` / `nm.generate_html_report` | Provenance tracking and auto-generated HTML/Markdown run reports |
 | `nm.make_memory` | On-disk caching for expensive pipelines |
 | `normet.io` | ERA5, EEA, DEFRA, OpenAQ data adapters |

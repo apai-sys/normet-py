@@ -2,6 +2,11 @@
 
 from .calibration import CalibratedEstimator, QuantileCalibration, calibrate_quantiles
 from .chronos import ChronosEmbedder
+from .embedding_diagnostics import (
+    embedding_projection,
+    plot_embedding_diagnostics,
+    silhouette_curve,
+)
 from .estimator import (
     CHRONOS_BACKEND,
     CHRONOS_DEFAULT_SAMPLES,
@@ -25,6 +30,9 @@ __all__ = [
     "QuantileCalibration",
     "add_calendar_covariates",
     "calibrate_quantiles",
+    "embedding_projection",
+    "plot_embedding_diagnostics",
+    "silhouette_curve",
     "Chronos2Estimator",
     "CounterfactualResult",
     "InsufficientContextError",
