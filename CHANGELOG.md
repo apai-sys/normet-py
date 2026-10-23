@@ -899,6 +899,15 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - **GDAS1 met download** (`normet.io.gdas`): `fetch_gdas1` / `gdas1_filenames`
   stream and cache the weekly GDAS1 (1°) ARL files from NOAA ARL's archive so
   `run_back_trajectories` can run when no local meteorology is available.
+- **The EEA adapter fetches again.** `fetch_eea_data` scraped the Discomap
+  FME endpoint, which the agency has since closed behind HTTP Basic
+  authentication: every call answered `401` (observed 2026-10-23, with or
+  without query parameters). It now queries EEA's official Parquet download
+  service — same country/pollutant/year interface, no key — verified against
+  the live service. Reading the answer needs `pyarrow`, added to the
+  `[data]` extra; the service caps one synchronous answer, so the adapter
+  asks one calendar month at a time and concatenates. The response contract
+  follows the service; see *Changed (breaking)* below.
 
 ### Changed (breaking)
 - **`pandas>=2.0`** (was `>=1.5`), for `format="mixed"` in
@@ -932,6 +941,15 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   `[xarray]` extra (and `xarray`/`netCDF4` from `[all]`). ERA5 meteorology is
   now fetched as pre-interpolated single-point time-series via
   `fetch_era5_timeseries`, which needs only `cdsapi` — no `xarray`/`netCDF4`.
+- **`fetch_eea_data`'s response follows the EEA Parquet service** (see
+  Fixed). `site` is now the reporting sampling-point id
+  (`"GB/GB_SamplingPoint_65449"`), not the legacy `GB0001A`-style code; the
+  columns are `[date, site, country, pollutant, value, unit, aggregation,
+  validity]` — latitude and longitude are gone, as the service does not
+  report them; `station=` filters identifiers by case-insensitive substring
+  (client side — the service has no station parameter); the service's `-99`
+  missing sentinel becomes `NaN`; and the `output=` parameter is dropped,
+  having configured nothing but the retired FME transport.
 
 ### Fixed
 - **Lag analysis silently skipped pre-whitening on statsmodels 0.15.** The
