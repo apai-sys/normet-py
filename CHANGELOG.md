@@ -451,6 +451,13 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   far the weights and the effect move when each donor is dropped). 'Placebo in
   space' also reports Abadie's RMSPE-ratio test (`rmspe_ratio_test`): the
   treated unit's post/pre RMSPE ratio, its rank and its p-value.
+- **Model tab: the holdout on the probabilistic scale** — every trained model's tab now
+  carries the point forecast's CRPS reference, `sqrt(pi/2) x MAE` on the held-out rows
+  (`crps_observed`): the score a spread forecast must beat to be worth its spread. The
+  Chronos-2 tab adds a quantile backtest — one anchored forecast of the last horizon at
+  the 10/50/90 levels, scored with `crps_from_quantiles` against the observed tail, the
+  median's point reference and the pinball loss at each level (`pinball_loss`), with a
+  line saying whether the band beats its own median's reference.
 
 ### Changed
 - **`rolling` names its windows `window_01`, `window_02`, …** (was

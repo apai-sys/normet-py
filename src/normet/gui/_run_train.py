@@ -8,6 +8,7 @@ zero-shot check).  Mixed into :class:`~.main_window.MainWindow`.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 import pandas as pd
 from PySide6.QtWidgets import QMainWindow
@@ -24,6 +25,77 @@ log = logging.getLogger(__name__)
 #: modStats' columns and subsets, as the Model tab's table names them.
 _STATS_HEADER = {"set": "Subset", "p_level": "Significance"}
 _STATS_SET = {"training": "Training", "testing": "Testing", "all": "All"}
+
+#: The levels the Chronos-2 Model-tab backtest forecasts and scores. The middle
+#: one doubles as the point forecast whose CRPS reference the band must beat.
+_BACKTEST_Q = (0.1, 0.5, 0.9)
+
+
+def crps_reference(obs: Any, pred: Any) -> float | None:
+    """The point forecast's CRPS reference (``sqrt(pi/2)`` x its MAE), or None
+    where it cannot be read. A spread forecast earns its spread only by scoring
+    below this: the number puts a point model on the probabilistic scale the
+    CRPS measures on."""
+    try:
+        from normet.analysis import crps_observed
+
+        return float(crps_observed(pred, obs))
+    except Exception:
+        log.exception("crps_observed failed")
+        return None
+
+
+def quantile_backtest(estimator: Any, df_prep: pd.DataFrame) -> tuple[list[list[str]], str] | None:
+    """Score the estimator's quantile forecast of the last horizon against the
+    observed tail, as the Chronos-2 Model tab shows it: the band's CRPS, the
+    median's point reference, and the pinball loss at each level.
+
+    The zero-shot model has no held-out parity plot, so this stands in for one:
+    one anchored forecast over the last ``prediction_length`` steps, scored as
+    a distribution rather than a point. A single window is thin evidence, and
+    the line says so by naming its length; it is the Model tab's quick check,
+    not the backtest a paper would quote. None where the record is too short or
+    the forecast or scoring fails (logged).
+    """
+    try:
+        from normet.analysis import crps_from_quantiles, crps_observed, pinball_loss
+
+        indexed = _chronos.to_indexed_frame(df_prep)
+        horizon = int(estimator.prediction_length)
+        if len(indexed) <= int(estimator.context_length) + horizon:
+            return None
+        qf = estimator.predict_quantiles(
+            indexed,
+            "value",
+            anchor=indexed.index[-horizon],
+            horizon=horizon,
+            quantiles=list(_BACKTEST_Q),
+        )
+        obs = indexed.loc[qf.index, "value"]
+        crps = crps_from_quantiles(qf.to_numpy(dtype=float), obs, quantiles=list(_BACKTEST_Q))
+        med_col = f"q{_BACKTEST_Q[1]}"
+        ref = crps_observed(qf[med_col], obs)
+        rows = [
+            ["Quantile backtest — CRPS", f"{crps:.3f}"],
+            ["Quantile backtest — point reference", f"{ref:.3f}"],
+        ] + [
+            [f"Pinball loss, q{q}", f"{pinball_loss(qf[f'q{q}'], obs, q):.3f}"] for q in _BACKTEST_Q
+        ]
+        n = len(qf)
+        if crps <= ref:
+            line = (
+                f"Over the last {n} steps the band's CRPS {crps:.3f} beats the median's "
+                f"point reference {ref:.3f} — the spread earns its keep."
+            )
+        else:
+            line = (
+                f"Over the last {n} steps the band's CRPS {crps:.3f} does not beat the "
+                f"median's point reference {ref:.3f} — the spread costs more than it tells."
+            )
+        return rows, line
+    except Exception:
+        log.exception("quantile backtest failed")
+        return None
 
 
 class TrainRunMixin(QMainWindow):
@@ -107,7 +179,10 @@ class TrainRunMixin(QMainWindow):
         There is no parity plot or feature importance to show: nothing was
         fitted and there is no held-out set. The covariate-sensitivity
         diagnostic answers the question those plots exist to answer — is this
-        model's output driven by meteorology, or is it autoregressing?
+        model's output driven by meteorology, or is it autoregressing? — and
+        the quantile backtest scores its forecast of the last horizon as a
+        distribution (CRPS against the median's point reference, pinball per
+        level), the closest thing to a holdout a zero-shot model has here.
         """
         import matplotlib.pyplot as plt
 
@@ -143,14 +218,23 @@ class TrainRunMixin(QMainWindow):
         )
         ax.axis("off")
 
+        lines = [
+            f"Checkpoint: {est.model_name}   |   device: {est.device}   |   "
+            f"context: {est.context_length} h   |   horizon: {est.prediction_length} h",
+            f"Covariates: {len(met)} met + 6 calendar   |   rows: {len(self.df_prep):,}",
+        ]
+        # The zero-shot model has no held-out parity plot: its stand-in is a
+        # quantile forecast of the last horizon, scored as a distribution.
+        bt = quantile_backtest(est, self.df_prep)
+        if bt is not None:
+            if header is None:
+                header, rows = ["Diagnostic", "Value"], []
+            rows = rows + bt[0]
+            lines.append(bt[1])
         self.tab_model.show_result(
             fig,
             verdict=verdict,
-            lines=[
-                f"Checkpoint: {est.model_name}   |   device: {est.device}   |   "
-                f"context: {est.context_length} h   |   horizon: {est.prediction_length} h",
-                f"Covariates: {len(met)} met + 6 calendar   |   rows: {len(self.df_prep):,}",
-            ],
+            lines=lines,
             header=header,
             rows=rows,
         )
@@ -313,12 +397,21 @@ class TrainRunMixin(QMainWindow):
             )
 
         backend = getattr(self.model, "backend", "?")
+        lines = [
+            f"Backend: {backend}   |   features: {len(self.trained_features)}   |   rows: {len(self.df_prep):,}"
+        ]
+        # The holdout's point forecast on the probabilistic scale: this is the
+        # CRPS any spread forecast here would later have to beat.
+        ref = crps_reference(obs, pred)
+        if ref is not None:
+            lines.append(
+                f"The point forecast's CRPS reference: {ref:.2f} — a spread forecast "
+                "must beat this to be worth its spread."
+            )
         self.tab_model.show_result(
             fig,
             verdict=verdict,
-            lines=[
-                f"Backend: {backend}   |   features: {len(self.trained_features)}   |   rows: {len(self.df_prep):,}"
-            ],
+            lines=lines,
             header=header,
             rows=rows,
             own_words=True,
