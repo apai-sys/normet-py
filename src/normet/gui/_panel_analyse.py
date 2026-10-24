@@ -28,6 +28,7 @@ from ._constants import MET_DEFAULTS, TIME_VARS
 from ._lists import ALL_TIP, _checked_items, _toggle_all
 from ._widgets import (
     NoWheelComboBox,
+    NoWheelDoubleSpinBox,
     NoWheelSpinBox,
     hint_label,
     run_button,
@@ -288,6 +289,88 @@ class AnalysePanelMixin(QMainWindow):
         never at the box's build."""
         if value > 1 and self.trend_series.currentText().startswith("emission"):
             self.trend_series.setCurrentText("long-term trend (separated)")
+
+    def _build_events_box(self) -> QGroupBox:
+        """The event windows of a series: per-timestamp anomaly scores, and
+        the consecutive stretches above a threshold flagged as events."""
+        box = QGroupBox("Events & anomalies")
+        ef = QFormLayout(box)
+        ef.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        ef.addRow(
+            hint_label(
+                "Scores every timestamp for how far it strays from the record's "
+                "normal behaviour, then flags the consecutive stretches above a "
+                "threshold -- the smoke episodes, the plume events. The scores "
+                "and the flagged windows land on the Events tab."
+            )
+        )
+        self.events_series = NoWheelComboBox()
+        self.events_series.addItems(
+            [
+                "emission part (emi_total)",
+                "long-term trend (separated)",
+                "meteorology part (met_total)",
+                "observed target",
+            ]
+        )
+        self.events_series.setToolTip(
+            "Which series to score. The decomposition's parts need a "
+            "decomposition first; the observed target only the model.\n"
+            "Anomalies of the emission part are departures from the "
+            "meteorologically normal -- events the weather did not cause."
+        )
+        ef.addRow("Series", self.events_series)
+        self.events_method = NoWheelComboBox()
+        self.events_method.addItems(["iqr", "isolation", "stl_residual"])
+        self.events_method.setToolTip(
+            "iqr: |value - median| / IQR, the robust univariate score; the "
+            "threshold below is in multiples of it.\n"
+            "isolation: an IsolationForest over the value and its lags, which "
+            "catches shapes a univariate score cannot -- a spike train, a "
+            "level shift. It scores against its own boundary: the threshold "
+            "row does not apply.\n"
+            "stl_residual: the score of the seasonal-decomposition residual -- "
+            "what stands out against the record's own cycle, not against its "
+            "whole distribution."
+        )
+        ef.addRow("Method", self.events_method)
+        self.events_k = NoWheelDoubleSpinBox()
+        self.events_k.setRange(1.0, 10.0)
+        self.events_k.setSingleStep(0.5)
+        self.events_k.setValue(3.0)
+        self.events_k.setToolTip(
+            "The threshold, in multiples of the IQR (of the residual IQR under "
+            "stl_residual): 3 flags what sits beyond median + 3*IQR.\n"
+            "Lower flags more; on an autocorrelated hourly record even k=3 "
+            "flags the tails of ordinary weather -- raise it, or raise the "
+            "minimum length, until only the episodes remain."
+        )
+        ef.addRow("Threshold k", self.events_k)
+        self.events_min_len = NoWheelSpinBox()
+        self.events_min_len.setRange(1, 240)
+        self.events_min_len.setValue(3)
+        self.events_min_len.setToolTip(
+            "Shortest flagged stretch, in steps of the record (hours for an "
+            "hourly one). 1 keeps single-step spikes; 3 reads as episodes "
+            "rather than instrument flickers."
+        )
+        ef.addRow("Min length", self.events_min_len)
+        self.events_button = run_button(
+            "▶  Find events",
+            "Score every timestamp and flag the consecutive stretches above "
+            "the threshold. iqr is instant; isolation and stl_residual fit a "
+            "model over the record first and take a few seconds more.",
+        )
+        self.events_button.clicked.connect(self._run_events)
+        self.events_method.currentTextChanged.connect(self._events_method_changed)
+        ef.addRow(self.events_button)
+        return box
+
+    def _events_method_changed(self, method: str) -> None:
+        """The forest scores against its own decision boundary: the k row has
+        nothing to say under isolation, so it goes grey rather than sit
+        there looking applied."""
+        self.events_k.setEnabled(method != "isolation")
 
     def _build_unc_box(self) -> QGroupBox:
         """The spread's sources: weather, model form, their interaction.

@@ -315,6 +315,11 @@ class ShellMixin(QMainWindow):
             "and which p stands for it."
         )
         self.tabs.addTab(self.tab_trend, "Trend")
+        self.tab_events = CanvasTab(
+            "Run the event search to see it here — every timestamp's anomaly "
+            "score with the flagged windows shaded, and the event table."
+        )
+        self.tabs.addTab(self.tab_events, "Events")
         self.tab_unc = CanvasTab(
             "Run the uncertainty decomposition to see where the band's spread comes "
             "from -- met resampling, the model form, and the two's interaction, each "
