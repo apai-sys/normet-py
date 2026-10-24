@@ -19,8 +19,10 @@ again:
 - sites are identified by the reporting sampling-point id
   (``"GB/GB_SamplingPoint_65449"``), not by the FME-era station codes
   (``GB0001A``), and the response carries no latitude/longitude;
-- missing observations arrive as the numeric sentinel ``-99``, converted to
-  ``NaN`` here before the frame is returned.
+- missing observations arrive as a numeric sentinel, converted to ``NaN`` here
+  before the frame is returned: the bulk service writes ``-99``, the
+  per-station Parquet blobs ``-999`` (measured on DEUB044's NO2 record,
+  2026-10-24: 2,037 of its 26,304 rows, every one flagged invalid).
 
 The service answers in Parquet, so reading it needs ``pyarrow`` (carried by
 the ``[data]`` extra).
@@ -65,6 +67,11 @@ EEA_POLLUTANT_CODES = {
 }
 
 _NOTATION_BY_CODE = {code: name for name, code in EEA_POLLUTANT_CODES.items()}
+
+#: The service's "no measurement" sentinels: the bulk download writes -99, the
+#: per-station Parquet blobs -999 (both measured; see :func:`_tidy`).
+_MISSING_BULK = -99.0
+_MISSING_BLOB = -999.0
 
 _DOWNLOAD_API = "https://eeadmz1-downloads-api-appservice.azurewebsites.net/ParquetFile/dynamic"
 
@@ -120,9 +127,11 @@ def _tidy(raw: pd.DataFrame, country: str) -> pd.DataFrame:
     becomes the notation that names it, where one is known.
     """
     values = pd.to_numeric(raw["Value"], errors="coerce").astype(float)
-    # -99 is EEA's sentinel for "no measurement" (a reporting convention, not
-    # a concentration); left as a number it would poison every mean.
-    values = values.mask(values == -99.0)
+    # Two sentinels mean "no measurement": the bulk service writes -99, the
+    # per-station Parquet blobs -999 (measured on DEUB044's NO2 record,
+    # 2026-10-24: 2,037 of its 26,304 rows, every one flagged invalid). Left as
+    # numbers they would poison every mean; a real concentration is never -99.
+    values = values.mask(values.isin((_MISSING_BULK, _MISSING_BLOB)))
     return pd.DataFrame(
         {
             "date": pd.to_datetime(raw["Start"], utc=True, errors="coerce"),
