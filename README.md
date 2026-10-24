@@ -633,12 +633,14 @@ width on a white page, leaving the figure on its tab as it was.
 model-ready dataset without leaving the app: pick a network — the six UK
 networks (AURN, AQE, SAQN, WAQN, NI, LMAM), the EEA reporting network for
 Europe (country code, no key), or OpenAQ for most of the world (free API
-key) — then browse/search its stations by the pollutants they measure or
-official site code (e.g. "MAN3" for Manchester Piccadilly) or pick one on
-the map of them, choose a date range, and fetch the hourly measurements
-together with ERA5-derived meteorology from Open-Meteo (no API key;
-Copernicus CDS optional). The
-merged hourly table can be saved as CSV or sent straight into Step 1.
+key) — then find its stations by the pollutants they measure and pick one,
+or several, by name, by official site code (e.g. "MAN3" for Manchester
+Piccadilly) or on the map: a click, a box drawn around them, or ⌘/Ctrl-click
+to add. The map sits on OpenStreetMap or Esri tiles, zooms and pans. Choose
+a date range and fetch the hourly measurements together with ERA5-derived
+meteorology from Open-Meteo (no API key; Copernicus CDS optional); several
+stations become one panel-shaped table with a site column. The merged table
+can be saved as CSV or sent straight into Step 1.
 
 **SCM Studio** (Analysis → Synthetic Control, or the 🧪 toolbar button) — the
 counterfactual workflow on panel data: map date/unit/outcome columns, pick the

@@ -24,6 +24,19 @@ def qapp():
     yield app
 
 
+@pytest.fixture(autouse=True)
+def _no_map_tiles(monkeypatch):
+    """No GUI test may reach the OpenStreetMap tile server.
+
+    The layer has its own tests (``test_basemap.py``); what these exercise is the
+    window's wiring, which must not depend on the network being up -- the map
+    falls back to its plain grid exactly as it does offline.
+    """
+    from normet.gui import _basemap
+
+    monkeypatch.setattr(_basemap, "tile_mosaic", lambda *args, **kwargs: None)
+
+
 def test_main_window_example_flow(qapp):
     from normet.gui.main_window import MainWindow
 
@@ -303,13 +316,16 @@ def _click_event(map_widget, lon, lat):
     """The mouse event a click at (*lon*, *lat*) produces, as a press+release pair."""
     from types import SimpleNamespace
 
-    x, y = map_widget.ax.transData.transform((lon, lat))
+    from normet.gui._basemap import mercator
+
+    x, y = map_widget.ax.transData.transform((lon, float(mercator(lat))))
     return SimpleNamespace(
         x=float(x),
         y=float(y),
         button=1,
         inaxes=map_widget.ax,
         xdata=float(lon),
+        ydata=float(mercator(lat)),
         canvas=map_widget.canvas,
     )
 
@@ -330,15 +346,15 @@ def test_station_map_click_selects_the_station(qapp):
         win.station_map._pressed(event)
         win.station_map._released(event)
 
-        assert win._selected_key() == 2
+        assert win._selected_keys() == [2]
         assert win.station_table.currentRow() == 2
         assert "Glasgow Kerbside" in win.station_hint.text()
         assert win.fetch_btn.isEnabled()
-        assert win.station_map._selected == 2  # the red ring follows the pick
+        assert win.station_map._selected == [2]  # the red ring follows the pick
 
         # A row click rings the same station on the map.
         win.station_table.selectRow(0)
-        assert win.station_map._selected == 0
+        assert win.station_map._selected == [0]
     finally:
         win.close()
 
@@ -366,6 +382,125 @@ def test_station_map_picks_only_near_a_point(qapp):
         w.deleteLater()
 
 
+def _event_at(widget, lon, lat):
+    from types import SimpleNamespace
+
+    from normet.gui._basemap import mercator
+
+    x, y = widget.ax.transData.transform((lon, float(mercator(lat))))
+    return SimpleNamespace(
+        x=float(x),
+        y=float(y),
+        button=1,
+        inaxes=widget.ax,
+        xdata=float(lon),
+        ydata=float(mercator(lat)),
+        canvas=widget.canvas,
+    )
+
+
+def test_station_map_box_selects_the_stations_inside(qapp):
+    """Dragging a box selects every station in it -- several at once, in the
+    map and in the table -- and the selection drives a multi-station fetch."""
+    from normet.gui.data_window import DataWindow
+
+    win = DataWindow()
+    win.resize(1100, 800)
+    win.show()
+    try:
+        df = _four_stations()
+        win.stations = df
+        win._fill_station_table(df)
+        # A box across the two northern stations (Glasgow 55.86 and Belfast 54.60).
+        start = _event_at(win.station_map, -6.5, 54.3)
+        end = _event_at(win.station_map, -3.5, 56.2)
+        win.station_map._pressed(start)
+        win.station_map._moved(end)
+        win.station_map._released(end)
+
+        assert win._selected_keys() == [2, 3]
+        assert win.station_map._selected == [2, 3]
+        assert sorted({i.row() for i in win.station_table.selectedItems()}) == [2, 3]
+        assert "2 stations selected" in win.station_hint.text()
+        assert win.fetch_btn.isEnabled()
+
+        # A drag that ends on empty space selects nothing.
+        empty = _event_at(win.station_map, 5.0, 40.0)
+        win.station_map._pressed(empty)
+        win.station_map._moved(_event_at(win.station_map, 7.0, 41.0))
+        win.station_map._released(_event_at(win.station_map, 7.0, 41.0))
+        assert win._selected_keys() == []
+    finally:
+        win.close()
+
+
+def test_station_map_adds_to_the_selection_with_command(qapp, monkeypatch):
+    """Command/Control-click adds a station, and clicking it again takes it out."""
+    from normet.gui.data_window import DataWindow
+
+    win = DataWindow()
+    win.resize(1100, 800)
+    win.show()
+    try:
+        df = _four_stations()
+        win.stations = df
+        win._fill_station_table(df)
+        win.station_map._additive = lambda: True  # what holding Command/Control means
+        for key in (2, 3, 2):
+            event = _event_at(win.station_map, df.loc[key, "lon"], df.loc[key, "lat"])
+            win.station_map._pressed(event)
+            win.station_map._released(event)
+        assert win._selected_keys() == [3]
+        assert win.station_map._selected == [3]
+    finally:
+        win.close()
+
+
+def test_fetch_many_stacks_stations_and_skips_failures(monkeypatch):
+    """Several stations become one panel-shaped table, and one closed station
+    does not take the batch down with it."""
+    import pandas as pd
+    import pytest
+
+    from normet.gui import data_window as dw
+
+    def fake(st, *args):
+        if st["code"] == "BAD":
+            raise RuntimeError("no data for that range")
+        return pd.DataFrame(
+            {
+                "date": pd.to_datetime(["2020-01-01 01:00", "2020-01-01 00:00"]),
+                "site": [st["site"]] * 2,
+                "NO2": [2.0, 1.0],
+            }
+        )
+
+    monkeypatch.setattr(dw, "_fetch_and_merge", fake)
+    sites = [
+        {"site": "Bravo", "code": "B"},
+        {"site": "Alpha", "code": "A"},
+        {"site": "Gone", "code": "BAD"},
+    ]
+    out = dw._fetch_many(
+        sites, ["NO2"], "2020-01-01", "2020-01-02", dw.MET_OPEN_METEO, dw.PROV_UK, "aurn", "", None
+    )
+    assert out["site"].tolist() == ["Alpha", "Alpha", "Bravo", "Bravo"]
+    assert out["NO2"].tolist() == [1.0, 2.0, 1.0, 2.0]  # sorted by site, then date
+
+    with pytest.raises(RuntimeError, match="None of the 1 selected stations"):
+        dw._fetch_many(
+            [{"site": "Gone", "code": "BAD"}],
+            ["NO2"],
+            "2020-01-01",
+            "2020-01-02",
+            dw.MET_OPEN_METEO,
+            dw.PROV_UK,
+            "aurn",
+            "",
+            None,
+        )
+
+
 def test_station_map_shows_the_filtered_list(qapp):
     """The search narrows the map to the rows the table shows, and a network
     change empties it, so no point can select a station of another network."""
@@ -382,6 +517,41 @@ def test_station_map_shows_the_filtered_list(qapp):
         win.search_edit.clear()
         win.net_combo.setCurrentText(EEA_NETWORK)
         assert win.station_map._keys.size == 0
+    finally:
+        win.close()
+
+
+def test_station_map_draws_the_basemap_when_available(qapp, monkeypatch):
+    """With tiles the image sits behind the points at their extent and is
+    credited; when they cannot be had the scatter is all there is."""
+    import numpy as np
+
+    from normet.gui import _basemap
+    from normet.gui.data_window import DataWindow
+
+    image = np.full((512, 768, 3), 240, dtype=np.uint8)
+    extent = (0.0, 12.0, 40.0, 60.0)
+    monkeypatch.setattr(_basemap, "tile_mosaic", lambda *args, **kwargs: (image, extent))
+
+    win = DataWindow()
+    win.resize(1100, 800)
+    win.show()
+    try:
+        win.stations = _four_stations()
+        win._fill_station_table(win.stations)
+        win.station_map._load_basemap()  # what the deferred call does
+        bg = win.station_map._bg
+        assert bg.get_visible()
+        assert tuple(bg.get_extent()) == extent
+        assert win.station_map._credit.get_visible()  # attribution is a condition
+
+        # Offline: the same search, no tiles -- the points stay, the image goes.
+        monkeypatch.setattr(_basemap, "tile_mosaic", lambda *args, **kwargs: None)
+        win._fill_station_table(win.stations)
+        win.station_map._load_basemap()
+        assert not bg.get_visible()
+        assert not win.station_map._credit.get_visible()
+        assert win.station_map._points.get_offsets().shape[0] == 4
     finally:
         win.close()
 
