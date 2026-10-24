@@ -720,7 +720,10 @@ class CanvasTab(QWidget):
             "Draw the figure at this time step: each period's mean of every series\n"
             "(bands too). Only the figure changes; the result and its export do not."
         )
-        group(QLabel("Resolution"), combo)
+        if _time_index(data) is not None:
+            # Only a result with a time axis has periods to average; for the rest
+            # (a fold table) a selector with one usable entry is noise.
+            group(QLabel("Resolution"), combo)
         if self.bar_lead is not None or self.bar_tail:
             # The owner's controls too: a row that wraps where the window is narrow,
             # rather than one that holds the window wide.
