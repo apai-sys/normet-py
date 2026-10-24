@@ -10,7 +10,14 @@ Tabs
 ----
 Panel          — outcome by unit, treated highlighted; balance check.
 Fit            — observed vs. synthetic + effect path + donor weights
-                 (``scm_dashboard``) with ``scm_diagnostics`` verdict.
+                 (``scm_dashboard``) with the ``scm_diagnostics`` verdict and the
+                 pre-trend test of the same fit (``pre_trend_test``).
+Fit Checks     — the fit's inference at a glance: the pre-trend test with its
+                 event-study figure (``plot_event_study``), the conformal interval
+                 of the post-cutoff ATT (``conformal_effect_interval``) and the
+                 donor-weight stability (``loo_weight_stability``); once 'Placebo in
+                 space' has been run, Abadie's RMSPE-ratio test (``rmspe_ratio_test``)
+                 joins the Placebo Space tab.
 Placebo Space  — each donor treated as a pseudo-treated unit; permutation
                  p-value and placebo bands (``placebo_in_space``).
 Placebo Time   — fake earlier cutoffs; event-time bands (``placebo_in_time``).
@@ -56,6 +63,7 @@ from ._lists import ALL_TIP, _toggle_all
 from ._widgets import (
     CanvasTab,
     NoWheelComboBox,
+    NoWheelDoubleSpinBox,
     NoWheelSpinBox,
     hint_label,
     run_button,
@@ -146,6 +154,62 @@ def fit_verdict(diagnostics: dict, shuffled_r2: float | None = None) -> tuple[st
     )
 
 
+def _pre_trend_of(result: dict, cutoff_date: str, alpha: float = 0.05) -> Any:
+    """The pre-trend verdict of a finished fit, or None where it could not be
+    computed: the test reads only the fitted synthetic, so it costs one OLS."""
+    try:
+        from normet.causal import pre_trend_test
+
+        return pre_trend_test(result, cutoff_date, alpha=alpha)
+    except Exception:
+        log.exception("pre_trend_test failed")
+        return None
+
+
+def pre_trend_banner(verdict: str) -> tuple[str, str]:
+    """A pre-trend verdict as the window's banner: its traffic light and its words."""
+    head = verdict.split(":", 1)[0].strip()
+    if head == "ok":
+        return "ok", verdict
+    if head == "fail":
+        return "error", verdict
+    return "warn", verdict
+
+
+def conformal_banner(out: dict[str, float]) -> tuple[str, str]:
+    """A conformal interval as the window's banner: significant at 5 % or not.
+
+    One sentence on purpose: the banner's translator reads it sentence by sentence
+    where no template matches the whole, and a sentence beginning in a number is
+    not split from the one before it.
+    """
+    p = out["p_value"]
+    words = (
+        f"95 % conformal interval {out['low']:+.2f} to {out['high']:+.2f} "
+        f"(ATT = {out['att']:+.2f})."
+    )
+    if p <= 0.05:
+        return "ok", f"The average post-cutoff effect is significant (p = {p:.3f}): {words}"
+    return "warn", f"The average post-cutoff effect is not significant (p = {p:.3f}): {words}"
+
+
+def loo_banner(table: pd.DataFrame) -> tuple[str, str]:
+    """A leave-one-donor-out table as the window's banner: the worst held-out donor."""
+    if table is None or table.empty:
+        return (
+            "warn",
+            "Leave-one-donor-out needs at least three donors: each refit keeps the rest.",
+        )
+    worst = table.sort_values("max_abs_drift", ascending=False).iloc[0]
+    level = "ok" if float(worst["max_abs_drift"]) < 0.1 else "warn"
+    return (
+        level,
+        f"Dropping {worst['dropped_donor']} moves a single weight by "
+        f"{float(worst['max_abs_drift']):.3f} "
+        f"(mean {float(worst['mean_abs_drift']):.3f}).",
+    )
+
+
 def donor_layout(
     df: pd.DataFrame,
     unit_col: str,
@@ -212,6 +276,7 @@ class SCMWindow(QMainWindow):
         self._main_df: pd.DataFrame | None = None
         self.result: dict | None = None  # {"synthetic": df, "weights": ...}
         self.diagnostics: dict | None = None
+        self._last_design: dict | None = None
         self._tab_data: dict[int, pd.DataFrame] = {}
         self._updating = False
 
@@ -447,6 +512,39 @@ class SCMWindow(QMainWindow):
         self.placebo_time_btn.clicked.connect(self._run_placebo_time)
         inf.addRow(self.placebo_time_btn)
 
+        self.pt_alpha = NoWheelDoubleSpinBox()
+        self.pt_alpha.setRange(0.001, 0.5)
+        self.pt_alpha.setSingleStep(0.01)
+        self.pt_alpha.setDecimals(3)
+        self.pt_alpha.setValue(0.05)
+        self.pt_alpha.setToolTip("Significance level for the pre-trend slope test.")
+        inf.addRow("Pre-trend level", self.pt_alpha)
+        self.pretrend_btn = run_button(
+            "▶  Pre-trend + event study",
+            "Was the fit parallel before the intervention? A slope test on the\npre-cutoff residuals, with the effect path on the event-time axis.",
+        )
+        self.pretrend_btn.clicked.connect(self._run_pretrend)
+        inf.addRow(self.pretrend_btn)
+
+        self.conf_perm = NoWheelSpinBox()
+        self.conf_perm.setRange(100, 20_000)
+        self.conf_perm.setValue(1000)
+        self.conf_perm.setToolTip("Sub-samples for the conformal null distribution.")
+        inf.addRow("Conformal draws", self.conf_perm)
+        self.conf_btn = run_button(
+            "▶  Conformal interval",
+            "A finite-sample 95 % interval for the average post-cutoff effect\n(sub-sampling null, Chernozhukov, Wüthrich & Zhu 2021).",
+        )
+        self.conf_btn.clicked.connect(self._run_conformal)
+        inf.addRow(self.conf_btn)
+
+        self.loo_btn = run_button(
+            "▶  Leave-one-donor-out",
+            "Refit the control leaving out each donor in turn: how far the\nweights and the effect move when one donor drops.",
+        )
+        self.loo_btn.clicked.connect(self._run_loo)
+        inf.addRow(self.loo_btn)
+
         self.unc_method = NoWheelComboBox()
         self.unc_method.addItems(["jackknife", "bootstrap"])
         self.unc_method.setToolTip(
@@ -476,6 +574,9 @@ class SCMWindow(QMainWindow):
             self.fit_btn,
             self.placebo_space_btn,
             self.placebo_time_btn,
+            self.pretrend_btn,
+            self.conf_btn,
+            self.loo_btn,
             self.unc_btn,
             self.all_btn,
             self.spatial_btn,
@@ -517,6 +618,11 @@ class SCMWindow(QMainWindow):
         self.tabs.addTab(self.tab_panel, "Panel")
         self.tab_fit = CanvasTab("Run the synthetic control to see observed vs. synthetic here.")
         self.tabs.addTab(self.tab_fit, "Fit")
+        self.tab_checks = CanvasTab(
+            "Run 'Pre-trend + event study', 'Conformal interval' or 'Leave-one-donor-out' "
+            "to inspect the fit's inference here."
+        )
+        self.tabs.addTab(self.tab_checks, "Fit Checks")
         self.tab_pspace = CanvasTab(
             "Run 'Placebo in space' to test the effect against the donor distribution."
         )
@@ -851,6 +957,11 @@ class SCMWindow(QMainWindow):
         is_bayes = self.backend_combo.currentText() == "bayesian"
         for b in (self.placebo_space_btn, self.placebo_time_btn, self.unc_btn, self.all_btn):
             b.setEnabled(not busy and has_df and not is_bayes)
+        # These read the finished fit, or refit the classic SCM themselves: the
+        # bayesian backend gives its own credible bands, but all three still work.
+        self.pretrend_btn.setEnabled(not busy and has_df and self.result is not None)
+        self.conf_btn.setEnabled(not busy and has_df and self.result is not None)
+        self.loo_btn.setEnabled(not busy and has_df)
         self.spatial_btn.setEnabled(
             not busy
             and has_df
@@ -1025,6 +1136,18 @@ class SCMWindow(QMainWindow):
                     "Its donor weights balance the ridge model's residuals only; they do not "
                     "say which donors the synthetic unit is made of.",
                 )
+            # The fit's own parallel-trends check: scm_diagnostics already ran
+            # pre_trend_test on the fitted synthetic and keeps it under "pre_trend".
+            pre_trend = self.diagnostics.get("pre_trend")
+            if pre_trend:
+                rows.extend(
+                    [
+                        ["Pre-trend slope (per step)", f"{pre_trend['slope']:+.4f}"],
+                        ["Pre-trend slope p-value", f"{pre_trend['p_slope']:.4f}"],
+                        ["Pre-trend RMPE drift", f"{pre_trend['rmpe_drift']:.3f}"],
+                    ]
+                )
+                lines.append(pre_trend["verdict"])
 
         self.tab_fit.show_result(
             fig, verdict=verdict, lines=lines, header=header, rows=rows, own_words=True
@@ -1046,7 +1169,7 @@ class SCMWindow(QMainWindow):
         kwargs = self._infer_kwargs()
 
         def job():
-            from normet.causal import effect_bands_space, placebo_in_space
+            from normet.causal import effect_bands_space, placebo_in_space, rmspe_ratio_test
 
             out = placebo_in_space(
                 design["df"],
@@ -1059,13 +1182,20 @@ class SCMWindow(QMainWindow):
                 **kwargs,
             )
             bands = effect_bands_space(out, level=0.95, method="quantile")
-            return out, bands
+            # Abadie's RMSPE-ratio test is arithmetic on the same effects: it rides
+            # on this run instead of taking its own.
+            try:
+                rmspe = rmspe_ratio_test(out, design["cutoff_date"])
+            except Exception:
+                log.exception("rmspe_ratio_test failed")
+                rmspe = None
+            return out, bands, rmspe
 
         self._last_design = design
         self.runner.submit("placebo in space", job, self._placebo_space_done, self._show_error)
 
     def _placebo_space_done(self, payload) -> None:
-        out, bands = payload
+        out, bands, rmspe = payload
         design = self._last_design
         cutoff = pd.Timestamp(design["cutoff_date"])
         import matplotlib.pyplot as plt
@@ -1108,9 +1238,200 @@ class SCMWindow(QMainWindow):
                 f"Effect is not distinguishable from placebo variation (p = {p:.3f}).",
             )
 
-        self.tab_pspace.show_result(fig, verdict=verdict)
+        lines = None
+        if rmspe is not None:
+            n = len(rmspe["placebo_ratios"])
+            lines = [
+                "Abadie's RMSPE-ratio test (post/pre RMSPE): treated "
+                f"{rmspe['treated_ratio']:.2f}, rank {rmspe['rank']} of {n + 1}, "
+                f"p = {rmspe['p_value']:.3f}."
+            ]
+        self.tab_pspace.show_result(fig, verdict=verdict, lines=lines)
         self._show_tab(self.tab_pspace, bands)
         self.statusBar().showMessage("Placebo-in-space done.")
+
+    # ------------------------------------------------- fit checks (the fit's inference)
+    def _fit_or_none(self) -> dict | None:
+        """The finished fit and its design, or None with a dialog asking for a fit."""
+        if self.result is None or self._last_design is None:
+            QMessageBox.information(
+                self,
+                "No fit yet",
+                "Run the synthetic control first — these checks read its effect.",
+            )
+            return None
+        return self._last_design
+
+    def _run_pretrend(self) -> None:
+        design = self._fit_or_none()
+        if design is None:
+            return
+        alpha = self.pt_alpha.value()
+        result = self.result
+
+        def job():
+            return _pre_trend_of(result, design["cutoff_date"], alpha=alpha)
+
+        self.runner.submit("pre-trend test", job, self._pretrend_done, self._show_error)
+
+    def _pretrend_done(self, pre: Any) -> None:
+        design = self._last_design
+        if design is None or self.result is None:
+            return
+        fig: Any = None
+        try:
+            from normet.causal import plot_event_study
+
+            fig = plot_event_study(
+                self.result["synthetic"],
+                cutoff_date=pd.Timestamp(design["cutoff_date"]),
+                title=f"Event study — {design['treated_unit']}",
+            )
+        except Exception:
+            log.exception("plot_event_study failed")
+        if pre is None:
+            self.tab_checks.show_result(
+                fig,
+                verdict=(
+                    "warn",
+                    "The pre-trend test could not be computed for this fit "
+                    "(too few finite pre-period residuals).",
+                ),
+            )
+        else:
+            rows = [
+                ["Pre-period slope (per step)", f"{pre.slope:+.4f}"],
+                ["Slope p-value", f"{pre.p_slope:.4f}"],
+                ["RMPE drift (last third vs. first two)", f"{pre.rmpe_drift:.3f}"],
+                ["Pre-period points", pre.n_periods],
+            ]
+            self.tab_checks.show_result(
+                fig,
+                verdict=pre_trend_banner(pre.verdict),
+                header=["Statistic", "Value"],
+                rows=rows,
+                own_words=True,
+            )
+        self._show_tab(self.tab_checks, self.result.get("synthetic"))
+        self.statusBar().showMessage("Pre-trend done.")
+
+    def _run_conformal(self) -> None:
+        design = self._fit_or_none()
+        if design is None:
+            return
+        n_perm = self.conf_perm.value()
+        result = self.result
+
+        def job():
+            from normet.causal import conformal_effect_interval
+
+            return conformal_effect_interval(result, design["cutoff_date"], n_perm=n_perm)
+
+        self.runner.submit("conformal interval", job, self._conformal_done, self._show_error)
+
+    def _conformal_done(self, out: dict[str, float]) -> None:
+        import matplotlib.pyplot as plt
+
+        att, low, high = out["att"], out["low"], out["high"]
+        p = out["p_value"]
+        fig, ax = plt.subplots(figsize=(8, 2.2), layout="constrained")
+        ax.plot([low, high], [0.5, 0.5], color=S.MODELLED, lw=4, solid_capstyle="round")
+        ax.plot(att, 0.5, marker="o", ms=8, color=S.INK)
+        S.zero_line(ax)
+        ax.set_yticks([])
+        ax.set_title(f"Conformal interval for the average post-cutoff effect (p = {p:.3f})")
+        S.grid(ax)
+        rows = [
+            ["Mean effect (ATT)", f"{att:+.3f}"],
+            ["95 % conformal interval", f"{low:+.3f} to {high:+.3f}"],
+            ["p-value (H0: effect = 0)", f"{p:.3f}"],
+            ["Post-cutoff points", out["n_post"]],
+            ["Sub-samples", out["n_perm"]],
+        ]
+        self.tab_checks.show_result(
+            fig,
+            verdict=conformal_banner(out),
+            header=["Statistic", "Value"],
+            rows=rows,
+            own_words=True,
+        )
+        self._show_tab(
+            self.tab_checks,
+            pd.DataFrame(
+                {
+                    "statistic": ["att", "low", "high", "p_value", "n_post", "n_perm"],
+                    "value": [att, low, high, p, out["n_post"], out["n_perm"]],
+                }
+            ),
+        )
+        self.statusBar().showMessage("Conformal interval done.")
+
+    def _run_loo(self) -> None:
+        design = self._design()
+        if design is None:
+            return
+
+        def job():
+            from normet.causal import loo_weight_stability
+
+            return loo_weight_stability(
+                design["df"],
+                date_col=design["date_col"],
+                unit_col=design["unit_col"],
+                outcome_col=design["outcome_col"],
+                treated_unit=design["treated_unit"],
+                cutoff_date=design["cutoff_date"],
+                donors=design["donors"],
+            )
+
+        self.runner.submit("leave-one-donor-out", job, self._loo_done, self._show_error)
+
+    def _loo_done(self, table: pd.DataFrame) -> None:
+        if table is not None and not table.empty:
+            import matplotlib.pyplot as plt
+
+            t = table.sort_values("mean_abs_drift", ascending=True)
+            fig, ax = plt.subplots(figsize=(8, max(3, 0.25 * len(t) + 1)), layout="constrained")
+            y = np.arange(len(t))
+            ax.barh(
+                y,
+                t["mean_abs_drift"].to_numpy(dtype=float),
+                color=S.MODELLED,
+                alpha=0.75,
+                label="mean |Δw|",
+            )
+            ax.scatter(
+                t["max_abs_drift"].to_numpy(dtype=float),
+                y,
+                marker="|",
+                s=24,
+                color=S.INK,
+                label="max |Δw|",
+            )
+            ax.set_yticks(y)
+            ax.set_yticklabels(t["dropped_donor"].astype(str), fontsize=7)
+            ax.set_xlabel("Weight drift (absolute change in the remaining donors' weights)")
+            ax.set_title("Leave-one-donor-out: weight drift by held-out donor")
+            S.legend(ax)
+            S.grid(ax)
+            header = ["Donor left out", "Mean |Δw|", "Max |Δw|", "Effect shift (ATT)"]
+            rows = [
+                [
+                    str(r.dropped_donor),
+                    f"{r.mean_abs_drift:.3f}",
+                    f"{r.max_abs_drift:.3f}",
+                    f"{r.effect_shift:+.3f}",
+                ]
+                for r in table.sort_values("max_abs_drift", ascending=False).itertuples()
+            ]
+            self.tab_checks.show_result(
+                fig, verdict=loo_banner(table), header=header, rows=rows, own_words=True
+            )
+            self._show_tab(self.tab_checks, table)
+        else:
+            self.tab_checks.show_result(None, verdict=loo_banner(table))
+            self._show_tab(self.tab_checks)
+        self.statusBar().showMessage("Leave-one-donor-out done.")
 
     def _run_placebo_time(self) -> None:
         design = self._design()

@@ -1283,8 +1283,9 @@ The synthetic-control workflow takes a different input --- a long panel of many 
 welcome's example card. It is laid out as the main window is: the panel on the left,
 its pages chosen from a bar --- \tab{Data} (the panel data and its columns),
 \tab{Design}, \tab{Estimator}, \tab{Inference} --- result tabs on the right
-(\tab{Panel}, \tab{Fit}, \tab{Placebo Space}, \tab{Placebo Time}, \tab{Uncertainty},
-\tab{All Units}, \tab{Similarity}), and \emph{Export current tab data} above them. The
+(\tab{Panel}, \tab{Fit}, \tab{Fit Checks}, \tab{Placebo Space}, \tab{Placebo Time},
+\tab{Uncertainty}, \tab{All Units}, \tab{Similarity}), and \emph{Export current tab
+data} above them. The
 method is described in Section~\ref{sec:scmtheory}.
 
 This chapter's figures reproduce the ULEZ case study of the \nm{} paper: the London Ultra
@@ -1393,12 +1394,25 @@ should report the spread, not one number.
   \item[Run placebo in space] The \tab{Placebo Space} tab draws every donor's placebo
         effect in grey and the treated unit's in red, then the treated effect inside a
         95\,\% band of the placebos. Green at $p \le 0.05$, amber with ``borderline'' up to
-        0.15, amber otherwise.
+        0.15, amber otherwise. It also reports Abadie's RMSPE-ratio test: the treated
+        unit's post/pre RMSPE ratio, its rank among the placebos and its p-value.
   \item[Run placebo in time] Fake cutoffs every \emph{Placebo every} steps (7), each with
         at least \emph{Min pre-period} steps (30) before it. A fake post-period must fit
         before the true cutoff, so this needs a long pre-period; the tab says so when
         none fits. Green at $p \le 0.05$; when $p$ is the smallest the number of fake
         cutoffs allows, the verdict says so and suggests a smaller step.
+  \item[Run pre-trend + event study] Was the fit parallel before the intervention? A
+        slope test on the pre-cutoff residuals --- its slope, p-value and an RMPE drift
+        ratio, the fit's own parallel-trends check, which the \tab{Fit} tab reports too
+        --- and the effect path on the event-time axis: the pre-period points should
+        scatter about zero and the post-period should leave them.
+  \item[Run conformal interval] A finite-sample 95\,\% interval for the average
+        post-cutoff effect, built from a sub-sampling null distribution of the effect's
+        block means (Chernozhukov, W\"uthrich \& Zhu 2021); the number of sub-samples is
+        the \emph{Conformal draws} control. Green at $p \le 0.05$.
+  \item[Run leave-one-donor-out] The control is refit leaving out each donor in turn:
+        how far the remaining weights and the post-cutoff effect move when one donor
+        drops. A result carried by a single donor stands out here.
   \item[Uncertainty bands] Jackknife (leave each donor out) or bootstrap ($B$ refits,
         100 by default). The verdict gives the mean post-cutoff effect and on what
         share of post-cutoff dates the band excludes zero; green at half or more.
