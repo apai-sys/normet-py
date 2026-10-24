@@ -803,6 +803,7 @@ TEXTS.update(
         # -- Model ---------------------------------------------------------------------------
         "Good fit — test R² = {n0}.": "拟合良好——测试集 R² = {n0}。",
         "The normalisation results should be reliable.": "归一化结果应当可靠。",
+        "The point forecast's CRPS reference: {n0} — a spread forecast must beat this to be worth its spread.": "点预测的 CRPS 参考值：{n0}——带分布的预报须优于此值，才值得带上这个分布。",
         "Moderate fit — test R² = {n0}.": "拟合一般——测试集 R² = {n0}。",
         "Consider more features or a longer time budget.": "可考虑增加特征或延长时间预算。",
         "Poor fit — test R² = {n0}.": "拟合较差——测试集 R² = {n0}。",

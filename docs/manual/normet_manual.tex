@@ -990,7 +990,11 @@ is \code{modStats} for the training rows, the testing rows and all rows
 prediction, square, with the 1:1 line and, in its corner, the number of rows, the slope of
 predicted on observed (below 1: the extremes are pulled in) and the mean bias --- as a
 density of hexagons where the rows run to thousands; the bars are the model's feature
-importance (split counts for LightGBM).
+importance (split counts for LightGBM). Under the table, one line reads the point
+forecast's \emph{CRPS reference} --- $\sqrt{\pi/2}\cdot\mathrm{MAE}$ over the held-out
+rows, the point forecast's score on the scale of the continuous ranked probability score.
+A forecast that carries a spread scores its own CRPS, and only a score below this
+reference says the spread is worth carrying.
 
 \screenshot{ui_model.png}{MY1 trained with FLAML (LightGBM, 30~s budget, random split):
 on the 1,448 held-out hours $R^2 = 0.883$ and RMSE $= 8.66$~\ugm{}, against $0.976$ on
@@ -1015,6 +1019,14 @@ forecast's median when the future weather is shuffled, and that shift as a perce
 the prediction. The verdict is green at 5\,\% or more, amber from 1 to 5\,\% (the series is
 mostly carried by the target's own history) and red below 1\,\% (the model is
 autoregressing, and a de-weathered series from it would be meaningless).
+
+The table also carries a quantile backtest: the checkpoint forecasts the last horizon once
+at the 10/50/90 percentile levels, the band is scored against the observed tail by CRPS
+(the CDF interpolated through the three levels), and its median is scored as a point
+forecast ($\sqrt{\pi/2}\cdot\mathrm{MAE}$ again). The line under the table says whether the
+band beats its own median's reference --- whether the spread is worth carrying --- and the
+pinball losses break the score down by level. The line names the window it speaks for: one
+horizon is a quick check, not the backtest one would quote.
 
 \emph{Fine-tune Chronos-2} adapts the loaded checkpoint to the site's own record:
 \emph{lora} trains small adapters and leaves the base weights alone (it needs
