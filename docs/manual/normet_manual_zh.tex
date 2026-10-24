@@ -1154,8 +1154,16 @@ MY1 一样好，所以只有它的干预前 $R^2$ 不予解读。经典 SCM 根�
 到下次会话；更改它会重新读取已打开的文件。在脚本中，
 \code{nm.io.read\_time\_series(path, zone=\ldots)} 以同样的方式读表。
 
+% The Data Studio's figure is taller than half a page: started at the foot of a
+% page it is floated to a float page of its own, so the section opens a fresh one.
+\clearpage
 \section{数据工作室：空气质量监测网络与气象}\label{sec:datastudio}
 \emph{获取数据}（Ctrl+D）无需离开应用即可拼出一张可建模的表（图~\ref{fig:datastudio}）：
+\screenshot{ui_data_studio.png}{在 EEA 网络、国家 \code{DE} 下搜索后的数据工作室：
+站点显示在地图上，选中的三个用红圈标出，对应行在下方表格中高亮——“获取并合并”会把
+它们下载成一张表。左侧是监测网络、污染物、日期范围和气象来源；\emph{来源设置}一组只在
+非英国网络下出现。}{fig:datastudio}
+
 \begin{enumerate}\nosep
   \item \textbf{空气质量。}选择一个监测网络。六个英国网络是 AURN（国家网络，约 210 个
         站点）、AQE、SAQN、WAQN、NI 和 LMAM（地方管理），共约 1500 个站点；它们既不需要
@@ -1163,8 +1171,13 @@ MY1 一样好，所以只有它的干预前 $R^2$ 不予解读。经典 SCM 根�
         报告网络：几百到上千个站点，同样无需密钥。\emph{OpenAQ} 覆盖世界大部分地区，需要
         一个免费 API 密钥——粘贴到\emph{来源设置}里，或设置 \code{OPENAQ\_API\_KEY}。
         勾选污染物（默认 \PMtwo{}、\NOtwo{} 和 O\textsubscript{3}），然后\emph{查找站点}。
-        \tab{站点}标签页列出测量这些污染物的站点；可按名称或官方代码搜索（\code{MAN3} 是
-        Manchester Piccadilly），选中一个。
+        \tab{站点}标签页按各站点的坐标把它们画在地图上，下方是表格：单击选中指针下的
+        站点，按住鼠标拖出方框可选中框内所有站点，⌘/Ctrl-单击加选或减选。表格随之同步，
+        搜索框同时收窄二者（可输入名称，或官方代码，如 \code{MAN3} 即
+        Manchester Piccadilly）；指针悬停在点上会显示站点名称。滚轮以指针为中心缩放，
+        “+”“−”按钮逐级缩放，手形按钮平移，\emph{Fit} 让站点重新回到视野。站点下方是
+        底图——OpenStreetMap、Esri 浅色底图或卫星影像，在地图上方的下拉框选择，均无需
+        密钥，来源标注在图下方——显示视野时下载。
   \item \textbf{日期范围。}英国档案按整个日历年提供，从各站点开始运行时起；选中站点后，
         日期范围会对齐到它的记录。EEA 的记录按污染物标注年份——其英国站点止于 2019 年，
         因为英国在脱欧后停止向该机构报告——日期范围会对齐到所选站点覆盖的年份；OpenAQ
@@ -1174,7 +1187,9 @@ MY1 一样好，所以只有它的干预前 $R^2$ 不予解读。经典 SCM 根�
         \code{d2m}、\code{rh2m}、\code{sp}、\code{tcc}、\code{tp}、\code{ssrd}、\code{ws}、
         \code{wd}、\code{u10} 和 \code{v10}——都是\emph{列}一栏识别为气象的名字。它们以 UTC
         给出，合并时换到窗口的时钟上（第~\ref{sec:clock}~节）。
-  \item \textbf{获取并合并}下载逐时测量值和站点坐标处的气象，按小时合并。\tab{预览}和
+  \item \textbf{获取并合并}下载逐时测量值和站点坐标处的气象，按小时合并。选中多个站点时
+        逐个处理，并叠成一张带 \code{site} 列的表——建模步骤可按站点分组的\emph{面板}。
+        \tab{预览}和
         \tab{表格}显示结果；\emph{保存合并的 CSV…}把它写出，\emph{发送到主窗口}在主窗口
         中打开它。
 \end{enumerate}
@@ -1187,9 +1202,6 @@ MY1 一样好，所以只有它的干预前 $R^2$ 不予解读。经典 SCM 根�
 从它发送来的表保存在内存中，命令日志会如实说明这一点，而不是写一条无法重复的
 \code{read\_csv}。
 
-\screenshot{ui_data_studio.png}{搜索前的数据工作室，停在 EEA 网络、国家 \code{DE}——
-\emph{来源设置}一组只在非英国网络下出现。左侧是监测网络、污染物、日期范围和气象来源；
-右侧是站点表、预览和合并后的表。}{fig:datastudio}
 
 \section{传输工作室：后向轨迹预测变量}\label{sec:transport}
 本地气象不会告诉你空气从哪里来。传输工作室把 HYSPLIT 后向轨迹转换成能说明这一点的预测

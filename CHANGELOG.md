@@ -397,17 +397,25 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   staggered design's permuted treated identities are contaminated by the true
   effect (and with two treated units the single non-identity permutation is
   contaminated), while a donor never intervened on draws from the null.
- - **Data Studio: the found stations on a map.** After *Find stations* the
-  Stations tab draws the sites at their coordinates above the table. A click
-  on a station selects it exactly as a table row does — the table scrolls to
-  it, the hint and date range follow, *Fetch & merge* enables — hovering
-  names it, and selecting in the table rings its point; the search field
-  narrows both views together. There is no basemap: tiles would mean an
-  online service or a new dependency for a picture whose points already sit
-  where the stations are. The aspect is 1/cos(latitude), so a degree of
-  longitude is drawn at its true width and a wide panel shows more
-  surrounding area rather than stretching the map. Every network works, as
-  all three providers carry station coordinates.
+ - **Data Studio: the found stations on a map, picked and fetched together.**
+  After *Find stations* the Stations tab draws the sites at their coordinates
+  above the table, on a basemap: OpenStreetMap's standard style, Esri's muted
+  Light Gray Canvas or Esri satellite imagery --- all key-free, chosen on the
+  map's own row and credited under it as their terms ask. A click selects the
+  station under the pointer, a drag selects every station inside the drawn box,
+  and Command/Control-click adds or removes one; the table mirrors the
+  selection and a table selection rings the points, while the search field
+  narrows both views. The wheel and the +/− buttons zoom, the hand toggle
+  pans, and Fit brings the stations back. Fetch & merge now takes *every*
+  selected station, downloads each with its own meteorology and stacks them
+  into one panel-shaped table (``date``, ``site``, the pollutants, the met
+  columns), skipping a station that returns nothing and failing only if all
+  do; the preview draws one line per station. Points and tiles are in Web
+  Mercator, the tiles fetched after the points for the view shown and cached
+  under ``~/.normet/osm_tiles``; offline (or without ``requests``) the map is
+  the same points on a plain grid. Every network works: all three providers
+  carry station coordinates.
+
 - **Data Studio is no longer UK-only**: the Network picker now also offers
    the **EEA** reporting network (all of Europe) and **OpenAQ** (most of the
    world, free API key), and the entry point is renamed accordingly — the
