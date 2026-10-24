@@ -609,13 +609,17 @@ class TrainRunMixin(QMainWindow):
         from normet import cv_score
 
         backend = self.backend_combo.currentText()
-        if backend == "flaml":
-            model_config = {
+        # The same config the one-split train would use, per fold — written as an
+        # expression rather than the train handler's statement: this window is
+        # vendored as-is to the R GUI, where each block is patched on its own.
+        model_config = (
+            {
                 "time_budget": self.budget_spin.value(),
                 "estimator_list": self._selected_estimators() or ["lgbm"],
             }
-        else:
-            model_config = {"n_trials": self.budget_spin.value()}
+            if backend == "flaml"
+            else {"n_trials": self.budget_spin.value()}
+        )
         self.runner.submit(
             f"walk-forward CV ({backend})",
             cv_score,
