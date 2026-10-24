@@ -60,6 +60,7 @@ _TASK_WORDS = {
     "multiscale": "Multi-scale",
     "pdp": "PDP",
     "trend": "Trend",
+    "events": "Events",
     "uncertainty": "Uncertainty",
 }
 
@@ -75,7 +76,8 @@ class SessionMixin(QMainWindow):
         5: "multiscale",
         6: "pdp",
         7: "trend",
-        8: "uncertainty",
+        8: "events",
+        9: "uncertainty",
     }
 
     def _record_task(self, fn, args, kwargs):  # noqa: ANN001, ANN202 - TaskRunner.record
