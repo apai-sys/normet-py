@@ -501,6 +501,65 @@ def test_fetch_many_stacks_stations_and_skips_failures(monkeypatch):
         )
 
 
+def test_station_map_reports_its_count_and_deselects(qapp):
+    """The controls say how many stations there are and how many are picked,
+    and Esc (like the Deselect button) empties the selection."""
+    from types import SimpleNamespace
+
+    from normet.gui.data_window import DataWindow
+
+    win = DataWindow()
+    try:
+        win.stations = _four_stations()
+        win._fill_station_table(win.stations)
+        assert win.station_map.info.text() == "4 stations · none selected"
+        assert not win.station_map.clear_btn.isEnabled()
+
+        win.station_map.selectionChanged.emit([1, 2])
+        assert "2 selected" in win.station_map.info.text()
+        assert win.station_map.clear_btn.isEnabled()
+        assert win._selected_keys() == [1, 2]
+
+        win.station_map._key(SimpleNamespace(key="escape", canvas=win.station_map.canvas))
+        assert win._selected_keys() == []
+        assert "none selected" in win.station_map.info.text()
+        assert not win.station_map.clear_btn.isEnabled()
+    finally:
+        win.close()
+
+
+def test_station_map_zooms_to_a_station(qapp):
+    """Double-clicking a station closes in on it, and the right-click action
+    selects what the view then holds."""
+    from normet.gui._basemap import inverse_mercator
+    from normet.gui._station_map import StationMap
+
+    w = StationMap()
+    try:
+        df = _four_stations()
+        w.set_stations(df)
+        event = _event_at(w, df.loc[2, "lon"], df.loc[2, "lat"])
+        event.dblclick = True
+        w._pressed(event)
+
+        x0, x1 = w.ax.get_xlim()
+        y0, y1 = w.ax.get_ylim()
+        assert x0 < df.loc[2, "lon"] < x1
+        assert float(inverse_mercator(y0)) < df.loc[2, "lat"] < float(inverse_mercator(y1))
+        assert (x1 - x0) < 1.0  # a city view, not the whole country
+
+        picked: list = []
+        w.selectionChanged.connect(picked.append)
+        w._select_in_view()
+        assert picked and picked[-1] == [2]
+
+        w._fit()  # back out, then every station is in view again
+        w._select_in_view()
+        assert picked[-1] == [0, 1, 2, 3]
+    finally:
+        w.deleteLater()
+
+
 def test_station_map_shows_the_filtered_list(qapp):
     """The search narrows the map to the rows the table shows, and a network
     change empties it, so no point can select a station of another network."""

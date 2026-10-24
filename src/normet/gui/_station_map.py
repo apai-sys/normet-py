@@ -24,6 +24,7 @@ The hand button turns drags into pans, and the wheel zooms about the pointer.
 
 from __future__ import annotations
 
+import math
 import weakref
 from typing import Any
 
@@ -33,11 +34,13 @@ from matplotlib.figure import Figure
 from matplotlib.patches import Rectangle
 from matplotlib.ticker import FuncFormatter
 from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -89,6 +92,7 @@ class StationMap(QWidget):
         self._bbox_ll: tuple[float, float, float, float] | None = None
         self._fit_limits: tuple[float, float, float, float] | None = None
         self._bm_token = 0
+        self._extent: tuple[float, float, float, float] | None = None
         self._press: tuple[float, float] | None = None
         self._pan_from: tuple[float, float] | None = None
         self._pan_mode = False
@@ -168,11 +172,18 @@ class StationMap(QWidget):
         self.ax.margins(PAD_FRAC)
         self.ax.set_xlabel("Longitude", fontsize=8)
         self.ax.set_ylabel("Latitude", fontsize=8)
+
         # The axes run in Web Mercator (a tile is then a square of equal degrees), so
         # the y ticks are drawn at their latitudes again.
-        self.ax.yaxis.set_major_formatter(
-            FuncFormatter(lambda v, _pos: f"{float(_basemap.inverse_mercator(v)):.0f}")
-        )
+        def lat_label(v: float, _pos: Any) -> str:
+            # Enough decimals for the ticks to differ: the step between them is
+            # about a fifth of the span.
+            span = abs(self.ax.get_ylim()[1] - self.ax.get_ylim()[0])
+            step = span / 5.0
+            decimals = 0 if step >= 1.0 else int(min(5, math.ceil(-math.log10(step))))
+            return f"{float(_basemap.inverse_mercator(v)):.{decimals}f}"
+
+        self.ax.yaxis.set_major_formatter(FuncFormatter(lat_label))
         self.ax.tick_params(labelsize=7)
         self._show_empty(True)
 
@@ -188,8 +199,16 @@ class StationMap(QWidget):
         self.canvas.mpl_connect("button_release_event", self._released)
         self.canvas.mpl_connect("motion_notify_event", self._moved)
         self.canvas.mpl_connect("scroll_event", self._scrolled)
+        self.canvas.mpl_connect("key_press_event", self._key)
         self.canvas.mpl_connect("figure_leave_event", lambda _e: self._tip_off())
         self.canvas.setCursor(Qt.CursorShape.CrossCursor)
+        # The gestures are many and invisible; say them where the pointer rests.
+        self.canvas.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        self.canvas.setToolTip(
+            "Click a station to select it · drag a box to select several ·\n"
+            "⌘/Ctrl-click to add or remove one · double-click to zoom to it ·\n"
+            "wheel to zoom · middle-drag (or ✋) to pan · right-click for more."
+        )
 
         # In the window's language from the start (the English is kept), then the
         # theme that language's window is in.
@@ -199,6 +218,7 @@ class StationMap(QWidget):
         apply_figure_theme(self.figure, theme_manager().dark)
         theme_manager().themeChanged.connect(self._retheme)
         self._follow_language()
+        self._update_info()
         self.canvas.draw_idle()
 
     # ------------------------------------------------------------------ controls
@@ -220,9 +240,9 @@ class StationMap(QWidget):
         self.base_combo.currentTextChanged.connect(lambda _t: self._schedule_tiles(False))
         h.addWidget(self.base_combo)
         for text, tip, slot in (
-            ("−", "Zoom out", lambda: self._zoom(1 / ZOOM_STEP)),
-            ("+", "Zoom in", lambda: self._zoom(ZOOM_STEP)),
-            ("⤢", "Fit the stations back in view", self._fit),
+            ("−", "Zoom out (−), about the middle of the map", lambda: self._zoom(1 / ZOOM_STEP)),
+            ("+", "Zoom in (+)", lambda: self._zoom(ZOOM_STEP)),
+            ("Fit map", "Fit the stations back in view (0)", self._fit_view),
         ):
             b = QToolButton()
             b.setText(text)
@@ -232,13 +252,23 @@ class StationMap(QWidget):
         self.pan_btn = QToolButton()
         self.pan_btn.setText("✋")
         self.pan_btn.setCheckable(True)
-        self.pan_btn.setToolTip("Pan the map: drags move it instead of selecting.")
+        self.pan_btn.setToolTip(
+            "Pan the map: drags move it instead of selecting.\n"
+            "A middle-button drag pans without it."
+        )
         self.pan_btn.toggled.connect(self._set_pan)
         h.addWidget(self.pan_btn)
+        self.clear_btn = QToolButton()
+        self.clear_btn.setText("Deselect")
+        self.clear_btn.setToolTip("Empty the selection (Esc).")
+        self.clear_btn.setEnabled(False)
+        self.clear_btn.clicked.connect(lambda: self.selectionChanged.emit([]))
+        h.addWidget(self.clear_btn)
         h.addStretch(1)
-        tip = QLabel("drag a box to select · ⌘/Ctrl-click to add")
-        tip.setStyleSheet("color: palette(placeholder-text);")
-        h.addWidget(tip)
+        # What the map holds, and what is picked: the answer to "did my box take?"
+        self.info = QLabel("")
+        self.info.setStyleSheet("color: palette(placeholder-text);")
+        h.addWidget(self.info)
         return row
 
     def _set_pan(self, on: bool) -> None:
@@ -264,6 +294,7 @@ class StationMap(QWidget):
             self._bbox_ll = None
             self._fit_limits = None
             self._points.set_offsets(np.zeros((0, 2)))
+            self._update_info()
             self._show_empty(True)
             self.canvas.draw_idle()
             return
@@ -271,6 +302,7 @@ class StationMap(QWidget):
         coords = df[["lon", "lat"]].apply(pd.to_numeric, errors="coerce")
         ok = coords.notna().all(axis=1).to_numpy()
         ll = coords.to_numpy(dtype=float)[ok]
+        self._ll = ll  # lon/lat as given, for the copy action
         self._xy = (
             np.column_stack([ll[:, 0], _basemap.mercator(ll[:, 1])])
             if len(ll)
@@ -283,6 +315,7 @@ class StationMap(QWidget):
         ]
         if not len(self._xy):
             self._points.set_offsets(np.zeros((0, 2)))
+            self._update_info()
             self._show_empty(True)
             self.canvas.draw_idle()
             return
@@ -299,6 +332,7 @@ class StationMap(QWidget):
             float(la.max()) + pad_y,
         )
         self._fit()
+        self._update_info()
         self._show_empty(False)
         self._bg.set_visible(False)  # the previous search's tiles are stale
         self._credit.set_visible(False)
@@ -315,6 +349,7 @@ class StationMap(QWidget):
         else:
             hit = np.isin(self._keys, self._selected)
             self._mark.set_offsets(self._xy[hit] if hit.any() else np.zeros((0, 2)))
+        self._update_info()
         self.canvas.draw_idle()
 
     # ------------------------------------------------------------------ view
@@ -333,6 +368,10 @@ class StationMap(QWidget):
         # not feed -- hand it the box, and let autoscale's margins pad it.
         self.ax.set_aspect("equal", adjustable="datalim")
         self.ax.dataLim.set_points(np.array([[x0, y0], [x1, y1]]))
+        # Zooming set the limits explicitly, which turns autoscaling off for the
+        # axis; fitting again has to turn it back on before it can act.
+        self.ax.set_autoscalex_on(True)
+        self.ax.set_autoscaley_on(True)
         self.ax.autoscale_view()
         self.canvas.draw_idle()
 
@@ -361,15 +400,25 @@ class StationMap(QWidget):
 
     def _view_changed(self) -> None:
         """After a zoom or pan: redraw, and fetch the tiles for the new view."""
+        if self._extent is not None:
+            x0, x1 = self.ax.get_xlim()
+            y0, y1 = self.ax.get_ylim()
+            ex0, ex1, ey0, ey1 = self._extent
+            if x0 < ex0 or x1 > ex1 or y0 < ey0 or y1 > ey1:
+                # The image no longer covers the view: a stretched corner of it
+                # would be a blur, so show the plain map until its own tiles come.
+                self._bg.set_visible(False)
+                self._credit.set_visible(False)
         self.canvas.draw_idle()
         self._schedule_tiles(False)
 
     def _visible_bbox(self) -> tuple[float, float, float, float]:
         """The view in lon/lat, for the tiles that must cover it."""
         inv = self.ax.transData.inverted()
-        (x0, y0), (x1, y1) = inv.transform(
-            [(v[0], v[1]) for v in self.ax.get_position().get_points()]
-        )
+        # The axes' *display* box: get_position() is in figure (0..1) units and
+        # would transform into a degenerate box near the origin.
+        box = self.ax.get_window_extent()
+        (x0, y0), (x1, y1) = inv.transform([(box.x0, box.y0), (box.x1, box.y1)])
         return (
             float(min(x0, x1)),
             float(max(x0, x1)),
@@ -409,6 +458,7 @@ class StationMap(QWidget):
             self.canvas.draw_idle()
             return
         image, extent = mosaic
+        self._extent = extent
         self._bg.set_data(image)
         self._bg.set_extent(extent)
         self._bg.set_visible(True)
@@ -444,6 +494,18 @@ class StationMap(QWidget):
         self.ax.set_ylim(cy - span_y / 2, cy + span_y / 2)
 
     # ------------------------------------------------------------------ internals
+    def _update_info(self) -> None:
+        """The count under the controls: how many stations, and how many picked."""
+        total = len(self._keys) if hasattr(self, "_keys") else 0
+        if not total:
+            self.info.setText("")
+        else:
+            picked = len(self._selected)
+            self.info.setText(
+                f"{total} stations" + (f" · {picked} selected" if picked else " · none selected")
+            )
+        self.clear_btn.setEnabled(bool(self._selected))
+
     def _show_empty(self, empty: bool) -> None:
         self._empty.set_visible(empty)
         self._mark.set_visible(not empty)
@@ -476,8 +538,21 @@ class StationMap(QWidget):
         return [int(k) for k in self._keys[inside]]
 
     def _pressed(self, event: Any) -> None:
-        if getattr(event, "button", None) != 1 or not self._over_axes(event):
+        button = getattr(event, "button", None)
+        if button == 3 and self._over_axes(event):  # right-click: the menu
+            self._context(event)
+            return
+        if button == 2 and self._over_axes(event):  # middle-drag pans either way
+            self._pan_from = (event.x, event.y)
+            self.canvas.setCursor(Qt.CursorShape.ClosedHandCursor)
+            return
+        if button != 1 or not self._over_axes(event):
             self._press = None
+            return
+        if getattr(event, "dblclick", False):  # double-click: close in on it
+            i = self._nearest(event)
+            if i is not None:
+                self.zoom_to(int(self._keys[i]))
             return
         self._press = (event.x, event.y)
         if self._pan_mode:
@@ -512,6 +587,9 @@ class StationMap(QWidget):
                 self._band.set_width(event.xdata - x0)
                 self._band.set_height(event.ydata - y0)
                 self._band.set_visible(True)
+                self.info.setText(
+                    f"{len(self._in_box(x0, y0, event.xdata, event.ydata))} in the box"
+                )
                 self.canvas.draw_idle()
                 return
         i = self._nearest(event) if self._over_axes(event) else None
@@ -523,6 +601,12 @@ class StationMap(QWidget):
             return
         self._tip.xy = (float(self._xy[i, 0]), float(self._xy[i, 1]))
         self._tip.set_text(self._labels[i])
+        # Sit the label on the side with the room: a name at the right edge would
+        # otherwise run out of the map.
+        box = self.ax.get_window_extent()
+        near_right = event.x is not None and event.x > box.x0 + box.width * 0.65
+        self._tip.set_horizontalalignment("right" if near_right else "left")
+        self._tip.set_position((-9 if near_right else 9, 10))
         self._tip.set_visible(True)
         if not self._pan_mode:
             self.canvas.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -541,6 +625,13 @@ class StationMap(QWidget):
 
     def _released(self, event: Any) -> None:
         press, self._press = self._press, None
+        if getattr(event, "button", None) == 2 and self._pan_from is not None:
+            self._pan_from = None
+            self.canvas.setCursor(
+                Qt.CursorShape.OpenHandCursor if self._pan_mode else Qt.CursorShape.CrossCursor
+            )
+            self._view_changed()
+            return
         if self._pan_from is not None:
             self._pan_from = None
             self.canvas.setCursor(Qt.CursorShape.OpenHandCursor)
@@ -574,6 +665,68 @@ class StationMap(QWidget):
         else:
             keys = [key]
         self.selectionChanged.emit(sorted(keys))
+
+    def _key(self, event: Any) -> None:
+        """Esc empties the selection, +/- zoom, 0 (or F) fits."""
+        key = str(getattr(event, "key", "") or "").lower()
+        if key == "escape":
+            self.selectionChanged.emit([])
+        elif key in ("+", "="):
+            self._zoom(ZOOM_STEP)
+        elif key == "-":
+            self._zoom(1 / ZOOM_STEP)
+        elif key in ("0", "f", "home"):
+            self._fit_view()
+
+    def _fit_view(self) -> None:
+        self._fit()
+        self._schedule_tiles(True)
+
+    def zoom_to(self, key: int, span: float = 0.05) -> None:
+        """Centre the map on one station, close enough to see its streets."""
+        hit = np.flatnonzero(self._keys == key)
+        if not hit.size:
+            return
+        cx, cy = (float(v) for v in self._xy[hit[0]])
+        box = self.ax.get_window_extent()
+        span_x = max(float(span), MIN_SPAN)
+        span_y = span_x * max(box.height, 1) / max(box.width, 1)
+        self.ax.set_xlim(cx - span_x / 2, cx + span_x / 2)
+        self.ax.set_ylim(cy - span_y / 2, cy + span_y / 2)
+        self._view_changed()
+
+    def _select_in_view(self) -> None:
+        """Select every station in the current view (a right-click action)."""
+        x0, x1 = self.ax.get_xlim()
+        y0, y1 = self.ax.get_ylim()
+        keys = self._in_box(x0, x1, y0, y1)
+        if keys:
+            self.selectionChanged.emit(keys)
+
+    def _copy(self, i: int) -> None:
+        """Put the station's name and coordinates on the clipboard."""
+        lat, lon = (float(v) for v in self._ll[i])
+        QApplication.clipboard().setText(f"{self._labels[i]}\t{lat:.5f}\t{lon:.5f}")
+
+    def _context(self, event: Any) -> None:
+        """The right-click menu: what this station is, and what to do with it."""
+        i = self._nearest(event)
+        menu = QMenu(self)
+        if i is not None:
+            key = int(self._keys[i])
+            menu.addAction("Select only this station", lambda: self.selectionChanged.emit([key]))
+            menu.addAction(
+                "Add it to the selection",
+                lambda: self.selectionChanged.emit(sorted(set(self._selected) | {key})),
+            )
+            menu.addAction("Zoom to this station", lambda: self.zoom_to(key))
+            menu.addAction("Copy name and coordinates", lambda: self._copy(i))
+            menu.addSeparator()
+        menu.addAction("Select the stations in view", self._select_in_view)
+        if self._selected:
+            menu.addAction("Clear the selection", lambda: self.selectionChanged.emit([]))
+        menu.addAction("Fit the stations", self._fit_view)
+        menu.exec(QCursor.pos())
 
     def _additive(self) -> bool:
         """Whether Command (macOS) or Control is held: add to the selection."""

@@ -405,8 +405,14 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   station under the pointer, a drag selects every station inside the drawn box,
   and Command/Control-click adds or removes one; the table mirrors the
   selection and a table selection rings the points, while the search field
-  narrows both views. The wheel and the +/− buttons zoom, the hand toggle
-  pans, and Fit brings the stations back. Fetch & merge now takes *every*
+  narrows both views. The wheel and the +/− buttons zoom about the pointer,
+  the hand toggle (or a middle-button drag) pans, and *Fit map* brings the
+  stations back; *Deselect* or Esc empties the selection. A count above the
+  map says how many stations the search found and how many are picked (or
+  how many a box holds, while it is drawn), double-clicking a station zooms
+  to its streets, and a right-click menu selects what the view holds, zooms
+  to a station or copies its coordinates. Latitude ticks carry as many
+  decimals as the zoom needs. Fetch & merge now takes *every*
   selected station, downloads each with its own meteorology and stacks them
   into one panel-shaped table (``date``, ``site``, the pollutants, the met
   columns), skipping a station that returns nothing and failing only if all
