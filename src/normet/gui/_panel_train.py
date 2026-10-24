@@ -131,6 +131,26 @@ class TrainPanelMixin(QMainWindow):
         )
         self.train_button.clicked.connect(self._run_train)
         form.addRow(self.train_button)
+        # Walk-forward validation of the trained model form: the same backend
+        # retrained on expanding windows, each future block scored once. The
+        # random split's R² is an optimist's number; this checks it.
+        self.cv_folds_spin = NoWheelSpinBox()
+        self.cv_folds_spin.setRange(2, 10)
+        self.cv_folds_spin.setValue(5)
+        self.cv_folds_spin.setToolTip(
+            "Walk-forward folds. Each fold trains on all data before its test block\n"
+            "and scores the block after it, so no future hour is ever in training."
+        )
+        self._cv_folds_label = QLabel("CV folds")
+        form.addRow(self._cv_folds_label, self.cv_folds_spin)
+        self.cv_button = run_button(
+            "▶  Walk-forward CV",
+            "Retrain on expanding windows and score each future block.\n"
+            "Checks the single split's R² against future-ordered evidence.\n"
+            "Needs a trained model, and takes that training time once per fold.",
+        )
+        self.cv_button.clicked.connect(self._run_cv)
+        form.addRow(self.cv_button)
         # Chronos-2 only: adapt the loaded checkpoint to this site's own record.
         self._ft_box = QWidget()
         ft = QFormLayout(self._ft_box)
@@ -178,9 +198,13 @@ class TrainPanelMixin(QMainWindow):
             (self._split_label, self.split_combo),
             (self._train_fraction_label, self.train_fraction_spin),
             (self._seed_label, self.seed_spin),
+            (self._cv_folds_label, self.cv_folds_spin),
         ):
             label.setVisible(not is_chronos)
             widget.setVisible(not is_chronos)
+        # Nothing retrains under chronos-2, so nothing folds forward either;
+        # its check is the quantile backtest on the Model tab.
+        self.cv_button.setVisible(not is_chronos)
         self._chronos_hint.setVisible(is_chronos)
         self._ft_box.setVisible(is_chronos)
         self._device_label.setVisible(is_chronos)

@@ -767,7 +767,7 @@ read from the \tab{File} menu (Section~\ref{sec:config}).
 Tab & Shows & Filled by \\
 \midrule
 Data        & overview, cycles, wind and pollution roses, statistics; rows left out & loading \\
-Model       & verdict, statistics table, parity plot, feature importance & Train model \\
+Model       & verdict, statistics table, parity plot, feature importance, walk-forward CV & Train model; Walk-forward CV \\
 Normalise   & observed and normalised series, the quantile band, their cycles & Run normalisation \\
 Decompose   & the emission or meteorological components, the cycles & Run decomposition \\
 Rolling     & the mean of the rolling windows, with their spread & Run rolling normalisation \\
@@ -1005,6 +1005,18 @@ A fit on the training rows much better than on the held-out rows is expected of 
 trees and is not by itself a problem; a poor held-out fit is. Before normalising with a
 moderate or poor model, try more predictors, a longer budget or more estimators. The
 normalised series inherits the model's errors.
+
+A single random split flatters the model: every test hour's neighbours sit in the
+training rows, so an autocorrelated series can be forecast locally without being
+forecast well. \emph{Walk-forward CV} checks that number: the same backend retrains on
+an expanding window and scores the block of hours immediately after it, five times by
+default (\emph{CV folds}); it takes the training budget once per fold. The tab gains a
+\emph{View} selector between the split's figures and the folds --- a bar of $R^2$ per
+fold with the split's value drawn across the bars, and a table of each fold's test
+window, its size and its $R^2$, RMSE and mean bias. When the split's line sits well
+above the bars the verdict says so: trust the folds. For a series whose regime drifts,
+where a random split samples the future as often as the past, the folds are the honest
+number.
 
 \section{Chronos-2}\label{sec:chronosui}
 With \code{chronos-2} chosen the training controls are hidden --- there is nothing to

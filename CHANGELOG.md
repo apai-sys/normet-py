@@ -458,6 +458,14 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   the 10/50/90 levels, scored with `crps_from_quantiles` against the observed tail, the
   median's point reference and the pinball loss at each level (`pinball_loss`), with a
   line saying whether the band beats its own median's reference.
+- **Model tab: walk-forward CV** — a `Walk-forward CV` button (with a `CV folds` spin,
+  5 by default) retrains the current backend on expanding windows and scores each
+  future block with `cv_score`, the honest check on a random split's R²: every test
+  hour's neighbours sit in the training rows. The tab gains a `View` selector between
+  the split's figures and the folds — an R² bar per fold with the split's value drawn
+  across them, a table of each fold's test window and its R²/RMSE/MB, and a verdict
+  that says plainly when the split flatters the model. Unavailable for Chronos-2,
+  whose check is the quantile backtest above.
 
 ### Changed
 - **`rolling` names its windows `window_01`, `window_02`, …** (was
