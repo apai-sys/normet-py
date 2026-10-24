@@ -3,7 +3,8 @@
 Two-step workflow in the house style (parameter panel left, result tabs right):
 
 1. **Find stations** — pick a network, tick pollutants, list the sites that
-   measure them, browse/search the station table and pick one.
+   measure them, then pick one from the station table, by search, or by
+   clicking its point on the map.
 2. **Fetch & merge** — download the hourly measurements for every ticked
    pollutant at that site, fetch hourly meteorology for the site coordinates
    (Open-Meteo ERA5 archive by default — no API key; Copernicus CDS
@@ -32,7 +33,7 @@ import logging
 import os
 
 import pandas as pd
-from PySide6.QtCore import QDate, Qt
+from PySide6.QtCore import QDate, QItemSelection, QItemSelectionModel, Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDateEdit,
@@ -60,6 +61,7 @@ from PySide6.QtWidgets import (
 from normet import style as S
 
 from ._clock import TaskClock
+from ._station_map import StationMap
 from ._widgets import CanvasTab, NoWheelComboBox, hint_label, run_button
 from .workers import TaskRunner
 
@@ -437,6 +439,57 @@ def _fetch_and_merge(
     return merged
 
 
+def _fetch_many(
+    stations: list[dict],
+    pollutants: list[str],
+    date_from: str,
+    date_to: str,
+    met_source: str,
+    provider: str,
+    source: str | None,
+    country: str,
+    api_key: str | None,
+) -> pd.DataFrame:
+    """Fetch *stations* one by one and stack them into one table (a panel).
+
+    Each station gets its own measurements and its own meteorology (at its
+    coordinates), and the frames carry their ``site`` column, so the stack is
+    the long-format panel the modelling steps expect. A station that returns
+    nothing (closed, no coverage in the range) is logged and skipped rather
+    than aborting the batch; the batch fails only if every one of them does.
+    """
+    frames: list[pd.DataFrame] = []
+    failures: list[str] = []
+    for st in stations:
+        try:
+            frames.append(
+                _fetch_and_merge(
+                    st,
+                    pollutants,
+                    date_from,
+                    date_to,
+                    met_source,
+                    provider,
+                    source,
+                    country,
+                    api_key,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - one station, not the batch
+            failures.append(f"{st.get('site', st.get('code', '?'))}: {exc}")
+            log.warning("Data Studio: skipped %s — %s", st.get("site"), exc)
+    if not frames:
+        detail = "; ".join(failures[:3])
+        raise RuntimeError(
+            f"None of the {len(stations)} selected stations returned data"
+            + (f" — {detail}" if detail else ".")
+        )
+    if failures:
+        log.warning("Data Studio: %d of %d stations skipped", len(failures), len(stations))
+    out = pd.concat(frames, ignore_index=True)
+    return out.sort_values(["site", "date"], kind="stable").reset_index(drop=True)
+
+
 class DataWindow(QMainWindow):
     """ "Get data" window: air-quality networks + reanalysis met, merged.
 
@@ -638,12 +691,28 @@ class DataWindow(QMainWindow):
         sl.addLayout(search_row)
         self.station_table = QTableWidget()
         self.station_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.station_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        # Several stations fetch together into one table (a panel), so the list
+        # selects several; the map is the other way to make that selection.
+        self.station_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.station_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.station_table.itemSelectionChanged.connect(self._station_selected)
-        sl.addWidget(self.station_table, 1)
+        self.station_table.itemDoubleClicked.connect(self._station_double_clicked)
+        # The map and the table show one list two ways: the map is where the
+        # stations are, the table is what each one measures and holds.
+        self.station_map = StationMap()
+        self.station_map.selectionChanged.connect(self._map_selection)
+        stations = QSplitter(Qt.Orientation.Vertical)
+        stations.addWidget(self.station_map)
+        stations.addWidget(self.station_table)
+        stations.setStretchFactor(0, 3)
+        stations.setStretchFactor(1, 2)
+        stations.setSizes([380, 260])
+        sl.addWidget(stations, 1)
         sl.addWidget(
-            hint_label("Click 🔍 Find stations to fill this table, then select the site to use.")
+            hint_label(
+                "Click 🔍 Find stations, then select the site(s) to use — a row, its\n"
+                "point on the map, or a box around several of them."
+            )
         )
         self.tabs.addTab(st_tab, "Stations")
 
@@ -672,7 +741,7 @@ class DataWindow(QMainWindow):
     def _sync_enabled(self) -> None:
         busy = self.runner.busy
         self.find_btn.setEnabled(not busy)
-        self.fetch_btn.setEnabled(not busy and self._selected_station() is not None)
+        self.fetch_btn.setEnabled(not busy and bool(self._selected_stations()))
         has_data = self.merged is not None
         self.save_btn.setEnabled(has_data)
         self.send_btn.setEnabled(has_data and self._main is not None)
@@ -729,6 +798,7 @@ class DataWindow(QMainWindow):
         self.stations = None
         self.station_table.clearContents()
         self.station_table.setRowCount(0)
+        self.station_map.set_stations(None)
         self.station_hint.setText("No station chosen yet")
         self._refresh_context()
         self.statusBar().showMessage(
@@ -777,7 +847,7 @@ class DataWindow(QMainWindow):
         self._fill_station_table(df)
         self.tabs.setCurrentIndex(0)
         self.statusBar().showMessage(
-            f"{len(df)} sites measure the ticked pollutants — search and select one."
+            f"{len(df)} sites measure the ticked pollutants — search, or pick one on the map."
         )
 
     def _fill_station_table(self, df: pd.DataFrame) -> None:
@@ -798,6 +868,7 @@ class DataWindow(QMainWindow):
                     item.setData(Qt.ItemDataRole.UserRole, int(row.name))
                 self.station_table.setItem(r, c, item)
         self.station_table.resizeColumnsToContents()
+        self.station_map.set_stations(df)
 
     def _filter_stations(self, text: str) -> None:
         if self.stations is None:
@@ -813,20 +884,74 @@ class DataWindow(QMainWindow):
             df = df[match]
         self._fill_station_table(df)
 
-    def _selected_station(self) -> dict | None:
+    def _selected_keys(self) -> list[int]:
+        """The station frame indices of the table's selected rows, in its order."""
+        rows = sorted({i.row() for i in self.station_table.selectedItems()})
+        keys = []
+        for r in rows:
+            item = self.station_table.item(r, 0)
+            if item is not None and item.data(Qt.ItemDataRole.UserRole) is not None:
+                keys.append(int(item.data(Qt.ItemDataRole.UserRole)))
+        return keys
+
+    def _selected_stations(self) -> list[dict]:
         if self.stations is None:
-            return None
-        items = self.station_table.selectedItems()
-        if not items:
-            return None
-        idx = self.station_table.item(items[0].row(), 0).data(Qt.ItemDataRole.UserRole)
-        if idx is None or idx not in self.stations.index:
-            return None
-        return self.stations.loc[idx].to_dict()
+            return []
+        return [
+            self.stations.loc[k].to_dict()
+            for k in self._selected_keys()
+            if k in self.stations.index
+        ]
+
+    def _station_double_clicked(self, item: QTableWidgetItem) -> None:
+        """Double-clicking a row zooms the map to that station."""
+        cell = self.station_table.item(item.row(), 0)
+        key = None if cell is None else cell.data(Qt.ItemDataRole.UserRole)
+        if key is not None:
+            self.station_map.zoom_to(int(key))
+
+    def _map_selection(self, keys: list[int]) -> None:
+        """A selection made on the map becomes the table's, and the row's path follows."""
+        wanted = set(keys)
+        sel = QItemSelection()
+        model = self.station_table.model()
+        first: int | None = None
+        for r in range(self.station_table.rowCount()):
+            item = self.station_table.item(r, 0)
+            key = None if item is None else item.data(Qt.ItemDataRole.UserRole)
+            if key in wanted:
+                sel.select(model.index(r, 0), model.index(r, self.station_table.columnCount() - 1))
+                if first is None:
+                    first = r
+                if item is not None:
+                    self.station_table.scrollToItem(
+                        item, QAbstractItemView.ScrollHint.PositionAtCenter
+                    )
+        if first is not None:  # the keyboard's row follows the first pick
+            self.station_table.setCurrentCell(first, 0, QItemSelectionModel.SelectionFlag.NoUpdate)
+        self.station_table.selectionModel().select(
+            sel,
+            QItemSelectionModel.SelectionFlag.ClearAndSelect
+            | QItemSelectionModel.SelectionFlag.Rows,
+        )
 
     def _station_selected(self) -> None:
-        st = self._selected_station()
-        if st:
+        keys = self._selected_keys()
+        self.station_map.highlight(keys)
+        st = self._selected_stations()[0] if keys else None
+        if len(keys) > 1:
+            sites = (
+                [str(x) for x in self.stations.loc[keys, "site"]]
+                if self.stations is not None
+                else []
+            )
+            names = ", ".join(sites[:3]) + (" …" if len(sites) > 3 else "")
+            self.station_hint.setText(
+                f"{len(keys)} stations selected: {names}\n"
+                "Fetch & merge downloads each one and joins them into one table."
+            )
+            self.station_hint.setStyleSheet("")
+        elif st:
             cov = f"{st.get('from', '')} → {st.get('to', '')}" if st.get("to") else "unknown"
             code = f" ({st['code']})" if st.get("code") else ""
             stype = f"\ntype: {st['site_type']}" if st.get("site_type") else ""
@@ -850,8 +975,8 @@ class DataWindow(QMainWindow):
         self._sync_enabled()
 
     def _run_fetch(self) -> None:
-        st = self._selected_station()
-        if st is None:
+        sites = self._selected_stations()
+        if not sites:
             QMessageBox.information(
                 self, "No station", "Find stations and select one in the table first."
             )
@@ -864,12 +989,13 @@ class DataWindow(QMainWindow):
             return
         met = self.met_combo.currentText()
         prov, src, country = self._provider()
+        name = sites[0]["site"] if len(sites) == 1 else f"{len(sites)} stations"
         self.runner.submit(
-            f"fetch {st['site']}",
-            _fetch_and_merge,
+            f"fetch {name}",
+            _fetch_many,
             self._fetch_done,
             self._show_error,
-            st,
+            sites,
             pollutants,
             d_from,
             d_to,
@@ -885,10 +1011,12 @@ class DataWindow(QMainWindow):
         n_nan = int(df.isna().sum().sum())
         pol_cols = [c for c in df.columns if c in POLLUTANTS]
         met_cols = [c for c in df.columns if c in ("t2m", "ws", "wd", "sp", "rh2m")]
+        n_sites = int(df["site"].nunique()) if "site" in df.columns else 1
         self.preview_summary.setText(
-            f"{len(df):,} hourly rows × {df.shape[1]} columns   |   "
-            f"{df['date'].min():%Y-%m-%d} → {df['date'].max():%Y-%m-%d}   |   "
-            f"pollutants: {', '.join(pol_cols)}   |   missing cells: {n_nan:,}"
+            f"{len(df):,} hourly rows × {df.shape[1]} columns"
+            + (f"   |   {n_sites} stations" if n_sites > 1 else "")
+            + f"   |   {df['date'].min():%Y-%m-%d} → {df['date'].max():%Y-%m-%d}"
+            f"   |   pollutants: {', '.join(pol_cols)}   |   missing cells: {n_nan:,}"
         )
         self._fill_preview_table(df)
         self._draw_preview(df, pol_cols)
@@ -919,23 +1047,35 @@ class DataWindow(QMainWindow):
         n = max(1, len(pol_cols))
         fig, axes = plt.subplots(n, 1, figsize=(8, 1.5 * n + 0.4), sharex=True, squeeze=False)
         d = df.set_index("date")
+        sites = list(dict.fromkeys(d["site"])) if "site" in d.columns else [None]
+        # A panel of many stations would be a thicket: draw the first few and say so.
+        drawn = sites[:6]
+        lw = 0.5 if len(df) > 1500 * len(drawn) else 0.9
         shown = []
         for ax, pol in zip(axes.ravel(), pol_cols or [None], strict=False):
             if pol is None:
                 ax.axis("off")
                 continue
-            S.line(
-                ax,
-                d.index,
-                d[pol],
-                lw=0.5 if len(d) > 1500 else 0.9,
-                color=S.PALETTE[len(shown) % 4],
-            )
+            for i, site in enumerate(drawn):
+                part = d if site is None else d[d["site"] == site]
+                S.line(
+                    ax,
+                    part.index,
+                    part[pol],
+                    lw=lw,
+                    color=S.PALETTE[i % len(S.PALETTE)],
+                    label=str(site) if len(drawn) > 1 else None,
+                )
             cov = d[pol].notna().mean() * 100
-            ax.set_title(f"{S.formula(pol)} — {cov:.0f} % coverage")
+            title = f"{S.formula(pol)} — {cov:.0f} % coverage"
+            if len(sites) > len(drawn):
+                title += f" (first {len(drawn)} of {len(sites)} stations)"
+            ax.set_title(title, fontsize=8)
             ax.set_ylabel(S.formula(pol))
             ax.margins(x=0)
             S.grid(ax)
+            if len(drawn) > 1:
+                ax.legend(fontsize=6, ncol=2, frameon=False, loc="upper right")
             shown.append(ax)
         if shown and isinstance(d.index, pd.DatetimeIndex):
             S.format_time_axis(shown[-1])
@@ -945,7 +1085,9 @@ class DataWindow(QMainWindow):
             fig,
             verdict=(
                 "ok",
-                f"Fetched {len(df):,} hourly rows for {df['site'].iloc[0]}.",
+                f"Fetched {len(df):,} hourly rows for {df['site'].iloc[0]}."
+                if df["site"].nunique() == 1
+                else f"Fetched {len(df):,} hourly rows for {df['site'].nunique()} stations.",
             )
             if len(df)
             else ("warn", "Empty result."),
@@ -958,9 +1100,11 @@ class DataWindow(QMainWindow):
     def _save_csv(self) -> None:
         if self.merged is None:
             return
+        n_sites = int(self.merged["site"].nunique()) if len(self.merged) else 0
         site = str(self.merged["site"].iloc[0]).replace(" ", "_") if len(self.merged) else "data"
+        stem = site if n_sites <= 1 else f"{n_sites}_stations"
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save merged CSV", f"normet_{site}.csv", "CSV (*.csv)"
+            self, "Save merged CSV", f"normet_{stem}.csv", "CSV (*.csv)"
         )
         if path:
             self.merged.to_csv(path, index=False)
