@@ -1455,9 +1455,18 @@ measurement it belongs to. The choice is kept for the next session; changing it 
 open file again. In a script, \code{nm.io.read\_time\_series(path, zone=\ldots)} reads a
 table the same way.
 
+% The Data Studio's figure is taller than half a page: started at the foot of a
+% page it is floated to a float page of its own, so the section opens a fresh one.
+\clearpage
 \section{Data Studio: air quality networks and meteorology}\label{sec:datastudio}
 \emph{Get data} (Ctrl+D) assembles a model-ready table without leaving the app
 (Figure~\ref{fig:datastudio}):
+\screenshot{ui_data_studio.png}{The Data Studio after a search on the EEA network for
+\code{DE}: the stations on the map, three picked and ringed, their rows highlighted in
+the table below --- \emph{Fetch \& merge} would download all three into one table.
+Network, pollutants, date range and meteorology source on the left; the
+\emph{Source settings} group belongs to the non-UK networks.}{fig:datastudio}
+
 \begin{enumerate}\nosep
   \item \textbf{Air quality.} Choose a network. The six UK networks are AURN (the
         national network, about 210 sites), AQE, SAQN, WAQN, NI and LMAM (locally
@@ -1468,8 +1477,21 @@ table the same way.
         a free API key --- paste it into \emph{Source settings}, or set
         \code{OPENAQ\_API\_KEY}. Tick the pollutants (\PMtwo{}, \NOtwo{} and
         O\textsubscript{3} by default), and \emph{Find stations}. The \tab{Stations}
-        tab lists the sites that measure them; search by name or official code
-        (\code{MAN3} is Manchester Piccadilly) and select one.
+        tab draws the sites at their coordinates on a map, with the table beneath
+        it: a click selects the station under the pointer, a box drawn with the
+        mouse selects every station inside it, and Command/Control-click adds
+        one. The table follows either way, and the search field narrows both (a
+        name, or an official code such as \code{MAN3} for Manchester
+        Piccadilly); hovering a point names the station. The wheel zooms about
+        the pointer, the $+$ and $-$ buttons step it, the hand button (or the
+        middle button) pans, \emph{Fit map} brings the stations back and
+        \emph{Deselect} (or Esc) empties the selection; double-click a station
+        to zoom to its streets, and right-click for the menu --- select what the
+        view holds, copy a station's coordinates. The row above the map counts
+        what the search found and how much of it is picked. A basemap lies under the points
+        --- OpenStreetMap, Esri's light canvas or satellite imagery, picked on
+        the row above the map, key-free and credited below it --- fetched when
+        the view is shown.
   \item \textbf{Date range.} The UK archives are whole calendar years, from each
         station's opening; selecting a station snaps the range to its record. The EEA
         record is dated pollutant by pollutant --- its UK stations end in 2019,
@@ -1483,7 +1505,10 @@ table the same way.
         recognises as meteorology. They come on UTC and are put on the window's clock
         (Section~\ref{sec:clock}) as they are joined.
   \item \textbf{Fetch \& merge} downloads the hourly measurements and the meteorology for
-        the site's coordinates and joins them on the hour. \tab{Preview} and
+        the site's coordinates and joins them on the hour. With several stations
+        selected it does that for each and stacks them into one table, which
+        carries a \code{site} column --- a panel the modelling steps can group.
+        \tab{Preview} and
         \tab{Table} show the result; \emph{Save merged CSV\ldots} writes it and
         \emph{Send to main window} opens it there.
 \end{enumerate}
@@ -1497,10 +1522,6 @@ pollutants: a ticked NO or NO\textsubscript{x} is skipped for it, with a line in
 The Data Studio needs an internet connection; a table sent from it is held in memory, and
 the command log says so rather than writing a \code{read\_csv} it could not repeat.
 
-\screenshot{ui_data_studio.png}{The Data Studio before a search, on the EEA network for
-\code{DE} --- the \emph{Source settings} group belongs to the non-UK networks. Network,
-pollutants, date range and meteorology source on the left; the station table, preview and
-merged table on the right.}{fig:datastudio}
 
 \section{Transport Studio: back-trajectory predictors}\label{sec:transport}
 Local meteorology does not say where the air came from. The Transport Studio turns

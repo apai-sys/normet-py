@@ -36,6 +36,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 # cache first: a fresh home would build that from scratch.
 _REAL_HOME = os.path.expanduser("~")
 os.environ.setdefault("MPLCONFIGDIR", os.path.join(_REAL_HOME, ".matplotlib"))
+# The Data Studio figure shows its OpenStreetMap basemap: keep those tiles with
+# the real cache, so a rebuild does not fetch them again into a temp home.
+os.environ.setdefault("NORMET_TILE_CACHE", os.path.join(_REAL_HOME, ".normet", "osm_tiles"))
 _HOME = tempfile.mkdtemp(prefix="normet-figures-home-")
 os.environ["HOME"] = _HOME
 os.environ["USERPROFILE"] = _HOME
@@ -407,7 +410,11 @@ def transport_figures():
 
 
 def data_studio_figure():
-    from normet.gui.data_window import DataWindow, EEA_NETWORK
+    import json
+
+    import pandas as pd
+
+    from normet.gui.data_window import EEA_NETWORK, DataWindow
 
     print("data studio")
     w = DataWindow(parent=None)
@@ -416,7 +423,24 @@ def data_studio_figure():
     # new face of the window, and DE has enough stations to matter.
     w.net_combo.setCurrentText(EEA_NETWORK)
     w.country_edit.setText("DE")
+    # The stations of a real EEA search for DE (captured 2026-10-24, 55 of 787,
+    # spread over the country): the map and table show what a search fills them
+    # with. Their OpenStreetMap tiles are fetched when the figure is built (and
+    # cached under ~/.normet/osm_tiles); offline the map falls back to its grid.
+    with open(os.path.join(HERE, "data_studio_stations.json"), encoding="utf-8") as fh:
+        stations = pd.DataFrame(json.load(fh))
+    w.stations = stations
+    w._fill_station_table(stations)
+    # Three of them selected, as a box drawn on the map would: the rings, the
+    # table's highlighted rows and the hint all show the multi-station fetch.
+    # Rows 1, 3 and 5 sit far apart (Aachen, Aalen, Altenburg) and stay in the
+    # table's first screen, so the rings and the highlighted rows are both seen.
+    picked = [int(i) for i in stations.index[:5:2]]
+    w.station_map.selectionChanged.emit(picked)
     w.show()
+    # The tiles are fetched on a timer once the search is shown; the figure is
+    # grabbed now, so fetch them here (cached, a handful) instead of waiting.
+    w.station_map._load_basemap(True)
     grab(w, "ui_data_studio.png")
     return w
 
