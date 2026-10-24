@@ -8,6 +8,7 @@ zero-shot check).  Mixed into :class:`~.main_window.MainWindow`.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import Any
 
 import pandas as pd
@@ -96,6 +97,144 @@ def quantile_backtest(estimator: Any, df_prep: pd.DataFrame) -> tuple[list[list[
     except Exception:
         log.exception("quantile backtest failed")
         return None
+
+
+#: The fold table's columns, under the names the CV view shows them by. The
+#: scores keep modStats' abbreviations, as the holdout's own table does.
+_CV_COLUMNS = [
+    ("fold", "Fold"),
+    ("test_start", "Test starts"),
+    ("test_end", "Test ends"),
+    ("n_test", "Rows"),
+    ("R2", "R2"),
+    ("RMSE", "RMSE"),
+    ("MB", "MB"),
+]
+
+
+def _fold_day(value: Any) -> str:
+    """A fold boundary to the day: a timestamp from Python, a string from R."""
+    try:
+        stamp = pd.Timestamp(value)
+    except (ValueError, TypeError):
+        return str(value)[:10]
+    return str(value)[:10] if pd.isna(stamp) else stamp.strftime("%Y-%m-%d")
+
+
+def cv_table(folds: pd.DataFrame) -> tuple[list[str], list[list[str]]]:
+    """The walk-forward folds as the Model tab's table: the window each fold
+    forecast and the three scores its holdout table is read by. A backend
+    that scores differently leaves an em dash in the column it did not fill."""
+    header = [label for _key, label in _CV_COLUMNS]
+    rows: list[list[str]] = []
+    for rec in folds.to_dict("records"):
+        row: list[str] = []
+        for key, _label in _CV_COLUMNS:
+            v = rec.get(key)
+            if key in ("test_start", "test_end"):
+                row.append(_fold_day(v))
+            elif key in ("fold", "n_test"):
+                try:
+                    row.append(str(int(float(v))))
+                except (TypeError, ValueError):
+                    row.append("—")
+            else:
+                try:
+                    f = float(v)
+                except (TypeError, ValueError):
+                    row.append("—")
+                else:
+                    row.append("—" if pd.isna(f) else f"{f:.3f}")
+        rows.append(row)
+    return header, rows
+
+
+def cv_verdict(folds: pd.DataFrame, holdout_r2: float | None) -> tuple[tuple[str, str], list[str]]:
+    """The CV view's verdict and its note line: the folds' median R², with the
+    random split's read against it.
+
+    Walk-forward CV is the honest check: a random split lets each test hour's
+    neighbours into training, so the split's R² is an optimist's number. The
+    interesting quantity is therefore the gap — over 0.1 R² the split flatters
+    the model and the folds are what to trust. The fold thresholds match the
+    holdout verdict's (0.7 good, 0.5 moderate).
+    """
+    import numpy as np
+
+    r2 = (
+        pd.to_numeric(folds["R2"], errors="coerce").dropna()
+        if "R2" in folds
+        else pd.Series(dtype=float)
+    )
+    if r2.empty:
+        return (
+            ("warn", "Walk-forward CV produced no scorable folds — try fewer folds."),
+            [],
+        )
+    med = float(r2.median())
+    lines = [f"Across {len(r2)} folds R² ranged {float(r2.min()):.2f} to {float(r2.max()):.2f}."]
+    split = None if holdout_r2 is None else float(holdout_r2)
+    if split is not None and np.isfinite(split) and split - med > 0.1:
+        return (
+            (
+                "warn",
+                f"Walk-forward CV — median fold R² = {med:.2f} against the random "
+                f"split's {split:.2f}: the split flatters the model, trust the folds.",
+            ),
+            lines,
+        )
+    if med >= 0.7:
+        return (
+            (
+                "ok",
+                f"Walk-forward CV — median fold R² = {med:.2f}: the fit holds on future-ordered folds.",
+            ),
+            lines,
+        )
+    if med >= 0.5:
+        return (
+            (
+                "warn",
+                f"Walk-forward CV — median fold R² = {med:.2f}: consider more features or a longer time budget.",
+            ),
+            lines,
+        )
+    return (
+        (
+            "error",
+            f"Walk-forward CV — median fold R² = {med:.2f}: on future-ordered folds the fit "
+            "is poor, revisit features/target.",
+        ),
+        lines,
+    )
+
+
+def cv_figure(folds: pd.DataFrame, holdout_r2: float | None) -> Any:
+    """R² per fold, with the random split's value drawn across the bars: the
+    eye checks whether the split's number sits above the folds it should match."""
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    r2 = pd.to_numeric(folds["R2"], errors="coerce") if "R2" in folds else pd.Series(dtype=float)
+    fig, ax = plt.subplots(figsize=(8, 2.8))
+    x = np.arange(len(folds))
+    starts = folds["test_start"] if "test_start" in folds else pd.Series(list(range(len(folds))))
+    ax.bar(x, np.nan_to_num(r2.to_numpy(dtype=float), nan=0.0), width=0.6, color=S.COMPONENT)
+    if len(r2.dropna()):
+        ax.axhline(
+            float(r2.dropna().median()), color=S.INK, lw=0.8, ls=(0, (4, 3)), label="CV median"
+        )
+    if holdout_r2 is not None and np.isfinite(float(holdout_r2)):
+        ax.axhline(float(holdout_r2), color=S.TERTIARY, lw=1.2, label="Random split")
+    ax.set_xticks(x)
+    ax.set_xticklabels(
+        [_fold_day(v) for v in starts], fontsize=S.SMALL_SIZE, rotation=0 if len(folds) <= 6 else 30
+    )
+    ax.set_ylabel("R²")
+    ax.set_title(f"Walk-forward CV — {len(folds)} folds")
+    S.grid(ax, axis="y")
+    S.legend(ax, loc="upper right")
+    return fig
 
 
 class TrainRunMixin(QMainWindow):
@@ -187,6 +326,9 @@ class TrainRunMixin(QMainWindow):
         import matplotlib.pyplot as plt
 
         est = self.model
+        # Chronos-2 has no holdout and its own check (the quantile backtest):
+        # a CV view left by a previous backend must not ride along here.
+        self._model_views = {}
         met = [f for f in self.trained_features if f not in TIME_VARS]
         try:
             shift = _chronos.sensitivity(est, self.df_prep, met)
@@ -272,7 +414,12 @@ class TrainRunMixin(QMainWindow):
         log.info("Training finished")
 
     def _render_model_tab(self) -> None:
-        """Stats table + parity plot + feature importances, with an R² verdict."""
+        """Stats table + parity plot + feature importances, with an R² verdict.
+
+        The figures are drawn by a callable rather than once: a walk-forward CV
+        run registers the folds beside them as a tab view (see ``_cv_done``),
+        and the tab redraws whichever view is picked.
+        """
         import matplotlib.pyplot as plt
         import numpy as np
 
@@ -295,11 +442,7 @@ class TrainRunMixin(QMainWindow):
         except Exception:
             log.exception("modStats failed")
 
-        fig, (ax1, ax2) = plt.subplots(
-            1, 2, figsize=(8, 3.4), gridspec_kw={"width_ratios": [1, 1.15]}
-        )
         name = S.formula(self.target_combo.currentText())
-
         test = self.df_prep
         if "set" in self.df_prep.columns:
             test = self.df_prep[self.df_prep["set"] == "testing"]
@@ -307,78 +450,89 @@ class TrainRunMixin(QMainWindow):
             test = self.df_prep
         obs = test["value"].to_numpy()
         pred = np.asarray(ml_predict(self.model, test))
-        lo, hi = min(obs.min(), pred.min()), max(obs.max(), pred.max())
-        pad = 0.03 * (hi - lo)
-        lims = [lo - pad, hi + pad]
-        if len(obs) > 2000:
-            # Thousands of points are a blot as dots: their density, on a log scale.
-            hb = ax1.hexbin(
-                obs,
-                pred,
-                gridsize=45,
-                bins="log",
-                mincnt=1,
-                cmap="Blues",
-                extent=(*lims, *lims),
-                linewidths=0,
-                rasterized=True,
-            )
-            S.colorbar(fig, hb, ax1, label="Count")
-        else:
-            ax1.scatter(
-                obs, pred, s=5, alpha=0.35, color=S.OBSERVED, edgecolors="none", rasterized=True
-            )
-        ax1.plot(lims, lims, color=S.INK, lw=0.7, ls=(0, (4, 3)), label="1:1")
-        # The fit beside the R² and RMSE in the title: how many points, the slope of
-        # predicted on observed (below 1: the extremes are pulled in) and the mean bias.
-        slope = float(np.polyfit(obs, pred, 1)[0]) if len(obs) > 1 else float("nan")
-        ax1.text(
-            0.97,
-            0.04,
-            f"n = {len(obs):,}\nslope = {slope:.2f}\nbias = {float((pred - obs).mean()):+.2f}",
-            transform=ax1.transAxes,
-            ha="right",
-            va="bottom",
-            fontsize=S.SMALL_SIZE + 0.5,
-            color=S.INK,
-            linespacing=1.3,
-        )
-        ax1.set_xlim(lims)
-        ax1.set_ylim(lims)
-        ax1.set_aspect("equal", adjustable="box")
+        # The verdict's numbers, computed here: the figure waits until the tab
+        # draws this view, the verdict is read whether or not it is drawn.
         ss_res = float(((obs - pred) ** 2).sum())
         ss_tot = float(((obs - obs.mean()) ** 2).sum())
         r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
         rmse = float(np.sqrt(((obs - pred) ** 2).mean()))
-        ax1.set_xlabel(f"Observed {name} (test set)")
-        ax1.set_ylabel(f"Predicted {name}")
-        ax1.set_title(f"Parity — R²={r2:.3f}, RMSE={rmse:.2f}")
-        S.grid(ax1)
-        S.legend(ax1, loc="upper left")
 
-        imp = self._feature_importance()
-        if imp is not None:
-            names, vals = imp
-            order = np.argsort(vals)[-15:]
-            ax2.barh(
-                [names[i] for i in order], [vals[i] for i in order], color=S.COMPONENT, height=0.65
+        def _holdout_figure(_df: pd.DataFrame | None = None) -> Any:
+            fig, (ax1, ax2) = plt.subplots(
+                1, 2, figsize=(8, 3.4), gridspec_kw={"width_ratios": [1, 1.15]}
             )
-            ax2.set_title("Feature importance")
-            ax2.set_xlabel("Importance")
-            S.grid(ax2, axis="x")
-            ax2.tick_params(axis="y", length=0)
-            for side in ("top", "right"):
-                ax2.spines[side].set_visible(False)
-        else:
-            ax2.text(
-                0.5,
-                0.5,
-                "Feature importance not available\nfor this backend",
-                ha="center",
-                va="center",
-                color=S.NEUTRAL,
+            lo, hi = min(obs.min(), pred.min()), max(obs.max(), pred.max())
+            pad = 0.03 * (hi - lo)
+            lims = [lo - pad, hi + pad]
+            if len(obs) > 2000:
+                # Thousands of points are a blot as dots: their density, on a log scale.
+                hb = ax1.hexbin(
+                    obs,
+                    pred,
+                    gridsize=45,
+                    bins="log",
+                    mincnt=1,
+                    cmap="Blues",
+                    extent=(*lims, *lims),
+                    linewidths=0,
+                    rasterized=True,
+                )
+                S.colorbar(fig, hb, ax1, label="Count")
+            else:
+                ax1.scatter(
+                    obs, pred, s=5, alpha=0.35, color=S.OBSERVED, edgecolors="none", rasterized=True
+                )
+            ax1.plot(lims, lims, color=S.INK, lw=0.7, ls=(0, (4, 3)), label="1:1")
+            # The fit beside the R² and RMSE in the title: how many points, the slope of
+            # predicted on observed (below 1: the extremes are pulled in) and the mean bias.
+            slope = float(np.polyfit(obs, pred, 1)[0]) if len(obs) > 1 else float("nan")
+            ax1.text(
+                0.97,
+                0.04,
+                f"n = {len(obs):,}\nslope = {slope:.2f}\nbias = {float((pred - obs).mean()):+.2f}",
+                transform=ax1.transAxes,
+                ha="right",
+                va="bottom",
+                fontsize=S.SMALL_SIZE + 0.5,
+                color=S.INK,
+                linespacing=1.3,
             )
-            ax2.axis("off")
+            ax1.set_xlim(lims)
+            ax1.set_ylim(lims)
+            ax1.set_aspect("equal", adjustable="box")
+            ax1.set_xlabel(f"Observed {name} (test set)")
+            ax1.set_ylabel(f"Predicted {name}")
+            ax1.set_title(f"Parity — R²={r2:.3f}, RMSE={rmse:.2f}")
+            S.grid(ax1)
+            S.legend(ax1, loc="upper left")
+
+            imp = self._feature_importance()
+            if imp is not None:
+                names, vals = imp
+                order = np.argsort(vals)[-15:]
+                ax2.barh(
+                    [names[i] for i in order],
+                    [vals[i] for i in order],
+                    color=S.COMPONENT,
+                    height=0.65,
+                )
+                ax2.set_title("Feature importance")
+                ax2.set_xlabel("Importance")
+                S.grid(ax2, axis="x")
+                ax2.tick_params(axis="y", length=0)
+                for side in ("top", "right"):
+                    ax2.spines[side].set_visible(False)
+            else:
+                ax2.text(
+                    0.5,
+                    0.5,
+                    "Feature importance not available\nfor this backend",
+                    ha="center",
+                    va="center",
+                    color=S.NEUTRAL,
+                )
+                ax2.axis("off")
+            return fig
 
         if r2 >= 0.7:
             verdict = (
@@ -408,15 +562,109 @@ class TrainRunMixin(QMainWindow):
                 f"The point forecast's CRPS reference: {ref:.2f} — a spread forecast "
                 "must beat this to be worth its spread."
             )
-        self.tab_model.show_result(
-            fig,
-            verdict=verdict,
-            lines=lines,
-            header=header,
-            rows=rows,
-            own_words=True,
-        )
+        # The split's own R²: the walk-forward CV verdict reads the folds against it.
+        self._holdout_r2 = float(r2)
+        views: dict[str, tuple[Callable[[pd.DataFrame], Any], pd.DataFrame, dict[str, Any]]] = {
+            "Holdout": (
+                _holdout_figure,
+                pd.DataFrame(),
+                {
+                    "verdict": verdict,
+                    "lines": lines,
+                    "header": header,
+                    "rows": rows,
+                    "own_words": True,
+                },
+            )
+        }
+        self._model_views = views
+        self._show_model_view("Holdout")
         self._log_history("train", f"R2={r2:.3f}")
+
+    def _show_model_view(self, key: str) -> None:
+        """The Model tab's current view: the holdout's figures alone, or — once
+        a walk-forward CV has run — a selector between them and the folds.
+
+        The CV machinery passes frames through the tab's resolution selector;
+        neither view is a time series (a parity plot, a fold table), so the
+        selector stays out of the way (:meth:`CanvasTab._draw_series` shows it
+        only for data that has a time axis).
+        """
+        views: dict = getattr(self, "_model_views", {})
+        if len(views) > 1:
+            self.tab_model.show_views(views, key, label="View")
+        else:
+            render, data, kwargs = views[key]
+            self.tab_model.show_result(render(data), **kwargs)
+
+    def _run_cv(self) -> None:
+        """Score the current model form on walk-forward folds: the same backend
+        retrained on each expanding window, the future block after it scored as
+        a test would be. The random split's R² flatters — each test hour's
+        neighbours sit in training — and this is the check of that number
+        (``normet.cv_score``); it retrains as many models as there are folds,
+        so it takes its budget times over."""
+        if self.model is None or self._is_chronos() or not self._check_data():
+            return
+        from normet import cv_score
+
+        backend = self.backend_combo.currentText()
+        if backend == "flaml":
+            model_config = {
+                "time_budget": self.budget_spin.value(),
+                "estimator_list": self._selected_estimators() or ["lgbm"],
+            }
+        else:
+            model_config = {"n_trials": self.budget_spin.value()}
+        self.runner.submit(
+            f"walk-forward CV ({backend})",
+            cv_score,
+            self._cv_done,
+            self._show_error,
+            self.df_prep,
+            "value",
+            backend=backend,
+            covariates=list(self.trained_features),
+            n_splits=self.cv_folds_spin.value(),
+            model_config=model_config,
+            seed=self.seed_spin.value(),
+            verbose=True,
+        )
+        if backend == "flaml":
+            # Every fold searches for the time budget: the clock expects the run's total.
+            self.task_clock.expect(self.budget_spin.value() * self.cv_folds_spin.value())
+
+    def _cv_done(self, folds: pd.DataFrame | None) -> None:
+        """Register the folds as the Model tab's second view, and show it: the
+        tab now switches between what the split said and what the folds say."""
+        if folds is None or folds.empty:
+            self.notify(
+                "Walk-forward CV produced no folds — the record is too short for the "
+                "number of folds asked for.",
+                key="cv-no-folds",
+                kind="warn",
+            )
+            return
+        self.cv_folds = folds
+        holdout = getattr(self, "_holdout_r2", None)
+        header, rows = cv_table(folds)
+        verdict, lines = cv_verdict(folds, holdout)
+
+        def _cv_fig(_df: pd.DataFrame | None = None) -> Any:
+            return cv_figure(folds, holdout)
+
+        views: dict = getattr(self, "_model_views", {})
+        views["Walk-forward CV"] = (
+            _cv_fig,
+            folds,
+            {"verdict": verdict, "lines": lines, "header": header, "rows": rows, "own_words": True},
+        )
+        self._model_views = views
+        self._show_model_view("Walk-forward CV")
+        self._log_history("cv", f"{len(folds)} folds")
+        self.statusBar().showMessage(
+            "Walk-forward CV done — the Model tab compares split and folds."
+        )
 
     def _feature_importance(self):
         """Best-effort (names, values) from the trained model, else None."""
