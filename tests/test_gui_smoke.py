@@ -276,6 +276,116 @@ def test_find_stations_dispatches_per_provider(monkeypatch):
     assert out.loc[0, "to"] == "2026-01-01"
 
 
+def _four_stations():
+    import pandas as pd
+
+    return pd.DataFrame(
+        {
+            "site": [
+                "Manchester Piccadilly",
+                "London Marylebone Road",
+                "Glasgow Kerbside",
+                "Belfast Centre",
+            ],
+            "code": ["MAN3", "MY1", "GLA4", "BEL2"],
+            "site_type": ["Urban Background", "Urban Traffic", "Urban Traffic", "Urban Background"],
+            "pollutants": ["PM2.5, NO2", "NO2, O3", "PM2.5", "NO2"],
+            "n": [2, 2, 1, 1],
+            "from": ["1995-12-18", "1998-01-01", "2000-05-01", "2001-02-01"],
+            "to": ["2026-01-01", "2026-01-01", "2025-12-01", "2024-01-01"],
+            "lat": [53.4779, 51.5226, 55.8642, 54.5973],
+            "lon": [-2.2372, -0.1543, -4.2518, -5.9301],
+        }
+    )
+
+
+def _click_event(map_widget, lon, lat):
+    """The mouse event a click at (*lon*, *lat*) produces, as a press+release pair."""
+    from types import SimpleNamespace
+
+    x, y = map_widget.ax.transData.transform((lon, lat))
+    return SimpleNamespace(
+        x=float(x),
+        y=float(y),
+        button=1,
+        inaxes=map_widget.ax,
+        xdata=float(lon),
+        canvas=map_widget.canvas,
+    )
+
+
+def test_station_map_click_selects_the_station(qapp):
+    """A click on a station's point is a selection, exactly like clicking its
+    row: the table follows, the hint and date range update, Fetch enables."""
+    from normet.gui.data_window import DataWindow
+
+    win = DataWindow()
+    win.resize(1100, 800)
+    win.show()
+    try:
+        df = _four_stations()
+        win.stations = df
+        win._fill_station_table(df)
+        event = _click_event(win.station_map, df.loc[2, "lon"], df.loc[2, "lat"])
+        win.station_map._pressed(event)
+        win.station_map._released(event)
+
+        assert win._selected_key() == 2
+        assert win.station_table.currentRow() == 2
+        assert "Glasgow Kerbside" in win.station_hint.text()
+        assert win.fetch_btn.isEnabled()
+        assert win.station_map._selected == 2  # the red ring follows the pick
+
+        # A row click rings the same station on the map.
+        win.station_table.selectRow(0)
+        assert win.station_map._selected == 0
+    finally:
+        win.close()
+
+
+def test_station_map_picks_only_near_a_point(qapp):
+    """Only a click within a few pixels of a station is a pick: the map's empty
+    water must not select whichever station happens to be nearest."""
+    from normet.gui._station_map import PICK_PX, StationMap
+
+    w = StationMap()
+    try:
+        df = _four_stations()
+        w.set_stations(df)
+        hit = _click_event(w, df.loc[1, "lon"], df.loc[1, "lat"])
+        assert w._nearest(hit) == 1
+        away = _click_event(w, df.loc[1, "lon"] - 5.0, df.loc[1, "lat"] + 2.0)
+        assert w._nearest(away) is None
+        assert PICK_PX < 20
+        # Hovering names the station under the pointer.
+        w._moved(hit)
+        assert w._tip.get_visible() and w._tip.get_text() == "London Marylebone Road (MY1)"
+        w._moved(away)
+        assert not w._tip.get_visible()
+    finally:
+        w.deleteLater()
+
+
+def test_station_map_shows_the_filtered_list(qapp):
+    """The search narrows the map to the rows the table shows, and a network
+    change empties it, so no point can select a station of another network."""
+    from normet.gui.data_window import EEA_NETWORK, DataWindow
+
+    win = DataWindow()
+    try:
+        win.stations = _four_stations()
+        win._fill_station_table(win.stations)
+        assert len(win.station_map._keys) == 4
+        win.search_edit.setText("glasgow")
+        assert win.station_map._keys.tolist() == [2]
+        assert win.station_map._labels == ["Glasgow Kerbside (GLA4)"]
+        win.search_edit.clear()
+        win.net_combo.setCurrentText(EEA_NETWORK)
+        assert win.station_map._keys.size == 0
+    finally:
+        win.close()
+
+
 def test_fetch_and_merge_unknown_provider_raises():
     from normet.gui import data_window
 
