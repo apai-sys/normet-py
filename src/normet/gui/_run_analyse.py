@@ -34,6 +34,163 @@ def _long_term_columns(res: pd.DataFrame | None) -> pd.DataFrame | None:
     return None
 
 
+# -- events & anomalies --------------------------------------------------------------------
+
+
+def events_call(
+    frame: pd.DataFrame,
+    column: str,
+    *,
+    method: str = "iqr",
+    k: float = 3.0,
+    min_length: int = 1,
+    seed: int = 7_654_321,
+) -> tuple[pd.Series, pd.DataFrame]:
+    """The run as one worker task: per-timestamp scores for the strip, and the
+    flagged windows for the table.
+
+    ``column`` is a table column or ``"long-term"``, the separated long-term
+    component; the task takes the table as it stands (the command log names it
+    by the expression it is kept under), so a saved session repeats the search
+    exactly as it ran -- the series is built the way the trend builds it. Both
+    library calls score the same series with the same seed, and every method
+    here is deterministic under it, so the shaded windows on the strip and the
+    rows in the table are the same stretches, hour for hour. Scoring runs
+    twice (``detect_events`` scores for itself); on a long record under
+    ``stl_residual`` that is a second STL, which is why this pair lives on a
+    worker thread rather than in the handler.
+    """
+    from normet import anomaly_scores, detect_events
+
+    from . import _trend
+
+    series = (
+        _trend.long_term_series(frame)
+        if column == "long-term"
+        else _trend.trend_series(frame, column)
+    )
+    scores = anomaly_scores(series, method=method, seed=seed)
+    events = detect_events(series, method=method, k=k, min_length=min_length, seed=seed)
+    return scores, events
+
+
+def _event_stamp(value: Any, fmt: str) -> str:
+    """An event boundary to the stamp the table shows: a timestamp from
+    Python, whatever string form the bridge handed back."""
+    try:
+        return pd.Timestamp(value).strftime(fmt)
+    except (ValueError, TypeError):
+        return str(value)
+
+
+def events_table(events: pd.DataFrame, *, with_clock: bool) -> tuple[list[str], list[list[str]]]:
+    """The event windows as the Events tab's table. *with_clock* puts the
+    hour on the stamps: an hourly record's windows are hours, and day-only
+    stamps would show two events on one day as if they were one."""
+    fmt = "%Y-%m-%d %H:%M" if with_clock else "%Y-%m-%d"
+    header = ["Start", "End", "Steps", "Max score", "Mean score"]
+    rows: list[list[str]] = []
+    for ev in events.to_dict("records"):
+        try:
+            max_s, mean_s = f"{float(ev['max_score']):.2f}", f"{float(ev['mean_score']):.2f}"
+        except (TypeError, ValueError):
+            max_s = mean_s = "—"
+        rows.append(
+            [
+                _event_stamp(ev["start"], fmt),
+                _event_stamp(ev["end"], fmt),
+                str(int(ev["n"])),
+                max_s,
+                mean_s,
+            ]
+        )
+    return header, rows
+
+
+def _events_has_clock(scores: pd.Series) -> bool:
+    """True when the record steps are finer than a day: its event windows
+    are hours, and day-only stamps would draw two events on one day as
+    though they were one."""
+    if not isinstance(scores.index, pd.DatetimeIndex) or len(scores.index) < 3:
+        return False
+    med = pd.Series(scores.index).diff().median()
+    return bool(pd.notna(med) and med < pd.Timedelta(days=1))
+
+
+def events_verdict(
+    events: pd.DataFrame,
+    scores: pd.Series,
+    *,
+    method: str,
+    k: float,
+    min_length: int,
+    with_clock: bool,
+) -> tuple[tuple[str, str], list[str]]:
+    """The Events tab's verdict and its note lines.
+
+    An event is not an error — a record with nothing anomalous at k=3 is a
+    fine answer, and one with events says no more than *look here* — so the
+    verdict counts what was flagged rather than scolding it. The note lines
+    carry the run's settings and the largest window, the two things a reader
+    of the table asks first.
+    """
+    t = 0.0 if method == "isolation" else float(k)
+    fmt = "%Y-%m-%d %H:%M" if with_clock else "%Y-%m-%d"
+    steps = int(events["n"].sum()) if len(events) else 0
+    pct = 100.0 * steps / max(len(scores), 1)
+    # One sentence, plain counts: the zh catalogue keys these strings by their
+    # shape with the numbers lifted out, so no plural branches and no
+    # thousands separators.
+    lines = [f"Method {method}, threshold {t:g}, windows of at least {min_length} steps."]
+    if len(events) == 0:
+        return (
+            (
+                "ok",
+                f"No events: no stretch of the {len(scores)}-step record crosses "
+                f"the threshold {t:g} for {min_length} running steps.",
+            ),
+            lines,
+        )
+    top = events.iloc[0]
+    lines.append(
+        f"The largest window: {_event_stamp(top['start'], fmt)} to "
+        f"{_event_stamp(top['end'], fmt)}, {int(top['n'])} steps, "
+        f"max score {float(top['max_score']):.2f}."
+    )
+    return (
+        (
+            "warn",
+            f"Event windows flagged: {len(events)} ({pct:.1f}% of the record) — "
+            "check the table against the shaded strip.",
+        ),
+        lines,
+    )
+
+
+def events_figure(
+    scores: pd.Series, events: pd.DataFrame, *, threshold: float | None, name: str
+) -> Any:
+    """The score strip: every timestamp's anomaly score with each flagged
+    window shaded, so a table row is visible as the bump that made it. The
+    threshold is drawn where one applies — isolation scores against the
+    forest's own boundary and says so by leaving the line out — and the
+    shading is then simply where the curve crosses it."""
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(8, 2.6))
+    ax.plot(scores.index, scores.to_numpy(dtype=float), color=S.COMPONENT, lw=0.8)
+    if threshold is not None:
+        ax.axhline(threshold, color=S.INK, lw=0.8, ls=(0, (4, 3)), label=f"threshold {threshold:g}")
+    for ev in events.to_dict("records"):
+        ax.axvspan(ev["start"], ev["end"], color=S.MODELLED, alpha=0.15, lw=0)
+    ax.set_ylabel("Anomaly score")
+    ax.set_title(f"Anomaly scores — {name}")
+    S.grid(ax, axis="y")
+    if threshold is not None:
+        S.legend(ax, loc="upper right")
+    return fig
+
+
 class AnalyseRunMixin(QMainWindow):
     def _run_normalise(self) -> None:
         if not self._check_model():
@@ -475,6 +632,130 @@ class AnalyseRunMixin(QMainWindow):
         self.statusBar().showMessage("Segmented trend done.")
         self._log_history("trend", self._trend_name)
         log.info("Segmented trend finished (%s)", self._trend_name)
+
+    def _events_resolve(self) -> tuple[pd.DataFrame, str] | None:
+        """The events box's series choice as the table and column to score:
+        the trend box's four choices read against what the window holds.
+        None, said on screen, when the choice points at nothing the window
+        has; the score itself needs what the trend test needs. The task is
+        given the table and column, not the built series, so the command log
+        can name the table and a saved session repeats the search."""
+        from . import _trend
+
+        choice = self.events_series.currentText()
+        if choice.startswith("observed"):
+            frame, column = self.df_prep, self.target_combo.currentText()
+        elif choice.startswith("long-term"):
+            res = self.results.get("decompose")
+            if res is None or _long_term_columns(res) is None:
+                self.notify(
+                    "The long-term trend needs the emission decomposition that "
+                    "separated it -- run the emission decomposition first, or "
+                    "choose another series.",
+                    key="need-decompose",
+                )
+                return None
+            frame, column = res, "long-term"
+        else:
+            res = self.results.get("decompose")
+            if res is None:
+                self.notify(
+                    "Run the decomposition first: events are flagged on its series.",
+                    key="need-decompose",
+                )
+                return None
+            column = "emi_total" if choice.startswith("emission") else "met_total"
+            if column not in res.columns:
+                self.notify(
+                    f"The decomposition has no {column!r} in it: the emission "
+                    "part needs the emission method, the weather part the "
+                    "meteorology one.",
+                    key="need-decompose",
+                )
+                return None
+            frame = res
+        try:
+            series = (
+                _trend.long_term_series(frame)
+                if column == "long-term"
+                else _trend.trend_series(frame, column)
+            )
+        except ValueError:
+            self.notify(
+                f"The table the window holds has no {column!r}: train again, or "
+                "score the observed target.",
+                key="need-model",
+            )
+            return None
+        if int(series.notna().sum()) < 15:
+            self.notify(
+                "Fewer than 15 values in the series: the event search needs more.",
+                key="need-events",
+            )
+            return None
+        return frame, column
+
+    def _run_events(self) -> None:
+        """Flag the record's event windows on a worker: score every
+        timestamp, then the consecutive stretches above the threshold
+        (``normet.detect_events``). IsolationForest and STL each cost a
+        fit over the record, which is not the GUI thread's to spend."""
+        if not self._check_model():
+            return
+        got = self._events_resolve()
+        if got is None:
+            return
+        frame, column = got
+        method = self.events_method.currentText()
+        name = S.formula(self.target_combo.currentText())
+        choice = self.events_series.currentText()
+        if choice.startswith("long-term"):
+            name = "long-term trend"
+        elif choice.startswith("emission"):
+            name = "emi_total"
+        elif choice.startswith("meteorology"):
+            name = "met_total"
+        # Spoken at submit, like the trend's note: the panel's combos stay
+        # live while the task runs, and the result must say what was asked.
+        self._events_spec = (method, self.events_k.value(), self.events_min_len.value(), name)
+        self.runner.submit(
+            f"events ({method})",
+            events_call,
+            self._events_done,
+            self._show_error,
+            frame,
+            column,
+            method=method,
+            k=self.events_k.value(),
+            min_length=self.events_min_len.value(),
+            seed=self.seed_spin.value(),
+        )
+
+    def _events_done(self, got: tuple[pd.Series, pd.DataFrame]) -> None:
+        """The Events tab: the score strip with the flagged windows shaded,
+        the event table above it, and a verdict that counts what was
+        flagged."""
+        scores, events = got
+        method, k, min_length, name = self._events_spec
+        self.results["events"] = events
+        with_clock = _events_has_clock(scores)
+        header, rows = events_table(events, with_clock=with_clock)
+        verdict, lines = events_verdict(
+            events, scores, method=method, k=k, min_length=min_length, with_clock=with_clock
+        )
+        self.tab_events.show_result(
+            events_figure(
+                scores, events, threshold=None if method == "isolation" else k, name=name
+            ),
+            verdict=verdict,
+            lines=lines,
+            header=header,
+            rows=rows,
+        )
+        self.tabs.setCurrentWidget(self.tab_events)
+        self.statusBar().showMessage("Event search done.")
+        self._log_history("events", method)
+        log.info("Event search finished (%s, %d windows)", method, len(events))
 
     def _run_unc(self) -> None:
         if not self._check_model():

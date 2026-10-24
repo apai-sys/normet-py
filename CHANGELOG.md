@@ -466,6 +466,15 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   across them, a table of each fold's test window and its R²/RMSE/MB, and a verdict
   that says plainly when the split flatters the model. Unavailable for Chronos-2,
   whose check is the quantile backtest above.
+- **Events & anomalies box, Events tab** — the library's event detection
+  (`anomaly_scores`, `detect_events`) reaches the window: a box under the Trend
+  test scores a series — the emission part, the separated long-term trend, the
+  weather part or the observed target — with `iqr`, an IsolationForest on lags
+  (`isolation`), or the STL residual (`stl_residual`), flags the consecutive
+  stretches above `Threshold k` (in IQRs; the forest's own boundary when it
+  runs) of at least `Min length` steps, and the new Events tab shows the
+  score strip with each flagged window shaded beside a table of the windows:
+  start, end, steps, max and mean score, ranked by the maximum.
 
 ### Changed
 - **`rolling` names its windows `window_01`, `window_02`, …** (was

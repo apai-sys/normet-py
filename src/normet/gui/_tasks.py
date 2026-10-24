@@ -61,6 +61,20 @@ class TaskMixin(QMainWindow):
                 "emission decomposition, which chronos-2 cannot make: choose the "
                 "observed target, or train with flaml or lightgbm."
             )
+        # The event search scores whatever series the box points at; like the
+        # trend it needs a model only because that is what puts the observed
+        # target through the de-weathering the parts come from.
+        self.events_button.setEnabled(not busy and has_model)
+        if not has_model:
+            self.events_button.setToolTip("Train a model first.")
+        elif self._is_chronos() and self.events_series.currentText().startswith(
+            ("emission", "long-term")
+        ):
+            self.events_button.setToolTip(
+                "The emission part and its separated long-term trend need the "
+                "emission decomposition, which chronos-2 cannot make: choose the "
+                "observed target, or train with flaml or lightgbm."
+            )
         # The uncertainty attribution trains its own members, so it needs a model
         # to exist at all and the feature set to vary a model form; chronos-2's
         # zero-shot forecasts carry neither to speak of.
