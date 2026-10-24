@@ -751,7 +751,9 @@ Its pages, and what each holds (a page's first box goes untitled, the tab naming
         three window widths (Section~\ref{sec:multiscaleui}); \emph{Trend}: the
         series to test (a part of the decomposition, its separated long-term trend, or
         the observed target), its seasonal period, the number of segments and how
-        many bootstrap resamples; and \emph{Uncertainty decomposition}: the number
+        many bootstrap resamples; \emph{Events \& anomalies}: the series to score,
+        the method, the threshold and the shortest flagged stretch
+        (Section~\ref{sec:eventsui}); and \emph{Uncertainty decomposition}: the number
         of ensemble members, the met draws they all share, and the members' backend
         (Section~\ref{sec:uncertainty}).
   \item[Rolling] Window, step and samples (Section~\ref{sec:rollingui}).
@@ -773,6 +775,7 @@ Decompose   & the emission or meteorological components, the cycles & Run decomp
 Rolling     & the mean of the rolling windows, with their spread & Run rolling normalisation \\
 Multi-scale & the scale-space cascade and the energy in each band & Multi-scale \\
 Trend       & the tested series with its Theil--Sen line, or its segments and marked break, the verdict and the p value & Trend test \\
+Events      & the anomaly-score strip with the flagged windows shaded, and the event table & Find events \\
 PDP         & one partial-dependence panel per variable & Compute PDP \\
 Uncertainty & the per-date spread stacked by source (weather, model, interaction) and the median's shares & Uncertainty decomposition \\
 \bottomrule
@@ -826,6 +829,7 @@ Run decomposition     & a model                  & \code{decompose} \\
 Run rolling normalisation & an AutoML model      & \code{rolling} \\
 Multi-scale decomposition & an AutoML model, a normalisation & \code{rolling} $\times 3$ \\
 Trend test          & an AutoML model (a decomposition, where it tests one) & \code{trend} (1 segment), \code{detect\_trend\_breaks} (more) \\
+Find events         & a model (a decomposition, where it scores a part) & \code{anomaly\_scores}, \code{detect\_events} \\
 Compute PDP           & an AutoML model, one variable ticked & \code{pdp} \\
 Uncertainty decomposition & an AutoML model & \code{decompose\_uncertainty} \\
 \bottomrule
@@ -1209,10 +1213,40 @@ p of the search 0.001, the one to quote. Segment 1 runs +0.0812 per day
 break are in the figure; the per-segment table and the verdict above it are the
 Trend tab's.}{fig:trend_breaks}
 
+\section{Events \& anomalies}\label{sec:eventsui}
+The question beside the trend: not where the record is heading but what happened
+in it. The \emph{Events \& anomalies} box under \emph{Trend} scores every
+timestamp for how far it strays from the record's normal behaviour and flags the
+consecutive stretches above a threshold --- the smoke episodes, the release
+events, the days the instruments misbehaved (\code{anomaly\_scores},
+\code{detect\_events}).
+
+\emph{Series} is the trend box's choice: a decomposition's emission part
+(events the weather did not cause), its separated long-term trend, its weather
+part, or the observed target. \emph{Method} chooses the score: \code{iqr},
+$|x-\text{median}|/\mathrm{IQR}$, the robust univariate score with
+\emph{Threshold k} in multiples of it; \code{isolation}, an IsolationForest over
+the value and its lags, which catches shapes a univariate score cannot --- a
+spike train, a level shift --- and scores against the forest's own boundary, so
+the threshold row goes grey; \code{stl\_residual}, the score of the
+seasonal-decomposition residual, what stands out against the record's own cycle
+rather than against its whole distribution. \emph{Min length} drops stretches
+shorter than it, in steps of the record: 1 keeps single-hour spikes, 3 reads as
+episodes rather than instrument flickers.
+
+The \tab{Events} tab draws the score strip --- every timestamp's score with each
+flagged window shaded, the threshold as a line where one applies, so the
+shading is simply where the curve crosses it --- and the table of windows:
+start, end, steps, maximum and mean score, ranked by the maximum. On an
+autocorrelated hourly record even $k=3$ flags the tails of ordinary weather:
+raise the threshold, or the minimum length, until only the episodes remain.
+Both calls are deterministic under the seed, so the table's rows and the
+strip's shading are the same stretches, hour for hour.
+
 \section{Uncertainty decomposition}\label{sec:uncertainty}
 The question a de-weathered estimate invites: of the band around an effect, how
 much is the met resampling and how much is the model form? The \emph{Uncertainty
-decomposition} box under \emph{Trend} answers by attribution, not by another
+decomposition} box under \emph{Events \& anomalies} answers by attribution, not by another
 Monte-Carlo run. It trains \emph{Models} (default 4) members, each on its own
 seed and on the table as loaded, from the trained variable set; every member then
 predicts the same \emph{Samples} (default 300, the variables ticked on the

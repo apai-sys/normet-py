@@ -272,6 +272,14 @@ _KNOWN: dict[str, tuple[str, str, str, str]] = {
         "window holds ('long-term' is its separated long-term component, not a "
         "table column).",
     ),
+    "normet.gui._run_analyse.events_call": (
+        "Find events",
+        "scores, events",
+        "from normet.gui._run_analyse import events_call",
+        "The GUI's own helper around normet.anomaly_scores and normet.detect_events "
+        "on the series the window holds ('long-term' is its separated long-term "
+        "component, not a table column).",
+    ),
     "normet.analysis.uncertainty.decompose_uncertainty": (
         "Uncertainty decomposition",
         "uncertainty",

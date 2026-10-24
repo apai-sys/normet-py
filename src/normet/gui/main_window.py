@@ -163,6 +163,7 @@ class MainWindow(
                             self._build_decompose_box(),
                             self._build_multiscale_box(),
                             self._build_trend_box(),
+                            self._build_events_box(),
                             self._build_unc_box(),
                         ),
                         (self._build_rolling_box(),),
@@ -180,6 +181,7 @@ class MainWindow(
             self.roll_button,
             self.ms_button,
             self.trend_button,
+            self.events_button,
             self.pdp_button,
             self.unc_button,
         ]
