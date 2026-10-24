@@ -204,7 +204,47 @@ def test_events_button_gating(qapp):
         w.close()
 
 
-def test_run_events_flags_the_episode_on_the_tab(qapp):
+def test_run_events_flags_the_episode_on_the_tab(qapp, monkeypatch):
+    """The wiring end to end: submit, worker, render, command log. The two
+    library calls are replaced by a deterministic stand-in of the same iqr
+    maths — this is the window's test, and its vendored copy runs in the R
+    window's CI where the bridge would shell out to an Rscript that is not
+    installed there. The methods themselves are the libraries' own tests."""
+    import normet
+
+    def fake_scores(series, **_kw):
+        med = series.median()
+        iqr = series.quantile(0.75) - series.quantile(0.25)
+        return ((series - med).abs() / iqr).rename("score")
+
+    def fake_detect(series, *, k=3.0, min_length=1, **_kw):
+        score = fake_scores(series)
+        above = (score > k) & score.notna()
+        rows, run = [], None
+        for flag, stamp in zip(above, score.index, strict=True):
+            if flag and run is None:
+                run = [stamp, stamp, 0, 0.0, 0.0]
+            if flag:
+                run[1], run[2] = stamp, run[2] + 1
+                run[3] = max(run[3], float(score.loc[stamp]))
+                run[4] += float(score.loc[stamp])
+            elif run is not None:
+                rows.append(run)
+                run = None
+        if run is not None:
+            rows.append(run)
+        events = pd.DataFrame(rows, columns=["start", "end", "n", "max_score", "mean_score"])
+        if len(events):
+            events["mean_score"] = events["mean_score"] / events["n"]
+            events = (
+                events[events["n"] >= min_length]
+                .sort_values("max_score", ascending=False)
+                .reset_index(drop=True)
+            )
+        return events
+
+    monkeypatch.setattr(normet, "anomaly_scores", fake_scores)
+    monkeypatch.setattr(normet, "detect_events", fake_detect)
     w, _target, idx = _events_win(qapp)
     try:
         w.events_series.setCurrentText("observed target")
