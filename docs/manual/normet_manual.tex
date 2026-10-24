@@ -1243,6 +1243,15 @@ raise the threshold, or the minimum length, until only the episodes remain.
 Both calls are deterministic under the seed, so the table's rows and the
 strip's shading are the same stretches, hour for hour.
 
+\screenshot{ui_events.png}{The \tab{Events} tab on MY1's emission part
+(Section~\ref{sec:emission}): the iqr score of every timestamp, the $k=2$
+threshold as a line --- the box's default $k=3$ flags no window on this
+de-weathered series, so 2 is the first value that does --- and the 26 flagged
+windows shaded, the table of them ranked by the maximum score above the figure,
+the largest scoring 2.36. The shading is simply where the curve crosses the
+line; at a low threshold the ordinary-weather tails are what get flagged, and
+the top of the table is the 2020-03-10 07:00--18:00 stretch, a full day.}{fig:events}
+
 \section{Uncertainty decomposition}\label{sec:uncertainty}
 The question a de-weathered estimate invites: of the band around an effect, how
 much is the met resampling and how much is the model form? The \emph{Uncertainty

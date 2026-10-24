@@ -246,6 +246,50 @@ def main_figures(app):
     win.tre_segments.setValue(1)  # the rest of the run stands on the default
     win.trend_series.setCurrentText("emission part (emi_total)")
 
+    print("events (emission part)")
+    # The Events & anomalies box under Trend, on the emission part the Trend
+    # test just ran (the box's default choice), the iqr score at threshold 2
+    # and minimum length 3. The score strip with its flagged windows shaded and
+    # the event table land on the Events tab; the numbers the manual quotes are
+    # this run's own. The threshold is 2, not the box's default 3: on MY1's
+    # de-weathered emission part nothing clears 3, so 2 is the first value that
+    # shows the mechanism (the strip's shading is exactly where the score
+    # crosses the line). It must run before the meteorology decomposition
+    # overwrites results["decompose"] with its met columns.
+    win.events_series.setCurrentText("emission part (emi_total)")
+    win.events_method.setCurrentText("iqr")
+    win.events_k.setValue(2.0)
+    win.events_min_len.setValue(3)
+    print(
+        "  box:",
+        win.events_series.currentText(),
+        "/",
+        win.events_method.currentText(),
+        "/",
+        win.events_k.value(),
+        "/",
+        win.events_min_len.value(),
+    )
+    win._run_events()
+    ev = win.results["events"]
+    top = float(ev["max_score"].max()) if len(ev) else float("nan")
+    longest = int(ev["n"].max()) if len(ev) else 0
+    print("  windows:", len(ev), "max score:", round(top, 3), "longest stretch (steps):", longest)
+    if len(ev):
+        for _, r in ev.head(3).iterrows():
+            print(
+                "  window:",
+                str(r["start"]),
+                "->",
+                str(r["end"]),
+                "steps",
+                int(r["n"]),
+                "max",
+                round(float(r["max_score"]), 3),
+            )
+    said(win.tab_events)
+    grab(win, "ui_events.png")
+
     print("decompose: meteorology, four groups")
     win.decom_method.setCurrentText("meteorology")
     win.decom_attribution.setCurrentText("auto")
