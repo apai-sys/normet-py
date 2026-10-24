@@ -18,6 +18,13 @@ class TaskMixin(QMainWindow):
         has_model = self.model is not None
         has_y_inf = "normalise" in self.results
         self.train_button.setEnabled(not busy and has_data)
+        self.cv_button.setEnabled(not busy and has_model and not self._is_chronos())
+        if not has_model:
+            self.cv_button.setToolTip("Train a model first.")
+        elif self._is_chronos():
+            self.cv_button.setToolTip(
+                "Not available for chronos-2 — its check is the quantile backtest on the Model tab."
+            )
         self.ft_button.setEnabled(not busy and has_model and self._is_chronos())
         for b in (self.norm_button, self.decom_button, self.roll_button, self.pdp_button):
             b.setEnabled(not busy and has_model)
