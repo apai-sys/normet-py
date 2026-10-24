@@ -397,7 +397,18 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   staggered design's permuted treated identities are contaminated by the true
   effect (and with two treated units the single non-identity permutation is
   contaminated), while a donor never intervened on draws from the null.
- - **Data Studio is no longer UK-only**: the Network picker now also offers
+ - **Data Studio: the found stations on a map.** After *Find stations* the
+  Stations tab draws the sites at their coordinates above the table. A click
+  on a station selects it exactly as a table row does — the table scrolls to
+  it, the hint and date range follow, *Fetch & merge* enables — hovering
+  names it, and selecting in the table rings its point; the search field
+  narrows both views together. There is no basemap: tiles would mean an
+  online service or a new dependency for a picture whose points already sit
+  where the stations are. The aspect is 1/cos(latitude), so a degree of
+  longitude is drawn at its true width and a wide panel shows more
+  surrounding area rather than stretching the map. Every network works, as
+  all three providers carry station coordinates.
+- **Data Studio is no longer UK-only**: the Network picker now also offers
    the **EEA** reporting network (all of Europe) and **OpenAQ** (most of the
    world, free API key), and the entry point is renamed accordingly — the
    toolbar button is "🌐 Get data" and the menu is File → Get &Data

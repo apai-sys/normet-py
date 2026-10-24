@@ -3,7 +3,8 @@
 Two-step workflow in the house style (parameter panel left, result tabs right):
 
 1. **Find stations** — pick a network, tick pollutants, list the sites that
-   measure them, browse/search the station table and pick one.
+   measure them, then pick one from the station table, by search, or by
+   clicking its point on the map.
 2. **Fetch & merge** — download the hourly measurements for every ticked
    pollutant at that site, fetch hourly meteorology for the site coordinates
    (Open-Meteo ERA5 archive by default — no API key; Copernicus CDS
@@ -60,6 +61,7 @@ from PySide6.QtWidgets import (
 from normet import style as S
 
 from ._clock import TaskClock
+from ._station_map import StationMap
 from ._widgets import CanvasTab, NoWheelComboBox, hint_label, run_button
 from .workers import TaskRunner
 
@@ -641,9 +643,22 @@ class DataWindow(QMainWindow):
         self.station_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.station_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.station_table.itemSelectionChanged.connect(self._station_selected)
-        sl.addWidget(self.station_table, 1)
+        # The map and the table show one list two ways: the map is where the
+        # stations are, the table is what each one measures and holds.
+        self.station_map = StationMap()
+        self.station_map.stationClicked.connect(self._pick_on_map)
+        stations = QSplitter(Qt.Orientation.Vertical)
+        stations.addWidget(self.station_map)
+        stations.addWidget(self.station_table)
+        stations.setStretchFactor(0, 3)
+        stations.setStretchFactor(1, 2)
+        stations.setSizes([380, 260])
+        sl.addWidget(stations, 1)
         sl.addWidget(
-            hint_label("Click 🔍 Find stations to fill this table, then select the site to use.")
+            hint_label(
+                "Click 🔍 Find stations to fill this table, then select the site to use —\n"
+                "a row, or its point on the map."
+            )
         )
         self.tabs.addTab(st_tab, "Stations")
 
@@ -729,6 +744,7 @@ class DataWindow(QMainWindow):
         self.stations = None
         self.station_table.clearContents()
         self.station_table.setRowCount(0)
+        self.station_map.set_stations(None)
         self.station_hint.setText("No station chosen yet")
         self._refresh_context()
         self.statusBar().showMessage(
@@ -777,7 +793,7 @@ class DataWindow(QMainWindow):
         self._fill_station_table(df)
         self.tabs.setCurrentIndex(0)
         self.statusBar().showMessage(
-            f"{len(df)} sites measure the ticked pollutants — search and select one."
+            f"{len(df)} sites measure the ticked pollutants — search, or pick one on the map."
         )
 
     def _fill_station_table(self, df: pd.DataFrame) -> None:
@@ -798,6 +814,7 @@ class DataWindow(QMainWindow):
                     item.setData(Qt.ItemDataRole.UserRole, int(row.name))
                 self.station_table.setItem(r, c, item)
         self.station_table.resizeColumnsToContents()
+        self.station_map.set_stations(df)
 
     def _filter_stations(self, text: str) -> None:
         if self.stations is None:
@@ -813,18 +830,34 @@ class DataWindow(QMainWindow):
             df = df[match]
         self._fill_station_table(df)
 
-    def _selected_station(self) -> dict | None:
-        if self.stations is None:
-            return None
+    def _selected_key(self) -> int | None:
+        """The station frame index of the table's selected row, if one is."""
         items = self.station_table.selectedItems()
         if not items:
             return None
-        idx = self.station_table.item(items[0].row(), 0).data(Qt.ItemDataRole.UserRole)
+        key = self.station_table.item(items[0].row(), 0).data(Qt.ItemDataRole.UserRole)
+        return int(key) if key is not None else None
+
+    def _selected_station(self) -> dict | None:
+        if self.stations is None:
+            return None
+        idx = self._selected_key()
         if idx is None or idx not in self.stations.index:
             return None
         return self.stations.loc[idx].to_dict()
 
+    def _pick_on_map(self, key: int) -> None:
+        """A click on a station's point selects its row, and the row's path follows."""
+        for r in range(self.station_table.rowCount()):
+            item = self.station_table.item(r, 0)
+            if item is not None and item.data(Qt.ItemDataRole.UserRole) == key:
+                self.station_table.selectRow(r)
+                self.station_table.scrollToItem(item, QAbstractItemView.ScrollHint.PositionAtCenter)
+                return
+
     def _station_selected(self) -> None:
+        key = self._selected_key()
+        self.station_map.highlight(key)
         st = self._selected_station()
         if st:
             cov = f"{st.get('from', '')} → {st.get('to', '')}" if st.get("to") else "unknown"
