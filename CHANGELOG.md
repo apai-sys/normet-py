@@ -440,6 +440,17 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
    pollutants OpenAQ registers (PM2.5/PM10/NO2/O3/SO2/CO) are offered; NO and
    NOx are ticked away for OpenAQ as the adapter's set does not include them.
    The met join is shared: every provider carries coordinates.
+- **SCM Studio: the fit's own inference** — five library analyses now run from
+  the window. The Fit tab runs the fit's pre-trend test (`pre_trend_test`)
+  alongside `scm_diagnostics` and shows its slope, p-value and RMPE drift. The
+  new *Fit Checks* tab hosts the checks that act on a finished fit:
+  ▶ Pre-trend + event study (the pre-trend verdict with the effect path on the
+  event-time axis, `plot_event_study`), ▶ Conformal interval (a finite-sample
+  95 % interval for the post-cutoff ATT, `conformal_effect_interval`, with a
+  sub-sample control) and ▶ Leave-one-donor-out (`loo_weight_stability`, how
+  far the weights and the effect move when each donor is dropped). 'Placebo in
+  space' also reports Abadie's RMSPE-ratio test (`rmspe_ratio_test`): the
+  treated unit's post/pre RMSPE ratio, its rank and its p-value.
 
 ### Changed
 - **`rolling` names its windows `window_01`, `window_02`, …** (was
