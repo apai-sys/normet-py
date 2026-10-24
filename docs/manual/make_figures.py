@@ -407,11 +407,15 @@ def transport_figures():
 
 
 def data_studio_figure():
-    from normet.gui.data_window import DataWindow
+    from normet.gui.data_window import DataWindow, EEA_NETWORK
 
     print("data studio")
     w = DataWindow(parent=None)
     w.resize(*SIZE)
+    # Show the non-UK provider: the Source settings group (country code) is the
+    # new face of the window, and DE has enough stations to matter.
+    w.net_combo.setCurrentText(EEA_NETWORK)
+    w.country_edit.setText("DE")
     w.show()
     grab(w, "ui_data_studio.png")
     return w
