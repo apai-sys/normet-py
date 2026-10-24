@@ -696,6 +696,7 @@ class DataWindow(QMainWindow):
         self.station_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.station_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.station_table.itemSelectionChanged.connect(self._station_selected)
+        self.station_table.itemDoubleClicked.connect(self._station_double_clicked)
         # The map and the table show one list two ways: the map is where the
         # stations are, the table is what each one measures and holds.
         self.station_map = StationMap()
@@ -901,6 +902,13 @@ class DataWindow(QMainWindow):
             for k in self._selected_keys()
             if k in self.stations.index
         ]
+
+    def _station_double_clicked(self, item: QTableWidgetItem) -> None:
+        """Double-clicking a row zooms the map to that station."""
+        cell = self.station_table.item(item.row(), 0)
+        key = None if cell is None else cell.data(Qt.ItemDataRole.UserRole)
+        if key is not None:
+            self.station_map.zoom_to(int(key))
 
     def _map_selection(self, keys: list[int]) -> None:
         """A selection made on the map becomes the table's, and the row's path follows."""
