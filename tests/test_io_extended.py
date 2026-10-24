@@ -524,19 +524,30 @@ def test_list_eea_stations_pages_past_the_layer_cap(monkeypatch):
 
 def _eea_blob_bytes() -> bytes:
     """A station blob in the service's own columns: one pollutant (code 8 =
-    NO2), hourly, with the -99 sentinel."""
+    NO2), hourly, with both "no measurement" sentinels -- -99 as the bulk
+    service writes it and -999 as the per-station blobs do."""
     from decimal import Decimal
 
     raw = pd.DataFrame(
         {
-            "Samplingpoint": ["GB/GB_SamplingPoint_61464"] * 3,
-            "Pollutant": [8, 8, 8],
-            "Start": ["2013-01-01 01:00:00", "2013-01-01 02:00:00", "2013-01-01 03:00:00"],
-            "End": ["2013-01-01 02:00:00", "2013-01-01 03:00:00", "2013-01-01 04:00:00"],
-            "Value": [Decimal("3.2"), Decimal("-99.0"), Decimal("4.4")],
-            "Unit": ["ug.m-3"] * 3,
-            "AggType": ["hour"] * 3,
-            "Validity": [1, -1, 1],
+            "Samplingpoint": ["GB/GB_SamplingPoint_61464"] * 4,
+            "Pollutant": [8, 8, 8, 8],
+            "Start": [
+                "2013-01-01 01:00:00",
+                "2013-01-01 02:00:00",
+                "2013-01-01 03:00:00",
+                "2013-01-01 04:00:00",
+            ],
+            "End": [
+                "2013-01-01 02:00:00",
+                "2013-01-01 03:00:00",
+                "2013-01-01 04:00:00",
+                "2013-01-01 05:00:00",
+            ],
+            "Value": [Decimal("3.2"), Decimal("-99.0"), Decimal("-999.0"), Decimal("4.4")],
+            "Unit": ["ug.m-3"] * 4,
+            "AggType": ["hour"] * 4,
+            "Validity": [1, -1, -1, 1],
         }
     )
     buf = io.BytesIO()
@@ -571,7 +582,7 @@ def test_fetch_eea_station_mocked(monkeypatch):
     assert urls[0].endswith("/query") and len(urls) == 2  # code case-insensitive
     assert df["pollutant"].unique().tolist() == ["NO2"]
     assert df["site"].iloc[0] == "Liverpool Speke"
-    assert df["value"].isna().sum() == 1  # the -99 sentinel
+    assert df["value"].isna().sum() == 2  # the -99 and -999 sentinels
     assert df["lat"].iloc[0] == pytest.approx(53.35)
     assert df["date"].dt.tz is not None
 
