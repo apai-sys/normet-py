@@ -583,8 +583,11 @@ latest from the workflow's **Actions → Artifacts**, or build one locally with
 
 **Main window** — the meteorological-normalisation workflow as numbered steps in a left-hand
 panel (Data → Columns → Train → Normalise → Decompose → Rolling → PDP), with
-results in tabs that activate as each step finishes. Model quality, and every
-other result, is summarised by a traffic-light verdict banner. Step 1 exposes
+results in tabs that activate as each step finishes. The result tabs and the
+status-bar step lights follow the workflow's order — Data, Model, Normalise,
+Decompose, then the questions the decomposition invites (Multi-scale, Trend,
+Events, Uncertainty), then the separate steps Rolling and PDP. Model quality,
+and every other result, is summarised by a traffic-light verdict banner. Step 1 exposes
 the flaml estimator search list, plus "Time variables"/"Met only" one-click
 toggles for the PDP variable list, and a **Backend** selector — `flaml`,
 `lightgbm`, or `chronos-2` for the zero-shot path, which hides the training
@@ -598,7 +601,9 @@ windows), and an adjacent **Multi-scale decomposition** panel differences
 rolling-deweathered series at increasing window widths (14/90/365 d by
 default) against each other and against Step 2's full-record baseline —
 isolating the meteorological residual specific to each timescale band,
-analogous to wavelet detail coefficients. Includes drag-and-drop CSV
+analogous to wavelet detail coefficients. An energy-by-band ranking (σ) names
+the dominant timescale at a glance, each band drawn in its own cascade colour.
+Includes drag-and-drop CSV
 loading, recent files, config save/load, run history, CSV/HTML export, a
 live log dock, and one-click synthetic example data.
 
