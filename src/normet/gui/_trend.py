@@ -112,7 +112,7 @@ def long_term_series(frame: pd.DataFrame) -> pd.Series:
     ``date_unix`` contribution plus its base (``date_unix + emi_base``) -- the series
     the Trend (long-term) panel draws.
 
-    It is the clean input to a trend test: the recurring calendar cycles (seasonal,
+    It is the clean input to a trend analysis: the recurring calendar cycles (seasonal,
     weekly, diurnal) sit in their own component columns, so what is left is the drift
     plus one-off structural breaks, without the cycles inflating the residuals.
     """

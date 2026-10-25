@@ -300,12 +300,12 @@ def methods_paragraph(info: dict[str, Any], lang: str = "en") -> str | None:
         k = call.get("max_segments", 2)
         if zh:
             out.append(
-                f"分段趋势检验（每个分量以 Theil–Sen 拟合，断点以块自助法在全部候选位置下检验，"
+                f"分段趋势分析（每个分量以 Theil–Sen 拟合，断点以块自助法在全部候选位置下检验，"
                 f"normet.detect_trend_breaks，最多 {k} 段）施加于{nm}。"
             )
         else:
             out.append(
-                f"A segmented trend test (normet.detect_trend_breaks, up to {k} segments, "
+                f"A segmented trend analysis (normet.detect_trend_breaks, up to {k} segments, "
                 f"each segment fitted with Theil-Sen, the break's position gated against "
                 f"the same search under a block bootstrap) was applied to {nm}."
             )

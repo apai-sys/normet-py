@@ -80,7 +80,7 @@ Which tool does what the analyst asks:
 - The window's own steps are tools, each run as its button runs it, with the settings
   the analyst named (and no others): train (backend, budget, split, seed), normalise,
   decompose, rolling (rolling normalisation), multiscale, pdp (partial dependence),
-  trend (the trend test of a series: Mann-Kendall, Theil-Sen slope, block-bootstrap
+  trend (the trend analysis of a series: Mann-Kendall, Theil-Sen slope, block-bootstrap
   corrected), polar_plot (a variable by wind direction and speed), and the SCM
   Studio's synthetic control: scm_open, scm_fit, scm_placebo, scm_bands. results
   reads every result tab.
@@ -815,7 +815,7 @@ class WindowTools:
         )
 
     def trend(self, series: str = "emission", seasonal: str = "auto") -> str:
-        """The window's trend test (Mann-Kendall, Theil-Sen slope with its interval,
+        """The window's trend analysis (Mann-Kendall, Theil-Sen slope with its interval,
         and the block-bootstrap-corrected p where the record is autocorrelated) on
         series 'emission' (the decomposition's emission part), 'met' (its weather
         part) or 'observed' (the target as recorded); seasonal is 'auto', 'none' or
@@ -857,7 +857,7 @@ class WindowTools:
     def trend_breaks(
         self, series: str = "long-term", segments: int = 2, n_bootstrap: int | None = None
     ) -> str:
-        """The window's segmented trend test (normet.detect_trend_breaks): where the
+        """The window's segmented trend analysis (normet.detect_trend_breaks): where the
         trend breaks, if it does, each segment with its own Theil-Sen slope and
         interval, and the block-bootstrap p of the search. series is 'long-term'
         (the decomposition's separated long-term component -- the cleaner input,

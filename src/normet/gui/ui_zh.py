@@ -297,6 +297,12 @@ TEXTS = {
     "Multi-scale decomposition done.": "多尺度分解完成。",
     "{s0} d scale skipped: {s1}": "{s0} 天尺度已跳过：{s1}",
     "only {n0} window(s) fit in the record — need at least {n1} for a meaningful {n2} d scale (a single window degenerates to the full-record baseline)": "记录中只容得下 {n0} 个窗口——{n2} 天尺度至少需要 {n1} 个才有意义（单个窗口会退化为全记录基线）",
+    # -- Trend analysis (the Decompose page's box) ---------------------------------------------
+    "Trend analysis": "趋势分析",
+    "▶  Run trend analysis": "▶  运行趋势分析",
+    "Trend analysis done.": "趋势分析完成。",
+    "Run after each emission decomposition": "每次排放分解后运行",
+    "Fewer than 15 values in the series: the trend analysis needs more.": "序列中的值不足 15 个：趋势分析需要更多数据。",
     # -- Events & anomalies (the Decompose page's box) -----------------------------------------
     "Events & anomalies": "事件与异常",
     "Scores every timestamp for how far it strays from the record's normal behaviour, then flags the consecutive stretches above a threshold -- the smoke episodes, the plume events. The scores and the flagged windows land on the Events tab.": "为每个时刻打分，衡量它偏离该记录正常行为的程度，然后把超过阈值的连续时段标记出来——如烟霾事件、烟羽事件。分数与标记的时段显示在「事件」标签页上。",

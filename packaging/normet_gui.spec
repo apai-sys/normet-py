@@ -73,6 +73,18 @@ hiddenimports += ["shapefile"]
 hiddenimports += ["requests", "cdsapi", "rdata"]
 # pandas reaches its table readers the same way (Open Data's Parquet, Feather, Excel).
 hiddenimports += ["pyarrow", "openpyxl", "xlrd"]
+# The Events step's two model methods and the feature engineering's AR and ADF
+# diagnostics reach their submodules the same way: IsolationForest in
+# sklearn.ensemble, STL in statsmodels.tsa.seasonal, AR in statsmodels.tsa.ar_model,
+# ADF in statsmodels.tsa.stattools. Without the names the frozen app says
+# "'statsmodels.tsa.seasonal' is required but not installed" although the build env
+# had statsmodels (its scan bundles only what imports it statically).
+hiddenimports += [
+    "sklearn.ensemble",
+    "statsmodels.tsa.seasonal",
+    "statsmodels.tsa.ar_model",
+    "statsmodels.tsa.stattools",
+]
 
 a = Analysis(
     [os.path.join(SPECPATH, "launcher.py")],  # noqa: F821

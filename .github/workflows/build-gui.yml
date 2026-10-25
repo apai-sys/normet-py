@@ -54,10 +54,13 @@ jobs:
         with:
           python-version: "3.11"
 
+      # stats: the Events step's stl_residual and the AR/ADF feature diagnostics
+      # import their submodules by name (the spec's hiddenimports); the installers
+      # ship them, so the build env must have them to bundle.
       - name: Install package + GUI extra + PyInstaller
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[gui,flaml,lgb,geo,data]" pyinstaller
+          pip install -e ".[gui,flaml,lgb,geo,data,stats]" pyinstaller
 
       # ---------------- macOS: .app bundle + .dmg ----------------
       - name: Build macOS app + dmg

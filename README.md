@@ -61,7 +61,7 @@
 | `nm.do_all_multisite` | Parallel per-site pipelines |
 | `nm.pdp` | Partial dependence plots |
 | `nm.modStats` | Model performance metrics (R², RMSE, MAE, …) |
-| `nm.trend` / `nm.mann_kendall` / `nm.theil_sen` / `nm.detect_trend_breaks` | Trend tests with the block-bootstrap correction for autocorrelated records, plus the segmented (piecewise) trend for records whose level or slope changes part-way through |
+| `nm.trend` / `nm.mann_kendall` / `nm.theil_sen` / `nm.detect_trend_breaks` | Trend analyses with the block-bootstrap correction for autocorrelated records, plus the segmented (piecewise) trend for records whose level or slope changes part-way through |
 | `nm.crps_from_quantiles` / `nm.crps_from_samples` / `nm.pinball_loss` / `nm.crps_observed` | Probabilistic skill scores (Gneiting & Raftery 2005): CRPS for quantile and ensemble forecasts, the pinball loss, and a point forecast's CRPS reference |
 | `nm.decompose_uncertainty` | Attribute a de-weathered estimate's total spread to its source — weather (met resampling) vs model form vs their interaction — via an additive per-date variance decomposition |
 | `nm.detect_events` / `nm.anomaly_scores` | Event detection on normalised residuals |

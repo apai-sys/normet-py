@@ -628,7 +628,7 @@ HYSPLIT（NOAA ARL）。
 分解     & 排放分量或气象分量，以及周期 & 运行分解 \\
 滚动     & 各滚动窗口的均值及其离散度 & 运行滚动归一化 \\
 多尺度   & 尺度空间级联和各频带的能量 & 多尺度 \\
-趋势     & 被检验的序列及其 Theil--Sen 直线，或其各段折线与断点、评估结论和 p 值 & 趋势检验 \\
+趋势     & 被检验的序列及其 Theil--Sen 直线，或其各段折线与断点、评估结论和 p 值 & 趋势分析 \\
 事件     & 异常分数条，被标记的窗口以阴影显示，及其事件表 & 查找事件 \\
 PDP      & 每个变量一幅部分依赖图 & 计算 PDP \\
 不确定性 & 逐时刻的离散按来源堆叠（气象、模型形式、二者的交互）及中位数份额 & 不确定度分解 \\
@@ -673,7 +673,7 @@ PDP      & 每个变量一幅部分依赖图 & 计算 PDP \\
 运行分解              & 一个模型                 & \code{decompose} \\
 运行滚动归一化        & 一个 AutoML 模型         & \code{rolling} \\
 多尺度分解            & 一个 AutoML 模型，一次归一化 & \code{rolling} $\times 3$ \\
-趋势检验              & 一个 AutoML 模型（有分解时检验分解的序列） & \code{trend}（1 段）/\code{detect\_trend\_breaks}（更多） \\
+趋势分析              & 一个 AutoML 模型（有分解时检验分解的序列） & \code{trend}（1 段）/\code{detect\_trend\_breaks}（更多） \\
 查找事件              & 一个模型（给分量打分时须有分解） & \code{anomaly\_scores}、\code{detect\_events} \\
 计算 PDP              & 一个 AutoML 模型，至少勾选一个变量 & \code{pdp} \\
 不确定度分解          & 一个 AutoML 模型 & \code{decompose\_uncertainty} \\
@@ -933,12 +933,12 @@ $\sigma = 16.79$~\ugm{}）按精确 Shapley 值（16 个联盟）分摊到四个
 
 \section{趋势}\label{sec:trend}
 分解画完的序列会引出一个问题：它是在升、在降还是平的？这个上升是真实的吗？\emph{分解}一栏下的
-\emph{趋势检验}方框对所选序列运行 Mann--Kendall 和 Theil--Sen 检验——当记录带有修正所针对的自相关
-（MY1 的排放分量：AR(1) 残差自相关 0.94）时，用块自助法代替斜率的经典误差棒。只要勾着
-\emph{每次排放分解后运行}，每次排放分解结束时它还会再运行一次。
+\emph{趋势分析}方框对所选序列运行 Mann--Kendall 和 Theil--Sen 检验——当记录带有修正所针对的自相关
+（MY1 的排放分量：AR(1) 残差自相关 0.94）时，用块自助法代替斜率的经典误差棒。勾着
+\emph{每次排放分解后运行}（默认未勾）时，每次排放分解结束时它还会再运行一次。
 
 \emph{序列}指明检验哪一条：分解的排放分量（默认：气象解释不了的那部分）、\emph{分离出的长期
-趋势}——即第~\ref{sec:emission}~节画出、周期性已各自分离的长期分量，是更干净的趋势检验输入——气象分量，
+趋势}——即第~\ref{sec:emission}~节画出、周期性已各自分离的长期分量，是更干净的趋势分析输入——气象分量，
 或观测目标本身。\emph{段数}指明分几段：1 段（默认）是上面这条单段检验；2～4 段则改运行
 \emph{分段拟合}——即对所选序列运行 \code{detect\_trend\_breaks}。它在趋势中断处切分序列（若果中断），
 每段各给一条 Theil--Sen 斜率及其区间，断点仅在两道门槛下才成立：BIC 须改善，且最终拟合相对单段的
@@ -953,7 +953,7 @@ SSE 改善必须胜过把同一搜索在块自助法重采样上重跑（要引�
 每年），并有与单段运行相同的 CSV 导出和命令日志条目（脚本里是 \code{trend\_breaks\_call}，不是
 \code{trend\_call}）（图~\ref{fig:trend_breaks}）。
 
-\screenshot{ui_trend.png}{MY1 分解的排放分量的趋势检验（第~\ref{sec:emission}~节）：序列及其
+\screenshot{ui_trend.png}{MY1 分解的排放分量的趋势分析（第~\ref{sec:emission}~节）：序列及其
 Theil--Sen 直线和两个 p 值——经典的 Mann--Kendall p 值，以及因记录自相关而给出的
 块自助法 p 值——图上方的评估结论说明该引用哪一个。}{fig:trend}
 
@@ -1528,7 +1528,7 @@ curves = nm.pdp(df_prep, model, var_list=["ws", "temp"])
 \code{detect\_events}, \code{anomaly\_scores} & 归一化序列中的事件 \\
 \code{normalise\_plot}, \code{decomposition\_stack}, \code{scm\_dashboard} & 窗口中的图 \\
 \code{make\_run}, \code{save\_run}, \code{generate\_html\_report} & 溯源和报告 \\
-\code{trend}, \code{mann\_kendall}, \code{theil\_sen} & 趋势检验及其块自助法修正（\tab{趋势}标签页，第~\ref{sec:trend}~节） \\
+\code{trend}, \code{mann\_kendall}, \code{theil\_sen} & 趋势分析及其块自助法修正（\tab{趋势}标签页，第~\ref{sec:trend}~节） \\
 \code{detect\_trend\_breaks} & 分段趋势：水平或斜率在哪处断掉（BIC + 块自助法门槛） \\
 \code{decompose\_uncertainty} & 把总离散分摊到气象、模型形式及二者交互（\tab{不确定性}标签页，第~\ref{sec:uncertainty}~节） \\
 \code{make\_memory}       & 磁盘缓存 \\

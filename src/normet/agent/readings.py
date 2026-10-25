@@ -436,7 +436,7 @@ def cv_reading(scores: pd.DataFrame) -> str:
 
 
 def trend_reading(res: Any, name: str = "series") -> str:
-    """A trend test on a series (normet.trend result): its direction and the
+    """A trend analysis on a series (normet.trend result): its direction and the
     Mann-Kendall test, the slope with its interval, and -- where the record is
     autocorrelated -- the block-bootstrap interval and Wald p, which is the one
     to quote (the classical MK p is anti-conservative there and says so)."""
@@ -487,14 +487,14 @@ def trend_reading(res: Any, name: str = "series") -> str:
             rows.append(
                 ["quote", "AR(1) detected but the block bootstrap was unavailable — see the notes"]
             )
-    lines = [f"Trend test on {name} (normet.trend):", ""]
+    lines = [f"Trend analysis on {name} (normet.trend):", ""]
     lines.append(table(["", "value"], rows))
     lines += ["", *res.notes]
     return "\n".join(lines)
 
 
 def trend_breaks_reading(res: Any, name: str = "series") -> str:
-    """A segmented trend test on a series (normet.detect_trend_breaks result): where
+    """A segmented trend analysis on a series (normet.detect_trend_breaks result): where
     the trend breaks, each segment with its own Theil-Sen slope and Sen (1968)
     interval, and the block-bootstrap p of the search over every candidate
     position -- the multiple-testing-corrected, autocorrelation-aware one to
@@ -520,7 +520,7 @@ def trend_breaks_reading(res: Any, name: str = "series") -> str:
         ]
         row.append(num(seg.slope_per_year, 3) if seg.slope_per_year is not None else "n/a")
         seg_rows.append(row)
-    lines = [f"Segmented trend test on {name} (normet.detect_trend_breaks):", ""]
+    lines = [f"Segmented trend analysis on {name} (normet.detect_trend_breaks):", ""]
     if res.n_segments > 1:
         from normet.analysis.trend import _fmt_index
 

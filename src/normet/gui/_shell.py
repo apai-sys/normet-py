@@ -310,9 +310,8 @@ class ShellMixin(QMainWindow):
         self.tab_pdp = CanvasTab("Compute PDP to see partial-dependence curves.")
         self.tabs.addTab(self.tab_pdp, "PDP")
         self.tab_trend = CanvasTab(
-            "Run the trend test (or a decomposition, which runs it) to see the "
-            "verdict here — whether the tested series is increasing or decreasing, "
-            "and which p stands for it."
+            "Run the trend analysis to see the verdict here — whether the "
+            "tested series is increasing or decreasing, and which p stands for it."
         )
         self.tabs.addTab(self.tab_trend, "Trend")
         self.tab_events = CanvasTab(

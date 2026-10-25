@@ -489,13 +489,13 @@ class AnalyseRunMixin(QMainWindow):
         if column == "long-term":
             if frame["date_unix"].notna().sum() < 15:
                 self.notify(
-                    "Fewer than 15 values in the series: the trend test needs more.",
+                    "Fewer than 15 values in the series: the trend analysis needs more.",
                     key="need-trend",
                 )
                 return None
         elif frame.dropna(subset=[column]).shape[0] < 15:
             self.notify(
-                "Fewer than 15 values in the series: the trend test needs more.",
+                "Fewer than 15 values in the series: the trend analysis needs more.",
                 key="need-trend",
             )
             return None
@@ -594,9 +594,9 @@ class AnalyseRunMixin(QMainWindow):
             rows=rows,
         )
         self.tabs.setCurrentWidget(self.tab_trend)
-        self.statusBar().showMessage("Trend test done.")
+        self.statusBar().showMessage("Trend analysis done.")
         self._log_history("trend", self._trend_name)
-        log.info("Trend test finished (%s)", self._trend_name)
+        log.info("Trend analysis finished (%s)", self._trend_name)
 
     def _trend_breaks_done(self, result: Any) -> None:
         from . import _trend
@@ -637,7 +637,7 @@ class AnalyseRunMixin(QMainWindow):
         """The events box's series choice as the table and column to score:
         the trend box's four choices read against what the window holds.
         None, said on screen, when the choice points at nothing the window
-        has; the score itself needs what the trend test needs. The task is
+        has; the score itself needs what the trend analysis needs. The task is
         given the table and column, not the built series, so the command log
         can name the table and a saved session repeats the search."""
         from . import _trend

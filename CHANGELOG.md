@@ -496,6 +496,19 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   longer held it at ~1050 px (~1570 px with the Assistant open): the action
   buttons wrap, the welcome text and cards reflow, and the Assistant's top row
   shrinks. Tabs are named without ①②③ numbers.
+- **GUI: the *Trend test* box is now *Trend analysis*** — the box title, its
+  button, the status-bar line, the command-log entries, the Assistant's and
+  the agent's wording, and the manual's tables and captions all follow. Its
+  *Run after each emission decomposition* tick is unticked by default: the
+  decomposition's figure answers the question it was run for, and the trend
+  is the next question — it starts on purpose, or with the tick on.
+- **Packaging: the installers carry the Events step's model methods** —
+  IsolationForest (`sklearn.ensemble`) and STL (`statsmodels.tsa.seasonal`),
+  plus the AR/ADF submodules the feature engineering imports by name. The
+  PyInstaller scan cannot see the `require()` imports, so the frozen app said
+  *"'statsmodels.tsa.seasonal' is required but not installed"* although the
+  build env had statsmodels; the submodules are named in the spec now, and
+  the CI installer builds install the `stats` extra.
 
 ### Internal
 - **CI: two non-blocking probe jobs for the version upgrades.**

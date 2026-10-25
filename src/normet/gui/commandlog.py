@@ -259,13 +259,13 @@ _KNOWN: dict[str, tuple[str, str, str, str]] = {
         "The GUI's own helper over normet.rolling at three window widths.",
     ),
     "normet.gui._trend.trend_call": (
-        "Trend test",
+        "Trend analysis",
         "trend_result",
         "from normet.gui._trend import trend_call",
         "The GUI's own helper around normet.trend on the series the window holds.",
     ),
     "normet.gui._trend.trend_breaks_call": (
-        "Segmented trend test",
+        "Segmented trend analysis",
         "trend_result",
         "from normet.gui._trend import trend_breaks_call",
         "The GUI's own helper around normet.detect_trend_breaks on the series the "

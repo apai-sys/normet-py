@@ -192,22 +192,19 @@ def main_figures(app):
         "  sd:",
         emi[["date_unix", "day_julian", "weekday", "hour", "emi_noise"]].std().round(2).to_dict(),
     )
-    # The emission decomposition's end already started the automatic Trend test
-    # (the box's tick, the box's settings) and its done handler moved the
-    # window's tabs to the Trend tab: put the Decompose tab back, so this
-    # grab shows what it is named.
+    # The box's "Run after each emission decomposition" tick is unticked by
+    # default, so the decomposition's end did not start the trend and the
+    # window's tabs are still where the decomposition put them: this grab
+    # shows what it is named.
     win.tabs.setCurrentWidget(win.tab_decom)
     said(win.tab_decom)
     grab(win, "ui_decompose_emission.png")
 
     print("trend on the emission part")
-    # "Run after each emission decomposition" is ticked (the box's default), so
-    # the emission decomposition's end already ran the Trend test of its
-    # emission part, under the box's settings -- the inline runner carried
-    # that automatic task through on this thread too, and its tab is up.
-    # Nothing is re-run here; the numbers the manual quotes are the
-    # automatic run's. (It must happen before the meteorology decomposition
-    # overwrites the table in results["decompose"].)
+    # Run it here, under the box's default settings (the emission part,
+    # seasonal auto, one segment, 1000 replicates) -- the numbers the manual
+    # quotes are this run's own. (It must happen before the meteorology
+    # decomposition overwrites the table in results["decompose"].)
     print(
         "  box:",
         win.trend_series.currentText(),
@@ -218,8 +215,8 @@ def main_figures(app):
         "/",
         win.tre_n_bootstrap.value(),
     )
-    win.show_panel_page("Decompose")  # the Trend test box sits on the panel page
-    win.tabs.setCurrentWidget(win.tab_trend)  # its tab was up; make it certain
+    win.show_panel_page("Decompose")  # the Trend analysis box sits on the panel page
+    win._run_trend()
     t = win.results["trend"]
     print(t.to_string())
     said(win.tab_trend)

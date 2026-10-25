@@ -201,9 +201,9 @@ class AnalysePanelMixin(QMainWindow):
         return box
 
     def _build_trend_box(self) -> QGroupBox:
-        """The trend test of the decomposition's series, the observed target, or both:
+        """The trend analysis of the decomposition's series, the observed target, or both:
         runs after each emission decomposition where its tick is on."""
-        box = QGroupBox("Trend test")
+        box = QGroupBox("Trend analysis")
         tf = QFormLayout(box)
         tf.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         tf.addRow(
@@ -262,7 +262,10 @@ class AnalysePanelMixin(QMainWindow):
         self.tre_n_bootstrap.setValue(1000)
         tf.addRow("Bootstrap replicates", self.tre_n_bootstrap)
         self.trend_after = QCheckBox("Run after each emission decomposition")
-        self.trend_after.setChecked(True)
+        # Unticked by default: the decomposition's figure is the answer to the
+        # question it was run for, and the trend is a separate question the
+        # analyst starts on purpose (or ticks this to make it follow).
+        self.trend_after.setChecked(False)
         self.trend_after.setToolTip(
             "Each finished emission decomposition starts the test of its emission "
             "part, in the background, under this box's settings; the Segments row "
@@ -270,7 +273,7 @@ class AnalysePanelMixin(QMainWindow):
         )
         tf.addRow(self.trend_after)
         self.trend_button = run_button(
-            "▶  Run trend test",
+            "▶  Run trend analysis",
             "One segment: Mann–Kendall, Theil–Sen slope and its interval, the "
             "block-bootstrap correction where the record is autocorrelated.\n"
             "Two or more: the segmented fit -- where the trend breaks, each segment "

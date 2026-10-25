@@ -325,7 +325,7 @@ def build_server(tools: Any = None) -> Any:
         seed: int = 7654321,
         name: str | None = None,
     ) -> str:
-        """The trend test of one column of a table (a decomposition's emi_total or
+        """The trend analysis of one column of a table (a decomposition's emi_total or
         met_total, a normalised table's normalised, a raw table's target --
         `column` names it where it has to): Mann-Kendall, Theil-Sen slope with its
         interval, and the block-bootstrap-corrected interval and p where the record

@@ -272,7 +272,7 @@ def test_the_assistants_trend_tool_runs_the_step(win, qapp):
     _wait(qapp, lambda: "said" in box)
     t.join(timeout=10)
     said = box["said"]
-    assert "Trend test on NO2 — emission part (normet.trend)" in said, said[:400]
+    assert "Trend analysis on NO2 — emission part (normet.trend)" in said, said[:400]
     assert "Mann-Kendall" in said and "slope (per day)" in said
     assert "AR(1)" in said
 
@@ -394,7 +394,7 @@ def test_the_assistants_trend_breaks_tool_runs_the_segmented_step(win, qapp):
     _wait(qapp, lambda: "said" in box)
     t.join(timeout=30)
     said = box["said"]
-    assert "Segmented trend test on NO2 — long-term trend (separated)" in said, said[:400]
+    assert "Segmented trend analysis on NO2 — long-term trend (separated)" in said, said[:400]
     assert "break" in said and "block bootstrap" in said.lower()
 
 

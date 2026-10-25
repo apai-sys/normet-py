@@ -774,7 +774,7 @@ Normalise   & observed and normalised series, the quantile band, their cycles & 
 Decompose   & the emission or meteorological components, the cycles & Run decomposition \\
 Rolling     & the mean of the rolling windows, with their spread & Run rolling normalisation \\
 Multi-scale & the scale-space cascade and the energy in each band & Multi-scale \\
-Trend       & the tested series with its Theil--Sen line, or its segments and marked break, the verdict and the p value & Trend test \\
+Trend       & the tested series with its Theil--Sen line, or its segments and marked break, the verdict and the p value & Trend analysis \\
 Events      & the anomaly-score strip with the flagged windows shaded, and the event table & Find events \\
 PDP         & one partial-dependence panel per variable & Compute PDP \\
 Uncertainty & the per-date spread stacked by source (weather, model, interaction) and the median's shares & Uncertainty decomposition \\
@@ -828,7 +828,7 @@ Run normalisation     & a model, one variable to resample & \code{normalise} \\
 Run decomposition     & a model                  & \code{decompose} \\
 Run rolling normalisation & an AutoML model      & \code{rolling} \\
 Multi-scale decomposition & an AutoML model, a normalisation & \code{rolling} $\times 3$ \\
-Trend test          & an AutoML model (a decomposition, where it tests one) & \code{trend} (1 segment), \code{detect\_trend\_breaks} (more) \\
+Trend analysis      & an AutoML model (a decomposition, where it tests one) & \code{trend} (1 segment), \code{detect\_trend\_breaks} (more) \\
 Find events         & a model (a decomposition, where it scores a part) & \code{anomaly\_scores}, \code{detect\_events} \\
 Compute PDP           & an AutoML model, one variable ticked & \code{pdp} \\
 Uncertainty decomposition & an AutoML model & \code{decompose\_uncertainty} \\
@@ -1163,17 +1163,17 @@ it does not follow the \tab{Normalise} page's list.
 
 \section{Trend}\label{sec:trend}
 The question a decomposition invites: is the series it just drew rising, falling or flat,
-and is the rise real? The \emph{Trend test} box under \emph{Decompose} runs
+and is the rise real? The \emph{Trend analysis} box under \emph{Decompose} runs
 Mann--Kendall and Theil--Sen on the chosen series and, the record carrying the
 autocorrelation the correction exists for (MY1's emission part: AR(1) residual acf 0.94),
 replaces the slope's classical error bar with a moving-block bootstrap. It runs again
-each time an emission decomposition ends, if \emph{Run after each emission decomposition}
-is ticked.
+each time an emission decomposition ends where \emph{Run after each emission
+decomposition} is ticked (unticked by default).
 
 \emph{Series} names which one is tested: the decomposition's emission part
 (the default: what the weather does not explain), its \emph{separated long-term
 trend} --- the long-term component Section~\ref{sec:emission} drew, cycles already
-separated into their own components, so the cleaner input to a trend test --- its
+separated into their own components, so the cleaner input to a trend analysis --- its
 weather part, or the observed target itself. \emph{Segments} names how many:
 one (the default) is the single-slope test just described; two to four run the
 \emph{segmented fit} instead --- \code{detect\_trend\_breaks} on the chosen
@@ -1199,7 +1199,7 @@ CSV export and command-log entry as the one-segment run
 (\code{trend\_breaks\_call} in the script, not \code{trend\_call})
 (Figure~\ref{fig:trend_breaks}).
 
-\screenshot{ui_trend.png}{The trend test of MY1's decomposition's emission part
+\screenshot{ui_trend.png}{The trend analysis of MY1's decomposition's emission part
 (Section~\ref{sec:emission}): the series with its Theil--Sen line and the two p values ---
 the classical Mann--Kendall one and, the record being autocorrelated, the
 block-bootstrap one --- with the verdict above the figure saying which to quote.}{fig:trend}
@@ -1931,7 +1931,7 @@ Function & Does \\
 \code{detect\_events}, \code{anomaly\_scores} & events in a normalised series \\
 \code{normalise\_plot}, \code{decomposition\_stack}, \code{scm\_dashboard} & the window's figures \\
 \code{make\_run}, \code{save\_run}, \code{generate\_html\_report} & provenance and reports \\
-\code{trend}, \code{mann\_kendall}, \code{theil\_sen} & trend tests with the block-bootstrap correction (the \tab{Trend} tab, Section~\ref{sec:trend}) \\
+\code{trend}, \code{mann\_kendall}, \code{theil\_sen} & trend analyses with the block-bootstrap correction (the \tab{Trend} tab, Section~\ref{sec:trend}) \\
 \code{detect\_trend\_breaks} & segmented trend: where the level or slope breaks (BIC + block-bootstrap gate) \\
 \code{decompose\_uncertainty} & the total spread attributed to weather, model form and their interaction (the \tab{Uncertainty} tab, Section~\ref{sec:uncertainty}) \\
 \code{make\_memory}       & on-disk caching \\

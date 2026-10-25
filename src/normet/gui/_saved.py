@@ -75,7 +75,7 @@ class SavedResultsMixin(QMainWindow):
             "trained_features": list(self.trained_features),
             "results": {k: v for k, v in self.results.items() if k in _STEPS},
             "multiscale": getattr(self, "_multiscale_raw", None),
-            # The trend test as it ran, not just its table: (result, name, note,
+            # The trend analysis as it ran, not just its table: (result, name, note,
             # the table and column it came from) -- the last one so its figure's
             # series is drawn again from the saved run's own table, not the new one.
             "trend": (

@@ -304,7 +304,7 @@ def test_trend_reading_says_which_p_to_quote():
         )
 
     text = readings.trend_reading(mk(True, 0.002), name="MY1's emission part")
-    assert text.startswith("Trend test on MY1's emission part (normet.trend):")
+    assert text.startswith("Trend analysis on MY1's emission part (normet.trend):")
     assert "Mann-Kendall S" in text and "slope (per day)" in text and "increasing" in text
     assert "p (Wald on block bootstrap)" in text
     assert "0.002" in text
@@ -325,7 +325,7 @@ def test_headless_trend_runs_on_a_result_table(tools, tmp_path):
     path = str(tmp_path / "decomposition.csv")
     frame.to_csv(path, index=False)
     said = tools.trend(path)
-    assert said.startswith("Trend test on emi_total (normet.trend):")
+    assert said.startswith("Trend analysis on emi_total (normet.trend):")
     assert "direction (5%)" in said.replace("  ", " ") and "increasing" in said
     with pytest.raises(ValueError, match="no 'nope' column"):
         tools.trend(path, column="nope")
@@ -359,7 +359,7 @@ def test_headless_trend_breaks_runs_on_a_result_table(tools, tmp_path):
     path = str(tmp_path / "decomp2.csv")
     frame.to_csv(path, index=False)
     said = tools.trend_breaks(path)
-    assert said.startswith("Segmented trend test on long-term (normet.detect_trend_breaks):")
+    assert said.startswith("Segmented trend analysis on long-term (normet.detect_trend_breaks):")
     assert "p (block bootstrap of the search)" in said
     on_emission = tools.trend_breaks(path, column="emission")
     assert "break" in on_emission or "one regime" in on_emission
@@ -419,7 +419,7 @@ def test_trend_breaks_reading_says_where_and_whose_p():
 
     two = readings.trend_breaks_reading(mk(2, 0.004), name="MY1's emission part")
     assert two.startswith(
-        "Segmented trend test on MY1's emission part (normet.detect_trend_breaks):"
+        "Segmented trend analysis on MY1's emission part (normet.detect_trend_breaks):"
     )
     assert "2024-01-09" in two and "SSE improvement" in two
     assert "p (block bootstrap of the search)" in two and "0.004" in two
