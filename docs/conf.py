@@ -76,7 +76,9 @@ intersphinx_mapping = {
 }
 
 templates_path = ["_templates"]
-exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
+# plans/: the agents' working file (execution_plan.md), not user documentation --
+# tracked or not, it is not in a toctree, and a warning here fails the docs build.
+exclude_patterns = ["_build", "Thumbs.db", ".DS_Store", "plans/*"]
 if not _HAS_MYST:
     # Don't try to render .md guides when myst is unavailable.
     exclude_patterns.append("guide/*.md")
