@@ -285,7 +285,7 @@ def methods_paragraph(info: dict[str, Any], lang: str = "en") -> str | None:
         nm = call.get("series_name") or (call.get("args") or ["the series"])[1]
         if zh:
             out.append(
-                f"趋势检验（Mann–Kendall 与 Theil–Sen，残差自相关时以块自助法校正）施加于{nm}，"
+                f"趋势分析（Mann–Kendall 与 Theil–Sen，残差自相关时以块自助法校正）施加于{nm}，"
                 f"采用{seq}形式。"
             )
         else:

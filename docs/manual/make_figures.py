@@ -245,7 +245,7 @@ def main_figures(app):
 
     print("events (emission part)")
     # The Events & anomalies box under Trend, on the emission part the Trend
-    # test just ran (the box's default choice), the iqr score at threshold 2
+    # analysis just ran (the box's default choice), the iqr score at threshold 2
     # and minimum length 3. The score strip with its flagged windows shaded and
     # the event table land on the Events tab; the numbers the manual quotes are
     # this run's own. The threshold is 2, not the box's default 3: on MY1's
