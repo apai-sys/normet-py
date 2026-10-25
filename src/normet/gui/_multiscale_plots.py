@@ -10,11 +10,13 @@ Layout, left-to-right / top-to-bottom:
    converges toward ``Y_inf`` as the window approaches the full record.
 2. One panel per available **detail band** (``D_fast``/``D_meso``/``D_slow``),
    the actual wavelet-detail-coefficient analogues — each isolates the
-   meteorological-influence component specific to its timescale — styled
-   like the emission-decomposition panels for visual consistency.
-3. An **energy-by-band** ranking (σ of each band) on the right, so the
-   dominant timescale of residual meteorological influence is a one-glance
-   read — the same device used by the meteorology-decomposition figure.
+   meteorological-influence component specific to its timescale, drawn in
+   the cascade's light-to-dark colour for that band.
+3. An **energy-by-band** ranking (σ of each band) on the right, in each
+   band's own colour — three same-colour bars would read as one block — so
+   the dominant timescale of residual meteorological influence is a
+   one-glance read: the same device used by the meteorology-decomposition
+   figure.
 """
 
 from __future__ import annotations
@@ -25,11 +27,20 @@ import pandas as pd
 
 from normet import style as S
 
-from ._decomp_plots import COMP_COLOR, NOISE_COLOR, _lw, _time_series_axes
+from ._decomp_plots import NOISE_COLOR, _lw, _time_series_axes
 
 #: fast -> meso -> slow: light to dark blue as the resample pool widens; inf the
 #: normalised series' own colour.
 SCALE_COLORS = ["#9ECAE1", "#4292C6", "#08519C", S.MODELLED]
+
+#: Each detail band's colour, the cascade's: fast the lightest blue, slow the
+#: darkest. Without it the three band panels and the energy bars all draw in
+#: one colour, and the ranking reads as a single block.
+_BAND_COLORS = {
+    "D_fast": SCALE_COLORS[0],
+    "D_meso": SCALE_COLORS[1],
+    "D_slow": SCALE_COLORS[2],
+}
 
 _BAND_DEFS = [
     ("D_fast", "fast_days", "meso_days", "synoptic / sub-monthly residual"),
@@ -99,7 +110,7 @@ def multiscale_figure(result: dict, target: str = "", sigma_from: dict | None = 
         s = result[key]
         sigmas[key] = float(full[key].std())
         ax = fig.add_subplot(gs[i, 0], sharex=ax0)
-        S.line(ax, s.index, s.values, lw=_lw(pd.DataFrame(index=s.index)), color=COMP_COLOR)
+        S.line(ax, s.index, s.values, lw=_lw(pd.DataFrame(index=s.index)), color=_BAND_COLORS[key])
         S.zero_line(ax)
         ax.set_title(f"{label}   σ = {sigmas[key]:.2f}")
         left.append(ax)
@@ -109,7 +120,9 @@ def multiscale_figure(result: dict, target: str = "", sigma_from: dict | None = 
     axr = fig.add_subplot(gs[:, 1])
     if sigmas:
         order = sorted(sigmas, key=sigmas.get)
-        axr.barh(order, [sigmas[k] for k in order], color=[COMP_COLOR] * len(order), height=0.6)
+        axr.barh(
+            order, [sigmas[k] for k in order], color=[_BAND_COLORS[k] for k in order], height=0.6
+        )
         axr.set_title("Energy by band (σ)")
         S.grid(axr, axis="x")
         axr.tick_params(axis="y", length=0)

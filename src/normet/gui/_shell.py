@@ -70,16 +70,20 @@ def _menu_actions(menu) -> list:  # noqa: ANN001
 
 
 #: The status bar's lights: (what has a result, its name).
+#: The step lights' order is the workflow's: the decomposition's own questions
+#: (multi-scale, trend, events, uncertainty) follow the decomposition, and the
+#: separate steps Rolling and PDP come after them -- the result tabs' order.
 STEP_LIGHTS = (
     ("data", "Data"),
     ("model", "Model"),
     ("normalise", "Normalised"),
     ("decompose", "Decomposed"),
-    ("rolling", "Rolling"),
     ("multiscale", "Multi-scale"),
-    ("pdp", "PDP"),
     ("trend", "Trend"),
+    ("events", "Events"),
     ("uncertainty", "Uncertainty"),
+    ("rolling", "Rolling"),
+    ("pdp", "PDP"),
 )
 LIGHT_ON, LIGHT_OFF = "#34c759", "#aeaeb2"
 
@@ -299,16 +303,16 @@ class ShellMixin(QMainWindow):
             "observed − normalised by met variable."
         )
         self.tabs.addTab(self.tab_decom, "Decompose")
-        self.tab_roll = CanvasTab("Run the rolling normalisation to see it here.")
-        self.tabs.addTab(self.tab_roll, "Rolling")
+        # The tabs follow the workflow: the questions the decomposition invites,
+        # in the order the Decompose page asks them (its multi-scale first, then
+        # the trend of its series, the events it flags, the band's spread), and
+        # only after them the separate steps Rolling and PDP.
         self.tab_multiscale = CanvasTab(
             "Run the normalisation, then Multi-scale decomposition, to see "
             "how meteorological residuals split across fast/meso/slow "
             "timescales."
         )
         self.tabs.addTab(self.tab_multiscale, "Multi-scale")
-        self.tab_pdp = CanvasTab("Compute PDP to see partial-dependence curves.")
-        self.tabs.addTab(self.tab_pdp, "PDP")
         self.tab_trend = CanvasTab(
             "Run the trend analysis to see the verdict here — whether the "
             "tested series is increasing or decreasing, and which p stands for it."
@@ -325,6 +329,10 @@ class ShellMixin(QMainWindow):
             "date and in the median."
         )
         self.tabs.addTab(self.tab_unc, "Uncertainty")
+        self.tab_roll = CanvasTab("Run the rolling normalisation to see it here.")
+        self.tabs.addTab(self.tab_roll, "Rolling")
+        self.tab_pdp = CanvasTab("Compute PDP to see partial-dependence curves.")
+        self.tabs.addTab(self.tab_pdp, "PDP")
         self._sync_welcome()
         return self.tabs
 

@@ -519,6 +519,17 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   anomalies, Uncertainty decomposition) moved into the title's hover tooltip.
   The Trend and Uncertainty descriptions gain Chinese translations (they had
   shown in English).
+- **GUI: the result tabs follow the workflow** — the questions the
+  decomposition invites (Multi-scale, Trend, Events, Uncertainty) now sit
+  directly after Decompose, with the separate steps Rolling and PDP after
+  them: Data, Model, Normalise, Decompose, Multi-scale, Trend, Events,
+  Uncertainty, Rolling, PDP. The status bar's step lights follow the same
+  order and gain the Events light they were missing (its result existed; the
+  light did not).
+- **GUI: the multi-scale "Energy by band (σ)" reads per band** — the three
+  bars drew in one colour and read as a single block; each band now takes
+  the cascade's light-to-dark colour (D_fast the lightest blue, D_slow the
+  darkest), and the band panels above the ranking use the same colours.
 
 ### Internal
 - **CI: two non-blocking probe jobs for the version upgrades.**

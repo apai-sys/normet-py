@@ -72,12 +72,12 @@ class SessionMixin(QMainWindow):
         1: "train",
         2: "normalise",
         3: "decompose",
-        4: "rolling",
-        5: "multiscale",
-        6: "pdp",
-        7: "trend",
-        8: "events",
-        9: "uncertainty",
+        4: "multiscale",
+        5: "trend",
+        6: "events",
+        7: "uncertainty",
+        8: "rolling",
+        9: "pdp",
     }
 
     def _record_task(self, fn, args, kwargs):  # noqa: ANN001, ANN202 - TaskRunner.record
