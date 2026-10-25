@@ -56,7 +56,15 @@ class StepPanel(QWidget):
         self.bar.setExpanding(True)
         self.bar.setDocumentMode(True)
         self.bar.setUsesScrollButtons(False)
-        self.bar.setStyleSheet("QTabBar::tab { padding: 4px 4px; }")
+        # The padding keeps the six step names in the narrow panel; the colours must
+        # come from the palette, because any QTabBar::tab rule makes Qt's stylesheet
+        # engine draw the tab faces itself -- with fixed light colours, so the bar
+        # sat white on a dark window. palette(...) keeps it in the window's theme.
+        self.bar.setStyleSheet(
+            "QTabBar::tab { padding: 4px 4px; background: palette(window);"
+            " color: palette(window-text); border: none; }"
+            "QTabBar::tab:selected { background: palette(base); }"
+        )
         for name in self.names:
             self.bar.addTab(name)
         self.bar.currentChanged.connect(self.show_index)

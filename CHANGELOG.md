@@ -509,6 +509,16 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   *"'statsmodels.tsa.seasonal' is required but not installed"* although the
   build env had statsmodels; the submodules are named in the spec now, and
   the CI installer builds install the `stats` extra.
+- **GUI: the left panel's step bar follows the window's theme** — its local
+  tab rule made Qt draw the tab faces with fixed light colours, so the bar
+  sat white on a dark window; the rule now takes its colours from the
+  palette (`palette(window)`, `palette(base)`), so the six step names stay
+  compact and theme-correct in both appearances.
+- **GUI: the Decompose page's boxes read shorter** — the description sentence
+  under each box title (Multi-scale decomposition, Trend analysis, Events &
+  anomalies, Uncertainty decomposition) moved into the title's hover tooltip.
+  The Trend and Uncertainty descriptions gain Chinese translations (they had
+  shown in English).
 
 ### Internal
 - **CI: two non-blocking probe jobs for the version upgrades.**

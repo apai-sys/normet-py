@@ -30,7 +30,6 @@ from ._widgets import (
     NoWheelComboBox,
     NoWheelDoubleSpinBox,
     NoWheelSpinBox,
-    hint_label,
     run_button,
     toggle_button,
     wrap_row,
@@ -165,15 +164,15 @@ class AnalysePanelMixin(QMainWindow):
     def _build_multiscale_box(self) -> QGroupBox:
         """Multi-scale: three rolling widths, differenced against Step 2."""
         box = QGroupBox("Multi-scale decomposition")
+        # The box's description lives in the title's hover: a sentence under the
+        # name lengthened the page for what is read once and then forgotten.
+        box.setToolTip(
+            "Differences Y_fast − Y_meso − Y_slow − Y_∞ isolate the "
+            "meteorological residual specific to each timescale — like wavelet "
+            "detail coefficients or MSTL's trend/seasonal/remainder."
+        )
         mf = QFormLayout(box)
         mf.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        mf.addRow(
-            hint_label(
-                "Differences Y_fast − Y_meso − Y_slow − Y_∞ isolate the "
-                "meteorological residual specific to each timescale — like wavelet "
-                "detail coefficients or MSTL's trend/seasonal/remainder."
-            )
-        )
         self.ms_fast = NoWheelSpinBox()
         self.ms_fast.setRange(1, 3650)
         self.ms_fast.setValue(14)
@@ -204,16 +203,14 @@ class AnalysePanelMixin(QMainWindow):
         """The trend analysis of the decomposition's series, the observed target, or both:
         runs after each emission decomposition where its tick is on."""
         box = QGroupBox("Trend analysis")
+        box.setToolTip(
+            "Mann–Kendall and Theil–Sen on the series, with a block-bootstrap "
+            "correction where its residuals are autocorrelated -- which is which "
+            "p to quote said in the Trend tab. With more than one segment, a "
+            "segmented fit instead: where the trend breaks, if it does."
+        )
         tf = QFormLayout(box)
         tf.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        tf.addRow(
-            hint_label(
-                "Mann–Kendall and Theil–Sen on the series, with a block-bootstrap "
-                "correction where its residuals are autocorrelated -- which is which "
-                "p to quote said in the Trend tab. With more than one segment, a "
-                "segmented fit instead: where the trend breaks, if it does."
-            )
-        )
         self.trend_series = NoWheelComboBox()
         self.trend_series.addItems(
             [
@@ -297,16 +294,14 @@ class AnalysePanelMixin(QMainWindow):
         """The event windows of a series: per-timestamp anomaly scores, and
         the consecutive stretches above a threshold flagged as events."""
         box = QGroupBox("Events & anomalies")
+        box.setToolTip(
+            "Scores every timestamp for how far it strays from the record's "
+            "normal behaviour, then flags the consecutive stretches above a "
+            "threshold -- the smoke episodes, the plume events. The scores "
+            "and the flagged windows land on the Events tab."
+        )
         ef = QFormLayout(box)
         ef.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        ef.addRow(
-            hint_label(
-                "Scores every timestamp for how far it strays from the record's "
-                "normal behaviour, then flags the consecutive stretches above a "
-                "threshold -- the smoke episodes, the plume events. The scores "
-                "and the flagged windows land on the Events tab."
-            )
-        )
         self.events_series = NoWheelComboBox()
         self.events_series.addItems(
             [
@@ -385,18 +380,16 @@ class AnalysePanelMixin(QMainWindow):
         variables it was trained with.
         """
         box = QGroupBox("Uncertainty decomposition")
+        box.setToolTip(
+            "Of the band a model's estimate carries, how much is the met "
+            "resampling and how much the model form? An ensemble of members, "
+            "each trained on its own seed, predicts the same shared met "
+            "draws; the per-date spread splits orthogonally into weather, "
+            "model and their interaction. Minutes, not seconds: every "
+            "member is a fresh fit."
+        )
         uf = QFormLayout(box)
         uf.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        uf.addRow(
-            hint_label(
-                "Of the band a model's estimate carries, how much is the met "
-                "resampling and how much the model form? An ensemble of members, "
-                "each trained on its own seed, predicts the same shared met "
-                "draws; the per-date spread splits orthogonally into weather, "
-                "model and their interaction. Minutes, not seconds: every "
-                "member is a fresh fit."
-            )
-        )
         self.unc_samples = NoWheelSpinBox()
         self.unc_samples.setRange(2, 10_000)
         self.unc_samples.setValue(300)

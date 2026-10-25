@@ -301,6 +301,7 @@ TEXTS = {
     "Trend analysis": "趋势分析",
     "▶  Run trend analysis": "▶  运行趋势分析",
     "Trend analysis done.": "趋势分析完成。",
+    "Mann–Kendall and Theil–Sen on the series, with a block-bootstrap correction where its residuals are autocorrelated -- which is which p to quote said in the Trend tab. With more than one segment, a segmented fit instead: where the trend breaks, if it does.": "对序列运行 Mann–Kendall 与 Theil–Sen——残差存在自相关时，以块自助法校正；引用哪一个 p 值，「趋势」标签页上会说明。段数大于 1 时改为分段拟合：趋势在何处中断（若有中断）。",
     "Run after each emission decomposition": "每次排放分解后运行",
     "Fewer than 15 values in the series: the trend analysis needs more.": "序列中的值不足 15 个：趋势分析需要更多数据。",
     # -- Events & anomalies (the Decompose page's box) -----------------------------------------
@@ -331,6 +332,7 @@ TEXTS = {
     "Tick at least one variable for the PDP.": "请为 PDP 至少勾选一个变量。",
     # -- Step 6: uncertainty decomposition -------------------------------------------------
     "Uncertainty decomposition": "不确定度分解",
+    "Of the band a model's estimate carries, how much is the met resampling and how much the model form? An ensemble of members, each trained on its own seed, predicts the same shared met draws; the per-date spread splits orthogonally into weather, model and their interaction. Minutes, not seconds: every member is a fresh fit.": "模型估计所带的不确定带中，多少来自气象重采样、多少来自模型形式？各以自己的随机种子训练的成员系，对同一组共享的气象抽样做预测；逐日方差正交地分解为气象、模型形式与二者的交互。耗时以分钟计：每个成员都是全新的拟合。",
     "Member backend": "成员后端",
     "Models": "模型数",
     "▶ Run uncertainty decomposition": "▶ 运行不确定度分解",
