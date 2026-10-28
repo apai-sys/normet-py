@@ -615,7 +615,11 @@ their buttons do. It *proposes* a target and predictors as a card with an
 or normalises only once you have agreed. Choose an API model as
 `provider:model` (`anthropic:claude-sonnet-5-5`, `deepseek:deepseek-chat`,
 `ollama:qwen3:8b`, …), its key kept in the macOS keychain (**Key…**) or read from
-the provider's environment variable. Or choose a command-line agent signed in to
+the provider's environment variable. A model that
+hpc-agent forwards from a CSF3 or Bede job
+is listed as `bede:<model>` / `csf3:<model>` and follows the forward's port when the
+job restarts; a server of your own is added by typing `name:model` and giving its
+address under **Key…**. Or choose a command-line agent signed in to
 your own plan -- Claude Code, Codex, Antigravity agy or GitHub Copilot -- with
 the effort it thinks at: the window serves its tools to the agent over MCP on
 127.0.0.1 with a per-window token, and gives it no shell or files of its own.

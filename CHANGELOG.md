@@ -7,6 +7,20 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ## [Unreleased]
 
 ### Added
+- **Assistant: models forwarded by hpc-agent, and servers of your own.** A model that
+  hpc-agent forwards from a cluster job is named `cluster:model`
+  (`bede:hf.co/unsloth/GLM-5.3-Flash-GGUF:UD-Q4_K_XL`, or any unique part of the name,
+  `bede:glm-5.3`). Its address is the forward's port, read from hpc-agent's registry
+  (`~/.config/hpc-agent/forwards.json`, or `$NORMET_HPC_FORWARDS`) each time a message is
+  sent, so a restarted job (new port) still answers; the model list offers those that
+  accept a connection now and refreshes when opened. The cluster's llama.cpp key comes
+  from **Key…** (keychain), `BEDE_API_KEY` / `CSF3_API_KEY`, or, failing both, the copy
+  hpc-agent keeps in OpenCode's config for that port; it is read, never written or
+  printed. Any other OpenAI-compatible server is added by typing `name:model` and
+  clicking **Key…**, which asks for its address (kept in the settings; emptying the
+  address removes it). In the library: `normet.agent.llm.hpc_forwards`, `hpc_models`,
+  `hpc_forward`, `register_provider`, `forget_provider`, `provider_spec`,
+  `known_providers`. The built-in providers, their names and addresses are unchanged.
 - **Trend analysis (`normet.trend`)** — honest trends on autocorrelated
   environmental records. Three entry points:
   - `mann_kendall` : Mann-Kendall S with tie correction (Hirsch et al. 1982)
