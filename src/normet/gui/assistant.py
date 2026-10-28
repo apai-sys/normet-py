@@ -20,10 +20,18 @@ Models are named as :mod:`normet.agent.llm` names them
 own plan (:mod:`.assistant_cli`). A key is read from the macOS keychain
 (service "normet", account the provider: Key… stores it there), then from
 the provider's environment variable; it is never written anywhere else.
+
+Two more kinds of model are named the same way. A cluster's, forwarded to this machine
+by hpc-agent (``"bede:hf.co/unsloth/GLM-5.3-Flash-GGUF:UD-Q4_K_XL"``): the list offers
+those that answer now, and the address is the forward's, found each time a message is
+sent. And a server of the analyst's own (``"lab:qwen3"``), any OpenAI-compatible
+address: Key… on a name the library does not know asks for the address and keeps it
+in the settings.
 """
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import sys
@@ -36,10 +44,11 @@ from PySide6.QtCore import QEvent, QObject, QSettings, Qt, QThread, QTimer, Sign
 from PySide6.QtGui import QKeyEvent, QKeySequence, QShortcut, QTextCursor
 from PySide6.QtWidgets import (
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QDockWidget,
     QFrame,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QLineEdit,
     QMenu,
@@ -266,12 +275,80 @@ def find_key(provider: str) -> str | None:
     """The provider's key: typed in this session, the keychain, or its environment variable."""
     import os
 
-    env = llm.PROVIDERS.get(provider, ("", "", None))[2]
+    env = (llm.provider_spec(provider) or ("", "", None))[2]
     return (
         _SESSION_KEYS.get(provider)
         or keychain_get(provider)
         or (os.environ.get(env) if env else None)
     )
+
+
+# -- servers of the analyst's own, and the models hpc-agent forwards ------------------------
+#: Settings: the servers named (provider -> address, whether it takes a key), and the
+#: models last used on them.
+SERVERS_KEY = "assistant/servers"
+EXTRA_KEY = "assistant/extra_models"
+_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+def _stored(key: str) -> Any:
+    try:
+        return json.loads(str(_settings().value(key, "")) or "null")
+    except ValueError:
+        return None
+
+
+def saved_servers() -> dict[str, dict[str, Any]]:
+    """The servers the analyst named, as the settings hold them."""
+    got = _stored(SERVERS_KEY)
+    return got if isinstance(got, dict) else {}
+
+
+def _key_variable(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]", "_", name).upper() + "_API_KEY"
+
+
+def load_servers() -> None:
+    """Name the servers of earlier sessions to the model loop (a bad entry is skipped)."""
+    for name, s in saved_servers().items():
+        try:
+            llm.register_provider(
+                name, s["address"], key_env=_key_variable(name) if s.get("key") else None
+            )
+        except (ValueError, KeyError, TypeError, AttributeError):
+            continue
+
+
+def keep_server(name: str, address: str, needs_key: bool) -> None:
+    """Name a server now and for the next sessions. ``ValueError`` if the name or the
+    address cannot be one."""
+    llm.register_provider(name, address, key_env=_key_variable(name) if needs_key else None)
+    servers = saved_servers()
+    servers[name] = {"address": address.strip().rstrip("/"), "key": needs_key}
+    _settings().setValue(SERVERS_KEY, json.dumps(servers))
+
+
+def drop_server(name: str) -> None:
+    llm.forget_provider(name)
+    servers = saved_servers()
+    if servers.pop(name, None) is not None:
+        _settings().setValue(SERVERS_KEY, json.dumps(servers))
+
+
+def remember_model(name: str) -> None:
+    """A model used on a server of the analyst's own is in the list next time."""
+    if name.partition(":")[0] not in llm.custom_providers():
+        return
+    got = _stored(EXTRA_KEY)
+    kept = [m for m in (got if isinstance(got, list) else []) if m != name]
+    _settings().setValue(EXTRA_KEY, json.dumps([name, *kept][:20]))
+
+
+def models_offered() -> list[str]:
+    """The API models, those hpc-agent forwards now, and those used on the analyst's servers."""
+    got = _stored(EXTRA_KEY)
+    extra = [m for m in (got if isinstance(got, list) else []) if isinstance(m, str)]
+    return list(dict.fromkeys([*API_MODELS, *llm.hpc_models(), *extra]))
 
 
 # -- the window's tools -------------------------------------------------------------------
@@ -1723,6 +1800,59 @@ class _ChatThread(QThread):
             self.failed.emit(f"{type(exc).__name__}: {exc}")
 
 
+class _ModelBox(QComboBox):
+    """The model list, rescanned for hpc-agent's forwards each time it is opened."""
+
+    def __init__(self, on_open: Callable[[], None]) -> None:
+        super().__init__()
+        self._on_open = on_open
+
+    def showPopup(self) -> None:  # noqa: N802 -- Qt's name
+        self._on_open()
+        super().showPopup()
+
+
+class _ServerDialog(QDialog):
+    """A provider's key and, for a server of the analyst's own, its address.
+
+    ``kind``: ``"builtin"`` (key only), ``"hpc"`` (a cluster whose models hpc-agent
+    forwards: its address is the forward's, so only the key), ``"custom"`` (key and
+    address; the address emptied removes the server).
+    """
+
+    def __init__(self, parent: QWidget, provider: str, kind: str, address: str = "") -> None:
+        super().__init__(parent)
+        self.setWindowTitle("API key" if kind == "builtin" else "Model server")
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel(f"Key for {provider}:"))
+        self.key_edit = QLineEdit()
+        self.key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        lay.addWidget(self.key_edit)
+        self.addr_edit = QLineEdit(address)
+        if kind == "hpc":
+            hint = QLabel(
+                "The address is hpc-agent's forward, found at each message. Without a key "
+                "here, the one hpc-agent keeps in OpenCode's config is used."
+            )
+            hint.setWordWrap(True)
+            hint.setStyleSheet(_MUTED)
+            lay.addWidget(hint)
+        elif kind == "custom":
+            lay.addWidget(QLabel("Address of the server (OpenAI-compatible):"))
+            self.addr_edit.setPlaceholderText("http://127.0.0.1:11443/v1")
+            lay.addWidget(self.addr_edit)
+            if address:
+                hint = QLabel("Empty the address to remove this server.")
+                hint.setStyleSheet(_MUTED)
+                lay.addWidget(hint)
+        box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        box.accepted.connect(self.accept)
+        box.rejected.connect(self.reject)
+        lay.addWidget(box)
+
+
 class AssistantDock(QDockWidget):
     """The Assistant panel: a model, a conversation, proposals the analyst applies."""
 
@@ -1761,13 +1891,16 @@ class AssistantDock(QDockWidget):
         body = QWidget()
         v = QVBoxLayout(body)
         top = QHBoxLayout()
-        self.model_box = QComboBox()
+        load_servers()
+        self.model_box = _ModelBox(self._refresh_models)
         self.model_box.setEditable(True)
-        self.model_box.addItems([*API_MODELS, *self._agents])
+        self.model_box.addItems([*models_offered(), *self._agents])
         self.model_box.setToolTip(
             "An API model as provider:model (anthropic, openai, deepseek, gemini, ollama, "
-            "lmstudio), or a command-line agent signed in to your own plan: Claude Code, "
-            "Codex, Antigravity agy or GitHub Copilot."
+            "lmstudio); a model hpc-agent forwards from a cluster (bede:model, csf3:model); "
+            "a server of your own (name:model, its address given by Key…); or a command-line "
+            "agent signed in to your own plan: Claude Code, Codex, Antigravity agy or GitHub "
+            "Copilot."
         )
         self.model_box.setCurrentText(str(_settings().value("assistant/model", API_MODELS[0])))
         self.model_box.currentTextChanged.connect(self._model_changed)
@@ -1778,7 +1911,8 @@ class AssistantDock(QDockWidget):
         self.effort_box.currentTextChanged.connect(self._effort_changed)
         self.key_btn = QPushButton("Key…")
         self.key_btn.setToolTip(
-            "Store this provider's API key in the macOS keychain (or for this session)."
+            "Store this provider's API key in the macOS keychain (or for this session); "
+            "for a server of your own, also its address."
         )
         self.key_btn.clicked.connect(self.ask_key)
         # Full automatic: the button's own part is the switch; its menu says what it does.
@@ -2032,8 +2166,11 @@ class AssistantDock(QDockWidget):
         self._close_cli()
 
     def _sync_key_button(self) -> None:
-        name = self.model_box.currentText()
-        self.key_btn.setEnabled(not self._is_agent() and name.partition(":")[0] in llm.PROVIDERS)
+        name = self.model_box.currentText().strip()
+        provider = name.partition(":")[0]
+        self.key_btn.setEnabled(
+            not self._is_agent() and ":" in name and bool(_NAME.match(provider))
+        )
 
     def _model_changed(self, name: str) -> None:
         """The analyst chose another model: remembered for the next session."""
@@ -2042,27 +2179,83 @@ class AssistantDock(QDockWidget):
         _settings().setValue("assistant/model", name)
         self._close_cli()
 
+    def _refresh_models(self) -> None:
+        """The list follows hpc-agent: a model it forwards now is in it, one it stopped
+        forwarding is not (the one chosen stays, so a typed name is never lost)."""
+        clusters, live = llm.hpc_clusters(), llm.hpc_models()
+        current = self.model_box.currentText()
+        self.model_box.blockSignals(True)
+        for i in reversed(range(self.model_box.count())):
+            text = self.model_box.itemText(i)
+            if text.partition(":")[0] in clusters and text not in live and text != current:
+                self.model_box.removeItem(i)
+        for m in live:
+            if self.model_box.findText(m) < 0:
+                self.model_box.insertItem(len(API_MODELS), m)
+        self.model_box.setCurrentText(current)
+        self.model_box.blockSignals(False)
+
     def ask_key(self) -> None:
-        provider = self.model_box.currentText().partition(":")[0]
-        if provider not in llm.PROVIDERS:
+        provider = self.model_box.currentText().partition(":")[0].strip()
+        if not _NAME.match(provider):
             return
-        key, ok = QInputDialog.getText(
-            self, "API key", f"Key for {provider}:", QLineEdit.EchoMode.Password
+        kind = (
+            "builtin"
+            if provider in llm.PROVIDERS
+            else "hpc"
+            if provider in llm.hpc_clusters()
+            else "custom"
         )
-        if not ok or not key.strip():
+        known = llm.custom_providers().get(provider)
+        dlg = _ServerDialog(self, provider, kind, known[1] if known else "")
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        _SESSION_KEYS[provider] = key.strip()
-        where = "the macOS keychain" if keychain_store(provider, key.strip()) else "this session"
-        self.view.note(f"The {provider} key is kept in {where}.")
+        self.view.note(self.apply_server(provider, dlg.key_edit.text(), dlg.addr_edit.text()))
+
+    def apply_server(self, provider: str, key: str, address: str = "") -> str:
+        """Keep what the Key… dialog gave; returns what to tell the analyst.
+
+        A key goes to the keychain (this session where there is none). A provider the
+        library does not know is a server of the analyst's own: it needs an address, which
+        is named to the model loop and kept in the settings; the address emptied removes it.
+        """
+        key, address = key.strip(), address.strip()
+        said = []
+        if provider not in llm.PROVIDERS and provider not in llm.hpc_clusters():
+            had = provider in llm.custom_providers()
+            if not address:
+                if had:
+                    drop_server(provider)
+                    return f"The {provider} server is removed."
+                return f"Give the address of {provider} to add it as a server."
+            needs_key = bool(key) or bool(saved_servers().get(provider, {}).get("key"))
+            try:
+                keep_server(provider, address, needs_key)
+            except ValueError as exc:
+                return str(exc)
+            said.append(f"The {provider} server is kept at {address}.")
+        if key:
+            _SESSION_KEYS[provider] = key
+            where = "the macOS keychain" if keychain_store(provider, key) else "this session"
+            said.append(f"The {provider} key is kept in {where}.")
+        self._sync_key_button()
+        return " ".join(said) or "Nothing changed."
 
     def _model(self) -> llm.Model:
         name = self.model_box.currentText().strip()
         provider = name.partition(":")[0]
-        return llm.Model(
+        if ":" in name and _NAME.match(provider) and llm.provider_spec(provider) is None:
+            raise ValueError(
+                f"No server is named {provider!r}: click Key… to give its address, or use "
+                "one of " + ", ".join(llm.known_providers())
+            )
+        model = llm.Model(
             name,
-            api_key=find_key(provider) if provider in llm.PROVIDERS else None,
+            api_key=find_key(provider) if llm.provider_spec(provider) else None,
             max_tokens=MAX_TOKENS,
         )
+        remember_model(name)
+        return model
 
     # -- a message -------------------------------------------------------------------
     def busy(self) -> bool:

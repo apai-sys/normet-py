@@ -151,6 +151,169 @@ def test_adapters_write_and_read_each_format(monkeypatch):
     assert reply.calls[0].name == "_echo" and reply.usage == {"input": 1, "output": 2}
 
 
+# -- models hpc-agent forwards, and servers the analyst names -----------------------------
+GLM = "hf.co/unsloth/GLM-5.3-Flash-GGUF:UD-Q4_K_XL"
+DSV = "hf.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF:UD-Q4_K_XL"
+
+
+@pytest.fixture
+def hpc(monkeypatch, tmp_path):
+    """hpc-agent's registry and OpenCode's config, both in tmp_path (never the user's)."""
+    import socket
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    sock.listen()
+    live = sock.getsockname()[1]
+    registry = tmp_path / "forwards.json"
+    registry.write_text(
+        json.dumps(
+            [
+                {"cluster": "bede", "model": GLM, "local": live, "job_id": "1"},
+                {"cluster": "bede", "model": DSV, "local": 1, "job_id": "2"},  # nothing listens
+                {"cluster": "csf3", "model": "Qwen3.8", "local": live},
+                {"cluster": "csf3", "model": "no-port"},  # damaged entry: skipped
+                "not an entry",
+            ]
+        )
+    )
+    monkeypatch.setenv("NORMET_HPC_FORWARDS", str(registry))
+    opencode = tmp_path / "opencode"
+    opencode.mkdir()
+    (opencode / "opencode.jsonc").write_text(
+        "// hpc-agent keeps these keys\n"
+        + json.dumps(
+            {
+                "providers": {
+                    # An earlier job's provider on the same port: disabled, another cluster's.
+                    "csf3-old": {
+                        "settings": {"baseURL": f"http://127.0.0.1:{live}/v1", "apiKey": "k-stale"}
+                    },
+                    # Not disabled, but lists another model: loses to the one that lists this.
+                    "bede-other": {
+                        "settings": {
+                            "baseURL": f"http://127.0.0.1:{live}/v1",
+                            "apiKey": "k-nomodel",
+                        },
+                        "models": {"something-else": {}},
+                    },
+                    "bede-glm": {
+                        "settings": {"baseURL": f"http://127.0.0.1:{live}/v1", "apiKey": "k-glm"},
+                        "models": {GLM: {}},
+                    },
+                    "elsewhere": {
+                        "settings": {"baseURL": "http://127.0.0.1:2/v1", "apiKey": "k-other"}
+                    },
+                },
+                "disabled_providers": ["csf3-old"],
+            }
+        )
+    )
+    monkeypatch.setattr(llm, "OPENCODE_DIR", str(opencode))
+    for var in ("BEDE_API_KEY", "CSF3_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    yield live
+    sock.close()
+
+
+def test_hpc_registry_is_read_and_damaged_entries_skipped(hpc, monkeypatch, tmp_path):
+    assert [(f["cluster"], f["local"]) for f in llm.hpc_forwards()] == [
+        ("bede", hpc),
+        ("bede", 1),
+        ("csf3", hpc),
+    ]
+    # Only the forwards that still answer are offered.
+    assert llm.hpc_models() == [f"bede:{GLM}", "csf3:Qwen3.8"]
+    monkeypatch.setenv("NORMET_HPC_FORWARDS", str(tmp_path / "none.json"))
+    assert llm.hpc_forwards() == [] and llm.hpc_models() == []
+    (tmp_path / "bad.json").write_text("{not json")
+    assert llm.hpc_forwards(str(tmp_path / "bad.json")) == []
+
+
+def test_a_forwarded_model_is_named_by_cluster_and_found_by_a_part_of_its_name(hpc):
+    m = llm.Model("bede:glm-5.3")
+    assert m.model == GLM and m.name == f"bede:{GLM}"
+    assert m.base_url == f"http://127.0.0.1:{hpc}/v1" and m.format == "openai"
+    assert llm.Model(f"bede:{GLM}").model == GLM  # the full name, with its own colon
+    with pytest.raises(ValueError, match="could be"):
+        llm.Model("bede:gguf")  # in both of Bede's names
+    with pytest.raises(RuntimeError, match="not forwarded"):
+        llm.Model("bede:nonsuch")
+    with pytest.raises(RuntimeError, match="forwards no model from"):
+        llm.hpc_forward("elsewhere-cluster", "x")
+
+
+def test_a_forwarded_model_takes_the_port_the_registry_has_now(hpc, tmp_path):
+    """A restarted job gets another port; the next Model follows it."""
+    reg = tmp_path / "forwards.json"
+    reg.write_text(json.dumps([{"cluster": "bede", "model": GLM, "local": 4242}]))
+    assert llm.Model("bede:glm").base_url == "http://127.0.0.1:4242/v1"
+
+
+def test_a_forwarded_models_key_comes_from_the_caller_then_the_env_then_opencode(hpc, monkeypatch):
+    assert llm.Model("bede:glm").key == "k-glm"  # hpc-agent's copy in OpenCode's config
+    monkeypatch.setenv("BEDE_API_KEY", "k-env")
+    assert llm.Model("bede:glm").key == "k-env"
+    assert llm.Model("bede:glm", api_key="k-typed").key == "k-typed"
+    # The other provider's key (another port) is not borrowed.
+    assert llm.Model("bede:deepseek", api_key=None).key == "k-env"
+    monkeypatch.delenv("BEDE_API_KEY")
+    assert llm.Model("bede:deepseek").key is None
+
+
+def test_a_forwarded_model_is_asked_over_the_forward_with_its_key(hpc, monkeypatch):
+    sent = {}
+
+    def fake_post(url, body, headers, **kw):
+        sent.update(url=url, body=body, headers=headers)
+        return {"choices": [{"message": {"content": "ready"}}], "usage": {}}
+
+    monkeypatch.setattr(llm, "_post", fake_post)
+    reply = llm.Model("bede:glm", max_tokens=8).chat("s", [{"role": "user", "content": "go"}], [])
+    assert reply.text == "ready"
+    assert sent["url"] == f"http://127.0.0.1:{hpc}/v1/chat/completions"
+    assert sent["headers"] == {"Authorization": "Bearer k-glm"}
+    assert sent["body"]["model"] == GLM  # the server's name, not the part typed
+
+
+def test_a_server_the_analyst_names_is_a_provider(hpc, monkeypatch):
+    llm.forget_provider("lab")
+    try:
+        with pytest.raises(ValueError, match="provider:model"):
+            llm.Model("lab:m")
+        llm.register_provider("lab", "http://10.0.0.5:8080/v1/", key_env="LAB_KEY")
+        assert llm.provider_spec("lab") == ("openai", "http://10.0.0.5:8080/v1", "LAB_KEY")
+        assert "lab" in llm.known_providers() and "lab" not in llm.PROVIDERS
+        monkeypatch.delenv("LAB_KEY", raising=False)
+        with pytest.raises(RuntimeError, match="LAB_KEY"):
+            llm.Model("lab:m")
+        m = llm.Model("lab:m:7b", api_key="k")
+        assert (m.model, m.base_url, m.key) == ("m:7b", "http://10.0.0.5:8080/v1", "k")
+        llm.register_provider("nokey", "https://x.example/v1")
+        assert llm.Model("nokey:m").key is None
+        llm.forget_provider("nokey")
+    finally:
+        llm.forget_provider("lab")
+    with pytest.raises(ValueError, match="provider:model"):
+        llm.Model("lab:m")
+
+
+def test_named_servers_cannot_take_a_built_in_or_a_cluster_name(hpc):
+    for name in ("anthropic", "ollama", "bede", "csf3"):
+        with pytest.raises(ValueError, match="provider of its own"):
+            llm.register_provider(name, "http://127.0.0.1:1/v1")
+    for name, url in (
+        ("a b", "http://x/v1"),
+        ("a:b", "http://x/v1"),
+        ("ok", "ftp://x"),
+        ("ok", "x"),
+    ):
+        with pytest.raises(ValueError):
+            llm.register_provider(name, url)
+    llm.forget_provider("anthropic")  # a built-in one stays
+    assert "anthropic" in llm.PROVIDERS
+
+
 # -- the window's tools over HTTP -------------------------------------------------------
 def _rpc(server, body, token=True):
     req = urllib.request.Request(
@@ -312,9 +475,16 @@ def win(qapp, monkeypatch, tmp_path):
 
     ini = str(tmp_path / "normet-gui.ini")  # never the user's own settings
     monkeypatch.setattr(assistant, "_settings", lambda: QSettings(ini, QSettings.Format.IniFormat))
+    # Nor the user's forwards, OpenCode config or keychain.
+    monkeypatch.setenv("NORMET_HPC_FORWARDS", str(tmp_path / "no-forwards.json"))
+    monkeypatch.setattr(llm, "OPENCODE_DIR", str(tmp_path / "no-opencode"))
+    monkeypatch.setattr(assistant, "keychain_get", lambda provider: None)
+    monkeypatch.setattr(assistant, "keychain_store", lambda provider, key: False)
     w = MainWindow()
     yield w
     w.close()
+    for name in list(llm.custom_providers()):
+        llm.forget_provider(name)
 
 
 def test_window_tools_read_and_propose(win, qapp):
@@ -422,6 +592,98 @@ def test_unknown_agent_and_missing_key(win, qapp, monkeypatch):
     assert [dock.effort_box.itemText(i) for i in range(dock.effort_box.count())] == ["medium"]
     dock.send("hi")
     assert not dock.busy()
+
+
+def _forwards(tmp_path, monkeypatch, models):
+    reg = tmp_path / "forwards.json"
+    reg.write_text(json.dumps(models))
+    monkeypatch.setenv("NORMET_HPC_FORWARDS", str(reg))
+
+
+def test_the_model_list_follows_hpc_agents_forwards(win, qapp, monkeypatch, tmp_path):
+    import socket
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    sock.listen()
+    port = sock.getsockname()[1]
+    try:
+        box = win.assistant.model_box
+        items = lambda: [box.itemText(i) for i in range(box.count())]  # noqa: E731
+        assert not [m for m in items() if m.startswith("bede:")]
+        _forwards(tmp_path, monkeypatch, [{"cluster": "bede", "model": GLM, "local": port}])
+        win.assistant._refresh_models()  # what opening the list does
+        assert f"bede:{GLM}" in items()
+        box.setCurrentText("anthropic:claude-opus-5-5")
+        _forwards(tmp_path, monkeypatch, [])  # the job ended
+        win.assistant._refresh_models()
+        assert f"bede:{GLM}" not in items()
+        assert box.currentText() == "anthropic:claude-opus-5-5"
+        # A name typed by hand is never taken out from under the analyst.
+        box.setCurrentText("bede:typed-by-hand")
+        win.assistant._refresh_models()
+        assert box.currentText() == "bede:typed-by-hand"
+    finally:
+        sock.close()
+
+
+def test_a_forwarded_model_answers_in_the_panel(win, qapp, monkeypatch, tmp_path):
+    import socket
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    sock.listen()
+    port = sock.getsockname()[1]
+    try:
+        _forwards(tmp_path, monkeypatch, [{"cluster": "bede", "model": GLM, "local": port}])
+        dock = win.assistant
+        dock.model_box.setCurrentText("bede:glm")
+        assert dock.key_btn.isEnabled()
+        monkeypatch.setenv("BEDE_API_KEY", "k-env")
+        model = dock._model()
+        assert model.base_url == f"http://127.0.0.1:{port}/v1" and model.key == "k-env"
+        assert model.model == GLM
+    finally:
+        sock.close()
+
+
+def test_a_server_of_the_analysts_own_is_added_kept_and_removed(win, qapp, monkeypatch):
+    from normet.gui import assistant
+
+    dock = win.assistant
+    dock.model_box.setCurrentText("lab:qwen3")
+    assert dock.key_btn.isEnabled()
+    with pytest.raises(ValueError, match="click Key"):
+        dock._model()
+    assert "Give the address" in dock.apply_server("lab", "", "")
+    assert "begins with http" in dock.apply_server("lab", "", "10.0.0.5:8080")
+    assert llm.provider_spec("lab") is None  # a refused address names nothing
+    said = dock.apply_server("lab", "k1", "http://10.0.0.5:8080/v1/")
+    assert "kept at http://10.0.0.5:8080/v1/" in said and "this session" in said
+    assert assistant.saved_servers()["lab"] == {"address": "http://10.0.0.5:8080/v1", "key": True}
+    model = dock._model()
+    assert (model.model, model.base_url, model.key) == (
+        "qwen3",
+        "http://10.0.0.5:8080/v1",
+        "k1",
+    )
+    assert "lab:qwen3" in assistant.models_offered()  # used once, offered next time
+    # The next session names the server again from the settings.
+    llm.forget_provider("lab")
+    assistant.load_servers()
+    assert llm.provider_spec("lab") == ("openai", "http://10.0.0.5:8080/v1", "LAB_API_KEY")
+    assert "removed" in dock.apply_server("lab", "", "")
+    assert "lab" not in assistant.saved_servers() and llm.provider_spec("lab") is None
+
+
+def test_the_address_of_a_built_in_or_a_cluster_is_not_asked_for(win, qapp):
+    from normet.gui import assistant
+
+    dock = win.assistant
+    assert dock.apply_server("anthropic", "", "http://x/v1") == "Nothing changed."
+    assert "bede" not in assistant.saved_servers()
+    assert dock.apply_server("bede", "", "http://x/v1") == "Nothing changed."
+    assert "anthropic" not in llm.custom_providers() and "bede" not in llm.custom_providers()
 
 
 # -- agy and Copilot ----------------------------------------------------------------------
