@@ -9,6 +9,12 @@ notebooks/*.nc
 # Local scripts and their data (downloads, caches, outputs) — not published
 scripts/
 
+# Internal research plans, HPC job scripts and their logs — kept in the working
+# copy only, deliberately not published (they carry cluster paths, account
+# names and unpublished results). The files stay on disk; they are just
+# untracked. Previous copies remain in git history.
+/docs/plans/
+
 # Sphinx autosummary stubs (auto-generated at build time)
 docs/_autosummary/
 
