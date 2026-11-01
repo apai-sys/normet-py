@@ -371,7 +371,9 @@ class Chronos2Estimator:
         extrapolation. Pointing this at a ``chronos-t5`` checkpoint therefore
         disables covariate support and is rejected.
     context_length : int, default 2048
-        Hours of history conditioned on. 2048 h is Chronos-2's native context.
+        Hours of history conditioned on. The checkpoint's native context is
+        8192 h; the pipeline default of 2048 h is what this class uses unless
+        overridden.
     prediction_length : int, default 168
         Default horizon (hours) for a single forward pass, and the stride used
         when rolling across a long series.
@@ -1158,6 +1160,16 @@ class Chronos2Estimator:
         :attr:`prediction_length` shrinks. :meth:`covariate_sensitivity`
         quantifies how much of a given configuration's prediction is driven by
         meteorology rather than by that anchoring.
+
+        A second, subtler property: each draw resamples the meteorological
+        covariates in the *context* as well as the horizon (``swap_past[met]``
+        above), while the target history stays observed. The model therefore
+        conditions on observed concentrations paired with *random* past weather,
+        which breaks the concentration--weather correspondence it needs to learn
+        the meteorological response. A 2026-10 pilot found this costs accuracy
+        (daily NRMSE 61 % vs 28 % when only the future is intervened). The
+        future-only variant is not yet exposed here; this note documents the
+        current behaviour, which is preserved bit-for-bit.
 
         The quantile columns are easy to misread: ``dew_pNN`` is the average,
         over the resampled weather, of the model's own ``NN``-th *predictive*
