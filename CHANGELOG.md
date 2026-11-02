@@ -1315,6 +1315,16 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   User guide: `guide/examples_foundation.md` ("Reading the embedding space
   before you group it").
 
+### Changed
+- **`Chronos2Estimator.deweather` docstring** now states plainly that each draw
+  resamples the meteorological covariates in the *context* as well as the
+  horizon while the target history stays observed, which breaks the
+  concentration--weather correspondence the model needs to learn the
+  meteorological response (a 2026-10 pilot measured daily NRMSE 61 % vs 28 %
+  when only the future is intervened). Behaviour is unchanged. The
+  `context_length` docstring is corrected: the checkpoint's native context is
+  8192 h, not 2048 h (2048 h is the pipeline default this class uses).
+
 ## [0.4.0] — 2026-06-20
 
 ### Changed (breaking)
