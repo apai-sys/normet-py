@@ -186,3 +186,53 @@ def test_deweather_untouched() -> None:
     # the new method is additive; the existing de-weathering entry point remains
     assert hasattr(Chronos2Estimator, "deweather")
     assert hasattr(Chronos2Estimator, "normalise_in_context")
+
+
+def test_d4_multi_anchor_overlap() -> None:
+    df = _synthetic()
+    est = _estimator()
+    # stride < block_h -> anchors overlap, so interior hours are covered by >1 anchor
+    design = ICNDesign(context_length=1000, block_h=168, stride=84, n_resamples=3, seed=5)
+    res = normalise_in_context(est, df, "y", design=design, pipeline=FakeICLPipeline())
+    assert int(res.hour_contrib.max()) > 1, "overlapping anchors must cover hours >1 times"
+    assert res.diagnostics["n_anchors"] > (3000 - 168) // 168
+
+
+def test_d5_bidirectional_fills_hole() -> None:
+    df = _synthetic()
+    est = _estimator()
+    # a single forward pass leaves the first context_length hours uncovered; the
+    # reverse orientation covers them, so bidirectional should leave almost none.
+    fwd = normalise_in_context(
+        est,
+        df,
+        "y",
+        design=ICNDesign(context_length=1000, direction="forward", n_resamples=3, seed=6),
+        pipeline=FakeICLPipeline(),
+    )
+    bid = normalise_in_context(
+        est,
+        df,
+        "y",
+        design=ICNDesign(context_length=1000, direction="bidirectional", n_resamples=3, seed=6),
+        pipeline=FakeICLPipeline(),
+    )
+    assert fwd.diagnostics["uncovered_hours"] >= 1000
+    # bidirectional fills the middle of the record: the uncovered count drops to a
+    # fraction of the forward-only hole (the first ~context hours stay uncovered on
+    # both ends, which is expected -- both orientations still need a conditioning
+    # window). It must not leave the forward-size hole behind.
+    assert bid.diagnostics["uncovered_hours"] < fwd.diagnostics["uncovered_hours"] * 0.6
+
+
+def test_lead_time_weighting_runs() -> None:
+    df = _synthetic()
+    est = _estimator()
+    design = ICNDesign(
+        context_length=1000, block_h=168, stride=84, lead_tau=24.0, n_resamples=3, seed=7
+    )
+    res = normalise_in_context(est, df, "y", design=design, pipeline=FakeICLPipeline())
+    assert np.isfinite(res.level.to_numpy()).any()
+    # weighting must not change the shape contract
+    assert len(res.level) == len(df)
+    assert int(res.hour_contrib.max()) > 1

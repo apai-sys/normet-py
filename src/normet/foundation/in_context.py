@@ -25,7 +25,7 @@ without loading a checkpoint.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, NamedTuple, Protocol, runtime_checkable
 
 import numpy as np
 import pandas as pd
@@ -111,6 +111,13 @@ class ICNDesign:
     aggregate:
         Per-hour aggregation across resamples/anchors (D9): ``"median"``,
         ``"quantile_mean"`` (trimmed mean of the 10-90 % band) or ``"trimmed"``.
+    lead_tau:
+        Lead-time weighting (D4): when ``> 0``, each anchor's contribution to a
+        given hour is weighted by ``exp(-lead / lead_tau)`` where ``lead`` is the
+        hour's distance from that anchor's start. Smaller lead wins, so the
+        hour is mostly informed by the anchor that sees it earliest -- the
+        fusion that shrinks the first-``C``-hours hole a single forward pass
+        leaves. ``0`` (default) falls back to an unweighted mean.
     n_resamples:
         Counterfactual weather draws averaged into the level estimate.
     seed:
@@ -129,6 +136,7 @@ class ICNDesign:
     direction: str = "forward"
     context_length: int = 2048
     aggregate: str = "quantile_mean"
+    lead_tau: float = 0.0
     n_resamples: int = 20
     seed: int = 0
     support_min_frac: float = 0.5
@@ -241,6 +249,20 @@ class MetPool:
 # --------------------------------------------------------------------------- #
 # Result
 # --------------------------------------------------------------------------- #
+class _DirResult(NamedTuple):
+    """Per-orientation ICN output.
+
+    ``level_draws[h]`` / ``paired_draws[h]`` hold ``(value, lead)`` tuples for every
+    counterfactual point landing on hour ``h``; ``contrib[h]`` counts anchors. Kept as
+    a :class:`~typing.NamedTuple` (rather than a bare 3-tuple) so the element types are
+    unambiguous to static analysis across the forward / reverse / bidirectional branches.
+    """
+
+    level_draws: dict[int, list[tuple[float, int]]]
+    paired_draws: dict[int, list[tuple[float, int]]]
+    anchor_count: dict[int, int]
+
+
 @dataclass
 class ICNResult:
     """Container for one ICN run.
@@ -311,20 +333,29 @@ class Chronos2ICLPipeline:
 # --------------------------------------------------------------------------- #
 # Orchestration
 # --------------------------------------------------------------------------- #
-def _aggregate(values: np.ndarray, mode: str) -> float:
-    """Aggregate a 1-D sample of point estimates (D9)."""
-    if values.size == 0 or not np.all(np.isfinite(values)):
+def _aggregate(items: list[tuple[float, int]], mode: str, lead_tau: float) -> float:
+    """Aggregate ``(value, lead)`` draws into one point estimate (D4 + D9).
+
+    With ``lead_tau > 0`` each draw is weighted by ``exp(-lead / lead_tau)`` so an
+    hour is informed mostly by the anchor that sees it earliest. ``mode`` still
+    chooses the central tendency of the (weighted) sample.
+    """
+    if not items:
         return float("nan")
+    vals = np.asarray([v for v, _ in items], dtype=float)
+    if not np.all(np.isfinite(vals)):
+        return float("nan")
+    leads = np.asarray([float(lead) for _, lead in items], dtype=float)
+    w = np.exp(-leads / lead_tau) if lead_tau and lead_tau > 0 else np.ones_like(vals)
+    w = w / w.sum()
     if mode == "median":
-        return float(np.median(values))
-    if mode == "trimmed":
-        lo, hi = np.percentile(values, [10, 90])
-        sel = values[(values >= lo) & (values <= hi)]
-        return float(sel.mean()) if sel.size else float(np.mean(values))
-    # quantile_mean: mean of the 10-90 % band, the expectation estimator
-    lo, hi = np.percentile(values, [10, 90])
-    sel = values[(values >= lo) & (values <= hi)]
-    return float(sel.mean()) if sel.size else float(np.mean(values))
+        return float(np.sum(w * vals))
+    lo, hi = np.percentile(vals, [10, 90])
+    sel = (vals >= lo) & (vals <= hi)
+    if sel.sum() == 0:
+        return float(np.sum(w * vals))
+    wsel = w[sel] / w[sel].sum()
+    return float(np.sum(wsel * vals[sel]))
 
 
 def _one_direction(
@@ -334,13 +365,14 @@ def _one_direction(
     pipeline: ICLPipeline,
     met_cols: list[str],
     cols: list[str],
-) -> tuple[dict[int, list[float]], dict[int, list[float]], dict[int, int]]:
+) -> _DirResult:
     """Run ICN in one orientation; return (level_draws, paired_draws, contrib).
 
-    ``level_draws[h]`` collects, per absolute hour index, every counterfactual
-    level point that lands there (across anchors and resamples). ``paired_draws``
-    is the analogous collection for the paired estimate. ``contrib[h]`` counts
-    anchors covering each hour.
+    ``level_draws[h]`` collects ``(value, lead)`` for every counterfactual level
+    point that lands on hour ``h`` (across anchors and resamples), where ``lead``
+    is the hour's distance from its anchor's start -- the quantity D4 weights by.
+    ``paired_draws`` is the analogous collection for the paired estimate.
+    ``contrib[h]`` counts anchors covering each hour.
     """
     n = len(df)
     rng = np.random.default_rng(design.seed)
@@ -348,8 +380,8 @@ def _one_direction(
     observed = target_arr.copy()
     pool = MetPool(df[met_cols], met_cols)
 
-    level_draws: dict[int, list[float]] = {}
-    paired_draws: dict[int, list[float]] = {}
+    level_draws: dict[int, list[tuple[float, int]]] = {}
+    paired_draws: dict[int, list[tuple[float, int]]] = {}
     contrib: dict[int, int] = {}
 
     anchors = range(
@@ -398,12 +430,12 @@ def _one_direction(
         paired = observed[s:e] * ratio
 
         for offset, h in enumerate(range(s, e)):
-            level_draws.setdefault(h, []).extend(cf_levels[:, offset].tolist())
-            paired_draws.setdefault(h, []).append(float(paired[offset]))
+            level_draws.setdefault(h, []).extend((float(v), offset) for v in cf_levels[:, offset])
+            paired_draws.setdefault(h, []).append((float(paired[offset]), offset))
         for h in range(s, e):
             contrib[h] = contrib.get(h, 0) + 1
 
-    return level_draws, paired_draws, contrib
+    return _DirResult(level_draws, paired_draws, contrib)
 
 
 def normalise_in_context(
@@ -461,39 +493,39 @@ def normalise_in_context(
     )
     pipe = pipeline if pipeline is not None else Chronos2ICLPipeline(estimator)
 
-    def run_orientation(
-        frame: pd.DataFrame, t: str
-    ) -> tuple[dict[int, list[float]], dict[int, list[float]], dict[int, int]]:
-        return _one_direction(frame, t, design, pipe, met_cols, cols)
-
     if design.direction == "forward":
-        level_d, paired_d, contrib = run_orientation(df, target)
+        fwd = _one_direction(df, target, design, pipe, met_cols, cols)
+        level_d = fwd.level_draws
+        paired_d = fwd.paired_draws
+        contrib = fwd.anchor_count
     elif design.direction == "reverse":
         rev = df.iloc[::-1].copy()
         rev.index = df.index[::-1]
-        rl, rp, rc = run_orientation(rev, target)
-        # mirror hour indices back to the original orientation
+        r = _one_direction(rev, target, design, pipe, met_cols, cols)
+        # mirror reversed-frame hour indices back to the original orientation
         n = len(df)
-        level_d = {n - 1 - h: v for h, v in rl.items()}
-        paired_d = {n - 1 - h: v for h, v in rp.items()}
-        contrib = {n - 1 - h: v for h, v in rc.items()}
+        level_d = {n - 1 - h: v for h, v in r.level_draws.items()}
+        paired_d = {n - 1 - h: v for h, v in r.paired_draws.items()}
+        contrib = {n - 1 - h: v for h, v in r.anchor_count.items()}
     else:  # bidirectional
-        fl, fp, fc = run_orientation(df, target)
+        fwd = _one_direction(df, target, design, pipe, met_cols, cols)
         rev = df.iloc[::-1].copy()
         rev.index = df.index[::-1]
-        rl, rp, rc = run_orientation(rev, target)
+        revr = _one_direction(rev, target, design, pipe, met_cols, cols)
         n = len(df)
-        level_d, paired_d, contrib = {}, {}, {}
-        for h in set(fl) | set(rl):
-            oh = n - 1 - h
-            lv = fl.get(h, []) + rl.get(oh, [])
-            level_d[h] = lv
-        for h in set(fp) | set(rp):
-            oh = n - 1 - h
-            paired_d[h] = fp.get(h, []) + rp.get(oh, [])
-        for h in set(fc) | set(rc):
-            oh = n - 1 - h
-            contrib[h] = fc.get(h, 0) + rc.get(oh, 0)
+        level_d = {h: list(fwd.level_draws[h]) for h in fwd.level_draws}
+        paired_d = {h: list(fwd.paired_draws[h]) for h in fwd.paired_draws}
+        # forward already keyed by original hours; reverse keyed by reversed-frame
+        # hours, so map each reversed key r -> original hour n-1-r.
+        for hr, v in revr.level_draws.items():
+            level_d.setdefault(n - 1 - hr, []).extend(v)
+        for hr, v in revr.paired_draws.items():
+            paired_d.setdefault(n - 1 - hr, []).extend(v)
+        contrib_keys = set(fwd.anchor_count) | {n - 1 - h for h in revr.anchor_count}
+        contrib = {
+            h: fwd.anchor_count.get(h, 0) + revr.anchor_count.get(n - 1 - h, 0)
+            for h in contrib_keys
+        }
 
     n = len(df)
     level_vals = np.full(n, np.nan)
@@ -503,10 +535,10 @@ def normalise_in_context(
     contrib_arr = np.zeros(n, dtype=int)
     for h in range(n):
         if h in level_d and level_d[h]:
-            level_vals[h] = _aggregate(np.asarray(level_d[h]), design.aggregate)
-            mc_spread[h] = float(np.nanstd(level_d[h]))
+            level_vals[h] = _aggregate(level_d[h], design.aggregate, design.lead_tau)
+            mc_spread[h] = float(np.nanstd([v for v, _ in level_d[h]]))
         if h in paired_d and paired_d[h]:
-            paired_vals[h] = _aggregate(np.asarray(paired_d[h]), design.aggregate)
+            paired_vals[h] = _aggregate(paired_d[h], design.aggregate, design.lead_tau)
         if h in contrib:
             contrib_arr[h] = contrib[h]
 
@@ -541,18 +573,18 @@ def normalise_in_context(
     return result
 
 
-def _anchor_spread(level_d: dict[int, list[float]], n: int) -> np.ndarray:
+def _anchor_spread(level_d: dict[int, list[tuple[float, int]]], n: int) -> np.ndarray:
     """Per-hour spread across anchors (the anchoring/认知 uncertainty).
 
-    ``level_d[h]`` holds every counterfactual draw for hour ``h`` (across anchors
+    ``level_d[h]`` holds ``(value, lead)`` draws for hour ``h`` (across anchors
     *and* resamples); we cannot recover the per-anchor split after the fact, so we
-    approximate the anchor spread by the empirical std of the draws when an hour
-    is covered by several anchors and set it to NaN otherwise. Reporting both
+    approximate the anchor spread by the empirical std of the values when an hour
+    is covered by several draws and set it to NaN otherwise. Reporting both
     ``anchor`` and ``mc`` keeps the two uncertainty sources distinguishable even
     though this proxy folds resample noise into the anchor band.
     """
     out = np.full(n, np.nan)
-    for h, vals in level_d.items():
-        if len(vals) >= 2:
-            out[h] = float(np.nanstd(vals))
+    for h, items in level_d.items():
+        if len(items) >= 2:
+            out[h] = float(np.nanstd([v for v, _ in items]))
     return out
