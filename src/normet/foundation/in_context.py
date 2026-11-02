@@ -419,8 +419,16 @@ def _one_direction(
                 cf_future_mets.append(pool.sample_trajectory(e - s, rng))
             else:
                 cf_future_mets.append(pool.sample_climatology(future_index[0], e - s, rng))
+        # Counterfactual future: resampled weather + the *actual* future calendar
+        # (calendar is not part of the weather pool). Build a full frame per draw so
+        # ``future_met[cols]`` (which includes calendar encoders) resolves.
+        cf_full_futures: list[pd.DataFrame] = []
+        for fm in cf_future_mets:
+            ff = factual_met.copy()
+            ff[met_cols] = fm[met_cols].to_numpy()
+            cf_full_futures.append(ff)
         cf_levels = np.stack(
-            [pipeline.forecast(hist, past_cf, fm[cols], cols, target) for fm in cf_future_mets]
+            [pipeline.forecast(hist, past_cf, ff, cols, target) for ff in cf_full_futures]
         )
         level_cf_mean = cf_levels.mean(axis=0)
 
