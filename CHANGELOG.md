@@ -7,6 +7,17 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ## [Unreleased]
 
 ### Added
+- **In-Context Normalisation (ICN) for Chronos-2** — `normet.foundation.in_context`
+  with `ICNDesign` (D1–D9 axes), `MetPool` (record-pointwise / record-trajectory /
+  climatology sampling with calendar alignment and the A2 support check), `ICNResult`
+  (level, paired, weather effect, per-source spread, per-hour anchor contribution,
+  diagnostics) and `Chronos2ICLPipeline`. `Chronos2Estimator.normalise_in_context`
+  is the thin delegate; the heavy forward pass sits behind the `ICLPipeline` protocol,
+  so the orchestration runs torch-free in CI via a `FakeICLPipeline`. ICN intervenes on
+  the future only (D1) and draws the counterfactual weather from a pool (D2), so short
+  emission events that `deweather` absorbs survive. `deweather` is untouched.
+  Tests in `tests/test_in_context.py` assert the headline property: future-only
+  intervention recovers the weather response, past+future intervention collapses it.
 - **Assistant: models forwarded by hpc-agent, and servers of your own.** A model that
   hpc-agent forwards from a cluster job is named `cluster:model`
   (`bede:hf.co/unsloth/GLM-5.3-Flash-GGUF:UD-Q4_K_XL`, or any unique part of the name,

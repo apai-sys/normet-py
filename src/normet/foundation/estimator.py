@@ -1250,6 +1250,51 @@ class Chronos2Estimator:
             quantile_cols={q: f"dew_p{int(q * 100)}" for q in quantiles},
         )
 
+    def normalise_in_context(
+        self,
+        df: pd.DataFrame,
+        target: str,
+        design: Any = None,
+        pipeline: Any = None,
+        met_features: list[str] | None = None,
+        schema: str = "chronos",
+    ) -> Any:
+        """In-context normalisation (ICN) -- the future-only analogue of :meth:`deweather`.
+
+        ``deweather`` resamples weather from the observed record and intervenes on
+        the past **and** the future; that configuration absorbs short emission
+        events (the "past+future" cell of the 2x2 frame). ICN instead intervenes
+        on the **future only** (D1) and draws the counterfactual weather from a
+        configurable pool (D2), so a short event present in the observed past but
+        absent from the counterfactual weather survives. The orchestration, design
+        axes, meteorology pool and result container live in
+        :mod:`normet.foundation.in_context`; this method is a thin delegate so the
+        two normalisers share the same covariate resolution and (when no
+        ``pipeline`` is supplied) the same zero-shot Chronos-2 weights.
+
+        Parameters match :func:`normet.foundation.in_context.normalise_in_context`;
+        ``design`` defaults to future-only intervention on record trajectories and
+        ``pipeline`` defaults to the Chronos-2 adapter (loading the checkpoint on
+        first use). Unit tests inject a torch-free fake pipeline, so this path is
+        exercised in CI without a model.
+
+        Returns
+        -------
+        normet.foundation.in_context.ICNResult
+            Level and paired estimates plus the anchor / Monte-Carlo spread split.
+        """
+        from .in_context import normalise_in_context as _nic
+
+        return _nic(
+            self,
+            df,
+            target,
+            design=design,
+            pipeline=pipeline,
+            met_features=met_features,
+            schema=schema,
+        )
+
     def covariate_sensitivity(
         self,
         df: pd.DataFrame,

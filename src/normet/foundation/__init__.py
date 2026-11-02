@@ -21,6 +21,14 @@ from .estimator import (
     to_normet_frame,
     to_regular_index,
 )
+from .in_context import (
+    Chronos2ICLPipeline,
+    ICLPipeline,
+    ICNDesign,
+    ICNResult,
+    MetPool,
+    normalise_in_context,
+)
 
 __all__ = [
     "CHRONOS_BACKEND",
@@ -42,4 +50,10 @@ __all__ = [
     "to_indexed_frame",
     "to_normet_frame",
     "to_regular_index",
+    "ICNDesign",
+    "ICNResult",
+    "ICLPipeline",
+    "Chronos2ICLPipeline",
+    "MetPool",
+    "normalise_in_context",
 ]
