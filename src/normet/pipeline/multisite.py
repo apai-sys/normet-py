@@ -10,13 +10,13 @@ each station independently.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Callable
 from typing import Any
 
 import pandas as pd
 from joblib import Parallel, delayed
 
+from ..utils._config import resolve_workers
 from ..utils.logging import get_logger
 
 log = get_logger(__name__)
@@ -30,7 +30,7 @@ __all__ = [
 
 
 def _resolve_workers(n_cores: int | None) -> int:
-    return max(1, n_cores if n_cores is not None else (os.cpu_count() or 2) - 1)
+    return resolve_workers(n_cores)
 
 
 def multisite_apply(
@@ -55,7 +55,9 @@ def multisite_apply(
     func : callable
         Per-site function. Must return a pandas DataFrame.
     n_cores : int, optional
-        Parallel workers. Defaults to ``cpu_count() - 1``.
+        Parallel workers. Defaults to the job's allocation minus one
+        (see :func:`normet.utils.available_cores`), not the machine's
+        core count.
     site_kwarg : str, optional
         If set, the site id will also be passed to ``func`` under this kwarg
         (useful when ``func`` needs to know its site).

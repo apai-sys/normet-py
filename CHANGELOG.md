@@ -607,6 +607,29 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   trajectory window each had their own copy, identical down to the margins.
 
 ### Fixed
+- **Worker pools were sized from the machine, not the allocation.**
+  Nine parallel sections (normalise's threaded path, PDP, rolling,
+  decomposition, placebo-in-space, effect bands, staggered/batch SCM and
+  multisite) sized themselves with `(os.cpu_count() or 2) - 1`.
+  `os.cpu_count()` reports the host, not the allocation: inside a 4-core Slurm
+  job on a 32-core node it returns 32, so those sections asked for 31 workers
+  on 4 cores. normet-r has resolved this correctly for a while via
+  `.nm_available_cores()`; the Python package had no affinity, scheduler or
+  cgroup awareness at all.
+
+  New `normet.utils.available_cores()` takes the minimum of `sched_getaffinity`,
+  `SLURM_CPUS_PER_TASK` / `SLURM_CPUS_ON_NODE` / `NSLOTS` / `PBS_NUM_PPN` /
+  `NCPUS` / `LSB_DJOB_NUMPROC`, the cgroup v2 `cpu.max` quota (v1
+  `cfs_quota_us` fallback) and `os.cpu_count()`, so a 4-core batch gets 4.
+  `default_workers()` is that minus one for the parent process, and
+  `resolve_workers(n)` returns an explicit count unchanged — every former call
+  site now goes through it. `OMP_NUM_THREADS` is deliberately *not* consulted:
+  it caps threads per process, and users set it to 1 precisely to stop BLAS
+  oversubscribing underneath these pools.
+
+  No published result changes: the default `normalise()` path batches
+  sequentially and only logged the worker count.
+
 - **OpenAQ adapter: fetches came back empty for UK/EEA-sourced records.**
   Live verification (2026-10-23) against the `/parameters` endpoint showed
   each pollutant registered under several `parameters_id`s that differ by

@@ -1,6 +1,6 @@
 """Shared utilities: config, data prep, features, metrics, CV, caching, provenance, validation."""
 
-from ._config import DEFAULT_SEED, resolve_config
+from ._config import DEFAULT_SEED, available_cores, default_workers, resolve_config
 from .cache import config_hash, dataframe_hash, make_memory
 from .cv import cv_score, time_series_cv
 from .featureeng import (
@@ -26,6 +26,8 @@ from .validate import require_column, require_no_duplicates, require_no_nan_in, 
 
 __all__ = [
     "resolve_config",
+    "available_cores",
+    "default_workers",
     "DEFAULT_SEED",
     "prepare_data",
     "process_date",

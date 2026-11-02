@@ -7,7 +7,6 @@ Provides :func:`normalise` (resample-and-predict) and :func:`normalise_auto`
 
 from __future__ import annotations
 
-import os
 import zlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -20,7 +19,7 @@ import pandas as pd
 from ..exceptions import ConfigError, DataError, ModelError
 from ..model.predict import ml_predict
 from ..utils import progress
-from ..utils._config import resolve_config
+from ..utils._config import resolve_config, resolve_workers
 from ..utils.logging import get_logger
 from ..utils.prepare import check_data, expm1_columns, process_date
 
@@ -502,7 +501,7 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
     # Each pool's served columns as one array, built once for every draw.
     draw_arrays = [(stream, cols, pool[cols].to_numpy()) for stream, cols, pool in draws]
 
-    n_cores_eff = max(1, _cfg.n_cores if _cfg.n_cores is not None else (os.cpu_count() or 2) - 1)
+    n_cores_eff = resolve_workers(_cfg.n_cores)
 
     rng = np.random.default_rng(_cfg.seed)
     random_seeds = rng.choice(1_000_000, size=_cfg.n_samples, replace=False)

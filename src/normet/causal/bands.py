@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 import matplotlib.pyplot as plt
@@ -12,7 +11,7 @@ import pandas as pd
 
 from .. import style as S
 from ..style import styled
-from ..utils._config import DEFAULT_SEED
+from ..utils._config import DEFAULT_SEED, resolve_workers
 from ..utils._time import to_datetime_coerced
 from ..utils.logging import get_logger
 from .run_scm import run_scm
@@ -21,8 +20,8 @@ log = get_logger(__name__)
 
 
 def _eff_cores(n_cores: int | None) -> int:
-    """Resolve worker count: explicit value, else ``cpu_count() - 1`` (min 1)."""
-    return max(1, int(n_cores) if n_cores is not None else (os.cpu_count() or 2) - 1)
+    """Resolve worker count: explicit value, else the allocation minus one."""
+    return resolve_workers(n_cores)
 
 
 __all__ = [
@@ -329,7 +328,9 @@ def uncertainty_bands(
         Confidence interval level (e.g., 0.95 for 95% bands).
     n_cores : int, optional
         Worker processes for the bootstrap/jackknife refits (via joblib).
-        Defaults to ``cpu_count() - 1``.
+        Defaults to the allocation minus one (see
+        :func:`normet.utils.available_cores`), not the machine's core
+        count.
     **kwargs :
         Additional arguments passed to `run_scm`.
 

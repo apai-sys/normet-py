@@ -3,13 +3,13 @@
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
 
+from ..utils._config import resolve_workers
 from ..utils._time import to_datetime_coerced
 from ..utils.logging import get_logger
 from .run_scm import run_scm
@@ -21,7 +21,7 @@ __all__ = ["placebo_in_space", "placebo_in_time"]
 
 def _eff_cores(n_cores: int | None) -> int:
     """Resolve effective worker count (>=1)."""
-    return max(1, int(n_cores) if n_cores is not None else (os.cpu_count() or 2) - 1)
+    return resolve_workers(n_cores)
 
 
 def placebo_in_space(

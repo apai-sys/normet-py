@@ -3,14 +3,13 @@
 
 from __future__ import annotations
 
-import os
-
 import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
 
 from ..backends import backend_registry
 from ..model.predict import ml_predict
+from ..utils._config import resolve_workers
 from ..utils.features import extract_features
 from ..utils.logging import get_logger
 
@@ -111,7 +110,7 @@ def pdp(
         return np.linspace(float(lo), float(hi), int(max(2, grid_points)))
 
     X_df = X_df.copy()
-    n_cores_eff = max(1, n_cores if n_cores is not None else (os.cpu_count() or 2) - 1)
+    n_cores_eff = resolve_workers(n_cores)
 
     def _one(var: str) -> pd.DataFrame:
         grid = _grid(X_df[var])

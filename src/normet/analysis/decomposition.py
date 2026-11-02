@@ -8,7 +8,6 @@ Provides :func:`decompose` (and the convenience wrappers :func:`decom_emi`,
 from __future__ import annotations
 
 import numbers
-import os
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -23,7 +22,7 @@ from ..exceptions import ConfigError, DataError, ModelError
 from ..foundation.estimator import CHRONOS_BACKEND, resolve_n_samples
 from ..model.train import build_model
 from ..utils import progress
-from ..utils._config import DEFAULT_SEED, resolve_config
+from ..utils._config import DEFAULT_SEED, resolve_config, resolve_workers
 from ..utils.features import extract_features
 from ..utils.logging import get_logger
 from ..utils.prepare import add_date_variables, process_date
@@ -134,7 +133,7 @@ def _resolve_config(config: DecomposeConfig | None = None, **kwargs: Any) -> Dec
 
 def _effective_cores(n_cores: int | None) -> int:
     """Resolve parallel worker count (>=1)."""
-    return max(1, n_cores if n_cores is not None else (os.cpu_count() or 2) - 1)
+    return resolve_workers(n_cores)
 
 
 def _log_decomposition_progress(

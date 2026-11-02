@@ -5,13 +5,13 @@ with the same worker pool pattern."""
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
 
+from ..utils._config import resolve_workers
 from ..utils._time import to_datetime_coerced
 from ..utils.logging import get_logger
 from .run_scm import run_scm
@@ -75,7 +75,7 @@ def scm_all(
           - unit_col (treated unit ID)
     """
     units = sorted(pd.unique(df[unit_col]))
-    n_cores_eff = max(1, n_cores if n_cores is not None else (os.cpu_count() or 2) - 1)
+    n_cores_eff = resolve_workers(n_cores)
 
     ml_backend_for_log = kwargs.get("backend") if scm_backend == "mlscm" else None
     log.info(
@@ -272,7 +272,7 @@ def run_scm_staggered(
             f"{[(u, str(pd.to_datetime(c).date())) for u, c in pairs if u in no_post]}"
         )
 
-    n_cores_eff = max(1, int(n_cores) if n_cores is not None else (os.cpu_count() or 2) - 1)
+    n_cores_eff = resolve_workers(n_cores)
     log.info(
         "run_scm_staggered: scm_backend=%s | treated=%d | donors=%d | post_agg=%s | n_cores=%d",
         scm_backend,

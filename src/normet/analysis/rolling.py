@@ -9,7 +9,6 @@ of the result.
 
 from __future__ import annotations
 
-import os
 import re
 import time
 from dataclasses import dataclass
@@ -19,7 +18,7 @@ import pandas as pd
 
 from ..model.train import build_model
 from ..utils import progress
-from ..utils._config import DEFAULT_SEED, resolve_config
+from ..utils._config import DEFAULT_SEED, resolve_config, resolve_workers
 from ..utils.features import extract_features
 from ..utils.logging import _progress_str, get_logger
 from ..utils.prepare import add_date_variables, process_date
@@ -196,7 +195,7 @@ def rolling(
         time_vars = {"date_unix", "day_julian", "weekday", "hour"}
         variables_resample_resolved = [f for f in covariates_resolved if f not in time_vars]
 
-    n_cores_eff = max(1, _cfg.n_cores if _cfg.n_cores is not None else (os.cpu_count() or 2) - 1)
+    n_cores_eff = resolve_workers(_cfg.n_cores)
 
     d_floor = df_work["date"].dt.floor("D")
     min_day = d_floor.min()
