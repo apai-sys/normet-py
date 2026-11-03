@@ -44,14 +44,14 @@ from PySide6.QtWidgets import (
     QWidgetItem,
 )
 
-from .theme import apply_figure_theme, light_figure, theme_manager
+from .theme import apply_figure_theme, light_figure, muted_color, theme_manager
 
 #: Traffic-light palette for verdict banners.
 VERDICT_COLOR = {"ok": "#34c759", "warn": "#ff9500", "error": "#ff3b30"}
 
-#: Muted colour for secondary hints / file labels.
-HINT_STYLE = "color:#8e8e93;"
-HINT_STYLE_SMALL = "color:#8e8e93;font-size:11px;"
+#: Muted colour for secondary hints / file labels, per theme (see theme.muted_color).
+HINT_STYLE = f"color:{muted_color()};"
+HINT_STYLE_SMALL = f"color:{muted_color()};font-size:11px;"
 
 RUN_BUTTON_STYLE = "font-weight:600;padding:8px;"
 
@@ -132,11 +132,21 @@ def app_icon_path() -> str:
 
 
 def hint_label(text: str, small: bool = True) -> QLabel:
-    """A muted, word-wrapped helper label."""
+    """A muted, word-wrapped helper label, recoloured when the theme changes."""
     lbl = QLabel(text)
     lbl.setWordWrap(True)
-    lbl.setStyleSheet(HINT_STYLE_SMALL if small else HINT_STYLE)
+    _apply_hint_style(lbl, small)
+    try:
+        theme_manager().themeChanged.connect(
+            lambda dark: _apply_hint_style(lbl, small, dark))
+    except RuntimeError:      # no application yet: the colour asked for stands
+        pass
     return lbl
+
+
+def _apply_hint_style(lbl: QLabel, small: bool, dark: bool | None = None) -> None:
+    size = "font-size:11px;" if small else ""
+    lbl.setStyleSheet(f"color:{muted_color(dark)};{size}")
 
 
 def as_figure(obj: Any):
@@ -573,7 +583,7 @@ class CanvasTab(QWidget):
         lbl = QLabel(self._placeholder)
         lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lbl.setWordWrap(True)
-        lbl.setStyleSheet(HINT_STYLE)
+        lbl.setStyleSheet(f"color:{muted_color()};")
         self._layout.addWidget(lbl)
 
     def clear(self) -> None:

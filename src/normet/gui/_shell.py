@@ -33,6 +33,7 @@ from . import _settings, commandlog, theme
 from ._constants import DOCS_URL
 from ._data_tab import DataTab
 from ._widgets import CanvasTab, FlowLayout
+from .theme import muted_color
 from .welcome import Welcome
 from .workers import QtLogHandler
 
@@ -588,7 +589,7 @@ class ShellMixin(QMainWindow):
 
         version = QLabel(f"Version {normet.__version__}")
         version.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        version.setStyleSheet("font-size: 11px; color: gray;")
+        version.setStyleSheet(f"font-size: 11px; color: {muted_color()};")
         v.addWidget(version)
 
         what = QLabel(

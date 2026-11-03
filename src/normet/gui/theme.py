@@ -69,6 +69,20 @@ def is_dark_mode(app: QApplication | None = None) -> bool:
     return app.palette().color(QPalette.ColorRole.Window).lightnessF() < 0.5
 
 
+#: The muted secondary-text colour per theme: the light grey reads on the light
+#: window, the dark theme's tick grey on the dark one. A fixed #8e8e93 is
+#: legible on both but goes flat on dark.
+MUTED = "#8e8e93"
+MUTED_DARK = "#aeaeb2"
+
+
+def muted_color(dark: bool | None = None) -> str:
+    """The secondary-text colour for the window's theme; None asks the system."""
+    if dark is None:
+        dark = is_dark_mode()
+    return MUTED_DARK if dark else MUTED
+
+
 def _hex(color: Any) -> str | None:
     from matplotlib.colors import to_hex
 

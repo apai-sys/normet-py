@@ -31,7 +31,7 @@ from collections import Counter
 from typing import Any
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QColor, QGuiApplication
+from PySide6.QtGui import QColor, QGuiApplication, QPalette
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -54,7 +54,7 @@ from PySide6.QtWidgets import (
 
 from normet import figstyle as FS
 
-from .theme import apply_figure_theme
+from .theme import apply_figure_theme, muted_color
 
 #: Panel labels as the menu offers them; None for none.
 LABELS: tuple[tuple[str, str | None], ...] = (
@@ -548,7 +548,7 @@ class PrintDialog(QDialog):
             "Double-click a label or a tick's numbers to size them, the legend or a colour "
             "bar to edit it; drag a legend or a colour bar where it reads best."
         )
-        hint.setStyleSheet("color: gray;")
+        hint.setStyleSheet(f"color: {muted_color()};")
         hint.setWordWrap(True)
         side.addWidget(hint)
         buttons = QHBoxLayout()
@@ -569,7 +569,8 @@ class PrintDialog(QDialog):
         self.scroll.setWidget(self.canvas)
         self.scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
         pal = self.scroll.palette()
-        pal.setColor(self.scroll.backgroundRole(), QColor("#8e8e93"))
+        # the backdrop behind the figure: the palette's mid surface, dark or light
+        pal.setColor(self.scroll.backgroundRole(), pal.color(QPalette.ColorRole.Mid))
         self.scroll.setPalette(pal)
         top = QHBoxLayout(self)
         top.addWidget(panel)
