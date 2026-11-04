@@ -48,6 +48,19 @@ autosummary_generate = True
 # (see ``_templates/autosummary/``), so module-level ``automodule`` does not
 # expand members itself.
 autosummary_imported_members = False
+# ``normet.agent.llm`` has constants and functions whose names differ only by case
+# (``HPC_CLUSTERS``/``hpc_clusters``, ``HPC_FORWARDS``/``hpc_forwards``). On a case-insensitive
+# filesystem (the default on macOS and Windows) the two stubs of a pair are one file, named for
+# the constant and holding the function's text: the toctree cannot find the function's stub, the
+# constant's page shows the function, and ``sphinx -W`` fails. The functions' stubs get another
+# file name here; object names, and so every cross-reference, stay as they are. The functions are
+# the ones renamed because a ``docs/_autosummary`` built before this entry already holds the
+# constants' stubs under their own names: the next build rewrites those, where renaming the
+# constants would leave them in the way until deleted.
+autosummary_filename_map = {
+    "normet.agent.llm.hpc_clusters": "normet.agent.llm.hpc_clusters-function",
+    "normet.agent.llm.hpc_forwards": "normet.agent.llm.hpc_forwards-function",
+}
 autodoc_default_options = {
     "undoc-members": False,
     "show-inheritance": True,
