@@ -137,9 +137,8 @@ def hint_label(text: str, small: bool = True) -> QLabel:
     lbl.setWordWrap(True)
     _apply_hint_style(lbl, small)
     try:
-        theme_manager().themeChanged.connect(
-            lambda dark: _apply_hint_style(lbl, small, dark))
-    except RuntimeError:      # no application yet: the colour asked for stands
+        theme_manager().themeChanged.connect(lambda dark: _apply_hint_style(lbl, small, dark))
+    except RuntimeError:  # no application yet: the colour asked for stands
         pass
     return lbl
 

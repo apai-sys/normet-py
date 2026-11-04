@@ -72,8 +72,14 @@ def available_cores() -> int:
 
     # Schedulers that allocate without binding leave the mask wide open, so
     # their own environment variables are the only signal.
-    for var in ("SLURM_CPUS_PER_TASK", "SLURM_CPUS_ON_NODE", "NSLOTS",
-                "PBS_NUM_PPN", "NCPUS", "LSB_DJOB_NUMPROC"):
+    for var in (
+        "SLURM_CPUS_PER_TASK",
+        "SLURM_CPUS_ON_NODE",
+        "NSLOTS",
+        "PBS_NUM_PPN",
+        "NCPUS",
+        "LSB_DJOB_NUMPROC",
+    ):
         try:
             val = int(os.environ.get(var, ""))
         except ValueError:
