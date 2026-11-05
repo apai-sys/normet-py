@@ -383,8 +383,11 @@ class _Tool(QFrame):
 
     def keyPressEvent(self, e: Any) -> None:  # noqa: N802
         # The keyboard reaches a finished tool the way a click does.
-        if not self.error and self.result.strip() and e.key() in (
-                Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+        if (
+            not self.error
+            and self.result.strip()
+            and e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space)
+        ):
             self.toggle()
             return
         super().keyPressEvent(e)

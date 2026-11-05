@@ -40,7 +40,7 @@ def _install_excepthook() -> None:
             except Exception:
                 pass
         if threading.current_thread() is not threading.main_thread():
-            return                     # widgets only on the GUI thread; the file has it
+            return  # widgets only on the GUI thread; the file has it
         where = tr(f"Details were saved to {path}.") if path else tr("Details could not be saved.")
         try:
             box = QMessageBox()
@@ -48,7 +48,8 @@ def _install_excepthook() -> None:
             box.setWindowTitle("Unexpected error")
             box.setText(f"{exc_type.__name__}: {exc}")
             box.setInformativeText(
-                tr("The app stayed open; your results are unaffected.") + " " + where)
+                tr("The app stayed open; your results are unaffected.") + " " + where
+            )
             box.setDetailedText(msg)
             box.exec()
         except Exception:

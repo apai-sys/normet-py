@@ -13,6 +13,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 @pytest.fixture(scope="module")
 def qapp():
     from PySide6.QtWidgets import QApplication
+
     return QApplication.instance() or QApplication([])
 
 
@@ -24,16 +25,20 @@ def test_fill_sortable_orders_numbers_and_keeps_none_last(qapp):
     from normet.gui._widgets import copy_table_rows, fill_sortable
 
     tbl = QTableWidget(0, 2)
-    fill_sortable(tbl, ["a", "b"], [
-        ["9", "x"],
-        ["10", "y"],
-        ["", "z"],
-    ])
+    fill_sortable(
+        tbl,
+        ["a", "b"],
+        [
+            ["9", "x"],
+            ["10", "y"],
+            ["", "z"],
+        ],
+    )
     assert tbl.isSortingEnabled()
     tbl.sortByColumn(0, Qt.SortOrder.AscendingOrder)
     assert tbl.item(0, 0).text() == "9"
     assert tbl.item(1, 0).text() == "10"
-    assert tbl.item(2, 0).text() == ""        # no key sorts last
+    assert tbl.item(2, 0).text() == ""  # no key sorts last
     copy_table_rows(tbl, [0])
     assert qapp.clipboard().text() == "9\tx"
 
@@ -48,8 +53,7 @@ def test_panel_page_and_result_tab_are_remembered(qapp, tmp_path, monkeypatch):
 
     ini = str(tmp_path / "normet-gui.ini")
     monkeypatch.setattr(_settings, "config_dir", lambda: str(tmp_path))
-    monkeypatch.setattr(mw, "QSettings",
-                        lambda *a: QSettings(ini, QSettings.Format.IniFormat))
+    monkeypatch.setattr(mw, "QSettings", lambda *a: QSettings(ini, QSettings.Format.IniFormat))
     win = MainWindow()
     win.show_panel_page("Decompose")
     win.tabs.setCurrentIndex(3)
@@ -68,9 +72,16 @@ def test_clear_history_asks_first(qapp, tmp_path, monkeypatch):
     from normet.gui._session import SessionMixin
 
     monkeypatch.setattr(_settings, "config_dir", lambda: str(tmp_path))
-    _settings.append_history({"time": "2026-01-01 00:00", "task": "train",
-                              "target": "pm25", "backend": "flaml",
-                              "rows": 10, "detail": ""})
+    _settings.append_history(
+        {
+            "time": "2026-01-01 00:00",
+            "task": "train",
+            "target": "pm25",
+            "backend": "flaml",
+            "rows": 10,
+            "detail": "",
+        }
+    )
     assert _settings.read_history()
 
     class _Dlg:
@@ -79,10 +90,10 @@ def test_clear_history_asks_first(qapp, tmp_path, monkeypatch):
 
     dlg = _Dlg()
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.No)
-    SessionMixin._clear_history(None, dlg)     # declined: kept
+    SessionMixin._clear_history(None, dlg)  # declined: kept
     assert _settings.read_history()
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
-    SessionMixin._clear_history(None, dlg)     # confirmed: cleared
+    SessionMixin._clear_history(None, dlg)  # confirmed: cleared
     assert not _settings.read_history()
 
 
@@ -94,7 +105,7 @@ def test_notify_done_is_silent_offscreen(qapp, tmp_path, monkeypatch):
     monkeypatch.setattr(_settings, "config_dir", lambda: str(tmp_path))
     win = MainWindow()
     win.runner.task_name = "train (flaml)"
-    win._notify_done()                         # offscreen: no beep, no crash
+    win._notify_done()  # offscreen: no beep, no crash
     win.deleteLater()
 
 
@@ -110,9 +121,8 @@ def test_step_light_opens_its_page_from_the_keyboard(qapp, tmp_path, monkeypatch
     win = MainWindow()
     win.show()
     light = win._step_lights["trend"]
-    ev = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Return,
-                   Qt.KeyboardModifier.NoModifier)
-    assert win.eventFilter(light, ev)           # consumed
+    ev = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Return, Qt.KeyboardModifier.NoModifier)
+    assert win.eventFilter(light, ev)  # consumed
     assert win.panel_stack.currentIndex() >= 0
     win.deleteLater()
 
@@ -126,15 +136,18 @@ def test_chat_tool_toggles_from_the_keyboard(qapp):
     k = Look(1.0)
     tool = _Tool("test_call()", k)
     tool.finish("some result text", False)
-    tool.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Return,
-                                 Qt.KeyboardModifier.NoModifier))
+    tool.keyPressEvent(
+        QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Return, Qt.KeyboardModifier.NoModifier)
+    )
     assert tool.opened
-    tool.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Space,
-                                 Qt.KeyboardModifier.NoModifier))
+    tool.keyPressEvent(
+        QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Space, Qt.KeyboardModifier.NoModifier)
+    )
     assert not tool.opened
     # an errored tool never opens
     bad = _Tool("bad_call()", k)
     bad.finish("error text", True)
-    bad.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Return,
-                                Qt.KeyboardModifier.NoModifier))
+    bad.keyPressEvent(
+        QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Return, Qt.KeyboardModifier.NoModifier)
+    )
     assert not bad.opened

@@ -136,16 +136,20 @@ class TaskMixin(QMainWindow):
             name = getattr(self.runner, "task_name", "") or ""
             word = _TASK_WORDS.get(name.split(" ")[0], name.split(" ")[0].title())
             from .uilang import tr
+
             message = tr("{s0} done.").format(s0=tr(word))
             QApplication.beep()
             QApplication.alert(self, 0)
             if sys.platform == "darwin":
                 import subprocess
+
                 body = message.replace("\\", "\\\\").replace('"', '\\"')[:200]
-                subprocess.Popen(["osascript", "-e",
-                                  f'display notification "{body}" with title "Normet"'],
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception:                 # noqa: BLE001 - a notification, not a step
+                subprocess.Popen(
+                    ["osascript", "-e", f'display notification "{body}" with title "Normet"'],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+        except Exception:  # noqa: BLE001 - a notification, not a step
             pass
 
     def _abandon_task(self) -> None:

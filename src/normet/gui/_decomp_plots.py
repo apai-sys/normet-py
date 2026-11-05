@@ -224,6 +224,5 @@ def meteorology_figure(
         axr.spines[side].set_visible(False)
     from .figure_interact import _figure_note
 
-    _figure_note(fig, {"series": panels,
-                       "bars": [(axr, order, [sigma[c] for c in order], "σ")]})
+    _figure_note(fig, {"series": panels, "bars": [(axr, order, [sigma[c] for c in order], "σ")]})
     return fig

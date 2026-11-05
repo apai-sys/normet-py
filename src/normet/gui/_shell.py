@@ -482,10 +482,12 @@ class ShellMixin(QMainWindow):
         """A step light clicked -- or activated from the keyboard: its page in the
         panel, unfolded if it is folded."""
         if obj in self._step_lights.values() and (
-                event.type() == QEvent.Type.MouseButtonPress or (
-                    event.type() == QEvent.Type.KeyPress and event.key() in (
-                        Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space)
-                )):
+            event.type() == QEvent.Type.MouseButtonPress
+            or (
+                event.type() == QEvent.Type.KeyPress
+                and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space)
+            )
+        ):
             key = next(k for k, v in self._step_lights.items() if v is obj)
             self._open_step_page(key)
             return True
@@ -494,10 +496,16 @@ class ShellMixin(QMainWindow):
     def _open_step_page(self, key: str) -> None:
         """The panel's page for step-light ``key``; the panel unfolded to show it."""
         page = {
-            "data": "Data", "model": "Model", "normalise": "Normalise",
-            "decompose": "Decompose", "multiscale": "Decompose",
-            "trend": "Decompose", "events": "Decompose", "uncertainty": "Decompose",
-            "rolling": "Rolling", "pdp": "PDP",
+            "data": "Data",
+            "model": "Model",
+            "normalise": "Normalise",
+            "decompose": "Decompose",
+            "multiscale": "Decompose",
+            "trend": "Decompose",
+            "events": "Decompose",
+            "uncertainty": "Decompose",
+            "rolling": "Rolling",
+            "pdp": "PDP",
         }.get(key, "")
         if not page:
             return

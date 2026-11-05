@@ -21,7 +21,7 @@ import pandas as pd
 def _figure_note(fig: Any, payload: Any) -> None:
     """The figure's mouse read-out note (`fig._normet`), set where a figure is drawn --
     matplotlib's Figure takes no type on its attributes."""
-    fig._normet = payload          # noqa: SLF001
+    fig._normet = payload  # noqa: SLF001
 
 
 def _fmt(v: Any) -> str:
@@ -86,8 +86,9 @@ def readout(fig: Any, event: Any) -> str:
         if i is None:
             return ""
         when = _time(index[i])
-        parts = ", ".join(f"{label} {_fmt(_at(values, i))}" for label, values in series
-                          if i < len(values))
+        parts = ", ".join(
+            f"{label} {_fmt(_at(values, i))}" for label, values in series if i < len(values)
+        )
         return f"{when} · {parts}" if parts else when
 
     for a, names, values, unit in note.get("bars", []):

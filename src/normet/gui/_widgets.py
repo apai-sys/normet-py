@@ -160,9 +160,12 @@ def copy_table_rows(table: QTableWidget, rows: list[int]) -> None:
     """The picked rows of a table as TSV on the clipboard."""
     lines = []
     for r in rows:
-        lines.append("\t".join(
-            table.item(r, c).text() if table.item(r, c) else ""
-            for c in range(table.columnCount())))
+        lines.append(
+            "\t".join(
+                table.item(r, c).text() if table.item(r, c) else ""
+                for c in range(table.columnCount())
+            )
+        )
     QApplication.clipboard().setText("\n".join(lines))
 
 
@@ -945,12 +948,14 @@ class CanvasTab(QWidget):
             # The figure's mouse read-out, at its lower left as the Data tab's: what is
             # under the cursor (a component's value at a time, a contribution's σ ...).
             from .figure_interact import readout as _fig_readout
+
             hover = QLabel("")
             hover.setStyleSheet("color:#636366;")
             hover.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
             self._layout.addWidget(hover)
-            self.canvas.mpl_connect("motion_notify_event",
-                                    lambda e: hover.setText(_fig_readout(fig, e)))
+            self.canvas.mpl_connect(
+                "motion_notify_event", lambda e: hover.setText(_fig_readout(fig, e))
+            )
             self.canvas.mpl_connect("figure_leave_event", lambda _e: hover.setText(""))
             self.canvas.draw_idle()  # now if the tab is in view, else when it comes into view
         else:

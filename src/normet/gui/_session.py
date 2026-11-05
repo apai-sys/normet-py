@@ -364,9 +364,11 @@ class SessionMixin(QMainWindow):
 
     def _clear_history(self, dlg: QDialog) -> None:
         from .uilang import tr
-        if QMessageBox.question(
-                self, tr("Clear history"),
-                tr("Forget every run in the history?")) != QMessageBox.Yes:
+
+        if (
+            QMessageBox.question(self, tr("Clear history"), tr("Forget every run in the history?"))
+            != QMessageBox.Yes
+        ):
             return
         _settings.clear_history()
         dlg.accept()
