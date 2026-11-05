@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import os
 
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import QEvent, Qt, QUrl
 from PySide6.QtGui import QActionGroup, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
@@ -460,7 +460,7 @@ class ShellMixin(QMainWindow):
             "discarded when the background computation eventually finishes."
         )
         self.cancel_btn.clicked.connect(self._abandon_task)
-        # How far the analysis has come, one light per step.
+        # How far the analysis has come, one light per step; a click opens its page.
         self._step_lights: dict[str, QLabel] = {}
         lights = QWidget()
         row = QHBoxLayout(lights)
@@ -469,12 +469,42 @@ class ShellMixin(QMainWindow):
         for key, _name in STEP_LIGHTS:
             lbl = QLabel()
             lbl.setTextFormat(Qt.TextFormat.RichText)
+            lbl.setCursor(Qt.CursorShape.PointingHandCursor)
+            lbl.installEventFilter(self)
             row.addWidget(lbl)
             self._step_lights[key] = lbl
         self.statusBar().addPermanentWidget(lights)
         self.statusBar().addPermanentWidget(self.cancel_btn)
         self.statusBar().addPermanentWidget(self.progress)
         self._update_step_lights()
+
+    def eventFilter(self, obj, event) -> bool:
+        """A step light clicked -- or activated from the keyboard: its page in the
+        panel, unfolded if it is folded."""
+        if obj in self._step_lights.values() and (
+                event.type() == QEvent.Type.MouseButtonPress or (
+                    event.type() == QEvent.Type.KeyPress and event.key() in (
+                        Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space)
+                )):
+            key = next(k for k, v in self._step_lights.items() if v is obj)
+            self._open_step_page(key)
+            return True
+        return super().eventFilter(obj, event)
+
+    def _open_step_page(self, key: str) -> None:
+        """The panel's page for step-light ``key``; the panel unfolded to show it."""
+        page = {
+            "data": "Data", "model": "Model", "normalise": "Normalise",
+            "decompose": "Decompose", "multiscale": "Decompose",
+            "trend": "Decompose", "events": "Decompose", "uncertainty": "Decompose",
+            "rolling": "Rolling", "pdp": "PDP",
+        }.get(key, "")
+        if not page:
+            return
+        if page is None:
+            return
+        self.toggle_panel(True)
+        self.show_panel_page(page)
 
     def _update_step_lights(self) -> None:
         """Each step's light: green once it has a result, grey until then."""
@@ -487,7 +517,7 @@ class ShellMixin(QMainWindow):
             colour = LIGHT_ON if done[key] else LIGHT_OFF
             lbl = self._step_lights[key]
             lbl.setText(f'<span style="color:{colour}">●</span> {name}')
-            lbl.setToolTip(f"{name}: {'done' if done[key] else 'not run yet'}")
+            lbl.setToolTip(f"{name}: {'done' if done[key] else 'not run yet'} — click to open")
 
     def _rebuild_recent_menu(self) -> None:
         self.recent_menu.clear()

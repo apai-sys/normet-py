@@ -83,6 +83,7 @@ class AnalysePanelMixin(QMainWindow):
             "Remove the meteorological signal from the target\n(counterfactual under average meteorology).",
         )
         self.norm_button.clicked.connect(self._run_normalise)
+        self.norm_button.setShortcut("Ctrl+1")
         nf.addRow(self.norm_button)
         return box
 
@@ -130,6 +131,7 @@ class AnalysePanelMixin(QMainWindow):
             "Split the observed series into additive contributions\n(nested normalisation).",
         )
         self.decom_button.clicked.connect(self._run_decompose)
+        self.decom_button.setShortcut("Ctrl+2")
         df_.addRow(self.decom_button)
         return box
 
@@ -158,6 +160,7 @@ class AnalysePanelMixin(QMainWindow):
             "emission signal. Resamples the variables ticked under Normalise.",
         )
         self.roll_button.clicked.connect(self._run_rolling)
+        self.roll_button.setShortcut("Ctrl+3")
         rf.addRow(self.roll_button)
         return box
 
@@ -196,6 +199,7 @@ class AnalysePanelMixin(QMainWindow):
         )
         self.ms_button = run_button("▶  Multi-scale decomposition", self._ms_button_tip)
         self.ms_button.clicked.connect(self._run_multiscale)
+        self.ms_button.setShortcut("Ctrl+4")
         mf.addRow(self.ms_button)
         return box
 
@@ -277,6 +281,7 @@ class AnalysePanelMixin(QMainWindow):
             "with its own slope and interval. Seconds, not minutes.",
         )
         self.trend_button.clicked.connect(self._run_trend)
+        self.trend_button.setShortcut("Ctrl+5")
         self.tre_segments.valueChanged.connect(self._trend_segments_changed)
         tf.addRow(self.trend_button)
         return box
@@ -360,6 +365,7 @@ class AnalysePanelMixin(QMainWindow):
             "model over the record first and take a few seconds more.",
         )
         self.events_button.clicked.connect(self._run_events)
+        self.events_button.setShortcut("Ctrl+6")
         self.events_method.currentTextChanged.connect(self._events_method_changed)
         ef.addRow(self.events_button)
         return box
@@ -422,6 +428,7 @@ class AnalysePanelMixin(QMainWindow):
             "their\ninteraction, each member on the same met draws.",
         )
         self.unc_button.clicked.connect(self._run_unc)
+        self.unc_button.setShortcut("Ctrl+7")
         uf.addRow(self.unc_button)
         return box
 
@@ -467,6 +474,7 @@ class AnalysePanelMixin(QMainWindow):
             "Partial-dependence curves: how the model's prediction\nresponds to each variable.",
         )
         self.pdp_button.clicked.connect(self._run_pdp)
+        self.pdp_button.setShortcut("Ctrl+8")
         pv.addWidget(self.pdp_button)
         return box
 

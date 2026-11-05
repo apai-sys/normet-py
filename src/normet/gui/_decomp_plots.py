@@ -121,19 +121,24 @@ def emission_figure(
         axes.append(fig.add_subplot(gs[i, 0], sharex=axes[0]))
     lw = _lw(d)
     name = S.formula(target)
+    panels: list[tuple[Any, Any, list[tuple[str, Any]]]] = []  # the read-out's note
 
     ax = axes[0]
+    top_series: list[tuple[str, Any]] = []
     if "observed" in d.columns:
         S.line(ax, d.index, d["observed"], lw=lw, color=OBS_COLOR, alpha=0.45, label="observed")
+        top_series.append(("observed", d["observed"]))
     S.line(
         ax, d.index, d["emi_total"], lw=lw + 0.2, color=NORM_COLOR, label="normalised (emi_total)"
     )
+    top_series.append(("normalised", d["emi_total"]))
     base = float(d["emi_base"].iloc[0]) if "emi_base" in d.columns else float("nan")
     ax.set_title(
         f"Meteorologically normalised {name} — decomposed into time scales (baseline = {base:.1f})"
     )
     ax.set_ylabel(name)
     S.legend(ax, loc="upper right", ncols=2)
+    panels.append((ax, d.index, top_series))
 
     for ax, (col, label) in zip(axes[1:], stacked, strict=False):
         series = d[col]
@@ -146,9 +151,13 @@ def emission_figure(
             S.zero_line(ax)
         # σ of the record as it is: a coarser view's means would understate it.
         ax.set_title(f"{label}   σ = {full[col].std():.2f}")
+        panels.append((ax, d.index, [(label, series)]))
 
     _time_series_axes(axes, d.index)
     fig.align_ylabels(axes)
+    from .figure_interact import _figure_note
+
+    _figure_note(fig, {"series": panels})
 
     # The cycles, one panel each down the right-hand column.
     if cyclic:
@@ -182,6 +191,7 @@ def meteorology_figure(
     gs = fig.add_gridspec(n_left, 2, width_ratios=[3, 1])
     lw = _lw(d)
     name = S.formula(target)
+    panels: list[tuple[Any, Any, list[tuple[str, Any]]]] = []  # the read-out's note
 
     ax0 = fig.add_subplot(gs[0, 0])
     S.line(ax0, d.index, d["met_total"], lw=lw, color=S.INK)
@@ -191,12 +201,14 @@ def meteorology_figure(
         f"σ = {full['met_total'].std():.2f}"
     )
     left = [ax0]
+    panels.append((ax0, d.index, [("met_total", d["met_total"])]))
     for i, col in enumerate(top, start=1):
         ax = fig.add_subplot(gs[i, 0], sharex=ax0)
         S.line(ax, d.index, d[col], lw=lw, color=COMP_COLOR)
         S.zero_line(ax)
         ax.set_title(f"{col}   σ = {sigma[col]:.2f}")
         left.append(ax)
+        panels.append((ax, d.index, [(col, d[col])]))
     _time_series_axes(left, d.index)
     fig.align_ylabels(left)
 
@@ -210,5 +222,8 @@ def meteorology_figure(
     axr.tick_params(axis="y", length=0)
     for side in ("top", "right"):
         axr.spines[side].set_visible(False)
+    from .figure_interact import _figure_note
 
+    _figure_note(fig, {"series": panels,
+                       "bars": [(axr, order, [sigma[c] for c in order], "σ")]})
     return fig

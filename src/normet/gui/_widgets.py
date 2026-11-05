@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLayout,
     QListWidget,
+    QMenu,
     QPushButton,
     QSpinBox,
     QTableWidget,
@@ -110,6 +111,70 @@ def run_button(text: str, tooltip: str = "") -> QPushButton:
     if tooltip:
         btn.setToolTip(tooltip)
     return btn
+
+
+class SortItem(QTableWidgetItem):
+    """A cell shown as text and sorted by a value of its own -- a number where the text
+    is one, so 10 comes after 9 -- with the cells that have none last."""
+
+    def __init__(self, text: str, key: Any = None):
+        super().__init__(text)
+        self.key = key
+
+    def __lt__(self, other: Any) -> bool:
+        a, b = self.key, getattr(other, "key", None)
+        if a is None or b is None:
+            return a is not None and b is None
+        try:
+            return a < b
+        except TypeError:
+            return str(a) < str(b)
+
+
+def fill_sortable(table: QTableWidget, header: list[str], rows: list[list[Any]]) -> None:
+    """Put `rows` in `table` and let it be sorted by any column; a cell may be a plain
+    value or a (text, sort-key) pair, and numeric text sorts by its number."""
+    table.setSortingEnabled(False)
+    table.setColumnCount(len(header))
+    table.setHorizontalHeaderLabels(header)
+    table.setRowCount(len(rows))
+    for r, row in enumerate(rows):
+        for c, cell in enumerate(row):
+            if isinstance(cell, tuple):
+                text, key = cell
+            else:
+                text, key = str(cell), cell
+                if isinstance(key, str):
+                    try:
+                        key = float(key)
+                    except ValueError:
+                        key = None
+            table.setItem(r, c, SortItem(str(text), key))
+    table.resizeColumnsToContents()
+    # Sortable, but left in the order given until a header is clicked.
+    table.horizontalHeader().setSortIndicator(-1, Qt.SortOrder.AscendingOrder)
+    table.setSortingEnabled(True)
+
+
+def copy_table_rows(table: QTableWidget, rows: list[int]) -> None:
+    """The picked rows of a table as TSV on the clipboard."""
+    lines = []
+    for r in rows:
+        lines.append("\t".join(
+            table.item(r, c).text() if table.item(r, c) else ""
+            for c in range(table.columnCount())))
+    QApplication.clipboard().setText("\n".join(lines))
+
+
+def table_context_menu(table: QTableWidget, pos) -> None:
+    """Right-click a table row: copy it as TSV."""
+    row = table.rowAt(pos.y())
+    if row < 0:
+        return
+    table.selectRow(row)
+    menu = QMenu(table)
+    menu.addAction("Copy row", lambda: copy_table_rows(table, [row]))
+    menu.exec(table.mapToGlobal(pos))
 
 
 def toggle_button(text: str, tooltip: str = "") -> QPushButton:
@@ -261,6 +326,10 @@ class ThemedToolbar(NavigationToolbar2QT):
             self.insertAction(where, self.print_action)
         else:
             self.addAction(self.print_action)
+        # The figure's right-click menu: copy it, save it, or lay it out for print --
+        # the toolbar's three figure actions, reachable from the plot itself.
+        canvas.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        canvas.customContextMenuRequested.connect(self._canvas_menu)
         self._made_in: tuple[str, ...] | None = None
         theme_manager().themeChanged.connect(self._on_theme_changed)
         self.apply_theme(theme_manager().dark)
@@ -365,6 +434,26 @@ class ThemedToolbar(NavigationToolbar2QT):
         from .printview import PrintDialog
 
         PrintDialog(self.canvas, self.window()).exec()
+
+    def _canvas_menu(self, pos: Any) -> None:
+        """The figure's right-click menu: the toolbar's figure actions, from the plot.
+        Lambdas: `triggered` hands a slot its checked, which the slots would read as an
+        argument (the print_action's click learned the same)."""
+        menu = QMenu(self.canvas)
+        menu.addAction("Copy image", lambda: self.copy_figure())
+        menu.addAction("Save image…", lambda: self.save_figure())
+        menu.addSeparator()
+        menu.addAction("For print…", lambda: self.export_for_print())
+        menu.exec(self.canvas.mapToGlobal(pos))
+
+    def copy_figure(self) -> None:
+        """The figure's bitmap to the clipboard, at the screen's resolution."""
+        fig = self.canvas.figure
+        fig.canvas.draw()
+        w, h = fig.canvas.get_width_height()
+        buf = bytes(fig.canvas.buffer_rgba())
+        img = QImage(buf, w, h, QImage.Format.Format_RGBA8888).copy()
+        QApplication.clipboard().setImage(img)
 
     def save_figure(self, *args: Any) -> Any:
         with light_figure(self.canvas.figure):
@@ -832,18 +921,16 @@ class CanvasTab(QWidget):
             lbl.setWordWrap(True)
             self._layout.addWidget(lbl)
         if header and rows:
-            table = QTableWidget(len(rows), len(header))
-            table.setHorizontalHeaderLabels(header)
+            table = QTableWidget()
             table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-            for r, row in enumerate(rows):
-                for c, val in enumerate(row):
-                    table.setItem(r, c, QTableWidgetItem(str(val)))
+            fill_sortable(table, list(header), [list(row) for row in rows])
             if own_words:
                 from .uilang import translate_cells
 
                 translate_cells(table)
             table.setMaximumHeight(160)
-            table.resizeColumnsToContents()
+            table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            table.customContextMenuRequested.connect(table_context_menu)
             self._layout.addWidget(table)
         if fig is not None:
             fig = as_figure(fig)
@@ -855,6 +942,16 @@ class CanvasTab(QWidget):
             self.canvas = _canvas_class()(fig)
             self._layout.addWidget(ThemedToolbar(self.canvas, self))
             self._layout.addWidget(self.canvas, 1)
+            # The figure's mouse read-out, at its lower left as the Data tab's: what is
+            # under the cursor (a component's value at a time, a contribution's σ ...).
+            from .figure_interact import readout as _fig_readout
+            hover = QLabel("")
+            hover.setStyleSheet("color:#636366;")
+            hover.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
+            self._layout.addWidget(hover)
+            self.canvas.mpl_connect("motion_notify_event",
+                                    lambda e: hover.setText(_fig_readout(fig, e)))
+            self.canvas.mpl_connect("figure_leave_event", lambda _e: hover.setText(""))
             self.canvas.draw_idle()  # now if the tab is in view, else when it comes into view
         else:
             self._layout.addStretch(1)

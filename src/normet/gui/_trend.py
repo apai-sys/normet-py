@@ -338,6 +338,9 @@ def trend_breaks_fig(series: pd.Series, res: Any) -> Any:
     S.grid(ax)
     S.format_time_axis(ax)
     fig.tight_layout()
+    from .figure_interact import _figure_note
+
+    _figure_note(fig, {"series": [(ax, series.index, [("series", series.to_numpy())])]})
     return fig
 
 
@@ -378,4 +381,7 @@ def trend_fig(series: pd.Series, res: Any) -> Any:
     S.legend(ax, loc="upper right", ncols=2)
     S.format_time_axis(ax)
     fig.tight_layout()
+    from .figure_interact import _figure_note
+
+    _figure_note(fig, {"series": [(ax, series.index, [("series", series.to_numpy())])]})
     return fig

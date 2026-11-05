@@ -358,9 +358,18 @@ class SessionMixin(QMainWindow):
             tbl.resizeColumnsToContents()
             lay.addWidget(tbl)
         clr = QPushButton("Clear history")
-        clr.clicked.connect(lambda: (_settings.clear_history(), dlg.accept()))
+        clr.clicked.connect(lambda: self._clear_history(dlg))
         lay.addWidget(clr)
         dlg.exec()
+
+    def _clear_history(self, dlg: QDialog) -> None:
+        from .uilang import tr
+        if QMessageBox.question(
+                self, tr("Clear history"),
+                tr("Forget every run in the history?")) != QMessageBox.Yes:
+            return
+        _settings.clear_history()
+        dlg.accept()
 
     def _current_result(self) -> tuple[str, pd.DataFrame | None]:
         key = self._TAB_KEYS.get(self.tabs.currentIndex(), "")

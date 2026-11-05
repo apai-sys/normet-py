@@ -904,9 +904,9 @@ window, its whole height (Chapter~\ref{ch:assistant}).
 
 \section{Appearance and language}\label{sec:appearance}
 The window and its figures follow the system's light or dark appearance;
-\tab{View $\rightarrow$ Appearance} pins one. A figure on a dark window is recoloured
-for display only --- its faces, text, ticks and grid; colours that carry data are left
-alone --- and saved in its light colours.
+\tab{View $\rightarrow$ Appearance} pins one, kept for the next session. A figure on a
+dark window is recoloured for display only --- its faces, text, ticks and grid; colours
+that carry data are left alone --- and saved in its light colours.
 
 The window speaks English or Chinese: the system's language by default, or the one
 \tab{View $\rightarrow$ Language} chooses, kept for the next session. The switch is
@@ -921,6 +921,13 @@ report (Section~\ref{sec:commandlog}) is written in the language picked as it is
 --- \tab{File $\rightarrow$ Export HTML Report}, or the \emph{HTML report} button, lists
 each language named in itself --- its headings, labels and figure; the language is kept
 for the next report, and is the system's until one is picked.
+
+The window's size, position, panel page and result tab are kept where the analyst left
+them. The result tables sort by a header click and copy a row as tab-separated text on a
+right click. A task that finishes while the window is not in front calls the analyst back
+with a beep and a Dock bounce (and a macOS notification where the system allows it);
+clearing the run history asks first. The step lights and a finished tool call in the
+Assistant's conversation open from the keyboard as well as a click.
 
 % ============================ 6. COLUMNS AND TRAINING =========================
 \chapter{Training a model}\label{ch:train}

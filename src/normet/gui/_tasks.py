@@ -6,8 +6,12 @@ lives here, next to the runner, rather than being spread over the panels.
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import QMainWindow, QMessageBox
+import sys
 
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox
+
+from ._session import _TASK_WORDS
 from ._widgets import NoWheelSpinBox
 
 
@@ -110,6 +114,7 @@ class TaskMixin(QMainWindow):
 
     def _task_finished(self) -> None:
         self._sync_enabled()
+        self._notify_done()
         # A decomposition's end asked for the trend: the runner is free now, so it
         # can start (its button's own click does the same).
         if getattr(self, "_trend_wanted", False):
@@ -117,6 +122,31 @@ class TaskMixin(QMainWindow):
             if self.trend_after.isChecked():
                 self._run_trend()
         self.autosave_session()  # File -> Reopen Last Session, should the window go
+
+    def _notify_done(self) -> None:
+        """Call the analyst back when a task ends while they are in another window.
+
+        A Dock bounce and the system beep always; a macOS notification when osascript
+        takes it. Offscreen (the tests) and while the window is active, nothing."""
+        try:
+            if QApplication.platformName() in ("offscreen", "minimal"):
+                return
+            if QApplication.applicationState() == Qt.ApplicationState.ApplicationActive:
+                return
+            name = getattr(self.runner, "task_name", "") or ""
+            word = _TASK_WORDS.get(name.split(" ")[0], name.split(" ")[0].title())
+            from .uilang import tr
+            message = tr("{s0} done.").format(s0=tr(word))
+            QApplication.beep()
+            QApplication.alert(self, 0)
+            if sys.platform == "darwin":
+                import subprocess
+                body = message.replace("\\", "\\\\").replace('"', '\\"')[:200]
+                subprocess.Popen(["osascript", "-e",
+                                  f'display notification "{body}" with title "Normet"'],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:                 # noqa: BLE001 - a notification, not a step
+            pass
 
     def _abandon_task(self) -> None:
         if self.runner.busy:
@@ -153,7 +183,15 @@ class TaskMixin(QMainWindow):
         return True
 
     def _show_error(self, tb: str) -> None:
-        QMessageBox.critical(self, "Task failed", tb.splitlines()[-1] if tb else "Unknown error")
+        # The last line is the error; the full traceback stays reachable, not hidden.
+        last = tb.splitlines()[-1] if tb else "Unknown error"
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Critical)
+        box.setWindowTitle("Task failed")
+        box.setText(last)
+        if len(tb.splitlines()) > 1:
+            box.setDetailedText(tb)
+        box.exec()
         self.log_view.appendPlainText(tb)
 
     def _n_cores(self, spin: NoWheelSpinBox) -> int | None:

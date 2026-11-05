@@ -132,6 +132,7 @@ class MainWindow(
         geo = settings.value("geometry")
         if geo is not None:
             self.restoreGeometry(geo)
+        self._restore_panel_state()
         self.statusBar().showMessage("Open data, or load an example from the File menu, to begin.")
 
     # --------------------------------------------------------- left panel
@@ -196,8 +197,29 @@ class MainWindow(
         """The panel's page ``name``: one of PANEL_PAGES."""
         self.param_panel.show_page(name)
 
+    def _restore_panel_state(self) -> None:
+        """The panel's page and the results' tab as the analyst left them."""
+        settings = QSettings("apai-sys", "normet-gui")
+        page = settings.value("panel_page")
+        if page is not None:
+            try:
+                self.show_panel_page(str(page))
+            except ValueError:
+                pass
+        tab = settings.value("result_tab")
+        if tab is not None:
+            for i in range(self.tabs.count()):
+                if self.tabs.tabText(i) == str(tab):
+                    self.tabs.setCurrentIndex(i)
+                    break
+
     def closeEvent(self, event) -> None:  # noqa: N802
-        QSettings("apai-sys", "normet-gui").setValue("geometry", self.saveGeometry())
+        settings = QSettings("apai-sys", "normet-gui")
+        settings.setValue("geometry", self.saveGeometry())
+        i = self.param_panel.stack.currentIndex()
+        if 0 <= i < len(self.param_panel.names):
+            settings.setValue("panel_page", self.param_panel.names[i])
+        settings.setValue("result_tab", self.tabs.tabText(self.tabs.currentIndex()))
         logging.getLogger("normet").removeHandler(self._log_handler)
         self.assistant.shutdown()
         self.runner.shutdown()

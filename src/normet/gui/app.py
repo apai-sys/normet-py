@@ -12,20 +12,45 @@ def _install_excepthook() -> None:
     which looks like the app 'just quitting'.  This keeps the window alive and
     surfaces the error.
     """
+    import os
+    import threading
+    import time
     import traceback
 
     from PySide6.QtWidgets import QMessageBox
 
+    from .uilang import tr
+
+    def _log_to_file(msg):
+        path = os.path.join(os.path.expanduser("~"), ".normet", "error.log")
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(f"--- {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n{msg}\n")
+            return path
+        except OSError:
+            return None
+
     def hook(exc_type, exc, tb):
         msg = "".join(traceback.format_exception(exc_type, exc, tb))
-        sys.stderr.write(msg)
+        path = _log_to_file(msg)
+        if sys.stderr is not None:
+            try:
+                sys.stderr.write(msg)
+            except Exception:
+                pass
+        if threading.current_thread() is not threading.main_thread():
+            return                     # widgets only on the GUI thread; the file has it
+        where = tr(f"Details were saved to {path}.") if path else tr("Details could not be saved.")
         try:
-            QMessageBox.critical(
-                None,
-                "Unexpected error",
-                f"{exc_type.__name__}: {exc}\n\nThe app stayed open; your results "
-                "are unaffected. Details were logged to the console.",
-            )
+            box = QMessageBox()
+            box.setIcon(QMessageBox.Critical)
+            box.setWindowTitle("Unexpected error")
+            box.setText(f"{exc_type.__name__}: {exc}")
+            box.setInformativeText(
+                tr("The app stayed open; your results are unaffected.") + " " + where)
+            box.setDetailedText(msg)
+            box.exec()
         except Exception:
             pass
 

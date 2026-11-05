@@ -41,7 +41,6 @@ from PySide6.QtWidgets import (
     QSplitter,
     QTableView,
     QTableWidget,
-    QTableWidgetItem,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -49,7 +48,7 @@ from PySide6.QtWidgets import (
 
 from normet import style as S
 
-from ._widgets import CanvasTab, NoWheelComboBox
+from ._widgets import CanvasTab, NoWheelComboBox, fill_sortable, table_context_menu
 from .dataframe_model import DataFrameModel
 
 PICK_HINT = (
@@ -502,6 +501,8 @@ class DataTab(QWidget):
         self.stats = QTableWidget()
         self.stats.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.stats.verticalHeader().setVisible(False)
+        self.stats.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.stats.customContextMenuRequested.connect(table_context_menu)
         sl.addWidget(self.stats, 1)
         self.stats_note = QLabel("")
         sl.addWidget(self.stats_note)
@@ -1056,17 +1057,7 @@ class DataTab(QWidget):
             else:
                 rows.append([str(c), f"{s.notna().sum():,}", f"{missing:.1f}%", *[""] * 7])
         self.stats.clear()
-        self.stats.setColumnCount(len(header))
-        self.stats.setHorizontalHeaderLabels(header)
-        self.stats.setRowCount(len(rows))
-        for r, row in enumerate(rows):
-            for c, text in enumerate(row):
-                item = QTableWidgetItem(text)
-                if c:
-                    item.setTextAlignment(
-                        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-                    )
-                self.stats.setItem(r, c, item)
+        fill_sortable(self.stats, header, rows)
         self.stats.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         left = 0 if self.df is None else len(self.df) - len(d)
         self.stats_note.setText(

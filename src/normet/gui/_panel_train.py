@@ -130,6 +130,7 @@ class TrainPanelMixin(QMainWindow):
             "Prepare the data and train the machine-learning model.\nEverything below needs a trained model.",
         )
         self.train_button.clicked.connect(self._run_train)
+        self.train_button.setShortcut("Ctrl+Return")
         form.addRow(self.train_button)
         # Walk-forward validation of the trained model form: the same backend
         # retrained on expanding windows, each future block scored once. The

@@ -386,8 +386,9 @@ TEXTS = {
     "Ended: {s0}": "已结束：{s0}",
     "running: {s0}": "正在运行：{s0}",
     "Unexpected error": "意外错误",
-    "{s0}: {s1} The app stayed open; your results are unaffected. Details were logged to the console.": "{s0}：{s1} 应用仍在运行，结果不受影响。详细信息已记录到控制台。",
-    "The app stayed open; your results are unaffected. Details were logged to the console.": "应用仍在运行，结果不受影响。详细信息已记录到控制台。",
+    "Details were saved to {s0}.": "详情已保存到 {s0}。",
+    "Details could not be saved.": "详情无法保存。",
+    "The app stayed open; your results are unaffected.": "应用仍在运行，结果不受影响。",
     # -- the figure toolbar (matplotlib's) ------------------------------------------------------
     "Home": "主页",
     "Reset original view": "恢复原始视图",
@@ -407,6 +408,22 @@ TEXTS = {
     "Save figure": "保存图形",
     # -- export for publication ------------------------------------------------------------------
     "For print…": "打印用图…",
+    "Copy image": "复制图片",
+    "Save image…": "保存图片…",
+    "Copy row": "复制行",
+    # -- the result figures' mouse read-out (figure_interact) ------------------
+    "{s0} · {s1} {n0}": "{s0} · {s1} {n0}",
+    "{s0} · {s1} {n0}, {s2} {n1}": "{s0} · {s1} {n0}，{s2} {n1}",
+    "{s0} · {s1} {n0}, {s2} {n1}, {s3} {n2}": "{s0} · {s1} {n0}，{s2} {n1}，{s3} {n2}",
+    "observed": "观测",
+    "normalised": "归一化",
+    "series": "序列",
+    "met_total": "气象总影响",
+    "Trend (long-term)": "趋势（长期）",
+    "Seasonal (annual)": "季节（年）",
+    "Weekly cycle": "周循环",
+    "Diurnal cycle": "日循环",
+    "Short-term (noise)": "短期（噪声）",
     "Export for Publication": "导出出版图",
     "Export for Publication…": "导出出版图…",
     "Export Figure for Publication": "导出出版图",
@@ -797,6 +814,7 @@ INNER: dict[str, str] = {
     ", the first {n0} listed": "，列出前 {n0} 行",
     "{n0} rows, {n1} left out": "{n0} 行，其中 {n1} 行已排除",
     "{n0} rows": "{n0} 行",
+    "… {n0} more": "… 其余 {n0} 段",
     # emission components and multi-scale bands, as a verdict or a panel's title names them
     "Trend (long-term)": "趋势（长期）",
     "Seasonal (annual)": "季节（年周期）",
@@ -995,6 +1013,37 @@ TEXTS.update(
     }
 )
 
+# Long tooltips and composed read-outs the earlier passes left in English.
+TEXTS.update(
+    {
+        # -- the Trend analysis box ------------------------------------------------------
+        "Which series to test. The decomposition's parts need a decomposition first; the observed target only the model.\nThe emission part is the series the whole toolkit exists to trend: what weather does not explain. The long-term trend is the separated part of it: the recurring calendar cycles already taken out, so a cleaner fit -- the series the decomposition's Trend (long-term) panel draws.": "要检验的序列。分解的各分量需先做分解；观测目标只需模型。\n排放分量是整个工具包要作趋势分析的序列：气象解释不了的部分。长期趋势是其中已分离出的部分：周期性日历循环已扣除，拟合更干净——即分解的「趋势（长期）」面板所画的序列。",
+        "Sen's seasonal test pairs by calendar slot (hour 14 with hour 14, ...), which is the right test of a record that carries a repeating cycle.\nauto: from the record's step (hourly → 24, 30-minute → 48, daily → 7, monthly → 12), falling back to the classical test where the record is not a whole number of periods.\n24 hourly / 7 daily / 12 monthly where auto would guess wrong.": "Sen 季节性检验按日历时段配对（14 时对 14 时……），是检验带重复周期记录的正确方法。\nauto：依记录的时间步长（逐时 → 24，30 分钟 → 48，逐日 → 7，逐月 → 12），记录不是整周期数时回退到经典检验。\nauto 会猜错时用 24 逐时 / 7 逐日 / 12 逐月。",
+        "One segment: the single-slope test (Mann–Kendall, Theil-Sen).\nTwo or more: a segmented fit -- the record is split where the trend breaks, if it breaks, each segment reported with its own slope and interval; the break's p is the block bootstrap's, over the search.\nThe fit runs on the Series chosen above: the long-term trend is the cleaner input (the cycles are in their own components), the emission part it for the whole de-weathered signal. Raising this moves a still-default emission-part choice to the long-term trend.": "一段：单斜率检验（Mann–Kendall、Theil-Sen）。\n两段及以上：分段拟合——若趋势有转折，记录在转折点处拆分，每段报告各自的斜率和区间；转折点的 p 值来自块自助法，覆盖整个搜索。\n拟合作用于上方所选序列：长期趋势是更干净的输入（周期已在各自分量中），排放分量则针对整个去气象信号。增大此值会把仍为默认的排放分量选择切换到长期趋势。",
+        "Each finished emission decomposition starts the test of its emission part, in the background, under this box's settings; the Segments row says whether it is the single-slope test or the segmented fit.": "每次排放分解完成后，按本框设置在其后台对其排放分量启动检验；段数一行说明是单斜率检验还是分段拟合。",
+        # -- the Uncertainty box ---------------------------------------------------------
+        "Met resamples shared by every member (the weather factor).\nThe Normalise page's count, kept here so the two agree.": "各成员共享的气象重采样（气象因子）。\n与「归一化」页的数目一致，故在此保留。",
+        "Ensemble members, each trained on its own seed (the model-form factor). Two is the floor: with one member there is no model-form variance to attribute. The cost is this many fits, so the default stays small.": "集合成员数，每个成员用独立种子训练（模型形式因子）。下限为 2：只有一个成员就没有可归因的模型形式方差。代价是相应次数的拟合，故默认保持较小。",
+        "How each member is trained. lightgbm: a fast random search on every member.\nflaml: an AutoML search per member, at the cost of its budget each.": "每个成员如何训练。lightgbm：对每个成员做快速随机搜索。\nflaml：对每个成员做 AutoML 搜索，各自消耗其时间预算。",
+        # -- the Data window's network choice -------------------------------------------
+        "Air-quality source to search.\nThe six UK networks (AURN national + the regional networks);\nthe EEA reporting network for all of Europe; or OpenAQ for\nmost of the world (needs a free API key, see below).": "要检索的空气质量数据源。\n六个英国网络（AURN 全国 + 区域网络）；\n覆盖全欧洲的 EEA 报告网络；或覆盖世界大部分地区\n的 OpenAQ（需要免费 API 密钥，见下方）。",
+        # -- status lines ----------------------------------------------------------------
+        "Segmented trend done.": "分段趋势完成。",
+        "Not available for chronos-2 — its check is the quantile backtest on the Model tab.": "chronos-2 不可用——它的检验是模型标签页的分位数回测。",
+        # -- composed read-outs ------------------------------------------------------------
+        "{s0}\n{n0} rows × {n1} columns": "{s0}\n{n0} 行 × {n1} 列",
+        "{n0} rows × {n1} columns   |   date range: {s0}   |   missing values: {n2}": "{n0} 行 × {n1} 列   |   日期范围：{s0}   |   缺失值：{n2}",
+        "{s0} · took {n0} s": "{s0} · 用时 {n0} 秒",
+        "{s0} · took {n0} min": "{s0} · 用时 {n0} 分钟",
+        "{s0} · took {n0} h {n1} min": "{s0} · 用时 {n0} 小时 {n1} 分钟",
+        "Ended: {s0} · took {n1} s": "已结束：{s0} · 用时 {n1} 秒",
+        "Ended: {s0} · took {n1} min": "已结束：{s0} · 用时 {n1} 分钟",
+        "Ended: {s0} · took {n1} h {n2} min": "已结束：{s0} · 用时 {n1} 小时 {n2} 分钟",
+        "{n0} met file(s) chosen: {s0}": "已选 {n0} 个气象文件：{s0}",
+        "{n0} gdas file(s) downloaded: {s0}": "已下载 {n0} 个 gdas 文件：{s0}",
+    }
+)
+
 # The window's newer parts: saved sessions, notices, the step lights, the polar plot,
 # the Methods paragraph, the manual, the print checks and the cycles.
 TEXTS.update(
@@ -1100,22 +1149,26 @@ TEXTS.update(
 # Each step light's tooltip, whole: a step's name is a word other texts use otherwise.
 TEXTS.update(
     {
-        "Data: done": "数据：已完成",
-        "Data: not run yet": "数据：尚未运行",
-        "Model: done": "模型：已完成",
-        "Model: not run yet": "模型：尚未运行",
-        "Normalised: done": "归一化：已完成",
-        "Normalised: not run yet": "归一化：尚未运行",
-        "Decomposed: done": "分解：已完成",
-        "Decomposed: not run yet": "分解：尚未运行",
-        "Rolling: done": "滚动：已完成",
-        "Rolling: not run yet": "滚动：尚未运行",
-        "Multi-scale: done": "多尺度：已完成",
-        "Multi-scale: not run yet": "多尺度：尚未运行",
-        "PDP: done": "PDP：已完成",
-        "PDP: not run yet": "PDP：尚未运行",
-        "Uncertainty: done": "不确定度：已完成",
-        "Uncertainty: not run yet": "不确定度：尚未运行",
+        "Data: done — click to open": "数据：已完成——点击打开",
+        "Data: not run yet — click to open": "数据：尚未运行——点击打开",
+        "Model: done — click to open": "模型：已完成——点击打开",
+        "Model: not run yet — click to open": "模型：尚未运行——点击打开",
+        "Normalised: done — click to open": "归一化：已完成——点击打开",
+        "Normalised: not run yet — click to open": "归一化：尚未运行——点击打开",
+        "Decomposed: done — click to open": "分解：已完成——点击打开",
+        "Decomposed: not run yet — click to open": "分解：尚未运行——点击打开",
+        "Multi-scale: done — click to open": "多尺度：已完成——点击打开",
+        "Multi-scale: not run yet — click to open": "多尺度：尚未运行——点击打开",
+        "Trend: done — click to open": "趋势：已完成——点击打开",
+        "Trend: not run yet — click to open": "趋势：尚未运行——点击打开",
+        "Events: done — click to open": "事件：已完成——点击打开",
+        "Events: not run yet — click to open": "事件：尚未运行——点击打开",
+        "Uncertainty: done — click to open": "不确定度：已完成——点击打开",
+        "Uncertainty: not run yet — click to open": "不确定度：尚未运行——点击打开",
+        "Rolling: done — click to open": "滚动：已完成——点击打开",
+        "Rolling: not run yet — click to open": "滚动：尚未运行——点击打开",
+        "PDP: done — click to open": "PDP：已完成——点击打开",
+        "PDP: not run yet — click to open": "PDP：尚未运行——点击打开",
     }
 )
 INNER.update(
@@ -1542,5 +1595,29 @@ TEXTS.update(
         "sum ${s0}$": "${s0}$ 总和",
         "std ${s0}$": "${s0}$ 标准差",
         "p{n0} ${s0}$": "${s0}$ 第 {n0} 百分位数",
+    }
+)
+
+# Run-history clear confirmation, and the task-finished notification.
+TEXTS.update(
+    {
+        "Clear history": "清空历史",
+        "Forget every run in the history?": "忘记历史中的每一次运行？",
+        "{s0} done.": "{s0}完成。",
+    }
+)
+
+# Trend / Uncertainty panel: tab name, form labels, welcome lines, run-button tips.
+TEXTS.update(
+    {
+        "Trend": "趋势",
+        "Series": "序列",
+        "Seasonal period": "季节周期",
+        "Segments": "段数",
+        "Bootstrap replicates": "自助法重复数",
+        "Run the trend analysis to see the verdict here — whether the tested series is increasing or decreasing, and which p stands for it.": "运行趋势分析后，这里显示结论——所测序列是上升还是下降，以及该引用哪一个 p 值。",
+        "Run the uncertainty decomposition to see where the band's spread comes from -- met resampling, the model form, and the two's interaction, each date and in the median.": "运行不确定性分解后，这里显示区间离散度的来源——气象重采样、模型形式以及二者的交互，按日期及中位数给出。",
+        "One segment: Mann–Kendall, Theil–Sen slope and its interval, the block-bootstrap correction where the record is autocorrelated.\nTwo or more: the segmented fit -- where the trend breaks, each segment with its own slope and interval. Seconds, not minutes.": "一段：Mann–Kendall、Theil–Sen 斜率及其区间，记录自相关时以块自助法校正。\n两段及以上：分段拟合——趋势在何处中断，每段有各自的斜率和区间。耗时秒级，不是分钟级。",
+        "Split the total per-date spread into weather, model form and their\ninteraction, each member on the same met draws.": "把逐日总离散度拆分为气象、模型形式及二者的\n交互，每个成员使用相同的气象抽样。",
     }
 )

@@ -167,7 +167,8 @@ class InputsMixin(QMainWindow):
         return box
 
     def _open_csv(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Open data", "", TABLE_FILTER)
+        from .uilang import pref
+        path, _ = QFileDialog.getOpenFileName(self, "Open data", pref("last_dir", ""), TABLE_FILTER)
         if path:
             self.load_csv(path, remember=True)
 
@@ -215,6 +216,8 @@ class InputsMixin(QMainWindow):
         self._ingest(df, os.path.basename(path))
         self._show_dates(df)
         self._log_command(commandlog.open_table(os.path.abspath(path), self._zone()))
+        from .uilang import set_pref
+        set_pref("last_dir", os.path.dirname(os.path.abspath(path)))
         if remember:
             _settings.add_recent(path)
             self._rebuild_recent_menu()
