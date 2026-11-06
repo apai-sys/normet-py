@@ -75,7 +75,7 @@ RC: dict[str, Any] = {
     "font.family": "sans-serif",
     "font.sans-serif": ["DejaVu Sans", "Arial", "Helvetica", "Liberation Sans", "sans-serif"],
     "mathtext.fontset": "dejavusans",
-    "axes.unicode_minus": True,
+    "axes.unicode_minus": False,
     "pdf.fonttype": 42,
     "ps.fonttype": 42,
     "axes.prop_cycle": None,  # set below, from PALETTE
@@ -98,8 +98,8 @@ RC: dict[str, Any] = {
     "ytick.labelsize": 7.0,
     "xtick.direction": "out",
     "ytick.direction": "out",
-    "xtick.major.size": 3.0,
-    "ytick.major.size": 3.0,
+    "xtick.major.size": 3.5,
+    "ytick.major.size": 3.5,
     "xtick.minor.size": 1.8,
     "ytick.minor.size": 1.8,
     "xtick.major.width": 0.6,
@@ -132,12 +132,33 @@ TEXT_SIZE = RC["axes.labelsize"]
 SMALL_SIZE = 6.0
 
 
+def _installed_families(families: list[str]) -> list[str]:
+    """`families` without the CJK fallbacks this machine has no font for (they only
+    fill in glyphs the first face lacks; one missing makes matplotlib log a warning for
+    every text it draws). The generic names stay."""
+    try:
+        from matplotlib import font_manager
+        have = {f.name for f in font_manager.fontManager.ttflist}
+    except Exception:                                # noqa: BLE001
+        return families
+    return [f for f in families if f in ("sans-serif", "serif", "monospace")
+            or f in have]
+
+
 def rc() -> Any:
     """The style's rcParams, a dict. (Typed Any: matplotlib's newer stubs key rcParams by
     a Literal of every name, which a dict built from strings cannot be.)"""
     from cycler import cycler
 
     out = dict(RC)
+    # The CJK fallbacks, as cume and claems carry them: a glyph DejaVu lacks -- a label
+    # in 交通源 -- is drawn from the next family that has it. The window's own
+    # per-text fallback (gui/uilang.figure_texts) still stands for the translated figures.
+    out["font.family"] = _installed_families([
+        "sans-serif", "PingFang SC", "Hiragino Sans GB", "STHeiti",
+        "Microsoft YaHei", "SimHei", "Noto Sans CJK SC", "WenQuanYi Zen Hei",
+        "Arial Unicode MS",
+    ])
     out["axes.prop_cycle"] = cycler(color=PALETTE)
     return out
 
