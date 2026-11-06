@@ -191,7 +191,7 @@ def _say(text: str, lang: str, **values: Any) -> str:
         # format spec ({share:.0%}) is spent on the value here.
         import re as _re
 
-        def _fill(m):
+        def _fill(m: _re.Match[str]) -> str:
             spec = m.group(2) or ""
             if spec:
                 return format(values[m.group(1)], spec.lstrip(":"))

@@ -23,6 +23,7 @@ import html as _html
 import re
 from collections.abc import Sequence
 from functools import cache
+from typing import Any
 
 #: The languages a report is written in, by code.
 LANGUAGES: dict[str, str] = {"en": "English", "zh": "中文"}
@@ -72,7 +73,7 @@ def _either_number(word: str) -> str:
     return re.escape(word) + "s?"
 
 
-def _compile(template: str, whole: bool = True, sentences: bool = True):
+def _compile(template: str, whole: bool = True, sentences: bool = True) -> re.Pattern[str]:
     """A template's pattern: its text as it is, a number for each {n}, anything for each
     {s}. A phrase found inside a text (`whole=False`) does not start or end inside a word
     -- where its own first or last character is a word's, or a mark's -- and a {s} in it
@@ -170,7 +171,11 @@ def _phrases(text: str, cat: Catalogue) -> str:
     if all(w is not None for w in words):
         return " × ".join(w for w in words if w is not None)
     for pattern, _, tr in cat[2]:
-        text = pattern.sub(lambda m, tr=tr: tr.format(**m.groupdict()), text)
+
+        def fill(m: re.Match[str], tr: str = tr) -> str:
+            return tr.format(**m.groupdict())
+
+        text = pattern.sub(fill, text)
     return text
 
 
@@ -377,39 +382,39 @@ def _words(s: str, lang: str) -> str:
 
 
 @cache
-def translating_formatter():
+def translating_formatter() -> type:
     """A tick formatter that writes another's labels in a language. A figure's tick labels
     are written by its axes' formatters each time it is drawn -- a label set as words
     (set_xticklabels) too -- so the formatter is what is translated, not the labels."""
     from matplotlib.ticker import Formatter
 
     class Translating(Formatter):
-        def __init__(self, inner, lang):
+        def __init__(self, inner: Any, lang: str) -> None:
             self.inner, self.lang = inner, lang
 
-        def __call__(self, x, pos=None):
+        def __call__(self, x: float, pos: int | None = None) -> str:
             return _words(self.inner(x, pos), self.lang)
 
-        def format_ticks(self, values):
+        def format_ticks(self, values: Any) -> list[str]:
             return [_words(s, self.lang) for s in self.inner.format_ticks(values)]
 
-        def get_offset(self):
+        def get_offset(self) -> str:
             return _words(self.inner.get_offset(), self.lang)
 
-        def set_axis(self, axis):
+        def set_axis(self, axis: Any) -> None:
             super().set_axis(axis)
             self.inner.set_axis(axis)
 
-        def set_locs(self, locs):
+        def set_locs(self, locs: Any) -> None:
             self.inner.set_locs(locs)
 
-        def format_data_short(self, value):
+        def format_data_short(self, value: Any) -> str:
             return self.inner.format_data_short(value)
 
     return Translating
 
 
-def localize_figure(fig, lang: str) -> None:
+def localize_figure(fig: Any, lang: str) -> None:
     """A figure's texts -- titles, labels, legends, notes, and its tick labels where they
     are words (days, months, a date axis's month names) -- in `lang`, drawn with the
     language's characters from `figure_font` where a text's own font lacks them. Numbers
@@ -423,7 +428,7 @@ def localize_figure(fig, lang: str) -> None:
 
     translating = translating_formatter()
 
-    def fallback(t):
+    def fallback(t: Any) -> None:
         families = list(t.get_fontfamily())
         if font not in families:
             t.set_fontfamily(families + [font])
