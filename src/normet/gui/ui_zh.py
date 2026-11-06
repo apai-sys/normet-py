@@ -1621,3 +1621,28 @@ TEXTS.update(
         "Split the total per-date spread into weather, model form and their\ninteraction, each member on the same met draws.": "把逐日总离散度拆分为气象、模型形式及二者的\n交互，每个成员使用相同的气象抽样。",
     }
 )
+
+# Data attach, the formal Shapley preset and the trend protocol's controls.
+TEXTS.update(
+    {
+        "Attach meteorology…": "附加气象数据…",
+        "Read a second table of meteorology (for example a station's measured wind) and join its columns to the open table by timestamp, as the Data Studio's fetched meteorology is joined. Times are read on the time zone chosen above; columns already in the table are left as they are; rows without a match stay empty. Attach the meteorology before training.": "读取第二张气象数据表（例如气象站实测风），按时间戳把其列连接到已打开的表，与数据工作室获取的气象数据连接方式相同。时间按上方所选时区读取；表中已有的列保持原样；没有匹配的行留空。请在训练前附加气象数据。",
+        "Attach meteorology": "附加气象数据",
+        "Formal Shapley preset": "正式 Shapley 预设",
+        "Set the decomposition to the project's formal eight-variable Shapley run:\nmeteorology, exact Shapley attribution over all 2^k coalitions (256 for\neight variables), 10 Monte Carlo draws per coalition, and each variable\ncounted alone (no groups). Ticks the eight formal predictors\n(ws, blh, t2m, rh2m, sp, tcc, tp, ssrd) when no model is trained yet.": "把分解设为项目的正式八变量 Shapley 运行：\n气象方法、对全部 2^k 个联盟的精确 Shapley 归因（八个变量为 256 个）、\n每个联盟 10 次蒙特卡洛抽样，且每个变量单独计入（不分组）。\n尚未训练模型时，会勾选八个正式预测变量\n(ws、blh、t2m、rh2m、sp、tcc、tp、ssrd)。",
+        "Aggregation": "聚合",
+        "Aggregate the series before testing. 'monthly' takes monthly means -- the scale a 12-point block bootstrap and the project's trend intervals are written for.": "检验前先聚合序列。'monthly' 取月均值——这是 12 点块自助法和本项目趋势区间所针对的尺度。",
+        "Bootstrap scheme": "自助法方案",
+        "moving: resample contiguous blocks of the series (the default, repairs serial correlation in the values).\nresidual: resample blocks of the fitted trend's residuals and add them back -- the trend is preserved (the published protocol, with 12-month blocks and 2,000 replicates).": "moving：对序列的连续块重采样（默认，修复数值中的序列相关）。\nresidual：对拟合趋势的残差块重采样并加回——趋势得以保留（已发表方案，使用 12 个月块和 2,000 次重复）。",
+        "Replicate slope": "重复斜率估计",
+        "Slope recomputed in each bootstrap draw. OLS is O(n) and suits a long record; Theil-Sen is robust but O(n^2) per draw, so use it on a monthly or otherwise short series (the published protocol uses Theil-Sen).": "每次自助抽样重新计算的斜率。OLS 为 O(n)，适合长记录；Theil–Sen 稳健，但每次抽样为 O(n²)，故用于逐月或其他短序列（已发表方案使用 Theil–Sen）。",
+        "Block length": "块长度",
+        "Bootstrap block length in points. 12 on a monthly series is twelve months (the published protocol); auto uses the Politis-Romano/week rule.": "自助法的块长度（点数）。逐月序列取 12 即十二个月（已发表方案）；auto 使用 Politis–Romano/周规则。",
+        "none": "无",
+        "monthly": "逐月",
+        "moving": "移动块",
+        "residual": "残差块",
+        "ols": "OLS",
+        "theil-sen": "Theil–Sen",
+    }
+)

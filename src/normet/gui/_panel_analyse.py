@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from ._constants import MET_DEFAULTS, TIME_VARS
-from ._lists import ALL_TIP, _checked_items, _toggle_all
+from ._lists import ALL_TIP, _checked_items, _fill_checklist, _toggle_all
 from ._widgets import (
     NoWheelComboBox,
     NoWheelDoubleSpinBox,
@@ -37,6 +37,10 @@ from ._widgets import (
 
 
 class AnalysePanelMixin(QMainWindow):
+    #: The eight meteorological predictors of the formal Shapley protocol
+    #: (2**8 = 256 coalitions, 10 draws per coalition).
+    FORMAL_SHAPLEY_VARS = ("ws", "blh", "t2m", "rh2m", "sp", "tcc", "tp", "ssrd")
+
     def _build_normalise_box(self) -> QGroupBox:
         """Step 2: which variables to resample, and how many samples."""
         box = QGroupBox("Normalise")
@@ -111,6 +115,16 @@ class AnalysePanelMixin(QMainWindow):
             "auto: shapley when groups are given, else sequential."
         )
         df_.addRow("Attribution", self.decom_attribution)
+        self.formal_shapley_btn = QPushButton("Formal Shapley preset")
+        self.formal_shapley_btn.setToolTip(
+            "Set the decomposition to the project's formal eight-variable Shapley run:\n"
+            "meteorology, exact Shapley attribution over all 2^k coalitions (256 for\n"
+            "eight variables), 10 Monte Carlo draws per coalition, and each variable\n"
+            "counted alone (no groups). Ticks the eight formal predictors\n"
+            "(ws, blh, t2m, rh2m, sp, tcc, tp, ssrd) when no model is trained yet."
+        )
+        self.formal_shapley_btn.clicked.connect(self._formal_shapley_preset)
+        df_.addRow(self.formal_shapley_btn)
         from ._groups import GroupEditor
 
         # The variables in named groups (meteorology only): a contribution per group.
@@ -134,6 +148,57 @@ class AnalysePanelMixin(QMainWindow):
         self.decom_button.setShortcut("Ctrl+2")
         df_.addRow(self.decom_button)
         return box
+
+    def _formal_shapley_preset(self) -> None:
+        """The project's formal Shapley protocol: meteorology, exact Shapley values
+        (all 2**k coalitions, 256 for the eight formal predictors), 10 Monte Carlo
+        draws per coalition, each variable alone.
+
+        With no model trained yet the formal eight predictors are ticked, so the next
+        training is the one the protocol was written for; with a model, its own
+        meteorological variables are what the decomposition will use, and the note
+        says whether they are the eight.
+        """
+        self.decom_method.setCurrentText("meteorology")
+        self.decom_attribution.setCurrentText("shapley")
+        self.decom_samples.setValue(10)
+        self.decom_groups.clear()
+
+        available = [self.feature_list.item(i).text() for i in range(self.feature_list.count())]
+        missing = [v for v in self.FORMAL_SHAPLEY_VARS if v not in available]
+        if getattr(self, "model", None) is not None:
+            met = [f for f in self.trained_features if f not in TIME_VARS]
+            source = "the trained model"
+            if set(met) == set(self.FORMAL_SHAPLEY_VARS):
+                selection = "its eight meteorological predictors are the formal set"
+            else:
+                selection = (
+                    "the formal protocol has eight predictors (ws, blh, t2m, rh2m, sp, "
+                    "tcc, tp, ssrd); tick those and train again to match it"
+                )
+        else:
+            if missing:
+                met = [v for v in self.FORMAL_SHAPLEY_VARS if v in available]
+                selection = (
+                    f"the table has no {', '.join(missing)}; tick the eight formal "
+                    "predictors once they are loaded, then train"
+                )
+            else:
+                met = list(self.FORMAL_SHAPLEY_VARS)
+                _fill_checklist(self.feature_list, available, set(met))
+                selection = "the eight formal predictors are ticked for the next training"
+            source = "the features ticked for training"
+
+        n = len(met)
+        if 0 < n <= 10:
+            coalitions = f"{2**n:,} coalition{'s' if n != 1 else ''} (exact)"
+        else:
+            coalitions = "too many for exact Shapley values — group or reduce the predictors"
+        self.statusBar().showMessage(
+            f"Formal Shapley preset: meteorology, 10 draws per variable, no groups; "
+            f"{n} variable{'s' if n != 1 else ''} in {source} → {coalitions}. "
+            f"{selection[:1].upper()}{selection[1:]}."
+        )
 
     def _build_rolling_box(self) -> QGroupBox:
         """Step 4: window, step and samples for the rolling normalisation."""
@@ -262,6 +327,45 @@ class AnalysePanelMixin(QMainWindow):
         self.tre_n_bootstrap.setRange(100, 20_000)
         self.tre_n_bootstrap.setValue(1000)
         tf.addRow("Bootstrap replicates", self.tre_n_bootstrap)
+        # The protocol a published trend interval states: a monthly series, a
+        # residual block bootstrap of twelve-month blocks, and a robust slope in
+        # each draw.  Defaults keep the moving-block test on the series as given.
+        self.tre_aggregate = NoWheelComboBox()
+        self.tre_aggregate.addItems(["none", "monthly"])
+        self.tre_aggregate.setToolTip(
+            "Aggregate the series before testing. 'monthly' takes monthly means -- "
+            "the scale a 12-point block bootstrap and the project's trend intervals "
+            "are written for."
+        )
+        tf.addRow("Aggregation", self.tre_aggregate)
+        self.tre_bootstrap = NoWheelComboBox()
+        self.tre_bootstrap.addItems(["moving", "residual"])
+        self.tre_bootstrap.setToolTip(
+            "moving: resample contiguous blocks of the series (the default, repairs "
+            "serial correlation in the values).\n"
+            "residual: resample blocks of the fitted trend's residuals and add them "
+            "back -- the trend is preserved (the published protocol, with 12-month "
+            "blocks and 2,000 replicates)."
+        )
+        tf.addRow("Bootstrap scheme", self.tre_bootstrap)
+        self.tre_estimator = NoWheelComboBox()
+        self.tre_estimator.addItems(["ols", "theil-sen"])
+        self.tre_estimator.setToolTip(
+            "Slope recomputed in each bootstrap draw. OLS is O(n) and suits a long "
+            "record; Theil-Sen is robust but O(n^2) per draw, so use it on a monthly "
+            "or otherwise short series (the published protocol uses Theil-Sen)."
+        )
+        tf.addRow("Replicate slope", self.tre_estimator)
+        self.tre_block = NoWheelSpinBox()
+        self.tre_block.setRange(0, 1000)
+        self.tre_block.setSpecialValueText("auto")
+        self.tre_block.setValue(0)
+        self.tre_block.setToolTip(
+            "Bootstrap block length in points. 12 on a monthly series is twelve "
+            "months (the published protocol); auto uses the Politis-Romano/week "
+            "rule."
+        )
+        tf.addRow("Block length", self.tre_block)
         self.trend_after = QCheckBox("Run after each emission decomposition")
         # Unticked by default: the decomposition's figure is the answer to the
         # question it was run for, and the trend is a separate question the

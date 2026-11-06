@@ -249,13 +249,7 @@ class TrainRunMixin(QMainWindow):
         if backend == _chronos.BACKEND:
             self._run_load_chronos(target, features)
             return
-        if backend == "flaml":
-            model_config = {
-                "time_budget": self.budget_spin.value(),
-                "estimator_list": self._selected_estimators() or ["lgbm"],
-            }
-        else:
-            model_config = {"n_trials": self.budget_spin.value()}
+        model_config = self._model_config(backend)
 
         # The model must see the time features alongside the met predictors —
         # they carry the trend/seasonality that survives normalisation.
@@ -612,14 +606,7 @@ class TrainRunMixin(QMainWindow):
         # The same config the one-split train would use, per fold — written as an
         # expression rather than the train handler's statement: this window is
         # vendored as-is to the R GUI, where each block is patched on its own.
-        model_config = (
-            {
-                "time_budget": self.budget_spin.value(),
-                "estimator_list": self._selected_estimators() or ["lgbm"],
-            }
-            if backend == "flaml"
-            else {"n_trials": self.budget_spin.value()}
-        )
+        model_config = self._model_config(backend)
         self.runner.submit(
             f"walk-forward CV ({backend})",
             cv_score,

@@ -19,6 +19,7 @@ it with the window's own result.
 from __future__ import annotations
 
 import datetime
+import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -161,6 +162,36 @@ def open_table(path: str, zone: str | None = None) -> Entry:
     call = f"df = read_time_series({literal(path)}"
     call += f", zone={literal(zone)})" if zone and zone.upper() != "UTC" else ")"
     return Entry("Open data", call, imports=("from normet.io import read_time_series",))
+
+
+def attach_table(
+    path: str,
+    zone: str | None = None,
+    columns: Sequence[str] = (),
+    exclude_lines: Sequence[str] = (),
+) -> Entry:
+    """Meteorology read from its own table and joined to ``df`` by timestamp, as the
+    Data tab's Attach meteorology… does: the named columns, left-joined on 'date'.
+    Where rows are left out, the exclusion is applied again so ``df_kept`` is the
+    attached table without them."""
+    call = f"met = read_time_series({literal(path)}"
+    call += f", zone={literal(zone)})" if zone and zone.upper() != "UTC" else ")"
+    cols = [str(c) for c in columns]
+    call += (
+        "\nmet = met.dropna(subset=['date']).drop_duplicates('date').set_index('date')\n"
+        f"df = df.merge(met[{literal(cols)}].reset_index(), on='date', how='left', "
+        "validate='many_to_one')"
+    )
+    notes = [f"columns attached: {', '.join(cols)}"]
+    if exclude_lines:
+        call += "\n" + exclude(exclude_lines).code
+        notes.append("The rows left out were applied to the attached table again.")
+    return Entry(
+        f"Attach meteorology — {os.path.basename(path)}",
+        call,
+        imports=("from normet.io import read_time_series",),
+        notes=tuple(notes),
+    )
 
 
 def load_example(example: Any = None) -> Entry:

@@ -657,15 +657,23 @@ def _block_bootstrap_slopes(
     block_length: int,
     n_bootstrap: int,
     seed: int,
+    scheme: str = "moving",
+    estimator: str = "ols",
 ) -> np.ndarray:
-    """Moving-block bootstrap of the OLS trend slope.
+    """Block bootstrap of the trend slope.
 
-    Blocks of ``block_length`` contiguous points are drawn with replacement
-    until ``n`` points are assembled; the last block is truncated. Each
-    replicate uses the OLS slope (Theil-Sen per replicate would cost
-    O(n^2) per draw and 1000 draws of a year of hourly data would not
-    finish in a work session); the block sampling is what fixes the
-    autocorrelation, not the per-replicate estimator.
+    ``scheme="moving"`` (default) draws blocks of ``block_length`` contiguous
+    points from ``(x, y)`` with replacement and recomputes the slope -- the
+    moving-block bootstrap, which repairs serial correlation in the series.
+    ``scheme="residual"`` fits the Theil-Sen line once, then resamples
+    contiguous blocks of its residuals and adds them back to the fitted values,
+    holding the time grid fixed: the residual block bootstrap, which preserves
+    the trend and resamples only its low-frequency noise (the protocol a
+    published monthly trend interval may state).
+
+    ``estimator`` is the per-replicate slope: ``"ols"`` (default, O(n) and the
+    only practical one on a long record) or ``"theil-sen"`` (robust, O(n^2) per
+    draw; meant for a monthly or otherwise short series).
     """
     n = x.size
     rng = np.random.default_rng(seed)
@@ -673,6 +681,12 @@ def _block_bootstrap_slopes(
     n_starts = n - block_length + 1
     full = n // block_length
     remain = n - full * block_length
+    fit = resid = None
+    if scheme == "residual":
+        stats = require_scipy_stats()
+        base_slope, base_intercept, _, _ = stats.theilslopes(y, x)
+        fit = base_intercept + base_slope * x
+        resid = y - fit
     slopes = np.empty(n_bootstrap)
     for b in range(n_bootstrap):
         starts = rng.integers(0, n_starts, size=full)
@@ -684,8 +698,15 @@ def _block_bootstrap_slopes(
         if remain > 0 and n_starts > 0:
             s0 = int(rng.integers(0, n_starts))
             idx = np.concatenate([idx, positions[s0 : s0 + remain]])
-        xb = x[idx]
-        slopes[b] = _ols_slope(xb, y[idx])
+        if scheme == "residual":
+            assert fit is not None and resid is not None
+            xb, yb = x, fit + resid[idx]
+        else:
+            xb, yb = x[idx], y[idx]
+        if estimator == "theil-sen":
+            slopes[b] = float(require_scipy_stats().theilslopes(yb, xb)[0])
+        else:
+            slopes[b] = _ols_slope(xb, yb)
     return slopes
 
 
@@ -1230,6 +1251,8 @@ def trend(
     block_length: int | None = None,
     n_bootstrap: int = 1000,
     seed: int = 7_654_321,
+    bootstrap_scheme: str = "moving",
+    replicate_estimator: str = "ols",
 ) -> TrendResult:
     """Trend test + robust slope + honest error bars, for one series.
 
@@ -1271,6 +1294,17 @@ def trend(
         Bootstrap replicates.
     seed : int, default 7654321
         RNG seed; the bootstrap output is bit-identical across runs.
+    bootstrap_scheme : {"moving", "residual"}, default "moving"
+        How the block bootstrap resamples. "moving" draws contiguous blocks of
+        the series and recomputes the slope, repairing serial correlation in
+        the values themselves. "residual" holds the fitted Theil-Sen line and
+        resamples blocks of its residuals, adding them back to the fitted
+        values -- the trend is preserved and only its low-frequency noise is
+        resampled (the monthly residual-block protocol).
+    replicate_estimator : {"ols", "theil-sen"}, default "ols"
+        Slope recomputed in each replicate. "ols" is O(n) per draw and the
+        only practical choice on a long record; "theil-sen" is robust but
+        O(n^2) per draw, meant for a monthly or otherwise short series.
 
     Returns
     -------
@@ -1308,12 +1342,35 @@ def trend(
         ar1_p=acf_p,
         ar_autocorrelated=autocorrelated,
     )
-    if not autocorrelated:
+    scheme = str(bootstrap_scheme).strip().lower()
+    if scheme not in ("moving", "residual"):
+        raise DataError(
+            "bootstrap_scheme must be 'moving' or 'residual', got "
+            f"{bootstrap_scheme!r}."
+        )
+    estimator = str(replicate_estimator).strip().lower().replace("_", "-")
+    if estimator == "theilsen":
+        estimator = "theil-sen"
+    if estimator not in ("ols", "theil-sen"):
+        raise DataError(
+            "replicate_estimator must be 'ols' or 'theil-sen', got "
+            f"{replicate_estimator!r}."
+        )
+    if estimator == "theil-sen" and x.size > 5_000:
+        raise DataError(
+            f"a Theil-Sen replicate on {x.size:,} points is O(n^2) -- seconds per "
+            "draw, so hours over a default bootstrap; aggregate the series "
+            "(e.g. monthly means), lower n_bootstrap, or use "
+            "replicate_estimator='ols'."
+        )
+    # The moving-block bootstrap is the autocorrelation correction: without AR(1)
+    # residuals the Theil-Sen interval stands.  A residual bootstrap is an explicit
+    # request for that interval and runs whether or not the diagnostic fired.
+    if not autocorrelated and scheme == "moving":
         result.notes.append(
             "AR(1) residual autocorrelation not significant; the Theil-Sen interval is used as-is."
         )
         return result
-
     bl = (
         int(block_length)
         if block_length is not None
@@ -1321,7 +1378,13 @@ def trend(
     )
     bl = max(1, min(bl, x.size // 3))
     boots = _block_bootstrap_slopes(
-        xtime, y, block_length=bl, n_bootstrap=int(n_bootstrap), seed=int(seed)
+        xtime,
+        y,
+        block_length=bl,
+        n_bootstrap=int(n_bootstrap),
+        seed=int(seed),
+        scheme=scheme,
+        estimator=estimator,
     )
     finite = np.isfinite(boots)
     if finite.sum() < 10:
@@ -1349,10 +1412,15 @@ def trend(
         z_wald = slope.slope / se
         result.p_wald_boot = float(2 * (1 - NormalDist().cdf(abs(z_wald))))
     result.notes.append(
-        f"AR(1) residual autocorrelation {acf1:.2f} (p={acf_p:.2g}) < {test_alpha}: "
-        f"block bootstrap (length {bl}, {int(finite.sum())} replicates) used for the "
-        "slope interval. The Mann-Kendall p-value above is the classical one and "
-        "is anti-conservative under this autocorrelation; read the bootstrap "
-        "p_wald as the corrected test."
+        (
+            f"AR(1) residual autocorrelation {acf1:.2f} (p={acf_p:.2g}) < {test_alpha}: "
+            if autocorrelated
+            else f"AR(1) residual autocorrelation {acf1:.2f} (p={acf_p:.2g}) not "
+            "significant; residual block bootstrap requested: "
+        )
+        + f"{scheme} block bootstrap (length {bl}, {int(finite.sum())} replicates, "
+        f"{estimator} replicate slope) used for the slope interval. The Mann-Kendall "
+        "p-value above is the classical one and is anti-conservative under this "
+        "autocorrelation; read the bootstrap p_wald as the corrected test."
     )
     return result

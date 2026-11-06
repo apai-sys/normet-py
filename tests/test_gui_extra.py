@@ -18,6 +18,41 @@ def qapp():
 
 
 # ---------------------------------------------------------------- tables
+def test_formal_shapley_preset_sets_the_protocol(qapp):
+    from normet.gui.main_window import MainWindow
+
+    win = MainWindow()
+    try:
+        win.load_example()
+        win._formal_shapley_preset()
+        assert win.decom_method.currentText() == "meteorology"
+        assert win.decom_attribution.currentText() == "shapley"
+        assert win.decom_samples.value() == 10
+        assert win.decom_groups.text() == ""
+        assert set(win._selected_features()) == set(win.FORMAL_SHAPLEY_VARS)
+        assert "256 coalitions" in win.statusBar().currentMessage()
+    finally:
+        win.close()
+
+
+def test_model_config_reads_the_run_backends_own_budget(qapp):
+    """The uncertainty tab's backend may not be the panel's: its budget is the one
+    kept for that backend, not the spin box showing the other one's."""
+    from normet.gui.main_window import MainWindow
+
+    win = MainWindow()
+    try:
+        win.backend_combo.setCurrentText("flaml")
+        win.budget_spin.setValue(90)
+        win._budget_values["lightgbm"] = 33
+        assert win._model_config("lightgbm")["n_trials"] == 33
+        win.backend_combo.setCurrentText("lightgbm")
+        assert win._model_config("flaml")["time_budget"] == 90
+        assert win._model_config("lightgbm")["n_trials"] == 33
+    finally:
+        win.close()
+
+
 def test_fill_sortable_orders_numbers_and_keeps_none_last(qapp):
     from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QTableWidget

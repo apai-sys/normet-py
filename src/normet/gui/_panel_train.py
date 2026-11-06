@@ -68,7 +68,10 @@ class TrainPanelMixin(QMainWindow):
         self.budget_spin.setSuffix(" s")
         self.budget_spin.setToolTip("AutoML search time (flaml backend).")
         self._budget_label = QLabel("Time budget")
-        self._budget_values = {"flaml": 60, "lightgbm": 20}
+        # 6 trials is the published LightGBM protocol (normet_formal.py: n_trials=6,
+        # cv_folds=5, nrounds=400, early_stopping_rounds=30); the flaml budget above
+        # is a time in seconds.
+        self._budget_values = {"flaml": 60, "lightgbm": 6}
         self._prev_backend = "flaml"
         # Parked value for the "Samples" spin box on the other side of the
         # chronos-2 divide; see _train_backend_changed.
@@ -144,6 +147,43 @@ class TrainPanelMixin(QMainWindow):
         )
         self._cv_folds_label = QLabel("CV folds")
         form.addRow(self._cv_folds_label, self.cv_folds_spin)
+        # LightGBM's own protocol, as a published run states it: boosting rounds,
+        # early stopping and the hyperparameter-search folds.  Kept apart from
+        # CV folds above, which are walk-forward validation of the trained form.
+        # The published LightGBM protocol (normet_formal.py): 400 boosting rounds,
+        # early stopping after 30, a 5-fold hyperparameter search.  The library's own
+        # defaults (1000/20) remain one edit away, but a fresh run here is the paper's.
+        self.lgb_rounds = NoWheelSpinBox()
+        self.lgb_rounds.setRange(50, 20_000)
+        self.lgb_rounds.setValue(400)
+        self.lgb_rounds.setToolTip(
+            "Boosting rounds for the final LightGBM fit (num_boost_round). "
+            "Early stopping may end it sooner."
+        )
+        self._lgb_rounds_label = QLabel("LGB rounds")
+        form.addRow(self._lgb_rounds_label, self.lgb_rounds)
+        self.lgb_early = NoWheelSpinBox()
+        self.lgb_early.setRange(0, 500)
+        self.lgb_early.setValue(30)
+        self.lgb_early.setToolTip(
+            "Rounds without improvement before a LightGBM fit stops (0: no early "
+            "stopping). 30 is the project protocol."
+        )
+        self._lgb_early_label = QLabel("LGB early stop")
+        form.addRow(self._lgb_early_label, self.lgb_early)
+        self.lgb_cv_folds = NoWheelSpinBox()
+        self.lgb_cv_folds.setRange(2, 10)
+        self.lgb_cv_folds.setValue(5)
+        self.lgb_cv_folds.setToolTip(
+            "Folds the LightGBM hyperparameter search cross-validates on. "
+            "Separate from the walk-forward CV below, which scores the chosen form."
+        )
+        self._lgb_cv_label = QLabel("LGB search folds")
+        form.addRow(self._lgb_cv_label, self.lgb_cv_folds)
+        for _w in (self.lgb_rounds, self.lgb_early, self.lgb_cv_folds):
+            _w.setVisible(False)
+        for _l in (self._lgb_rounds_label, self._lgb_early_label, self._lgb_cv_label):
+            _l.setVisible(False)
         self.cv_button = run_button(
             "▶  Walk-forward CV",
             "Retrain on expanding windows and score each future block.\n"
@@ -239,6 +279,15 @@ class TrainPanelMixin(QMainWindow):
         )
         if is_chronos:
             self.decom_method.setCurrentText("meteorology")
+        # LightGBM's own protocol rows act only on that backend.
+        is_lgb = backend == "lightgbm"
+        for label, widget in (
+            (self._lgb_rounds_label, self.lgb_rounds),
+            (self._lgb_early_label, self.lgb_early),
+            (self._lgb_cv_label, self.lgb_cv_folds),
+        ):
+            label.setVisible(is_lgb)
+            widget.setVisible(is_lgb)
         if is_chronos:
             return
 
@@ -254,13 +303,44 @@ class TrainPanelMixin(QMainWindow):
             self.budget_spin.setRange(1, 500)
             self.budget_spin.setSuffix("")
             self.budget_spin.setToolTip("Random hyperparameter-search trials (LightGBM backend).")
-        self.budget_spin.setValue(self._budget_values.get(backend, 20))
+        self.budget_spin.setValue(self._budget_values.get(backend, 6))
         is_flaml = backend == "flaml"
         self._estimator_label.setVisible(is_flaml)
         self.estimator_list.setVisible(is_flaml)
 
     def _selected_estimators(self) -> list[str]:
         return _checked_items(self.estimator_list)
+
+    def _model_config(self, backend: str | None = None) -> dict:
+        """The backend's training configuration, as the train, CV and
+        uncertainty runs all pass it.  flaml searches within its time budget;
+        LightGBM uses the random search's trial count plus its boosting
+        protocol -- rounds, early stopping and the search's CV folds.
+
+        Where the run's backend is not the one the panel stands on (the
+        uncertainty tab's own backend), its budget is the value kept for that
+        backend, not the spin box showing the other one's.
+        """
+        current = self.backend_combo.currentText()
+        backend = backend or current
+        budget = (
+            self.budget_spin.value()
+            if backend == current
+            else self._budget_values.get(backend, 60 if backend == "flaml" else 6)
+        )
+        if backend == "flaml":
+            return {
+                "time_budget": budget,
+                "estimator_list": self._selected_estimators() or ["lgbm"],
+            }
+        if backend == "lightgbm":
+            return {
+                "n_trials": budget,
+                "cv_folds": self.lgb_cv_folds.value(),
+                "nrounds": self.lgb_rounds.value(),
+                "early_stopping_rounds": self.lgb_early.value(),
+            }
+        return {}
 
     def _selected_device(self) -> str | None:
         """``None`` means let :func:`normet.foundation.resolve_device` choose."""

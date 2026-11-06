@@ -207,9 +207,12 @@ class SessionMixin(QMainWindow):
             "lgb_trials": (
                 self.budget_spin.value()
                 if self.backend_combo.currentText() == "lightgbm"
-                else self._budget_values.get("lightgbm", 20)
+                else self._budget_values.get("lightgbm", 6)
             ),
             "flaml_estimators": self._selected_estimators(),
+            "lgb_rounds": self.lgb_rounds.value(),
+            "lgb_early": self.lgb_early.value(),
+            "lgb_cv_folds": self.lgb_cv_folds.value(),
             "seed": self.seed_spin.value(),
             "norm_vars": self._selected_norm_vars(),
             "norm_samples": self.norm_samples.value(),
@@ -230,6 +233,10 @@ class SessionMixin(QMainWindow):
             "tre_seasonal": self.tre_seasonal.currentText(),
             "tre_segments": self.tre_segments.value(),
             "tre_n_bootstrap": self.tre_n_bootstrap.value(),
+            "tre_aggregate": self.tre_aggregate.currentText(),
+            "tre_bootstrap": self.tre_bootstrap.currentText(),
+            "tre_estimator": self.tre_estimator.currentText(),
+            "tre_block": self.tre_block.value(),
             "trend_after": self.trend_after.isChecked(),
             "pdp_grid": self.pdp_grid.value(),
             "unc_samples": self.unc_samples.value(),
@@ -248,11 +255,16 @@ class SessionMixin(QMainWindow):
                     Qt.CheckState.Checked if item.text() in feats else Qt.CheckState.Unchecked
                 )
         self._budget_values["flaml"] = c.get("time_budget", 60)
-        self._budget_values["lightgbm"] = c.get("lgb_trials", 20)
+        self._budget_values["lightgbm"] = c.get("lgb_trials", 6)
         self.backend_combo.setCurrentText(c.get("backend", "flaml"))
         self.split_combo.setCurrentText(c.get("split_method", "random"))
         self.train_fraction_spin.setValue(c.get("train_fraction", 0.75))
-        self.budget_spin.setValue(self._budget_values.get(self.backend_combo.currentText(), 60))
+        self.budget_spin.setValue(
+            self._budget_values.get(
+                self.backend_combo.currentText(),
+                60 if self.backend_combo.currentText() == "flaml" else 6,
+            )
+        )
         ests = set(c.get("flaml_estimators") or ["lgbm"])
         for i in range(self.estimator_list.count()):
             item = self.estimator_list.item(i)
@@ -260,6 +272,9 @@ class SessionMixin(QMainWindow):
                 Qt.CheckState.Checked if item.text() in ests else Qt.CheckState.Unchecked
             )
         self.seed_spin.setValue(c.get("seed", 7_654_321))
+        self.lgb_rounds.setValue(int(c.get("lgb_rounds", 400)))
+        self.lgb_early.setValue(int(c.get("lgb_early", 30)))
+        self.lgb_cv_folds.setValue(int(c.get("lgb_cv_folds", 5)))
         nvars = set(c.get("norm_vars") or [])
         if nvars:
             for i in range(self.norm_vars.count()):
@@ -294,6 +309,10 @@ class SessionMixin(QMainWindow):
         self.trend_series.setCurrentText(c.get("trend_series", "emission part (emi_total)"))
         self.tre_seasonal.setCurrentText(c.get("tre_seasonal", "auto"))
         self.tre_n_bootstrap.setValue(c.get("tre_n_bootstrap", 1000))
+        self.tre_aggregate.setCurrentText(c.get("tre_aggregate", "none"))
+        self.tre_bootstrap.setCurrentText(c.get("tre_bootstrap", "moving"))
+        self.tre_estimator.setCurrentText(c.get("tre_estimator", "ols"))
+        self.tre_block.setValue(int(c.get("tre_block", 0)))
         self.trend_after.setChecked(c.get("trend_after", True))
         self.pdp_grid.setValue(c.get("pdp_grid", 50))
         self.unc_samples.setValue(c.get("unc_samples", 300))

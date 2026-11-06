@@ -154,6 +154,41 @@ def test_an_opened_csv_reads_back(win, tmp_path):
     assert "Nothing yet" in win.command_view.toPlainText()
 
 
+def test_attached_meteorology_reads_back(win, tmp_path):
+    base = tmp_path / "site.csv"
+    pd.DataFrame(
+        {
+            "date": pd.date_range("2021-01-01", periods=6, freq="h"),
+            "NO2": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            "ws": [9.0] * 6,  # the table's own measured wind: the attach keeps it
+        }
+    ).to_csv(base, index=False)
+    met = tmp_path / "kroc.csv"
+    pd.DataFrame(
+        {
+            "date": pd.date_range("2021-01-01 01:00", periods=5, freq="h"),
+            "ws": [1.0, 2.0, 3.0, 4.0, 5.0],
+            "t2m": [5.0, 6.0, 7.0, 8.0, 9.0],
+            "rh": [50.0, 51.0, 52.0, 53.0, 54.0],
+        }
+    ).to_csv(met, index=False)
+
+    win.load_csv(str(base))
+    win._set_exclusions(["2021-01-01 04:00 .. 2021-01-01 05:00"])
+    win.attach_met(str(met))
+    assert win.command_log.entries[-1].title == "Attach meteorology — kroc.csv"
+    assert {"t2m", "rh"} <= set(win.df_raw.columns)
+    assert win.df_raw["ws"].eq(9.0).all()  # the table's own column wins
+    assert win.exclusions == ["2021-01-01 04:00 .. 2021-01-01 05:00"]
+    assert len(win.df_raw) == 4
+    assert pd.isna(win.df_raw["t2m"].iloc[0])  # 00:00 is not in the met table
+
+    ns: dict = {}
+    exec(compile(win.command_log.script(), "session.py", "exec"), ns)
+    pd.testing.assert_frame_equal(ns["df"], win.df_loaded)
+    pd.testing.assert_frame_equal(ns["df_kept"], win.df_raw)
+
+
 def test_a_csv_across_a_daylight_saving_change_loads_and_trains(win, tmp_path):
     # Local time with its offset, +00:00 then +01:00: pandas 3 refused the column
     # at load ("Mixed timezones detected"); pandas 2 took it as objects that

@@ -83,6 +83,12 @@ def config_from_calls(calls: dict[str, dict[str, Any]]) -> dict[str, Any]:
             c["flaml_estimators"] = list(cfg["estimator_list"])
         if "n_trials" in cfg:
             c["lgb_trials"] = cfg["n_trials"]
+        if "nrounds" in cfg:
+            c["lgb_rounds"] = cfg["nrounds"]
+        if "early_stopping_rounds" in cfg:
+            c["lgb_early"] = cfg["early_stopping_rounds"]
+        if "cv_folds" in cfg:
+            c["lgb_cv_folds"] = cfg["cv_folds"]
     load = calls.get("load_estimator")
     if load:
         args = load.get("args") or []
@@ -129,6 +135,17 @@ def config_from_calls(calls: dict[str, dict[str, Any]]) -> dict[str, Any]:
     pdp = calls.get("pdp")
     if pdp and pdp.get("grid_points") is not None:
         c["pdp_grid"] = pdp["grid_points"]
+    tre = calls.get("trend_call")
+    if tre:
+        for src, dst in (
+            ("aggregate", "tre_aggregate"),
+            ("bootstrap_scheme", "tre_bootstrap"),
+            ("replicate_estimator", "tre_estimator"),
+            ("block_length", "tre_block"),
+            ("n_bootstrap", "tre_n_bootstrap"),
+        ):
+            if tre.get(src) is not None:
+                c[dst] = tre[src]
     return c
 
 

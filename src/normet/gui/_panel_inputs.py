@@ -86,6 +86,16 @@ class InputsMixin(QMainWindow):
         )
         self.file_btn.clicked.connect(self._open_csv)
         dv.addWidget(self.file_btn)
+        self.attach_btn = QPushButton("Attach meteorology…")
+        self.attach_btn.setToolTip(
+            "Read a second table of meteorology (for example a station's measured wind) "
+            "and join its columns to the open table by timestamp, as the Data Studio's "
+            "fetched meteorology is joined. Times are read on the time zone chosen above; "
+            "columns already in the table are left as they are; rows without a match stay "
+            "empty. Attach the meteorology before training."
+        )
+        self.attach_btn.clicked.connect(self._attach_met_dialog)
+        dv.addWidget(self.attach_btn)
         self.file_label = hint_label("No data loaded", small=False)
         dv.addWidget(self.file_label)
         zone_row = QHBoxLayout()
@@ -117,6 +127,9 @@ class InputsMixin(QMainWindow):
         dv.addWidget(self.dates_label)
         #: The file the table on screen was read from, read again when the zone changes.
         self._data_path: str | None = None
+        #: Meteorology attached to it since it was read: (path, columns), joined again
+        #: when the zone changes and the base file is read on the new clock.
+        self._met_attachments: list[tuple[str, list[str]]] = []
         return box
 
     def _zone(self) -> str:
@@ -124,12 +137,20 @@ class InputsMixin(QMainWindow):
 
     def _zone_changed(self, _index: int) -> None:
         """Another clock chosen: kept for the next session, and the open file read again
-        on it (the model and results go with the old times)."""
+        on it (the model and results go with the old times). Meteorology attached to it
+        is read on the same clock and joined again."""
         from PySide6.QtCore import QSettings
 
         QSettings("apai-sys", "normet-gui").setValue(ZONE_PREF, self._zone())
         if self._data_path is not None and self.df_raw is not None:
+            attachments = list(self._met_attachments)
             self.load_csv(self._data_path)
+            for path, _columns in attachments:
+                # Recorded again: load_csv has just logged the base table read on the
+                # new clock, so the session's script must join the meteorology on that
+                # clock too -- an unrecorded re-attach would leave the log's table
+                # without the columns the screen has.
+                self.attach_met(path, record=True)
 
     def _build_columns_box(self) -> QGroupBox:
         """Columns: the target series and the predictors ticked for the model."""
@@ -172,6 +193,108 @@ class InputsMixin(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(self, "Open data", pref("last_dir", ""), TABLE_FILTER)
         if path:
             self.load_csv(path, remember=True)
+
+    def _attach_met_dialog(self) -> None:
+        from .uilang import pref
+
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Attach meteorology", pref("last_dir", ""), TABLE_FILTER
+        )
+        if path:
+            self.attach_met(path)
+
+    def attach_met(self, path: str, *, record: bool = True) -> None:
+        """Join a second table's columns to the open table by timestamp -- a station's
+        measured wind, a meteorology file kept apart from the observations.
+
+        Its times are read on the time zone chosen for the open table. A column the
+        table already has is left as it is (the table's own measured value wins over
+        the attached file's); the others are left-joined, so a timestamp the attached
+        table does not cover stays empty. The rows left out by the Exclude box stay
+        left out, and the table on screen is the attached one -- the model and its
+        results were made on the table before, so they are cleared.
+        """
+        from normet.io import read_time_series
+
+        if self.df_loaded is None:
+            QMessageBox.warning(
+                self, "No data loaded", "Open the observations first, then attach meteorology."
+            )
+            return
+        try:
+            met = read_time_series(path, zone=self._zone())
+        except ValueError as exc:
+            QMessageBox.warning(self, "No times found", str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001 - a file pandas cannot read, said as it is
+            QMessageBox.critical(self, "Failed to read the meteorology", str(exc))
+            return
+
+        base = self.df_loaded
+        met = met.dropna(subset=["date"]).drop_duplicates("date").set_index("date")
+        new_cols = [c for c in met.columns if c not in base.columns]
+        skipped = [c for c in met.columns if c in base.columns]
+        if not new_cols:
+            QMessageBox.warning(
+                self,
+                "Nothing to attach",
+                f"Every column of {os.path.basename(path)} is already in the table "
+                f"({', '.join(skipped)}). The table's own values are kept.",
+            )
+            return
+
+        old_exclusions = list(self.exclusions)
+        old_target = self.target_combo.currentText()
+        old_features = set(self._selected_features())
+        base_label = os.path.basename(self._data_path) if self._data_path else "table"
+        merged = base.merge(
+            met[new_cols].reset_index(), on="date", how="left", validate="many_to_one"
+        )
+        merged.attrs = dict(base.attrs)
+        matched = int(merged["date"].isin(met.index).sum())
+
+        self._ingest(merged, f"{base_label} + {os.path.basename(path)}")
+        self._show_dates(merged)
+        # The target and predictors chosen before the attach stand; a newly attached
+        # meteorological column is ticked, since attaching it is why it is here.
+        if old_target and self.target_combo.findText(old_target) >= 0:
+            self.target_combo.setCurrentText(old_target)
+        available = [self.feature_list.item(i).text() for i in range(self.feature_list.count())]
+        new_met = {c for c in new_cols if c.lower() in MET_DEFAULTS or c in MET_DEFAULTS}
+        ticked = old_features | new_met
+        ticked.discard(self.target_combo.currentText())
+        _fill_checklist(self.feature_list, available, ticked)
+        if old_exclusions:
+            from ._data_tab import excluded_mask, parse_exclusions
+
+            mask = excluded_mask(self.df_loaded["date"], parse_exclusions(old_exclusions))
+            self.exclusions = old_exclusions
+            self.df_raw = (
+                self.df_loaded[~mask].reset_index(drop=True) if mask.any() else self.df_loaded
+            )
+            self._say_rows()
+        self._met_attachments.append((os.path.abspath(path), new_cols))
+        if record:
+            self._log_command(
+                commandlog.attach_table(
+                    os.path.abspath(path), self._zone(), new_cols, old_exclusions
+                )
+            )
+        covered = matched / len(merged) * 100 if len(merged) else 0.0
+        extra = f"; kept the table's own {', '.join(skipped)}" if skipped else ""
+        self.statusBar().showMessage(
+            f"Attached {', '.join(new_cols)} from {os.path.basename(path)}: "
+            f"{matched:,} of {len(merged):,} timestamps matched ({covered:.1f}%){extra}. "
+            "Train the model again to use them."
+        )
+        log.info(
+            "Attached %s to %s: %d/%d timestamps matched; skipped %s",
+            path,
+            base_label,
+            matched,
+            len(merged),
+            skipped,
+        )
 
     def load_example(self, key: str = "synthetic") -> None:
         """An example (``._examples.EXAMPLES``), opened with its target and predictors set
@@ -243,6 +366,7 @@ class InputsMixin(QMainWindow):
     def _ingest(self, df: pd.DataFrame, label: str) -> None:
         self.df_raw = self.df_loaded = df
         self.exclusions = []
+        self._met_attachments = []
         self.df_prep = None
         self.model = None
         self.chronos_check = None

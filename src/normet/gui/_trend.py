@@ -86,6 +86,10 @@ def trend_call(
     seasonal_period: int | None = None,
     n_bootstrap: int = 1000,
     seed: int = 7_654_321,
+    aggregate: str = "none",
+    block_length: int | None = None,
+    bootstrap_scheme: str = "moving",
+    replicate_estimator: str = "ols",
 ) -> Any:
     """normet.trend on one column of a table the window holds.
 
@@ -94,16 +98,31 @@ def trend_call(
     call with the table as it stands (the command log names the table by the
     expression it is kept under); the series is built the way the step builds
     it, so a saved session repeats the test exactly as it ran.
+
+    ``aggregate="monthly"`` resamples the series to monthly means first -- the
+    scale a monthly block bootstrap (``block_length=12``) is written for.
+    ``bootstrap_scheme="residual"`` resamples residuals around the fitted trend
+    instead of the values, and ``replicate_estimator="theil-sen"`` recomputes a
+    robust slope in each draw (short series only).
     """
     from normet import trend
 
     series = long_term_series(frame) if column == "long-term" else trend_series(frame, column)
+    if aggregate == "monthly":
+        if not isinstance(series.index, pd.DatetimeIndex):
+            raise ValueError(
+                "monthly aggregation needs a datetime index (or a 'date' column)"
+            )
+        series = series.resample("ME").mean().dropna()
     return trend(
         series,
         name=series_name or (None if series.name is None else str(series.name)),
         seasonal_period=seasonal_period,
+        block_length=block_length,
         n_bootstrap=n_bootstrap,
         seed=seed,
+        bootstrap_scheme=bootstrap_scheme,
+        replicate_estimator=replicate_estimator,
     )
 
 
@@ -159,7 +178,7 @@ def trend_breaks_call(
 def _quoted(res: Any) -> float:
     """The p the result says to quote: the bootstrap's where it ran, the
     classical one where it did not."""
-    if res.ar_autocorrelated and res.p_wald_boot is not None:
+    if res.p_wald_boot is not None:
         return res.p_wald_boot
     return res.test.p
 
