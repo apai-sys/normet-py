@@ -138,11 +138,11 @@ def _installed_families(families: list[str]) -> list[str]:
     every text it draws). The generic names stay."""
     try:
         from matplotlib import font_manager
+
         have = {f.name for f in font_manager.fontManager.ttflist}
-    except Exception:                                # noqa: BLE001
+    except Exception:  # noqa: BLE001
         return families
-    return [f for f in families if f in ("sans-serif", "serif", "monospace")
-            or f in have]
+    return [f for f in families if f in ("sans-serif", "serif", "monospace") or f in have]
 
 
 def rc() -> Any:
@@ -154,11 +154,19 @@ def rc() -> Any:
     # The CJK fallbacks, as cume and claems carry them: a glyph DejaVu lacks -- a label
     # in 交通源 -- is drawn from the next family that has it. The window's own
     # per-text fallback (gui/uilang.figure_texts) still stands for the translated figures.
-    out["font.family"] = _installed_families([
-        "sans-serif", "PingFang SC", "Hiragino Sans GB", "STHeiti",
-        "Microsoft YaHei", "SimHei", "Noto Sans CJK SC", "WenQuanYi Zen Hei",
-        "Arial Unicode MS",
-    ])
+    out["font.family"] = _installed_families(
+        [
+            "sans-serif",
+            "PingFang SC",
+            "Hiragino Sans GB",
+            "STHeiti",
+            "Microsoft YaHei",
+            "SimHei",
+            "Noto Sans CJK SC",
+            "WenQuanYi Zen Hei",
+            "Arial Unicode MS",
+        ]
+    )
     out["axes.prop_cycle"] = cycler(color=PALETTE)
     return out
 

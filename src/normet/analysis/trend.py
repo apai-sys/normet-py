@@ -1345,16 +1345,14 @@ def trend(
     scheme = str(bootstrap_scheme).strip().lower()
     if scheme not in ("moving", "residual"):
         raise DataError(
-            "bootstrap_scheme must be 'moving' or 'residual', got "
-            f"{bootstrap_scheme!r}."
+            f"bootstrap_scheme must be 'moving' or 'residual', got {bootstrap_scheme!r}."
         )
     estimator = str(replicate_estimator).strip().lower().replace("_", "-")
     if estimator == "theilsen":
         estimator = "theil-sen"
     if estimator not in ("ols", "theil-sen"):
         raise DataError(
-            "replicate_estimator must be 'ols' or 'theil-sen', got "
-            f"{replicate_estimator!r}."
+            f"replicate_estimator must be 'ols' or 'theil-sen', got {replicate_estimator!r}."
         )
     if estimator == "theil-sen" and x.size > 5_000:
         raise DataError(

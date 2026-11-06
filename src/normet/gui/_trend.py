@@ -110,9 +110,7 @@ def trend_call(
     series = long_term_series(frame) if column == "long-term" else trend_series(frame, column)
     if aggregate == "monthly":
         if not isinstance(series.index, pd.DatetimeIndex):
-            raise ValueError(
-                "monthly aggregation needs a datetime index (or a 'date' column)"
-            )
+            raise ValueError("monthly aggregation needs a datetime index (or a 'date' column)")
         series = series.resample("ME").mean().dropna()
     return trend(
         series,
