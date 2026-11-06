@@ -25,8 +25,9 @@ Nothing here writes a key down or prints one.
 
 :func:`converse` carries a conversation on: it sends the messages, carries out
 the tool calls the model asks for (an error is returned to the model in
-normet's words) and stops when the model answers without one. Only the
-standard library is used: no SDK to install.
+normet's words) and stops when the model answers without one. What the model
+is sent of the older rounds is shaped by a :class:`ContextPolicy`, so a long chat
+stays inside its budget. Only the standard library is used: no SDK to install.
 """
 
 from __future__ import annotations
@@ -307,6 +308,46 @@ class ChatModel(Protocol):
     def chat(self, system: str, messages: list[dict[str, Any]], tools: list[Tool]) -> Reply: ...
 
 
+def _zshrc_key(env: str, path: str = os.path.join("~", ".zshrc")) -> str | None:
+    """The value of the last ``export ENV=...`` line of ``~/.zshrc``, as a shell would leave it.
+
+    An app started from the Dock sees no shell's environment, so a key kept only in
+    ``~/.zshrc`` is read from there. It is read, never written or printed.
+    """
+    try:
+        with open(os.path.expanduser(path), encoding="utf-8", errors="replace") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return None
+    value = None
+    for line in lines:
+        m = re.match(rf"\s*export\s+{re.escape(env)}=(\S+)\s*(#.*)?$", line)
+        if m:
+            value = m.group(1).strip().strip("'\"")
+    return value or None
+
+
+def ca_bundle() -> None:
+    """Certificates for the provider's HTTPS where the OpenSSL bundled has none.
+
+    A bundled app's OpenSSL looks for them at the path it was built with (a conda or
+    Homebrew prefix on the build machine), which another Mac does not have; certifi's
+    are installed with it. Nothing changes where the system's bundle exists or
+    ``SSL_CERT_FILE`` is set, or where certifi is absent.
+    """
+    import ssl
+
+    if os.environ.get("SSL_CERT_FILE") or os.path.exists(
+        ssl.get_default_verify_paths().cafile or ""
+    ):
+        return
+    try:
+        import certifi
+    except ImportError:
+        return
+    os.environ["SSL_CERT_FILE"] = certifi.where()
+
+
 def _post(
     url: str,
     body: dict[str, Any],
@@ -314,6 +355,8 @@ def _post(
     timeout: float = 600.0,
     retries: int = 4,
 ) -> dict[str, Any]:
+    if url.startswith("https://"):
+        ca_bundle()
     data = json.dumps(body).encode("utf-8")
     for attempt in range(retries + 1):
         req = urllib.request.Request(
@@ -339,7 +382,13 @@ def _post(
 
 
 class Model:
-    """A model by name: ``"provider:model"`` (:data:`PROVIDERS`)."""
+    """A model by name: ``"provider:model"`` (:data:`PROVIDERS`).
+
+    The output budget defaults to 16384: a model that thinks first spends it on its
+    thinking too, and a completion cut at a small budget comes back with no answer.
+    A key not given is read from the provider's environment variable, then from an
+    ``export`` line of ``~/.zshrc``.
+    """
 
     def __init__(
         self,
@@ -347,7 +396,7 @@ class Model:
         *,
         base_url: str | None = None,
         api_key: str | None = None,
-        max_tokens: int = 4096,
+        max_tokens: int = 16384,
         temperature: float | None = 0.0,
     ) -> None:
         provider, _, model = name.partition(":")
@@ -359,7 +408,9 @@ class Model:
             )
         self.format, url, key_env = spec
         self.key = (
-            api_key if api_key is not None else (os.environ.get(key_env) if key_env else None)
+            api_key
+            if api_key is not None
+            else ((os.environ.get(key_env) or _zshrc_key(key_env)) if key_env else None)
         )
         if provider not in PROVIDERS and provider not in _CUSTOM and not base_url:
             # A model hpc-agent forwards: its port is the registry's now, its full name the
@@ -512,6 +563,83 @@ class FakeModel:
 
 
 @dataclass
+class ContextPolicy:
+    """What the model's payload carries of the older rounds.
+
+    A long chat otherwise carries every full reading to every round -- the largest
+    thing it spends. Rounds older than *keep* have their tool results folded to a
+    head line of 160 characters (a fresh reading is one call of the same tool away)
+    and their reasoning left out; the latest whole, unfailed result of each *pinned*
+    reading stays whole however old, the evidence the set-up, the fit and the
+    interpretation stand on. The messages themselves keep every full reading; only
+    the payload the model gets is shaped.
+    """
+
+    FOLDED = " ... [the head of an earlier reading; call the same tool once more for the whole]"
+
+    keep: int = 2
+    pinned: tuple[str, ...] = ()
+
+    def prepare(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """*messages* as the next call gets it: the older rounds shaped as the policy
+        says, the rest as they stand."""
+        kept: int | None = None
+        rounds = 0
+        for i in range(len(messages) - 1, -1, -1):
+            if messages[i]["role"] == "assistant":
+                rounds += 1
+                if rounds > self.keep:
+                    kept = i
+                    break
+        if kept is None:
+            return messages
+        pinned_ids = self._pinned_ids(messages) if self.pinned else set()
+        out: list[dict[str, Any]] = []
+        for pos, m in enumerate(messages):
+            if pos >= kept:
+                out.append(m)
+            elif m["role"] == "assistant":
+                out.append({k: v for k, v in m.items() if k != "reasoning"})
+            elif m["role"] == "tool":
+                results = []
+                for r in m.get("results", []):
+                    r = dict(r)
+                    t = r.get("text") or ""
+                    if len(t) > len(self.FOLDED) + 60 and r.get("id") not in pinned_ids:
+                        r["text"] = t[:160].rstrip() + self.FOLDED
+                    results.append(r)
+                out.append({"role": "tool", "results": results})
+            else:
+                out.append(dict(m))
+        return out
+
+    def _pinned_ids(self, messages: list[dict[str, Any]]) -> set[str]:
+        """The ids of the results kept whole however old: the latest of each pinned
+        reading, the one that did not fail."""
+        name_of: dict[str, str] = {}
+        for m in messages:
+            if m["role"] == "assistant":
+                for c in m.get("calls") or []:
+                    cid = c.get("id") if isinstance(c, dict) else getattr(c, "id", None)
+                    name = c.get("name") if isinstance(c, dict) else getattr(c, "name", "")
+                    name_of[str(cid)] = str(name)
+        latest: dict[str, str] = {}
+        for m in messages:
+            if m["role"] == "tool":
+                for r in m.get("results", []):
+                    name = name_of.get(str(r.get("id")))
+                    if name in self.pinned and not r.get("error"):
+                        latest[name] = str(r["id"])
+        return set(latest.values())
+
+
+#: What the payload keeps whole: the readings an analysis stands on.
+DEFAULT_CONTEXT = ContextPolicy(
+    pinned=("inspect_data", "model_fit", "normalised", "decomposition", "results")
+)
+
+
+@dataclass
 class Turn:
     """What one message of the user's came to: the events, the tokens spent and
     why the model stopped."""
@@ -530,6 +658,7 @@ def converse(
     max_turns: int = 25,
     on_event: Callable[[dict[str, Any]], None] | None = None,
     stop: threading.Event | None = None,
+    context: ContextPolicy | None = DEFAULT_CONTEXT,
 ) -> Turn:
     """Carry the conversation in *messages* on until the model answers without a
     tool call, *stop* is set, or *max_turns* model calls have been made.
@@ -538,6 +667,10 @@ def converse(
     are appended to it, so the next message of the user's continues it. Each
     event -- ``{"type": "model", "text", "calls"}`` or ``{"type": "tool", "name",
     "arguments", "output", "error"}`` -- is passed to *on_event* as it happens.
+
+    *context* shapes what the model is sent of the older rounds (see
+    :class:`ContextPolicy`; the default folds them, ``None`` sends all); *messages*
+    itself keeps every full reading.
     """
     turn = Turn()
     by_name = {t.name: t for t in tools}
@@ -551,7 +684,8 @@ def converse(
         if stop is not None and stop.is_set():
             turn.stopped = "stopped"
             return turn
-        reply = model.chat(system, messages, tools)
+        payload = context.prepare(messages) if context else messages
+        reply = model.chat(system, payload, tools)
         for k in ("input", "output"):
             turn.usage[k] += int(reply.usage.get(k, 0) or 0)
         event(

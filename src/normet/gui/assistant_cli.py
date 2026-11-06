@@ -31,12 +31,16 @@ by its id (``claude --resume``, ``codex exec resume``, ``agy --conversation``,
 
 from __future__ import annotations
 
+import glob
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import uuid
+from collections.abc import Callable
 from typing import Any
 
 from PySide6.QtCore import QObject, QThread, Signal
@@ -67,8 +71,35 @@ AGY_EFFORTS: dict[str, tuple[str, ...]] = {
 COPILOT_MODELS = ("default", "auto")
 COPILOT_EFFORTS = ("low", "medium", "high")
 
-#: Where installers put an agent when a GUI app's PATH does not reach it.
-_EXTRA_DIRS = ("~/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", "~/.npm-global/bin", "~/bin")
+#: Where installers and Node's version managers put an agent's command -- npm-installed
+#: Codex and Copilot land in the active Node's bin -- each a glob, the newest version's
+#: first. An app started from the Dock is given a PATH with none of them.
+CLI_PLACES = (
+    "~/.local/bin",
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "~/.claude/local",
+    "~/.nvm/versions/node/*/bin",  # nvm
+    "~/.local/share/fnm/node-versions/*/installation/bin",  # fnm (Linux)
+    "~/Library/Application Support/fnm/node-versions/*/installation/bin",  # fnm (macOS)
+    "~/.volta/bin",
+    "~/.asdf/shims",
+    "~/.local/share/mise/shims",  # Volta, asdf, mise
+    "~/.npm-global/bin",
+    "~/bin",
+    "~/.bun/bin",
+    "~/Library/pnpm",
+    "~/.local/share/pnpm",
+    "~/AppData/Roaming/npm",  # npm on Windows
+)
+#: Kept for callers of the earlier name: the plain folders among CLI_PLACES.
+_EXTRA_DIRS = tuple(p for p in CLI_PLACES if "*" not in p)
+
+_FOUND: dict[str, str] = {}
+#: The PATH the user's login shell has -- its rc files set nvm and the rest up as a
+#: terminal has them -- once read (:func:`login_path_in_background`); None until then.
+LOGIN_PATH: str | None = None
+_login_asked = False
 
 #: Told with the first message to an agent that takes no system prompt of its own.
 NOTE = (
@@ -81,20 +112,93 @@ NOTE = (
 STREAM_INTERRUPTED = "The stream was interrupted. Please continue the task you were working on."
 
 
+def _version_key(path: str) -> tuple[int, ...]:
+    """A Node version folder's version, to put the newest first (v22.11.0 > v9.0.0)."""
+    m = re.search(r"v?(\d+)\.(\d+)\.(\d+)", path)
+    return tuple(int(x) for x in m.groups()) if m else (-1,)
+
+
+def _runnable(p: str) -> bool:
+    return os.path.isfile(p) and os.access(p, os.X_OK)
+
+
+def read_login_path(timeout: float = 30) -> str | None:
+    """The PATH of the user's login shell. It runs the shell's rc files: seconds (7 s
+    measured on a zsh with nvm and conda), so never on the window's thread."""
+    shell = os.environ.get("SHELL") or "/bin/zsh"
+    if os.name == "nt" or not os.path.exists(shell):
+        return None
+    try:
+        out = subprocess.run(
+            [shell, "-lic", "printf '\\n__NORMET_PATH__%s\\n' \"$PATH\""],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            stdin=subprocess.DEVNULL,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.search(r"__NORMET_PATH__(.*)", out)
+    return m.group(1).strip() if m else None
+
+
+def login_path_in_background(then: Callable[[], None] | None = None) -> None:
+    """Read the login shell's PATH once, on a thread of its own; ``then()`` (called
+    from that thread) once it is in :data:`LOGIN_PATH`."""
+    global _login_asked
+    if _login_asked:
+        return
+    _login_asked = True
+
+    def job() -> None:
+        global LOGIN_PATH
+        LOGIN_PATH = read_login_path()
+        if then is not None and LOGIN_PATH:
+            then()
+
+    threading.Thread(target=job, daemon=True).start()
+
+
+def stream_interrupted(text: str) -> bool:
+    """Whether an agent's failure notice says its stream broke, whatever its wording."""
+    t = str(text).strip().lower()
+    return "stream was interrupted" in t or "please continue the task" in t
+
+
 def find_cli(command: str) -> str | None:
-    """The agent's executable: on PATH, else where installers put it."""
+    """The agent's command: on PATH; else where installers and Node's version managers
+    (nvm, fnm, Volta, asdf, mise, npm's own prefix) put it, the newest Node's first; else
+    on the login shell's PATH once that has been read. Never runs a shell itself."""
+    if command in _FOUND:
+        return _FOUND[command]
     found = shutil.which(command)
+    if not found:
+        names = [command] + ([command + ".cmd", command + ".exe"] if os.name == "nt" else [])
+        for place in CLI_PLACES:
+            dirs = sorted(glob.glob(os.path.expanduser(place)), key=_version_key, reverse=True)
+            found = next(
+                (os.path.join(d, n) for d in dirs for n in names if _runnable(os.path.join(d, n))),
+                None,
+            )
+            if found:
+                break
+    if not found and LOGIN_PATH:
+        found = shutil.which(command, path=LOGIN_PATH)
     if found:
-        return found
-    extra = os.pathsep.join(os.path.expanduser(d) for d in _EXTRA_DIRS)
-    return shutil.which(command, path=extra)
+        _FOUND[command] = found
+    return found
 
 
 def _env_with(command: str, env: dict[str, str]) -> dict[str, str]:
     """*env* with the command's folder first on PATH: an npm-installed agent is a
     Node script that finds ``node`` beside it."""
-    folder = os.path.dirname(command)
+    folder = os.path.dirname(os.path.abspath(command))
     return dict(env, PATH=folder + os.pathsep + env.get("PATH", ""))
+
+
+def _tokens(input_tokens: int = 0, output_tokens: int = 0) -> dict[str, int]:
+    """The usage dict :attr:`CliChat.turn_done` carries."""
+    return {"input": int(input_tokens), "output": int(output_tokens)}
 
 
 # -- models and efforts -------------------------------------------------------------------
@@ -185,13 +289,15 @@ class CliChat(QObject):
     """The conversation with an agent, a process per message.
 
     Signals: ``text`` (the reply's text as it comes), ``step`` (a tool of the
-    agent's own, by name), ``failed(str)`` and ``ended()`` (the message's
-    process is gone). ``interrupted`` is set when the agent's stream broke
+    agent's own, by name), ``turn_done(object)`` (once per message, the usage as
+    ``{"input": int, "output": int}`` tokens -- zeros where the agent reports
+    none), ``failed(str)`` and ``ended()`` (the message's process is gone). ``interrupted`` is set when the agent's stream broke
     mid-answer, for the panel to ask once more.
     """
 
     text = Signal(str)
     step = Signal(str)
+    turn_done = Signal(object)  # the dict itself, not a QVariantMap copy
     failed = Signal(str)
     ended = Signal()
 
@@ -347,6 +453,21 @@ class ClaudeChat(CliChat):
                     self.step.emit(str(block.get("name")))
         elif kind == "result" and (e.get("is_error") or e.get("subtype") not in (None, "success")):
             self.failed.emit(f"claude: {e.get('result') or e.get('subtype')}")
+        if kind == "result":
+            u = e.get("usage") or {}
+            self.turn_done.emit(
+                _tokens(
+                    sum(
+                        int(u.get(k) or 0)
+                        for k in (
+                            "input_tokens",
+                            "cache_creation_input_tokens",
+                            "cache_read_input_tokens",
+                        )
+                    ),
+                    u.get("output_tokens") or 0,
+                )
+            )
 
 
 class CodexChat(CliChat):
@@ -411,6 +532,11 @@ class CodexChat(CliChat):
                 and item.get("server") != SERVER_NAME
             ):
                 self.step.emit(f"{item.get('server')}/{item.get('tool')}")
+            elif kind == "item.started" and it == "web_search":
+                self.step.emit("web search")
+        elif kind == "turn.completed":
+            u = e.get("usage") or {}
+            self.turn_done.emit(_tokens(u.get("input_tokens") or 0, u.get("output_tokens") or 0))
         elif kind == "turn.failed":
             err = e.get("error") if isinstance(e.get("error"), dict) else e
             msg = str((err or {}).get("message") or kind)
@@ -479,6 +605,8 @@ class CopilotChat(CliChat):
         elif kind == "tool.execution_start":
             if data.get("mcpServerName") != SERVER_NAME:
                 self.step.emit(str(data.get("toolName") or "tool"))
+        elif kind == "result":
+            self.turn_done.emit(_tokens())  # it reports requests, not tokens
         elif kind.endswith(".error") or kind == "error":
             self.failed.emit(f"copilot: {data.get('message') or kind}")
 
@@ -650,16 +778,21 @@ class AgyChat(CliChat):
             if st == "agent_response" and s.get("text_delta"):
                 self._said += s["text_delta"]
                 self.text.emit(s["text_delta"])
-            elif st == "tool" and s.get("state") == "ACTIVE":
+            elif (
+                st == "tool"
+                and s.get("state") == "ACTIVE"
+                and s.get("tool_name") not in ("call_mcp_tool", "view_file")
+            ):
                 # Its reading of the tools' schemas, and its calls to them, are
                 # shown as the server takes them.
-                if s.get("tool_name") not in ("call_mcp_tool", "view_file"):
-                    self.step.emit(s.get("tool_name") or "tool")
+                self.step.emit(s.get("tool_name") or "tool")
         elif kind == "result":
             r = e.get("result") or {}
             self.conversation = r.get("conversation_id") or self.conversation
             if r.get("status") not in (None, "SUCCESS"):
                 self.failed.emit(f"agy: {r.get('error') or r.get('status')}")
+            u = r.get("usage") or {}
+            self.turn_done.emit(_tokens(u.get("input_tokens") or 0, u.get("output_tokens") or 0))
 
 
 CHATS: dict[str, type[CliChat]] = {

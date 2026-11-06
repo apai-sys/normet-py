@@ -196,3 +196,111 @@ def test_the_view_follows_the_system_appearance(qapp, fresh_zoom):
         QApplication.setPalette(old)
         v.follow_palette()
     assert v.look.dark == (old.color(QPalette.ColorRole.Base).lightnessF() < 0.5)
+
+
+def test_tex_in_dollars_reads_as_text(qapp):
+    from normet.gui.chatview import Look, _math, markdown_html
+
+    assert _math(r"Q/Q_{\text{exp}} \to 1") == "Q/Q<sub>exp</sub> → 1"
+    assert _math(r"x^2 \geq \alpha") == "x<sup>2</sup> ≥ α"
+    out = markdown_html("Costs $5 and $10, then $R^2 \\approx 0.9$; `a $b$ c` stays.", Look())
+    assert "$5 and $10" in out and "R<sup>2</sup> ≈ 0.9" in out and "NORMETMATH" not in out
+    assert "$b$" in out  # a dollar in code is left alone
+
+
+def test_a_long_word_is_soft_broken_and_copies_whole(qapp, fresh_zoom):
+    from PySide6.QtWidgets import QApplication
+
+    from normet.gui.chatview import ZWSP, ChatView, _runs, _soften
+
+    word = "x" * 100
+    assert _runs("short words only") == "short words only"
+    assert _runs(word).replace(ZWSP, "") == word and ZWSP in _runs(word)
+    assert "&amp;" in _soften(f"<p>{word} &amp; more</p>", True)  # an entity kept whole
+    v = ChatView()
+    v.resize(300, 300)
+    v.show()
+    v.reply(f"see /data/{word}/end here")
+    reply = [w for w in v.items() if type(w).__name__ == "_Reply"][0]
+    assert ZWSP in reply.label.text()
+    v.open_find()
+    v.find_bar.edit.setText("/data/" + "x" * 30)  # a needle spanning a soft break
+    assert len(v._hits) == 1
+    lbl, at, n = v._hits[0]
+    lbl.setSelection(at, n)
+    menu = v.menu_for(lbl)
+    dict((a.text(), a) for a in menu.actions())["Copy"].trigger()
+    assert QApplication.clipboard().text() == "/data/" + "x" * 30
+    assert v.toPlainText().endswith(f"see /data/{word}/end here")  # the transcript is whole
+    v.close()
+
+
+def test_a_table_scrolls_sideways_on_its_own(qapp, fresh_zoom):
+    from normet.gui.chatview import ChatView, _Wide
+
+    v = ChatView()
+    v.resize(260, 400)
+    v.show()
+    row = " | ".join(f"column{i}" for i in range(12))
+    v.reply(f"Before\n\n| {row} |\n|{'---|' * 12}\n| {row} |\n\nAfter")
+    reply = [w for w in v.items() if type(w).__name__ == "_Reply"][0]
+    for _ in range(10):
+        qapp.sendPostedEvents()
+        qapp.processEvents()
+    wide = reply.findChildren(_Wide)
+    assert len(wide) == 1 and wide[0].label.width() > 260  # wider than the panel
+    assert wide[0].horizontalScrollBar().maximum() > 0
+    assert len(reply._widgets) == 3  # text, table, text
+    # streaming more words leaves the blocks alone
+    before = list(reply._widgets)
+    v.reply("!", more=True)
+    assert reply._widgets == before
+    v.close()
+
+
+def test_notes_cards_and_the_working_line(qapp, fresh_zoom):
+    from normet.gui.chatview import ChatView, Working
+
+    v = ChatView()
+    v.resize(400, 500)
+    v.note("fine")
+    v.note("It broke", error=True)
+    names = [w.objectName() for w in v.items()]
+    assert names == ["", "trouble"]
+    assert v.toPlainText() == "fine\n\nIt broke"
+    btn = v.card("Proposed set-up", "Target", lambda: "Done", kind="setup")
+    card = v.items()[-1]
+    assert card.tag.text() == "Set-up" and card.tag.isVisibleTo(card)
+    assert not card.done
+    v.card_done(btn)
+    assert card.done and btn.text() == "Applied" and not btn.isEnabled()
+    plain = v.card("Run in the window", "x", lambda: "Ran", "Ran", "Run")
+    assert plain.text() == "Ran" and not plain.isEnabled()
+    assert v.items()[-1].tag.isHidden()
+
+    w = v.working
+    assert isinstance(w, Working) and w.isHidden()
+    w.say("Reading the data")
+    assert w.timer.isActive() and "Reading the data" in w.label.text()
+    first = w.spin.text()
+    for _ in range(3):
+        w._tick()
+    assert w.spin.text() != first or len(w.FRAMES) == 1
+    v.clear()
+    assert not w.timer.isActive()
+
+
+def test_a_call_line_is_one_painted_line(qapp, fresh_zoom):
+    from normet.gui.chatview import ChatView, _CallLine
+
+    v = ChatView()
+    v.resize(300, 300)
+    item = v.tool("inspect_data", {"target": "NO2"})
+    line = item.line
+    assert isinstance(line, _CallLine)
+    assert line.name == "inspect_data" and line.rest == "(target='NO2')"
+    v.show()
+    line.grab()  # paints without error
+    v.zoom_by(1)
+    v.zoom_by(0)
+    v.close()

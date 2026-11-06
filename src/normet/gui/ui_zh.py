@@ -1462,6 +1462,27 @@ INNER.update(
         "Wind": "风",
     }
 )
+# The Assistant's data consent, window-asked turns and save folder
+TEXTS.update(
+    {
+        "Send to {s0}?": "发送给 {s0}？",
+        "The assistant sends what normet's tools read of the table open to {s0} ({s1}): the table's size and span, each column's name, role, missing values, range and correlation with the target, the model's fit scores and feature importance, the normalised and decomposed series' means and ranges, the trend statistics -- and what the code it writes for you prints -- with your messages.\n\nIt does not send the table itself, row by row.\n\nAllow it for this data set?": "助手会把 normet 的工具读到的当前数据的内容发送给 {s0}（{s1}）：表的大小和时间跨度、每列的名称、角色、缺失值、取值范围及与目标的相关性，模型的拟合得分与特征重要性，归一化和分解序列的均值与范围，趋势统计——以及它为你写的代码的输出——连同你的消息。\n\n不会逐行发送数据表本身。\n\n允许对这个数据集这样做吗？",
+        "Allow it for this data set?": "允许对这个数据集这样做吗？",
+        "The window asks: {s0}": "窗口请求：{s0}",
+        "Not asked: {s0}": "未发出请求：{s0}",
+        "The assistant is mid-turn: the window's ask waits for it.": "助手正在回答：窗口的请求要等它完成。",
+        "'{s0}' is not installed, or not on PATH.": "未安装“{s0}”，或它不在 PATH 中。",
+        "Save folder…": "保存文件夹…",
+        "Save into folder": "保存到文件夹",
+        "Full automatic: save into folder": "全自动：保存到文件夹",
+        "Full automatic: where should its results be saved?": "全自动：结果保存到哪里？",
+        "Full automatic saves into {s0}.": "全自动保存到 {s0}。",
+        "Not saved": "未保存",
+        "Nothing saved": "未保存任何内容",
+        "Saved {n0} file(s)": "已保存 {n0} 个文件",
+        "Save": "保存",
+    }
+)
 # The Assistant's full automatic (.assistant: Auto, its notes)
 TEXTS.update(
     {
@@ -1469,7 +1490,7 @@ TEXTS.update(
         "Full automatic: the set-up the Assistant proposes is applied at once, and it works the analysis through -- data, set-up, training, normalisation, decomposition -- without waiting for you.": "全自动：助手提出的设定立即应用，并一路完成分析——数据、设定、训练、归一化、分解——无需等你确认。",
         "What full automatic does…": "全自动会做什么…",
         "Full automatic": "全自动",
-        "With Auto on, the Assistant works without waiting for you:\n\n• the target and predictors it proposes are applied at once;\n• it goes through the analysis in the window's order -- the data, the set-up, training, normalisation, decomposition -- reading each result;\n• if it stops with steps left, it is told what is left and goes on (up to 8 times; it stops when two reminders in a row change nothing);\n• a failed or empty answer from the model is asked again, twice at most.\n\nStop ends it at any time. With an API model all of this applies; a command-line agent has the set-up applied at once and works the chain as its own loop allows.": "打开“自动”后，助手不必等你确认：\n\n• 它提出的目标和预测变量立即应用；\n• 按窗口的顺序完成分析——数据、设定、训练、归一化、分解——并读取每一步的结果；\n• 如果还有步骤没做它就停下，会被告知还剩什么并继续（最多 8 次；连续两次提醒都没有进展就停止）；\n• 模型调用失败或回复为空时会重新请求，最多两次。\n\n随时可以点“停止”结束。以上全部适用于 API 模型；命令行智能体会立即应用设定，并在它自己的循环允许的范围内完成整个流程。",
+        "With Auto on, the Assistant works without waiting for you:\n\n• the target and predictors it proposes are applied at once;\n• it goes through the analysis in the window's order -- the data, the set-up, training, normalisation, decomposition -- reading each result;\n• if it stops with steps left, it is told what is left and goes on (up to 8 times; it stops when two reminders in a row change nothing);\n• a failed or empty answer from the model is asked again, twice at most;\n• what it saves (propose_save) goes into the folder chosen as Auto is turned on (Save folder… in its menu changes it), else beside the data in normet-auto/.\n\nStop ends it at any time. With an API model all of this applies; a command-line agent has the set-up applied at once and works the chain as its own loop allows.": "打开“自动”后，助手不必等你确认：\n\n• 它提出的目标和预测变量立即应用；\n• 按窗口的顺序完成分析——数据、设定、训练、归一化、分解——并读取每一步的结果；\n• 如果还有步骤没做它就停下，会被告知还剩什么并继续（最多 8 次；连续两次提醒都没有进展就停止）；\n• 模型调用失败或回复为空时会重新请求，最多两次；\n• 它保存的内容（propose_save）放进打开“自动”时选的文件夹（可在其菜单“保存文件夹…”中更改），否则放在数据旁的 normet-auto/。\n\n随时可以点“停止”结束。以上全部适用于 API 模型；命令行智能体会立即应用设定，并在它自己的循环允许的范围内完成整个流程。",
         "Full automatic on: what the Assistant proposes is applied at once, and it works the analysis through.": "全自动已打开：助手提出的内容立即应用，并一路完成分析。",
         "Full automatic off: proposals wait for Apply again.": "全自动已关闭：提议重新等待你点击“应用”。",
         "Full automatic: not finished, so it goes on -- left: {s0}.": "全自动：尚未完成，继续进行——还剩：{s0}。",

@@ -31,7 +31,9 @@ in the settings.
 
 from __future__ import annotations
 
+import html
 import json
+import os
 import re
 import subprocess
 import sys
@@ -40,13 +42,14 @@ import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from PySide6.QtCore import QEvent, QObject, QSettings, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QSettings, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QKeyEvent, QKeySequence, QShortcut, QTextCursor
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QDockWidget,
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -63,8 +66,9 @@ from PySide6.QtWidgets import (
 
 from normet.agent import llm, readings
 from normet.agent.mcp_http import ToolServer
+from normet.i18n import written_language
 
-from . import _code, assistant_cli
+from . import _code, assistant_cli, uilang
 from .chatview import ChatView, Look, composer_sheet
 from .theme import theme_manager
 
@@ -92,7 +96,8 @@ Which tool does what the analyst asks:
   trend (the trend analysis of a series: Mann-Kendall, Theil-Sen slope, block-bootstrap
   corrected), polar_plot (a variable by wind direction and speed), and the SCM
   Studio's synthetic control: scm_open, scm_fit, scm_placebo, scm_bands. results
-  reads every result tab.
+  reads every result tab. propose_save(items, reasons) offers to save the reports, the
+  result tables, the script or the session, into a folder the analyst picks.
 - Everything else normet's API does goes to the analyst with carry_out: code on the
   table open, CODE_CONVENTIONS api_help("") lists the API and api_help(name) shows a
   call; write a call from what api_help shows. Do not say normet cannot do something
@@ -157,7 +162,7 @@ MAX_TOKENS = 16384
 #: the tokens a long session spends are mostly the full readings it would otherwise carry
 #: for good; the panel's conversation is untouched, and a fresh reading one call away.
 KEEP_ROUNDS = 2
-FOLDED = " ... [the head of an earlier reading; call the same tool once more for the whole]"
+FOLDED = llm.ContextPolicy.FOLDED
 #: Readings the payload keeps whole however old in full automatic -- the latest of each:
 #: what the set-up, the fit and the reading of the results stand on, read early in a
 #: chain and decided on late.
@@ -225,6 +230,141 @@ def auto_on() -> bool:
     return bool(_settings().value(AUTO_KEY, False, type=bool))
 
 
+#: Providers that run on this machine: nothing leaves it, so no consent is asked.
+LOCAL = ("ollama", "lmstudio")
+#: Settings: where full automatic saves (the folder chosen), and what may be saved.
+SAVE_KEY = "assistant/save_folder"
+SAVE_ITEMS = ("report", "results", "script", "session")
+#: What each item saved is, as the card and the model are told.
+SAVE_TEXT = {
+    "report": "an HTML report for each result tab that has been run",
+    "results": "each result table as CSV",
+    "script": "the command log as a Python script that repeats the session",
+    "session": "the whole session as a normet results file (File -> Load Results reads it back)",
+}
+
+
+def documents_folder() -> str:
+    """Documents/normet/normet-auto: full automatic's folder where the data's own cannot
+    take it."""
+    return os.path.join(os.path.expanduser("~"), "Documents", "normet", "normet-auto")
+
+
+def _shipped(folder: str) -> bool:
+    """A folder inside the application or the package -- where the shipped examples are:
+    a file written there is lost to the analyst inside the app, and breaks a signed
+    app's seal."""
+    import normet
+
+    real = os.path.realpath(folder) + os.sep
+    roots = [os.path.dirname(os.path.abspath(normet.__file__)), getattr(sys, "_MEIPASS", None)]
+    return ".app" + os.sep + "Contents" + os.sep in real or any(
+        r and real.startswith(os.path.realpath(r) + os.sep) for r in roots
+    )
+
+
+def chosen_folder() -> str | None:
+    """The folder the analyst chose for full automatic's saves, if it is still there."""
+    chosen = str(_settings().value(SAVE_KEY, "") or "")
+    return chosen if chosen and os.path.isdir(chosen) else None
+
+
+def auto_folder(data_path: str | None) -> str:
+    """Where full automatic saves: the folder chosen in Auto's menu; else beside the data,
+    its folder's normet-auto/, where that is the analyst's own folder and can be written;
+    else Documents/normet/normet-auto -- an example's table is inside the application,
+    and a save beside it would be found by no one."""
+    chosen = chosen_folder()
+    if chosen:
+        return chosen
+    d = os.path.dirname(os.path.abspath(data_path)) if data_path else ""
+    if d and os.path.isdir(d) and os.access(d, os.W_OK) and not _shipped(d):
+        return os.path.join(d, "normet-auto")
+    return documents_folder()
+
+
+def _folder_link(folder: str) -> str:
+    """A folder named in a note, a click away from being shown."""
+    return f'<a href="{QUrl.fromLocalFile(folder).toString()}">{html.escape(folder)}</a>'
+
+
+def dataset_key(win: MainWindow) -> str:
+    """What consent is asked once for: the table's file, else the table open."""
+    return getattr(win, "_data_path", None) or f"unsaved table {id(win.df_raw)}"
+
+
+def dataset_keys(win: MainWindow) -> list[str]:
+    """Every data set the tools can read: the table open, and the SCM Studio's panel
+    (its own data set, whatever the main window holds)."""
+    keys = [dataset_key(win)] if win.df_raw is not None else []
+    scm = getattr(win, "_scm_window", None)
+    df = getattr(scm, "df", None)
+    if df is not None:
+        keys.append(f"SCM panel {id(df)}")
+    return keys
+
+
+def save_into(win: MainWindow, folder: str, items: list[str]) -> tuple[list[str], list[str]]:
+    """Write *items* (SAVE_ITEMS) of the window into *folder*: the paths written, and
+    what could not be written, each with why. Runs on the window's thread."""
+    import pandas as pd
+
+    os.makedirs(folder, exist_ok=True)
+    written: list[str] = []
+    skipped: list[str] = []
+    tables = {k: v for k, v in win.results.items() if isinstance(v, pd.DataFrame)}
+    for item in dict.fromkeys(items):
+        try:
+            if item == "results":
+                if not tables:
+                    skipped.append("results (no result table yet)")
+                for key, table in tables.items():
+                    path = os.path.join(folder, f"normet_{key}.csv")
+                    table.to_csv(path)
+                    written.append(path)
+            elif item == "report":
+                from normet import generate_html_report, make_run
+
+                from ._shell import report_language
+
+                if not tables:
+                    skipped.append("report (no result table yet)")
+                for key, table in tables.items():
+                    run = make_run(
+                        table,
+                        kind=key,
+                        config=win.get_config(),
+                        df=win.df_raw,
+                        model=win.model,
+                        seed=win.seed_spin.value(),
+                    )
+                    path = os.path.join(folder, f"normet_{key}_report.html")
+                    generate_html_report(run, path, lang=report_language())
+                    written.append(path)
+            elif item == "script":
+                if not len(win.command_log):
+                    skipped.append("script (nothing in the command log yet)")
+                    continue
+                path = os.path.join(folder, "normet_session.py")
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(win.command_log.script())
+                written.append(path)
+            elif item == "session":
+                if win.df_raw is None:
+                    skipped.append("session (no table is open)")
+                    continue
+                import joblib
+
+                from ._saved import SUFFIX
+
+                path = os.path.join(folder, "normet_session" + SUFFIX)
+                joblib.dump(win.session_bundle(), path, compress=3)
+                written.append(path)
+        except Exception as exc:  # noqa: BLE001 -- said, the others still written
+            skipped.append(f"{item} ({type(exc).__name__}: {exc})")
+    return written, skipped
+
+
 def _next(key: str) -> str:
     return "\nThen: " + NEXT_TEXT[key] + "."
 
@@ -272,13 +412,14 @@ def keychain_store(provider: str, key: str) -> bool:
 
 
 def find_key(provider: str) -> str | None:
-    """The provider's key: typed in this session, the keychain, or its environment variable."""
-    import os
-
+    """The provider's key: typed in this session, the keychain, ~/.zshrc, the environment.
+    The environment comes last: a shell's is a copy made when it started, and a key
+    changed in ~/.zshrc since is the one that works."""
     env = (llm.provider_spec(provider) or ("", "", None))[2]
     return (
         _SESSION_KEYS.get(provider)
         or keychain_get(provider)
+        or (llm._zshrc_key(env) if env else None)
         or (os.environ.get(env) if env else None)
     )
 
@@ -458,6 +599,7 @@ class WindowTools:
         ("pdp", "model"),
         ("polar_plot", "data"),
         ("results", None),
+        ("propose_save", "data"),
         ("scm_open", None),
         ("scm_fit", "panel"),
         ("scm_placebo", "scm"),
@@ -505,6 +647,7 @@ class WindowTools:
         "polar_plot": {"var": "variable", "pollutant": "variable", "stat": "statistic"},
         "train": {"n_trials": "budget", "time_budget": "budget", "split": "split_method"},
         "propose_setup": {"predictors": "features", "covariates": "features", "reason": "reasons"},
+        "propose_save": {"what": "items", "files": "items", "reason": "reasons"},
     }
     #: What an agent writes about its own call into the call's arguments, spelt without
     #: case or underscores -- dropped, not refused.
@@ -513,6 +656,7 @@ class WindowTools:
     ARG_TEXT: dict[Any, str] = {
         "reasons": "your reasons, in the analyst's words, shown on the card",
         ("propose_setup", "confidence"): "how sure you are, from 0 to 1 (0.7 = fairly sure)",
+        ("propose_save", "items"): "any of 'report', 'results', 'script', 'session'",
         ("propose_setup", "features"): "the predictors: the table's meteorological columns",
         ("api_help", "name"): "one of normet's calls, e.g. 'rolling'; '' lists them",
         ("carry_out", "code"): "normet's calls on the table open (df), as api_help shows "
@@ -791,12 +935,14 @@ class WindowTools:
 
         if auto_on():
             said = str(self._gui(apply))
-            self.dock.post_card.emit("Proposed set-up", body, apply, said, "Apply")
+            self.dock.post_card.emit("Proposed set-up", body, apply, said, "Apply", "setup")
             return (
                 f"{said} at once (full automatic is on): the panel has the target and "
                 "predictors ticked. Go on with the chain."
             )
-        self.dock.post_card.emit("Proposed set-up", body, apply_and_train, "", "Apply and train")
+        self.dock.post_card.emit(
+            "Proposed set-up", body, apply_and_train, "", "Apply and train", "setup"
+        )
         return (
             "Shown to the analyst as a card; its Apply ticks the set-up and starts training. "
             "Stop here and let them answer."
@@ -1091,6 +1237,42 @@ class WindowTools:
         return str(self._gui(lambda: _all_tabs_say(self.win)))
 
     # the SCM Studio
+    def propose_save(self, items: list[str], reasons: str) -> str:
+        """Offer to save what is on screen: any of "report" (an HTML report for each result
+        tab that has been run), "results" (each result table as CSV), "script" (the
+        command log as a Python script that repeats the session) and "session" (the
+        results file File -> Load Results reads back). A card with an Apply button: the
+        analyst picks the folder, and it is written there."""
+        want = [str(i).strip().lower() for i in items]
+        bad = [i for i in want if i not in SAVE_ITEMS]
+        if bad or not want:
+            raise ValueError(
+                f"items: any of {', '.join(SAVE_ITEMS)} ({', '.join(bad) or 'none'} given)"
+            )
+        want = list(dict.fromkeys(want))
+        body = (
+            "**Save:**\n\n" + "\n".join(f"- {i}: {SAVE_TEXT[i]}" for i in want) + f"\n\n{reasons}"
+        )
+        if auto_on():
+            said = str(self._gui(lambda: self.dock.save_items(want, auto=True)))
+            self.dock.post_card.emit("Save", body, lambda: said, said, "Save", "")
+            folder, written, skipped = self.dock.last_saved
+            return (
+                f"Carried out at once (full automatic is on): {said} into {folder}: "
+                + (", ".join(os.path.basename(p) for p in written) or "nothing")
+                + ("; not saved: " + "; ".join(skipped) if skipped else "")
+                + ". Go on with the chain."
+            )
+
+        def save() -> str:
+            return self.dock.save_items(want, auto=False)
+
+        self.dock.post_card.emit("Save", body, save, "", "Save", "")
+        return (
+            "Shown to the analyst with a Save button; nothing is written until they click it "
+            "and pick a folder. Stop here and let them answer."
+        )
+
     def _scm(self) -> Any:
         w = getattr(self.win, "_scm_window", None)
         if w is None or w.df is None:
@@ -1205,7 +1387,7 @@ class WindowTools:
             return self.win.df_raw, self.win.df_prep, self.win.model
 
         if auto_on():
-            self.dock.post_card.emit("Run in the window", body, lambda: "Ran", "Ran", "Run")
+            self.dock.post_card.emit("Run in the window", body, lambda: "Ran", "Ran", "Run", "run")
             df, df_prep, model = self._gui(inputs)
             said = _code.run_code(code, df, df_prep, model)
             return "Ran at once (full automatic is on).\n\n" + said
@@ -1214,7 +1396,7 @@ class WindowTools:
             self.dock.run_code(code)
             return "Running…"
 
-        self.dock.post_card.emit("Run in the window", body, run, "", "Run")
+        self.dock.post_card.emit("Run in the window", body, run, "", "Run", "run")
         return (
             "Shown to the analyst as a card; Run carries it out on the table, and their "
             "next message says what it gave. Stop here and let them answer."
@@ -1254,6 +1436,7 @@ class WindowTools:
                 self.pdp,
                 self.polar_plot,
                 self.results,
+                self.propose_save,
                 self.scm_open,
                 self.scm_fit,
                 self.scm_placebo,
@@ -1515,14 +1698,40 @@ def chain_left(win: MainWindow, called: set[str]) -> list[str]:
     return left
 
 
-def nudge_text(left: list[str], state: str) -> str:
+#: The languages a model is asked to reply in, by the window's language (uilang).
+REPLY_IN = {"en": "English", "zh": "Simplified Chinese (简体中文)"}
+
+
+def reply_language_text(talk: str | None = None) -> str:
+    """The language a turn the window starts itself is answered in. No analyst wrote it,
+    and its words are English, so "answer in the language the analyst writes in" would
+    read it as English. The conversation's language where the analyst has written in this
+    chat (*talk*, their last message's, ``written_language``) -- an English window talked
+    to in Chinese is answered in Chinese -- else the window's."""
+    if talk in REPLY_IN:
+        return (
+            f"Reply in {REPLY_IN[talk]}, the language the analyst writes to you in: "
+            "no one typed this, the window asks it."
+        )
+    return (
+        f"Reply in {REPLY_IN.get(uilang.language(), 'English')}, the window's "
+        "language: no one typed this, the window asks it."
+    )
+
+
+def window_task_text(text: str, talk: str | None = None) -> str:
+    """A turn the window starts itself (``AssistantDock.task``) as the model is sent it."""
+    return f"{text}\n\n[{reply_language_text(talk)}]"
+
+
+def nudge_text(left: list[str], state: str, talk: str | None = None) -> str:
     """What full automatic tells a model that ended its turn with the chain unfinished."""
     steps = "; ".join(CHAIN_TEXT[s] for s in left)
     return (
         "[Full automatic: the analysis is not finished, and no one will answer -- go on. "
         f"Still to do, in order: {steps}. Window now: {state}. Carry on with the first. "
         "Where a step cannot be done, say why in a line and go to the next; end once every "
-        "step is done or cannot be.]"
+        "step is done or cannot be. " + reply_language_text(talk) + "]"
     )
 
 
@@ -1559,6 +1768,10 @@ class _ChatThread(QThread):
 
     event = Signal(object)
     failed = Signal(str)
+    #: The language the analyst writes in (``written_language``): a turn full automatic
+    #: asks for itself is answered in it (nudge_text).
+    talk: str | None = None
+    auto = False
 
     def __init__(
         self, model: llm.ChatModel, messages: list[dict[str, Any]], tools: WindowTools
@@ -1597,59 +1810,23 @@ class _ChatThread(QThread):
         if self.messages and self.messages[-1]["role"] != "assistant":
             self.messages.append({"role": "assistant", "text": text, "calls": []})
 
+    def _policy(self) -> llm.ContextPolicy:
+        return llm.ContextPolicy(KEEP_ROUNDS, PINNED if self.auto else ())
+
     def _payload(self) -> list[dict[str, Any]]:
         """``self.messages`` as the next call gets it: rounds older than the last
         KEEP_ROUNDS have their tool results folded to the head line (FOLDED) and their
-        reasoning left out. A long session otherwise carries every full reading to every
-        round -- the largest thing it spends; the panel's conversation is not touched,
-        and a fresh reading is one call of the same tool away. Full automatic keeps the
-        latest of each PINNED reading whole."""
-        kept: int | None = None
-        rounds = 0
-        for i in range(len(self.messages) - 1, -1, -1):
-            if self.messages[i]["role"] == "assistant":
-                rounds += 1
-                if rounds > KEEP_ROUNDS:
-                    kept = i
-                    break
-        if kept is None:
-            return self.messages
-        pinned = self._pinned() if self.auto else set()
-        out: list[dict[str, Any]] = []
-        for pos, m in enumerate(self.messages):
-            if pos >= kept:
-                out.append(m)
-            elif m["role"] == "assistant":
-                out.append({k: v for k, v in m.items() if k != "reasoning"})
-            elif m["role"] == "tool":
-                results = []
-                for r in m.get("results", []):
-                    r = dict(r)
-                    text = r.get("text") or ""
-                    if len(text) > len(FOLDED) + 60 and r.get("id") not in pinned:
-                        r["text"] = text[:160].rstrip() + FOLDED
-                    results.append(r)
-                out.append({"role": "tool", "results": results})
-            else:
-                out.append(dict(m))
-        return out
+        reasoning left out (:class:`normet.agent.llm.ContextPolicy`). A long session
+        otherwise carries every full reading to every round -- the largest thing it
+        spends; the panel's conversation is not touched, and a fresh reading is one call
+        of the same tool away. Full automatic keeps the latest of each PINNED reading
+        whole."""
+        return self._policy().prepare(self.messages)
 
     def _pinned(self) -> set[str]:
         """The ids of the results kept whole however old (full automatic): the latest of
         each PINNED reading that did not fail."""
-        name_of: dict[str, str] = {}
-        for m in self.messages:
-            if m["role"] == "assistant":
-                for c in m.get("calls") or []:
-                    name_of[c.id] = c.name
-        latest: dict[str, str] = {}
-        for m in self.messages:
-            if m["role"] == "tool":
-                for r in m.get("results", []):
-                    name = name_of.get(r.get("id", ""))
-                    if name in PINNED and not r.get("error"):
-                        latest[name] = r["id"]
-        return set(latest.values())
+        return llm.ContextPolicy(KEEP_ROUNDS, PINNED)._pinned_ids(self.messages)
 
     def _call(self, c: llm.Call, by_name: dict[str, llm.Tool]) -> tuple[str, bool]:
         """A call of the model's carried out: its arguments checked first (renamed where a
@@ -1762,7 +1939,9 @@ class _ChatThread(QThread):
                     nudges += 1
                     nudged = left
                     state = str(self.box._gui(lambda: state_text(self.box.win)))
-                    self.messages.append({"role": "user", "content": nudge_text(left, state)})
+                    self.messages.append(
+                        {"role": "user", "content": nudge_text(left, state, self.talk)}
+                    )
                     self._note(
                         "Full automatic: not finished, so it goes on -- left: "
                         + ", ".join(CHAIN_WORDS[s] for s in left)
@@ -1856,7 +2035,8 @@ class _ServerDialog(QDialog):
 class AssistantDock(QDockWidget):
     """The Assistant panel: a model, a conversation, proposals the analyst applies."""
 
-    post_card = Signal(str, str, object, str, str)
+    #: (title, body, apply, applied, action, kind): a proposal card (``ChatView.card``).
+    post_card = Signal(str, str, object, str, str, str)
     _tool_started = Signal(str, object)
     _tool_ended = Signal(str, str, bool)
 
@@ -1885,6 +2065,16 @@ class AssistantDock(QDockWidget):
         self._server: ToolServer | None = None
         self._open_tools: list[QLabel] = []
         self._retried = False
+        #: (provider, data set) pairs the analyst allowed readings to be sent for
+        #: (_consent): asked once each, this session.
+        self.consented: set[tuple[str, str]] = set()
+        #: The language of the analyst's last message in this chat (``written_language``).
+        self._talk: str | None = None
+        #: The button of the card whose Apply is being carried out (_post_card), for what
+        #: the click starts to mark when it has ended.
+        self._acting: QPushButton | None = None
+        #: What the last save wrote: (folder, paths written, what was not written).
+        self.last_saved: tuple[str, list[str], list[str]] = ("", [], [])
         #: The agents' entries in the model list: label -> (agent, model).
         self._agents = {label: (agent, model) for label, agent, model in assistant_cli.choices()}
 
@@ -1926,10 +2116,14 @@ class AssistantDock(QDockWidget):
             "decomposition -- without waiting for you."
         )
         auto_menu = QMenu(self.auto_btn)
+        auto_menu.addAction("Save folder…", lambda: self._pick_auto_folder())
         auto_menu.addAction("What full automatic does…", self._about_auto)
         self.auto_btn.setMenu(auto_menu)
         self.auto_btn.setChecked(auto_on())
         self.auto_btn.toggled.connect(self._auto_chosen)
+        # A click (not a programmatic switch) turning it on asks where its saves go; a
+        # cancelled choice leaves it off.
+        self.auto_btn.clicked.connect(self._auto_clicked)
         # The row is what decides how narrow the dock can go: by default the
         # combos are as wide as their longest entry and Fusion's buttons 80 px,
         # which held the dock at 510 px and the window at that much more.
@@ -1955,9 +2149,9 @@ class AssistantDock(QDockWidget):
         v.addLayout(top)
         self.view = ChatView()
         v.addWidget(self.view, 1)
-        self.working = QLabel("Working…")
-        self.working.setStyleSheet(_MUTED)
-        self.working.hide()
+        #: The line that turns while the model works (``ChatView.working``), above the box
+        #: written in.
+        self.working = self.view.working
         v.addWidget(self.working)
         # The box the analyst writes in: rounded, growing with what is written, its
         # buttons inside it.
@@ -2014,11 +2208,17 @@ class AssistantDock(QDockWidget):
         # follows the window.
         win.runner.finished.connect(self._step_ended)
 
-        self.post_card.connect(self.view.card)
+        self.post_card.connect(self._post_card)
         self._tool_started.connect(self._on_tool_started)
         self._tool_ended.connect(self._on_tool_ended)
         self._sync_key_button()
         self._fill_efforts()
+        # An agent installed where only the login shell's PATH reaches (nvm, fnm, Volta,
+        # asdf, mise, bun, pnpm, homebrew): that PATH is read off the window's thread --
+        # seconds -- and find_cli looks on it from then on (the model list names every
+        # agent whether or not it is found yet, so nothing is redrawn).
+        if not all(assistant_cli.find_cli(cmd) for cmd, _ in assistant_cli.AGENTS.values()):
+            assistant_cli.login_path_in_background()
         self.view.note(
             "The Assistant reads what the window holds and runs its steps. It proposes a "
             "target and predictors as a card; nothing is applied until you click Apply."
@@ -2058,8 +2258,9 @@ class AssistantDock(QDockWidget):
             self._suggest(suggested_message(self.win, self.tools.called))
 
     def _say_tokens(self) -> None:
-        """The tokens the conversation has taken, in the box's status line (none where the
-        model is a command-line agent, which does not say)."""
+        """The tokens the conversation has taken, in the box's status line: an API model's
+        usage, and a command-line agent's as it reports it per turn (``turn_done``; none
+        for Copilot, which reports requests)."""
         used = self.usage["input"] or self.usage["output"]
         self.status.setText(
             f"tokens: {self.usage['input']:,} in, {self.usage['output']:,} out" if used else ""
@@ -2094,22 +2295,57 @@ class AssistantDock(QDockWidget):
             "the window: wait_for_run, then model_fit reads it. Do not train it again.]"
         )
 
+    def _post_card(
+        self, title: str, body: str, apply: Callable[[], str], applied: str, action: str, kind: str
+    ) -> None:
+        """A proposal card in the conversation. Its Apply is carried out with the card's
+        button known (``self._acting``), for what the click starts to mark or reopen when
+        it has ended."""
+        ref: list[QPushButton] = []
+
+        def acting() -> str:
+            self._acting = ref[0] if ref else None
+            try:
+                return apply()
+            finally:
+                self._acting = None
+
+        ref.append(self.view.card(title, body, acting, applied, action, kind))
+
+    @staticmethod
+    def _reopen(button: QPushButton | None, action: str) -> None:
+        """A card's button spent by its click but not used (a cancelled folder, a step in
+        the way): ready to be clicked again once the click has been handled."""
+        if button is None:
+            return
+
+        def again() -> None:
+            button.setText(action)
+            button.setEnabled(True)
+
+        QTimer.singleShot(0, again)
+
     def run_code(self, code: str) -> None:
         """The code of a card the analyst ran (carry_out), on the window's table, off the
         interface thread; what it gave shown and told to the model with the next
         message."""
         w = self.win
+        card = self._acting  # the card whose Run was clicked, marked when the code has ended
         item = self.view.tool("carry_out", {"lines": len(code.strip().splitlines())})
 
         def done(said: str) -> None:
             failed = "\nError:\n" in f"\n{said}"
             self.view.tool_done(item, said, failed)
+            if card is not None:
+                self.view.card_done(card, "Failed" if failed else "Ran")
             self.notes.append("[The analyst ran your code. What it gave:\n" + said + "]")
             if not self.busy() and self.messages_sent():
                 self._suggest(suggested_message(w, self.tools.called))
 
         def failed(message: str) -> None:
             self.view.tool_done(item, message, True)
+            if card is not None:
+                self.view.card_done(card, "Failed")
             self.notes.append(f"[The analyst ran your code; it failed: {message}]")
 
         if not w.runner.submit(
@@ -2123,6 +2359,7 @@ class AssistantDock(QDockWidget):
             w.model,
         ):
             self.view.tool_done(item, "A step is running: run it again once it has ended.", True)
+            self._reopen(card, "Run")
 
     def eventFilter(self, obj: QObject, ev: QEvent) -> bool:  # noqa: N802
         box = getattr(self, "composer", None)  # events come while the dock is built
@@ -2254,6 +2491,7 @@ class AssistantDock(QDockWidget):
             api_key=find_key(provider) if llm.provider_spec(provider) else None,
             max_tokens=MAX_TOKENS,
         )
+        llm.ca_bundle()  # certificates for the provider's HTTPS where the system has none
         remember_model(name)
         return model
 
@@ -2263,12 +2501,124 @@ class AssistantDock(QDockWidget):
             return True
         return self._cli is not None and self._cli.running()
 
+    def _provider(self) -> str:
+        """The provider of the model named: its agent's name for a command-line agent,
+        else the part before the colon."""
+        agent = self._agents.get(self.model_box.currentText())
+        return agent[0] if agent else self.model_box.currentText().strip().partition(":")[0]
+
+    def _confirm(self, title: str, text: str) -> bool:
+        box = QMessageBox.StandardButton
+        # No is the default: the Enter that sent the message must not also consent.
+        return QMessageBox.question(self, title, text, box.Yes | box.No, box.No) == box.Yes
+
+    def _consent(self, path: str | None = None) -> bool:
+        """Asked once per data set and provider before readings of it leave this machine:
+        the table open and the SCM Studio's panel, or the file *path*."""
+        provider = self._provider()
+        keys = [path] if path else dataset_keys(self.win)
+        if provider in LOCAL or not keys:
+            return True
+        keys = [(provider, k) for k in keys]
+        if all(k in self.consented for k in keys):
+            return True
+        spec = llm.provider_spec(provider)
+        host = (
+            {
+                "claude-code": "Anthropic, through Claude Code and your sign-in",
+                "codex": "OpenAI, through Codex and your ChatGPT sign-in",
+                "agy": "Google, through agy and your subscription",
+                "copilot": "GitHub, through Copilot's CLI and your sign-in",
+            }.get(provider)
+            or (
+                f"{provider}, your job on that cluster through hpc-agent's tunnel"
+                if provider in llm.hpc_clusters()
+                and provider not in llm.PROVIDERS
+                and provider not in llm.custom_providers()
+                else None
+            )
+            or (QUrl(spec[1]).host() if spec else "")
+            or provider
+        )
+        if not self._confirm(
+            "Send to " + provider + "?",
+            f"The assistant sends what normet's tools read of the table open to {provider} "
+            f"({host}): the table's size and span, each column's name, role, missing values, "
+            "range and correlation with the target, the model's fit scores and feature "
+            "importance, the normalised and decomposed series' means and ranges, the trend "
+            "statistics -- and what the code it writes for you prints -- with your "
+            "messages.\n\nIt does not send the table itself, row by row."
+            "\n\nAllow it for this data set?",
+        ):
+            return False
+        self.consented.update(keys)
+        return True
+
     def send(self, text: str | None = None) -> None:
         text = (text if isinstance(text, str) else self.composer.toPlainText()).strip()
         if not text or self.busy():
             return
-        self.composer.clear()
-        self.view.you(text)
+        self._dispatch(text, typed=True)
+
+    def can_task(self) -> bool:
+        """The window may start a turn of its own: the dock is idle, a model is named,
+        and this data set has been consented on already -- a window's own turn must not
+        ask what the analyst has not answered, and must not interrupt a turn under way."""
+        if self.busy() or not self.model_box.currentText().strip():
+            return False
+        provider = self._provider()
+        if provider in LOCAL:
+            return True
+        keys = dataset_keys(self.win)
+        if not keys:
+            return False
+        return all((provider, k) in self.consented for k in keys)
+
+    def task(self, text: str) -> bool:
+        """A turn the window starts itself, without the analyst typing. The same road as
+        send(): one message, the model's tools, its cards; what differs is where the words
+        come from, and that a consent the analyst has not given is NOT asked for -- the
+        turn just does not start. True where it started."""
+        text = str(text).strip()
+        if not text:
+            return False
+        if self.busy():
+            self.view.note("The assistant is mid-turn: the window's ask waits for it.")
+            return False
+        if not self.model_box.currentText().strip():
+            return False
+        if not self.can_task():
+            return False
+        self._dispatch(text, typed=False)
+        return True
+
+    def _dispatch(self, text: str, typed: bool) -> None:
+        """One message to the model: the analyst's own (*typed*), or one the window asks
+        (``task``, in the language of the chat)."""
+        model = None
+        if not self._is_agent():
+            try:
+                model = self._model()
+            except (ValueError, RuntimeError) as exc:
+                self.view.note(str(exc) if typed else "Not asked: " + str(exc), error=True)
+                return
+        if self._is_agent() and self._cli is None:
+            # Not found (yet: the login shell's PATH is read in the background): say so
+            # while the message is still in the box.
+            agent = self._agents[self.model_box.currentText()][0]
+            command = assistant_cli.AGENTS[agent][0]
+            if assistant_cli.find_cli(command) is None:
+                self.view.note(f"'{command}' is not installed, or not on PATH.", error=True)
+                return
+        if not self._consent():
+            return  # a message refused stays in the box, to be sent again
+        if typed:
+            self.composer.clear()
+            self.view.you(text)
+            self._talk = written_language(text) or self._talk
+        else:
+            self.view.note("The window asks: " + text)
+            text = window_task_text(text, self._talk)
         told = "".join(n + "\n" for n in self.notes)
         self.notes.clear()
         # The whole state where it moved since the last message; a brief line where not.
@@ -2279,16 +2629,12 @@ class AssistantDock(QDockWidget):
         self.tools.stop.clear()
         self._model_next = None
         self.status.setText("Thinking…")
-        if self._is_agent():
+        if model is None:
             self._send_cli(stamped)
-            return
-        try:
-            model = self._model()
-        except (ValueError, RuntimeError) as exc:
-            self.view.note(str(exc), error=True)
             return
         self.messages.append({"role": "user", "content": stamped})
         self._thread = _ChatThread(model, self.messages, self.tools)
+        self._thread.talk = self._talk
         self._thread.event.connect(self._on_event)
         self._thread.failed.connect(lambda msg: self.view.note(msg, error=True))
         self._thread.finished.connect(self._idle)
@@ -2312,13 +2658,20 @@ class AssistantDock(QDockWidget):
         elif e["type"] == "tool":
             if self._open_tools:
                 self.view.tool_done(self._open_tools.pop(0), e["output"], e["error"])
-            self.status.setText("Thinking…")
+            self._doing("Thinking…")
 
     def _say_running(self, name: str) -> None:
         """What the turn is doing, in the box's status line: a step of the window's, or a
         reading."""
         steps = ("train", "normalise", "decompose", "wait_for_run")
-        self.status.setText(f"{name} running in the window…" if name in steps else f"{name}…")
+        self._doing(f"{name} running in the window…" if name in steps else f"{name}…")
+
+    def _doing(self, what: str) -> None:
+        """What the turn is doing now: in the box's status line, and on the line that turns
+        while the model works (not once the turn has ended)."""
+        self.status.setText(what)
+        if self.busy():
+            self.view.working.say(what)
 
     def _on_tool_started(self, name: str, arguments: dict[str, Any]) -> None:
         self._open_tools.append(self.view.tool(name, arguments))
@@ -2327,10 +2680,13 @@ class AssistantDock(QDockWidget):
     def _on_tool_ended(self, name: str, output: str, error: bool) -> None:
         if self._open_tools:
             self.view.tool_done(self._open_tools.pop(0), output, error)
-        self.status.setText("Thinking…")
+        self._doing("Thinking…")
 
     def _working(self, on: bool) -> None:
-        self.working.setVisible(on)
+        if on:
+            self.view.working.say("Thinking…")
+        else:
+            self.view.working.stop()
         self.send_btn.setEnabled(not on)
         self.stop_btn.setEnabled(on)
 
@@ -2353,6 +2709,72 @@ class AssistantDock(QDockWidget):
             else "Full automatic off: proposals wait for Apply again."
         )
 
+    def _auto_clicked(self, on: bool) -> None:
+        # No folder, no full automatic: a cancelled choice leaves it off.
+        if on and not self._pick_auto_folder("Full automatic: where should its results be saved?"):
+            self.auto_btn.setChecked(False)
+
+    def _pick_auto_folder(self, title: str = "Full automatic: save into folder") -> bool:
+        """The folder full automatic's saves go into, chosen and kept; False where the
+        choice was cancelled."""
+        start = auto_folder(getattr(self.win, "_data_path", None))
+        if not os.path.isdir(start):
+            parent = os.path.dirname(start)
+            start = parent if os.path.isdir(parent) else os.path.expanduser("~")
+        folder = QFileDialog.getExistingDirectory(self, title, start)
+        if not folder:
+            return False
+        _settings().setValue(SAVE_KEY, folder)
+        self._say_auto_folder()
+        return True
+
+    def _say_auto_folder(self) -> None:
+        """Where full automatic's saves go now, with a link that shows the folder."""
+        chosen = chosen_folder()
+        where = (
+            _folder_link(chosen)
+            if chosen
+            else "beside the data (its folder's normet-auto/); an example's, and data in a "
+            "folder that cannot be written, in " + _folder_link(documents_folder())
+        )
+        self.view.note("Full automatic saves into " + where + ".", rich=True)
+
+    def save_items(self, items: list[str], auto: bool = False) -> str:
+        """Write *items* (SAVE_ITEMS) of the window into a folder: full automatic's
+        (``auto_folder``), else the one the analyst picks. Says where in the conversation
+        and, with the next message, to the model; returns the card button's text. What was
+        written is kept in ``last_saved`` (folder, paths, what was not)."""
+        w = self.win
+        card = self._acting
+        if auto:
+            folder = auto_folder(getattr(w, "_data_path", None))
+        else:
+            start = auto_folder(getattr(w, "_data_path", None))
+            if not os.path.isdir(start):
+                parent = os.path.dirname(start)
+                start = parent if os.path.isdir(parent) else os.path.expanduser("~")
+            folder = QFileDialog.getExistingDirectory(self, "Save into folder", start)
+            if not folder:
+                self._reopen(card, "Save")  # cancelled: the card can be used again
+                return "Not saved"
+        written, skipped = save_into(w, folder, items)
+        self.last_saved = (folder, written, skipped)
+        self.view.note(
+            f"Saved into {_folder_link(folder)}: "
+            + html.escape(", ".join(os.path.basename(p) for p in written) or "nothing")
+            + (" — not saved: " + html.escape("; ".join(skipped)) if skipped else ""),
+            rich=True,
+            error=not written,
+        )
+        if not auto:  # full automatic's tool result tells the model itself
+            self.notes.append(
+                f"[The analyst saved {len(written)} file(s) into {folder}: "
+                + ", ".join(os.path.basename(p) for p in written)
+                + ("; not saved: " + "; ".join(skipped) if skipped else "")
+                + ".]"
+            )
+        return f"Saved {len(written)} file(s)" if written else "Nothing saved"
+
     def _about_auto(self) -> None:
         QMessageBox.information(
             self,
@@ -2363,7 +2785,9 @@ class AssistantDock(QDockWidget):
             "training, normalisation, decomposition -- reading each result;\n"
             "• if it stops with steps left, it is told what is left and goes on (up to 8 "
             "times; it stops when two reminders in a row change nothing);\n"
-            "• a failed or empty answer from the model is asked again, twice at most.\n\n"
+            "• a failed or empty answer from the model is asked again, twice at most;\n"
+            "• what it saves (propose_save) goes into the folder chosen as Auto is turned on "
+            "(Save folder… in its menu changes it), else beside the data in normet-auto/.\n\n"
             "Stop ends it at any time. With an API model all of this applies; a command-line "
             "agent has the set-up applied at once and works the chain as its own loop "
             "allows.",
@@ -2384,6 +2808,7 @@ class AssistantDock(QDockWidget):
         self.usage = {"input": 0, "output": 0}
         self._model_next = None
         self._state_parts = None
+        self._talk = None
         self.tools._readings.clear()
         self._close_cli()
         self.view.clear()
@@ -2410,7 +2835,8 @@ class AssistantDock(QDockWidget):
                 self.view.note(f"'{command}' is not installed, or not on PATH.", error=True)
                 return
             self._cli.text.connect(self._cli_text_in)
-            self._cli.step.connect(lambda name: self.view.note(f"the agent's own step: {name}"))
+            self._cli.step.connect(self._cli_step)
+            self._cli.turn_done.connect(self._cli_turn)
             self._cli.failed.connect(lambda msg: self.view.note(msg, error=True))
             self._cli.ended.connect(self._cli_ended)
             self._retried = False
@@ -2421,6 +2847,17 @@ class AssistantDock(QDockWidget):
             self.view.note(str(exc), error=True)
             self._idle()
 
+    def _cli_step(self, name: str) -> None:
+        """A tool of the agent's own (the window's are shown as the server takes them)."""
+        self.view.note(f"the agent's own step: {name}")
+        self._doing(f"agent: {name}…")
+
+    def _cli_turn(self, usage: dict) -> None:
+        """The agent's turn ended: the tokens it says it took, into the conversation's."""
+        for k in ("input", "output"):
+            self.usage[k] += int(usage.get(k, 0) or 0)
+        self._doing("Thinking…")  # the work goes on; the next words stop it
+
     def _cli_text_in(self, t: str) -> None:
         """The agent's words as they arrive: the reply written so far shown whole, its
         suggestion's line (whole or begun) kept off the panel."""
@@ -2428,6 +2865,7 @@ class AssistantDock(QDockWidget):
             self._cli_text = ""
         self._cli_text += t
         self.view.reply_live(without_next(unstamp(self._cli_text)))
+        self.view.working.stop()  # the words themselves show the work
 
     def _cli_ended(self) -> None:
         """The agent's message ended: asked once more on its own where its stream broke

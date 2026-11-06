@@ -29,18 +29,23 @@ from __future__ import annotations
 
 import html
 import re
+import time
+from bisect import bisect_left, bisect_right
 from collections.abc import Callable
 from typing import Any
 
-from PySide6.QtCore import QEvent, QSettings, Qt, Signal
+from PySide6.QtCore import QEvent, QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
     QFont,
     QFontDatabase,
+    QFontMetrics,
     QKeySequence,
+    QPainter,
     QPalette,
     QShortcut,
     QTextDocument,
+    QTextDocumentFragment,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -106,6 +111,7 @@ class Look:
         self.on_accent = QColor("#ffffff" if self.accent.lightnessF() < 0.62 else "#000000")
         self.ok = QColor("#4cc38a" if dark else "#2f9e5a")
         self.err = QColor("#ff7b72" if dark else "#c62828")
+        self.err_ground = _mix(ground, self.err, 0.13 if dark else 0.07)
         base = QApplication.font().pointSizeF()
         self.size = max(9.0, (base if base > 0 else 13.0) + zoom)
         self.small = max(8.0, self.size - 1.5)
@@ -141,12 +147,15 @@ QWidget#chat QLabel[tone="error"] {{ color: {c(k.err)}; }}
 QFrame#you {{ background: {c(k.bubble)}; border-radius: 12px; }}
 QFrame#proposal {{ background: {c(k.card)}; border: 1px solid {c(k.border)};
                    border-radius: 10px; }}
+QFrame#trouble {{ background: {c(k.err_ground)}; border-radius: 8px; }}
 QFrame#tool {{ border-radius: 6px; }}
 QFrame#tool[open="true"] {{ background: {c(k.hover)}; }}
 QFrame#tool[clickable="true"]:hover {{ background: {c(k.hover)}; }}
 QPushButton#apply {{ background: {c(k.accent)}; color: {c(k.on_accent)}; border: none;
                      border-radius: 6px; padding: 4px 14px; font-weight: 600; }}
 QPushButton#apply:disabled {{ background: {c(k.border)}; color: {c(k.muted)}; }}
+QScrollArea#wide {{ background: transparent; border: none; }}
+QScrollArea#wide > QWidget > QWidget {{ background: transparent; }}
 QToolButton#to_end {{ background: {c(k.card if k.dark else k.ground)}; color: {c(k.text)};
                       border: 1px solid {c(k.border)}; border-radius: 14px; }}
 QToolButton#to_end:hover {{ background: {c(k.hover)}; }}
@@ -180,17 +189,97 @@ QPushButton#composer_stop:disabled, QPushButton#composer_new:disabled {{ color: 
 """
 
 
+#: TeX a model writes inline, as the text it stands for: models write $Q_{\text{exp}}$ and
+#: $\to$ in Markdown whether asked to or not, and the panel draws no TeX.
+_TEX = {
+    r"\to": "→",
+    r"\rightarrow": "→",
+    r"\leftarrow": "←",
+    r"\Rightarrow": "⇒",
+    r"\geq": "≥",
+    r"\ge": "≥",
+    r"\leq": "≤",
+    r"\le": "≤",
+    r"\neq": "≠",
+    r"\ne": "≠",
+    r"\approx": "≈",
+    r"\sim": "~",
+    r"\times": "×",
+    r"\cdot": "·",
+    r"\pm": "±",
+    r"\infty": "∞",
+    r"\Delta": "Δ",
+    r"\delta": "δ",
+    r"\alpha": "α",
+    r"\beta": "β",
+    r"\gamma": "γ",
+    r"\sigma": "σ",
+    r"\mu": "μ",
+    r"\chi": "χ",
+    r"\lambda": "λ",
+    r"\rho": "ρ",
+    r"\theta": "θ",
+    r"\epsilon": "ε",
+    r"\sum": "Σ",
+    r"\%": "%",
+    r"\,": " ",
+    r"\;": " ",
+    r"\quad": " ",
+    r"\left": "",
+    r"\right": "",
+    r"\ldots": "…",
+    r"\dots": "…",
+}
+_MATH_SRC = r"\$\$(.+?)\$\$|(?<![\w$])\$(?=\S)([^$\n]*?\S)\$(?![\w$])"
+#: A $...$ or $$...$$ span; (the second pattern) code spans matched first so a dollar in
+#: code is left alone.
+_MATH = re.compile(_MATH_SRC, re.S)
+_MATH_OR_CODE = re.compile(r"(```.*?```|`[^`\n]*`)|" + _MATH_SRC, re.S)
+
+
+def _math(src: str) -> str:
+    """Inline TeX as HTML text: commands as their symbols, _{x} and ^{x} as sub- and
+    superscripts."""
+    s = src.strip()
+    s = re.sub(r"\\(?:text|mathrm|mathbf|mathit|operatorname)\{([^{}]*)\}", r"\1", s)
+    s = re.sub(r"\\frac\{([^{}]*)\}\{([^{}]*)\}", r"\1/\2", s)
+    for cmd in sorted(_TEX, key=len, reverse=True):
+        s = re.sub(re.escape(cmd) + r"(?![A-Za-z])", lambda _m, c=cmd: _TEX[c], s)
+    s = html.escape(s, quote=False)
+    s = re.sub(r"_\{([^{}]*)\}", r"<sub>\1</sub>", s)
+    s = re.sub(r"\^\{([^{}]*)\}", r"<sup>\1</sup>", s)
+    s = re.sub(r"_(\w)", r"<sub>\1</sub>", s)
+    s = re.sub(r"\^(\w)", r"<sup>\1</sup>", s)
+    return s.replace("{", "").replace("}", "")
+
+
+def _md(md: str) -> str:
+    """The model's Markdown as Qt's HTML (from ``<body``), as Qt reads GitHub's dialect,
+    with inline $...$ TeX as text (``_math``). A dollar sign that opens no formula
+    ("$5 and $10") stays one, and so does one in code."""
+    maths: list[str] = []
+
+    def keep(m: re.Match[str]) -> str:
+        if m.group(1) is not None:  # code: untouched
+            return m.group(0)
+        maths.append(m.group(2) if m.group(2) is not None else m.group(3))
+        return f"NORMETMATH{len(maths) - 1}X"
+
+    doc = QTextDocument()
+    doc.setMarkdown(
+        _MATH_OR_CODE.sub(keep, md), QTextDocument.MarkdownFeature.MarkdownDialectGitHub
+    )
+    text = doc.toHtml()
+    text = text[text.find("<body") :] if "<body" in text else text
+    return re.sub(r"NORMETMATH(\d+)X", lambda m: _math(maths[int(m.group(1))]), text)
+
+
 def markdown_html(md: str, k: Look) -> str:
     """The model's Markdown as Qt's HTML, set for the panel: a heading at the body's own
     size (bold only), paragraphs and list items closer, lines a little apart, code shaded
     (a block's lines wrapped), a table ruled in the palette's line colour, its first row
-    shaded."""
-    from PySide6.QtGui import QTextDocument
-
-    doc = QTextDocument()
-    doc.setMarkdown(md)
-    text = doc.toHtml()
-    text = text[text.find("<body") :] if "<body" in text else text
+    shaded, TeX in dollars as text (``_md``)."""
+    text = _md(md)
     text = re.sub(
         r"font-size:(xx-large|x-large|large|medium|small|x-small);",
         f"font-size:{k.size:.1f}pt;",
@@ -244,13 +333,57 @@ def markdown_html(md: str, k: Look) -> str:
     )
 
 
+ZWSP = "\u200b"  # where a too-long word may be broken
+_BREAK_AT = 24  # characters between a long run's breaks
+_BREAK_MIN = 28  # runs shorter than this are left whole
+
+
+def _runs(text: str) -> str:
+    """A word too long for the panel (a URL, a path), given soft breaks every
+    ``_BREAK_AT`` characters: a zero-width space Qt wraps a line at (a 300-character word
+    is otherwise one line, its tail clipped, however narrow the label). Copying takes the
+    breaks out again."""
+
+    def soft(m: re.Match[str]) -> str:
+        run = m.group(0)
+        return ZWSP.join(run[i : i + _BREAK_AT] for i in range(0, len(run), _BREAK_AT))
+
+    return re.sub(rf"\S{{{_BREAK_MIN},}}", soft, text)
+
+
+def _soften(text: str, rich: bool) -> str:
+    """``_runs`` over the text as written, or -- HTML -- between its tags, its entities
+    whole (a break inside ``&amp;`` would print the entity as words)."""
+    if not rich:
+        return _runs(text)
+    out = []
+    for part in re.split(r"(<[^>]+>)", text):
+        if part.startswith("<"):
+            out.append(part)
+            continue
+        for piece in re.split(r"(&[#a-zA-Z0-9]+;)", part):
+            out.append(piece if piece.startswith("&") else _runs(piece))
+    return "".join(out)
+
+
 def _tone(w: QWidget, tone: str, prop: str = "tone") -> None:
     w.setProperty(prop, tone)
     w.style().unpolish(w)
     w.style().polish(w)
 
 
-def _label(text: str, k: Look, *, rich: bool, keep: bool, tone: str | None = None) -> QLabel:
+def _label(
+    text: str,
+    k: Look,
+    *,
+    rich: bool,
+    keep: bool,
+    tone: str | None = None,
+    view: ChatView | None = None,
+) -> QLabel:
+    """A wrapped, selectable label, as wide as it is given: a word too long for the panel
+    is soft-broken (``_soften``), never widening the conversation (a table goes in
+    ``_Wide``). With a *view*, its right click is the conversation's menu."""
     lbl = QLabel()
     # The analyst's and the model's own words (*keep*): left as written in any language
     # the window is in (.uilang). A note is the window's own.
@@ -267,29 +400,121 @@ def _label(text: str, k: Look, *, rich: bool, keep: bool, tone: str | None = Non
     if tone:
         lbl.setProperty("tone", tone)
     lbl.setFont(k.font())
-    lbl.setText(text)
+    lbl.setText(_soften(text, rich))
+    if view is not None:
+        view._hook(lbl)
     return lbl
+
+
+def _fill(lay: Any, widgets: list[QWidget]) -> None:
+    """A layout's widgets replaced: the old ones out of any find at once (hidden), the
+    deletion itself waiting a turn."""
+    while lay.count():
+        w = lay.takeAt(0).widget()
+        if w is not None:
+            w.hide()
+            w.deleteLater()
+    for w in widgets:
+        lay.addWidget(w)
+
+
+class _Wide(QScrollArea):
+    """A table: as wide as its cells, scrolled sideways on its own where the panel is
+    narrower, while the text around it wraps."""
+
+    def __init__(self, html_text: str, k: Look, view: ChatView | None = None) -> None:
+        super().__init__()
+        self.setObjectName("wide")
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.label = _label(html_text, k, rich=True, keep=True, view=view)
+        self.label.setWordWrap(False)
+        self.label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.label.adjustSize()
+        self.setWidget(self.label)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self._fit()
+
+    def set_html(self, html_text: str, k: Look) -> None:
+        self.label.setFont(k.font())
+        self.label.setText(_soften(html_text, True))
+        self.label.adjustSize()
+        self._fit()
+
+    def _fit(self) -> None:
+        over = self.label.width() > max(1, self.width())
+        bar = self.horizontalScrollBar().sizeHint().height() if over else 0
+        self.setFixedHeight(self.label.height() + bar)
+
+    def resizeEvent(self, e: Any) -> None:  # noqa: N802
+        super().resizeEvent(e)
+        self._fit()
+
+
+def _parts(md: str, k: Look) -> list[tuple[bool, str]]:
+    """Markdown as the panel shows it, cut where a table stands: (is a table, its HTML)."""
+    out: list[tuple[bool, str]] = []
+    for part in re.split(r'(<table border="1".*?</table>)', markdown_html(md, k), flags=re.S):
+        if part.strip():
+            out.append((part.startswith('<table border="1"'), part))
+    return out
+
+
+def _blocks(md: str, k: Look, view: ChatView | None = None) -> list[QWidget]:
+    """Markdown as the panel shows it: its text in labels, each table on its own."""
+    return [
+        _Wide(part, k, view) if wide else _label(part, k, rich=True, keep=True, view=view)
+        for wide, part in _parts(md, k)
+    ]
 
 
 class _Reply(QWidget):
     """The model's words, as their Markdown reads; written again as they stream in."""
 
-    def __init__(self, md: str, k: Look) -> None:
+    def __init__(self, md: str, k: Look, view: ChatView | None = None) -> None:
         super().__init__()
-        self.md = md
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(2, 0, 2, 0)
-        self.label = _label("", k, rich=True, keep=True)
-        lay.addWidget(self.label)
+        self.md, self.view = md, view
+        self._kinds: list[bool] = []
+        self._widgets: list[QWidget] = []
+        self.col = QVBoxLayout(self)
+        self.col.setContentsMargins(2, 0, 2, 0)
+        self.col.setSpacing(4)
         self.restyle(k)
+
+    @property
+    def label(self) -> QLabel | None:
+        """The first of its texts (a table's too, where it is first)."""
+        for w in self._widgets:
+            return w.label if isinstance(w, _Wide) else w  # type: ignore[return-value]
+        return None
+
+    def _set(self, k: Look) -> None:
+        parts = _parts(self.md, k)
+        kinds = [wide for wide, _ in parts]
+        if kinds == self._kinds:  # the same blocks: their text again, nothing rebuilt
+            for w, (_, part) in zip(self._widgets, parts, strict=True):
+                if isinstance(w, _Wide):
+                    w.set_html(part, k)
+                else:
+                    w.setFont(k.font())  # type: ignore[attr-defined]
+                    w.setText(_soften(part, True))  # type: ignore[attr-defined]
+            return
+        self._kinds = kinds
+        self._widgets = [
+            _Wide(part, k, self.view)
+            if wide
+            else _label(part, k, rich=True, keep=True, view=self.view)
+            for wide, part in parts
+        ]
+        _fill(self.col, self._widgets)
 
     def set_md(self, md: str, k: Look) -> None:
         self.md = md
-        self.label.setText(markdown_html(md, k))
+        self._set(k)
 
     def restyle(self, k: Look) -> None:
-        self.label.setFont(k.font())
-        self.label.setText(markdown_html(self.md, k))
+        self._set(k)
 
     def bare(self) -> str:
         return self.md
@@ -327,15 +552,49 @@ class _You(QFrame):
         return "› " + self.text.replace("\n", "\n  ")
 
 
+class _CallLine(QWidget):
+    """A call on one line: its name in the text's colour, its arguments quieter, cut
+    with an ellipsis where the panel ends (the whole call is the row's tooltip)."""
+
+    def __init__(self, call: str, k: Look) -> None:
+        super().__init__()
+        cut = call.find("(")
+        self.name, self.rest = (call, "") if cut < 0 else (call[:cut], call[cut:])
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.restyle(k)
+
+    def restyle(self, k: Look) -> None:
+        self.k = k
+        self.f = k.font(k.code_size, mono=True)
+        self.setFixedHeight(QFontMetrics(self.f).height() + 2)
+        self.update()
+
+    def paintEvent(self, e: Any) -> None:  # noqa: N802
+        p = QPainter(self)
+        p.setFont(self.f)
+        fm = p.fontMetrics()
+        y = (self.height() + fm.ascent() - fm.descent()) // 2
+        name = fm.elidedText(self.name, Qt.TextElideMode.ElideRight, self.width())
+        p.setPen(self.k.text)
+        p.drawText(0, y, name)
+        x = fm.horizontalAdvance(name)
+        if self.rest and x < self.width():
+            p.setPen(self.k.muted)
+            p.drawText(
+                x, y, fm.elidedText(self.rest, Qt.TextElideMode.ElideRight, self.width() - x)
+            )
+        p.end()
+
+
 class _Tool(QFrame):
     """One tool call: a dot -- grey while it runs, green when it answered, red when it was
     refused -- and the call on one line; a refusal under it; what it returned shown when
     the line is clicked."""
 
-    def __init__(self, call: str, k: Look) -> None:
+    def __init__(self, call: str, k: Look, view: ChatView | None = None) -> None:
         super().__init__()
         self.setObjectName("tool")
-        self.call, self.result, self.error, self.opened = call, "", False, False
+        self.call, self.k, self.result, self.error, self.opened = call, k, "", False, False
         lay = QVBoxLayout(self)
         lay.setContentsMargins(6, 2, 6, 2)
         lay.setSpacing(2)
@@ -344,14 +603,14 @@ class _Tool(QFrame):
         row.setSpacing(7)
         self.dot = QLabel("●")
         self.dot.setProperty("tone", "faint")
-        self.line = _label(html.escape(call), k, rich=True, keep=True, tone="muted")
+        self.line = _CallLine(call, k)
         self.chevron = QLabel("")
         self.chevron.setProperty("tone", "faint")
         row.addWidget(self.dot)
         row.addWidget(self.line, 1)
         row.addWidget(self.chevron)
         lay.addLayout(row)
-        self.detail = _label("", k, rich=False, keep=True, tone="muted")
+        self.detail = _label("", k, rich=False, keep=True, tone="muted", view=view)
         self.detail.setContentsMargins(17, 0, 0, 2)
         self.detail.hide()
         lay.addWidget(self.detail)
@@ -359,8 +618,9 @@ class _Tool(QFrame):
         self.restyle(k)
 
     def restyle(self, k: Look) -> None:
+        self.k = k
         self.dot.setFont(k.font(k.small - 1))
-        self.line.setFont(k.font(k.small))
+        self.line.restyle(k)
         self.chevron.setFont(k.font(k.small))
         self.detail.setFont(k.font(k.small) if self.error else k.font(k.code_size, mono=True))
 
@@ -369,7 +629,8 @@ class _Tool(QFrame):
         _tone(self.dot, "error" if error else "ok")
         if error:
             _tone(self.detail, "error")
-            self.detail.setText(text[:1200])
+            self.detail.setFont(self.k.font(self.k.small))
+            self.detail.setText(_runs(text[:1200]))
             self.detail.show()
         elif text.strip():
             self.chevron.setText("›")
@@ -397,14 +658,22 @@ class _Tool(QFrame):
 
     def toggle(self) -> None:
         self.opened = not self.opened
-        self.detail.setText(self.result[:4000] + ("…" if len(self.result) > 4000 else ""))
+        self.detail.setText(_runs(self.result[:4000]) + ("…" if len(self.result) > 4000 else ""))
         self.detail.setVisible(self.opened)
         self.chevron.setText("⌄" if self.opened else "›")
         _tone(self, "true" if self.opened else "false", "open")
 
 
 class _Card(QFrame):
-    """A proposal: its title, the model's reasons and the button that carries it out."""
+    """A proposal: what kind it is, its title, the model's reasons and the button that
+    carries it out (``mark_done`` once it has been)."""
+
+    #: The small line above a card's title, by its kind (the window's own words).
+    TAGS = {
+        "setup": "Set-up",
+        "script": "Steps in the window",
+        "run": "Run in the window",
+    }
 
     def __init__(
         self,
@@ -414,36 +683,51 @@ class _Card(QFrame):
         applied: str,
         action: str,
         k: Look,
+        view: ChatView | None = None,
+        kind: str = "",
     ) -> None:
         super().__init__()
         self.setObjectName("proposal")
-        self.title = title
+        self.title, self.kind, self.done = title, kind, False
         lay = QVBoxLayout(self)
         lay.setContentsMargins(12, 10, 12, 10)
-        # The title is the window's own words (translated); the body is the model's.
-        head = _label(html.escape(title), k, rich=True, keep=False)
-        head.setFont(k.font(bold=True))
-        lay.addWidget(head)
-        self.body = _Reply(body, k)
+        # The tag and the title are the window's own words (translated); the body is the
+        # model's.
+        self.tag = _label(self.TAGS.get(kind, "Proposal"), k, rich=False, keep=False, tone="muted")
+        self.tag.setVisible(bool(kind))
+        self.head = _label(html.escape(title), k, rich=True, keep=False, view=view)
+        self.head.setFont(k.font(bold=True))
+        lay.addWidget(self.tag)
+        lay.addWidget(self.head)
+        self.body = _Reply(body, k, view)
         lay.addWidget(self.body)
         self.button = btn = QPushButton(action)
         btn.setObjectName("apply")
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
 
         def clicked() -> None:
             try:
                 said = apply()
             except Exception as exc:  # noqa: BLE001 -- shown on the card
                 said = f"Could not apply: {exc}"
-            btn.setText(said)
-            btn.setEnabled(False)
+            self.mark_done(said)
 
         btn.clicked.connect(clicked)
         if applied:
-            btn.setText(applied)
-            btn.setEnabled(False)
+            self.mark_done(applied)
         lay.addWidget(btn, 0, Qt.AlignmentFlag.AlignLeft)
+        self.restyle(k)
+
+    def mark_done(self, text: str = "Applied") -> None:
+        """The card applied: its button says so (*text*) and is spent."""
+        self.done = True
+        self.button.setText(text)
+        self.button.setEnabled(False)
 
     def restyle(self, k: Look) -> None:
+        self.tag.setFont(k.font(k.small))
+        self.head.setFont(k.font(bold=True))
+        self.button.setFont(k.font(k.small))
         self.body.restyle(k)
 
     def bare(self) -> str:
@@ -453,13 +737,92 @@ class _Card(QFrame):
         return f"[{self.title}]\n{self.body.md}\n[{self.button.text()}]"
 
 
+class _Note(QFrame):
+    """A line of the panel's own: muted, or an error on a tinted ground."""
+
+    def __init__(
+        self,
+        text: str,
+        k: Look,
+        view: ChatView | None = None,
+        *,
+        error: bool = False,
+        rich: bool = False,
+    ) -> None:
+        super().__init__()
+        self.text, self.rich = text, rich
+        if error:
+            self.setObjectName("trouble")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(*((10, 6, 10, 6) if error else (2, 0, 2, 0)))
+        self.label = _label(
+            text, k, rich=rich, keep=False, tone="error" if error else "muted", view=view
+        )
+        lay.addWidget(self.label)
+        self.restyle(k)
+
+    def restyle(self, k: Look) -> None:
+        self.label.setFont(k.font(k.small))
+
+    def plain(self) -> str:
+        return _label_text(self.label).replace(ZWSP, "") if self.rich else self.text
+
+
+class Working(QWidget):
+    """The line that turns while the model works, above the box the analyst writes in:
+    what it is doing and for how long. Laid out by the panel (``ChatView.working``)."""
+
+    FRAMES = "·✢✳✶✻✽✻✶✳✢"
+
+    def __init__(self, k: Look) -> None:
+        super().__init__()
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(6, 2, 6, 2)
+        lay.setSpacing(8)
+        self.spin, self.label = QLabel(self.FRAMES[0]), QLabel("")
+        self.label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        lay.addWidget(self.spin)
+        lay.addWidget(self.label, 1)
+        self.what, self.t0, self.i = "", 0.0, 0
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._tick)
+        self.restyle(k)
+        self.hide()
+
+    def restyle(self, k: Look) -> None:
+        self.spin.setFont(k.font(k.size + 1))
+        self.spin.setFixedWidth(QFontMetrics(self.spin.font()).height())
+        self.label.setFont(k.font(k.small))
+        c = QColor.name
+        self.spin.setStyleSheet(f"color: {c(k.accent)};")
+        self.label.setStyleSheet(f"color: {c(k.muted)};")
+
+    def say(self, what: str) -> None:
+        """Show what is being done; the frames turn and the seconds count from the first."""
+        if not self.timer.isActive():
+            self.t0, self.i = time.monotonic(), 0
+            self.timer.start(90)
+        self.what = what
+        self._tick(advance=False)
+        self.show()
+
+    def stop(self) -> None:
+        self.timer.stop()
+        self.hide()
+
+    def _tick(self, advance: bool = True) -> None:
+        self.i += advance
+        self.spin.setText(self.FRAMES[self.i % len(self.FRAMES)])
+        s = int(time.monotonic() - self.t0)
+        self.label.setText(self.what + (f"  ·  {s} s" if s else ""))
+
+
 def _label_text(label: QLabel) -> str:
-    """A label's text as it reads: its rich text's characters, without the markup."""
+    """A label's text as it reads: its rich text's characters, without the markup (its
+    soft breaks still in)."""
     if label.textFormat() != Qt.TextFormat.RichText:
         return label.text()
-    doc = QTextDocument()
-    doc.setHtml(label.text())
-    return doc.toPlainText()
+    return QTextDocumentFragment.fromHtml(label.text()).toPlainText()
 
 
 def _put_away(w: QWidget | None, host: QWidget) -> bool:
@@ -544,6 +907,9 @@ class ChatView(QScrollArea):
             self.zoom = 0.0
         self.look = Look(self.zoom)
         self.setStyleSheet(sheet(self.look))
+        #: The line that turns while the model works: the panel lays it out (and calls
+        #: ``working.say(what)`` / ``working.stop()``); restyled and stopped with the view.
+        self.working = Working(self.look)
         #: Whether the view keeps the end as the conversation grows: it does until the
         #: analyst scrolls up to read, and again once they are back at the end.
         self._follow = True
@@ -581,12 +947,18 @@ class ChatView(QScrollArea):
             self._lay.insertWidget(self._lay.count() - 1, w)
         else:
             self._lay.insertWidget(self._lay.count() - 1, w, 0, align)
-        # Each label's menu is the conversation's (the copies, find), not a label's own.
         for lbl in [w] if isinstance(w, QLabel) else w.findChildren(QLabel):
-            lbl.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-            lbl.customContextMenuRequested.connect(
-                lambda pos, lbl=lbl: self.menu_for(lbl).exec(lbl.mapToGlobal(pos))
-            )
+            self._hook(lbl)
+
+    def _hook(self, lbl: QLabel) -> None:
+        """A label's menu is the conversation's (the copies, find), not a label's own."""
+        if lbl.property("hooked"):
+            return
+        lbl.setProperty("hooked", True)
+        lbl.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        lbl.customContextMenuRequested.connect(
+            lambda pos, lbl=lbl: self.menu_for(lbl).exec(lbl.mapToGlobal(pos))
+        )
 
     def items(self) -> list[QWidget]:
         out = []
@@ -606,6 +978,7 @@ class ChatView(QScrollArea):
                 w.deleteLater()
         self._reply = None
         self._follow = True
+        self.working.stop()
 
     def you(self, text: str) -> None:
         self._follow = True  # the analyst's own message: the view goes to the end
@@ -631,12 +1004,12 @@ class ChatView(QScrollArea):
         if more and self._reply is not None:
             self._reply.set_md(self._reply.md + text, self.look)
             return
-        self._reply = _Reply(text, self.look)
+        self._reply = _Reply(text, self.look, self)
         self._add(self._reply)
 
     def tool(self, name: str, arguments: dict[str, Any]) -> _Tool:
         args = ", ".join(f"{k}={v!r}" for k, v in arguments.items())
-        item = _Tool(f"{name}({args[:120]}{'…' if len(args) > 120 else ''})", self.look)
+        item = _Tool(f"{name}({args[:120]}{'…' if len(args) > 120 else ''})", self.look, self)
         self._add(item)
         self._reply = None
         return item
@@ -645,10 +1018,10 @@ class ChatView(QScrollArea):
     def tool_done(item: _Tool, output: str, error: bool) -> None:
         item.finish(output, error)
 
-    def note(self, text: str, error: bool = False) -> None:
-        lbl = _label(text, self.look, rich=False, keep=False, tone="error" if error else "muted")
-        lbl.setFont(self.look.font(self.look.small))
-        self._add(lbl)
+    def note(self, text: str, error: bool = False, rich: bool = False) -> None:
+        """A line of the panel's own: muted, or (*error*) on a tinted ground; *rich*:
+        *text* is HTML (a link)."""
+        self._add(_Note(text, self.look, self, error=error, rich=rich))
         self._reply = None
 
     def card(
@@ -658,14 +1031,22 @@ class ChatView(QScrollArea):
         apply: Callable[[], str],
         applied: str = "",
         action: str = "Apply",
+        kind: str = "",
     ) -> QPushButton:
         """A proposal with its button (``action``, what clicking it does); ``applied``,
         what applying it said where it was applied already (the Assistant's full
-        automatic), on the button instead."""
-        card = _Card(title, body, apply, applied, action, self.look)
+        automatic), on the button instead. ``kind`` (a key of ``_Card.TAGS``) names the
+        sort of proposal above its title."""
+        card = _Card(title, body, apply, applied, action, self.look, self, kind)
         self._add(card)
         self._reply = None
         return card.button
+
+    def card_done(self, button: QPushButton, text: str = "Applied") -> None:
+        """The card whose button *button* is (``card``'s return), marked applied."""
+        entry = self._entry(button)
+        if isinstance(entry, _Card):
+            entry.mark_done(text)
 
     # -- as text ---------------------------------------------------------------------
     def _entry(self, w: QWidget | None) -> QWidget | None:
@@ -692,7 +1073,12 @@ class ChatView(QScrollArea):
         menu = QMenu(self)
         copy = QApplication.clipboard().setText
         if label is not None and label.hasSelectedText():
-            selected = label.selectedText().replace("\u2029", "\n").replace("\u2028", "\n")
+            selected = (
+                label.selectedText()
+                .replace("\u2029", "\n")
+                .replace("\u2028", "\n")
+                .replace(ZWSP, "")
+            )
             menu.addAction("Copy", lambda: copy(selected))
         entry = self._entry(label)
         if entry is not None:
@@ -771,11 +1157,22 @@ class ChatView(QScrollArea):
             for lbl in labels:
                 if _put_away(lbl, host):
                     continue
-                text = _label_text(lbl).lower()
+                # The shown text carries soft breaks the needle does not: a match on the
+                # clean text is mapped back through where the breaks stand (it may span one).
+                clean, breaks = [], []
+                for ch in _label_text(lbl):
+                    if ch == ZWSP:
+                        breaks.append(len(clean))
+                    else:
+                        clean.append(ch)
+                text = "".join(clean).lower()
                 at = text.find(low)
                 while at >= 0:
-                    hits.append((lbl, at, len(needle)))
-                    at = text.find(low, at + len(needle))
+                    end = at + len(needle)
+                    lo = at + bisect_right(breaks, at)
+                    hi = end + bisect_left(breaks, end)
+                    hits.append((lbl, lo, hi - lo))
+                    at = text.find(low, end)
         return hits
 
     def find_again(self, *, first: bool = False) -> None:
@@ -831,10 +1228,11 @@ class ChatView(QScrollArea):
         for w in self.items():
             if isinstance(w, _You):
                 w.fit(k, room)
-            elif isinstance(w, (_Reply, _Tool, _Card)):
+            elif isinstance(w, (_Reply, _Tool, _Card, _Note)):
                 w.restyle(k)
             elif isinstance(w, QLabel):
                 w.setFont(k.font(k.small))
+        self.working.restyle(k)
         self.restyled.emit(k)
 
     def follow_palette(self) -> None:

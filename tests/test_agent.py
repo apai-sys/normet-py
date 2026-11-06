@@ -426,3 +426,120 @@ def test_trend_breaks_reading_says_where_and_whose_p():
     one = readings.trend_breaks_reading(mk(1, 0.42), name="flat")
     assert "one regime" not in one
     assert "best candidate cut" in one and "0.42" in one
+
+
+# -- llm: context policy, key lookup, certificates -----------------------------------
+
+
+def _rounds(n, big=400):
+    """A chat of n tool rounds: inspect_data first, then `n-1` calls of `results`."""
+    from normet.agent import llm
+
+    msgs = [{"role": "user", "content": "go"}]
+    for i in range(n):
+        name = "inspect_data" if i == 0 else "results"
+        msgs.append(
+            {
+                "role": "assistant",
+                "text": "",
+                "calls": [llm.Call(f"c{i}", name, {})],
+                "reasoning": "thinking",
+            }
+        )
+        msgs.append({"role": "tool", "results": [{"id": f"c{i}", "text": f"R{i} " + "x" * big}]})
+    return msgs
+
+
+def test_context_policy_folds_old_rounds_and_pins_readings():
+    from normet.agent import llm
+
+    msgs = _rounds(6)
+    out = llm.ContextPolicy(keep=2, pinned=("inspect_data", "results")).prepare(msgs)
+    texts = {r["id"]: r["text"] for m in out if m["role"] == "tool" for r in m["results"]}
+    # the latest `results` and the one `inspect_data` stay whole; other old ones fold to 160
+    assert texts["c0"] == msgs[2]["results"][0]["text"]
+    assert texts["c5"] == msgs[-1]["results"][0]["text"]
+    for cid in ("c1", "c2"):
+        assert texts[cid].endswith(llm.ContextPolicy.FOLDED)
+        assert len(texts[cid]) == len(llm.ContextPolicy.FOLDED) + len(texts[cid][:160].rstrip())
+        assert len(texts[cid]) < 160 + len(llm.ContextPolicy.FOLDED) + 1
+    # reasoning of old rounds is left out, the recent keeps it
+    assert "reasoning" not in out[1] and out[-2]["reasoning"] == "thinking"
+    # the messages themselves are untouched
+    assert msgs[4]["results"][0]["text"].endswith("x" * 400)
+
+
+def test_context_policy_unpinned_and_failed_results():
+    from normet.agent import llm
+
+    msgs = _rounds(5)
+    out = llm.ContextPolicy(keep=2).prepare(msgs)
+    assert out[2]["results"][0]["text"].endswith(llm.ContextPolicy.FOLDED)
+    short = _rounds(2)
+    assert llm.ContextPolicy(keep=2).prepare(short) is short
+    # a failed pinned result is not the pinned one: the earlier whole one is
+    msgs = _rounds(6)
+    msgs[-1]["results"][0]["error"] = True
+    out = llm.ContextPolicy(keep=1, pinned=("results",)).prepare(msgs)
+    texts = {r["id"]: r["text"] for m in out if m["role"] == "tool" for r in m["results"]}
+    assert texts["c4"] == msgs[-3]["results"][0]["text"]
+
+
+def test_converse_sends_the_folded_payload_but_keeps_the_messages():
+    from normet.agent import llm
+
+    seen = []
+    n = {"i": 0}
+
+    def policy(messages, tools):
+        seen.append(list(messages))
+        n["i"] += 1
+        if n["i"] > 6:
+            return llm.Reply("done", [], {})
+        return llm.Reply("", [llm.Call(f"k{n['i']}", "big", {})], {"input": 1, "output": 1})
+
+    big = llm.as_tool(lambda: "y" * 500, name="big", description="a long reading")
+    messages = [{"role": "user", "content": "go"}]
+    turn = llm.converse(llm.FakeModel(policy), [big], "sys", messages)
+    assert turn.stopped == "answered"
+    last = [r["text"] for m in seen[-1] if m["role"] == "tool" for r in m["results"]]
+    assert last[0].endswith(llm.ContextPolicy.FOLDED) and last[-1] == "y" * 500
+    full = [r["text"] for m in messages if m["role"] == "tool" for r in m["results"]]
+    assert all(t == "y" * 500 for t in full)
+
+
+def test_default_max_tokens_and_zshrc_key(tmp_path, monkeypatch):
+    from normet.agent import llm
+
+    rc = tmp_path / "zshrc"
+    rc.write_text(
+        "export OTHER=1\nexport ANTHROPIC_API_KEY=old\n"
+        "export ANTHROPIC_API_KEY='sk-new'  # latest\n"
+    )
+    assert llm._zshrc_key("ANTHROPIC_API_KEY", str(rc)) == "sk-new"
+    assert llm._zshrc_key("MISSING_KEY", str(rc)) is None
+    assert llm._zshrc_key("X", str(tmp_path / "nope")) is None
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(llm, "_zshrc_key", lambda env, path="": "from-zshrc")
+    m = llm.Model("anthropic:claude-sonnet-5-5")
+    assert m.key == "from-zshrc" and m.max_tokens == 16384
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "from-env")
+    assert llm.Model("anthropic:claude-sonnet-5-5").key == "from-env"
+
+
+def test_ca_bundle_falls_back_to_certifi(monkeypatch):
+    import ssl
+    import types
+
+    from normet.agent import llm
+
+    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+    monkeypatch.setattr(
+        ssl, "get_default_verify_paths", lambda: types.SimpleNamespace(cafile="/no/such/file")
+    )
+    certifi = pytest.importorskip("certifi")
+    llm.ca_bundle()
+    assert os.environ["SSL_CERT_FILE"] == certifi.where()
+    monkeypatch.setenv("SSL_CERT_FILE", "/mine.pem")
+    llm.ca_bundle()
+    assert os.environ["SSL_CERT_FILE"] == "/mine.pem"

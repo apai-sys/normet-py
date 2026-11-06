@@ -470,7 +470,7 @@ def test_an_agent_process_end_to_end(qapp, tmp_path):
 def win(qapp, monkeypatch, tmp_path):
     from PySide6.QtCore import QSettings
 
-    from normet.gui import assistant
+    from normet.gui import assistant, assistant_cli
     from normet.gui.main_window import MainWindow
 
     ini = str(tmp_path / "normet-gui.ini")  # never the user's own settings
@@ -480,6 +480,10 @@ def win(qapp, monkeypatch, tmp_path):
     monkeypatch.setattr(llm, "OPENCODE_DIR", str(tmp_path / "no-opencode"))
     monkeypatch.setattr(assistant, "keychain_get", lambda provider: None)
     monkeypatch.setattr(assistant, "keychain_store", lambda provider, key: False)
+    # No login shell is started for the PATH, and the data-consent question is answered
+    # yes (the tests that exercise it say otherwise): neither may block a test.
+    monkeypatch.setattr(assistant_cli, "login_path_in_background", lambda then=None: None)
+    monkeypatch.setattr(assistant.AssistantDock, "_confirm", lambda self, title, text: True)
     w = MainWindow()
     yield w
     w.close()
@@ -1365,3 +1369,280 @@ def test_a_call_cut_off_mid_json_is_told_to_write_it_shorter(monkeypatch):
     c.run()
     told = [e for e in events if e["type"] == "tool"][0]
     assert told["error"] and told["output"] == A.UNPARSED
+
+
+# -- the panel's consent, window-started turns, language, saves, usage ---------------------
+def _fake(dock, monkeypatch, seen=None, text="Done."):
+    def policy(messages, tools):
+        if seen is not None:
+            seen.append(messages[-1])
+        return llm.Reply(text, [], {})
+
+    monkeypatch.setattr(dock, "_model", lambda: llm.FakeModel(policy))
+
+
+def test_readings_leave_the_machine_only_after_consent_asked_once(win, qapp, monkeypatch):
+    win.load_example()
+    dock = win.assistant
+    asked = []
+    answers = [False, True]
+    monkeypatch.setattr(
+        type(dock), "_confirm", lambda self, title, text: asked.append(title) or answers.pop(0)
+    )
+    seen = []
+    _fake(dock, monkeypatch, seen)
+    dock.model_box.setCurrentText("anthropic:claude-sonnet-5-5")
+    dock.composer.setPlainText("Look at the data.")
+    dock.send()
+    # Refused: nothing was sent, and the message stays in the box to be sent again.
+    assert asked == ["Send to anthropic?"] and not seen and not dock.busy()
+    assert dock.composer.toPlainText() == "Look at the data." and dock.messages == []
+    dock.send()
+    _wait(qapp, lambda: not dock.busy() and not dock.working.isVisible())
+    assert len(asked) == 2 and len(seen) == 1
+    dock.send("And again.")  # allowed for this data set and provider: not asked again
+    _wait(qapp, lambda: not dock.busy() and not dock.working.isVisible())
+    assert len(asked) == 2 and len(seen) == 2
+    # Another provider is another question; a local one is none.
+    dock.model_box.setCurrentText("ollama:qwen3:8b")
+    assert dock._consent() is True and len(asked) == 2
+
+
+def test_no_table_open_means_nothing_to_consent_to(win):
+    dock = win.assistant
+    dock.model_box.setCurrentText("anthropic:claude-sonnet-5-5")
+    assert win.df_raw is None and dock._consent() is True
+
+
+def test_the_scm_studios_panel_is_a_data_set_of_its_own(win, monkeypatch):
+    import types
+
+    import pandas as pd
+
+    dock = win.assistant
+    dock.model_box.setCurrentText("anthropic:claude-sonnet-5-5")
+    asked = []
+    monkeypatch.setattr(
+        type(dock), "_confirm", lambda self, title, text: asked.append(title) or True
+    )
+    # A panel in the SCM Studio with the main table empty is still data to ask about.
+    win._scm_window = types.SimpleNamespace(
+        df=pd.DataFrame({"a": [1]}), result=None, close=lambda: None
+    )
+    assert win.df_raw is None and dock.can_task() is False
+    assert dock._consent() is True and len(asked) == 1
+    assert dock._consent() is True and len(asked) == 1  # once
+    assert dock.can_task() is True
+    # Another panel is another question.
+    win._scm_window.df = pd.DataFrame({"b": [2]})
+    assert dock.can_task() is False
+
+
+def test_the_window_starts_a_turn_of_its_own_only_where_consent_stands(win, qapp, monkeypatch):
+    win.load_example()
+    dock = win.assistant
+    asked = []
+    monkeypatch.setattr(
+        type(dock), "_confirm", lambda self, title, text: asked.append(title) or True
+    )
+    seen = []
+    _fake(dock, monkeypatch, seen)
+    dock.model_box.setCurrentText("anthropic:claude-sonnet-5-5")
+    assert not dock.can_task() and dock.task("Name the next step.") is False
+    assert not asked and not seen  # the window never asks the analyst's question for them
+    assert dock.task("  ") is False
+    dock._consent()  # the analyst allowed it
+    asked.clear()
+    assert dock.can_task()
+    assert dock.task("Name the next step.") is True
+    _wait(qapp, lambda: not dock.busy() and not dock.working.isVisible())
+    assert not asked
+    sent = seen[0]["content"]
+    assert sent.startswith("[Window now:") and "Name the next step." in sent
+    assert "no one typed this" in sent and "Reply in English" in sent
+    assert "The window asks: Name the next step." in dock.view.toPlainText()
+
+
+def test_a_window_turn_is_answered_in_the_language_the_analyst_writes(win, qapp, monkeypatch):
+    from normet.gui import assistant as A
+
+    win.load_example()
+    dock = win.assistant
+    seen = []
+    _fake(dock, monkeypatch, seen)
+    dock.model_box.setCurrentText("ollama:qwen3:8b")  # local: no question
+    assert dock._talk is None
+    dock.send("请看一下这张表。")
+    _wait(qapp, lambda: not dock.busy() and not dock.working.isVisible())
+    assert dock._talk == "zh"
+    dock.send("12345")  # no language in it: the chat's stays
+    _wait(qapp, lambda: not dock.busy() and not dock.working.isVisible())
+    assert dock._talk == "zh"
+    assert dock.task("Next?")
+    _wait(qapp, lambda: not dock.busy() and not dock.working.isVisible())
+    assert "Simplified Chinese" in seen[-1]["content"]
+    assert "Simplified Chinese" in A.nudge_text(["train"], "s", "zh")
+    assert "Reply in English" in A.nudge_text(["train"], "s", "en")
+    dock.new_conversation()
+    assert dock._talk is None
+
+
+def test_the_window_language_answers_where_nobody_has_written(monkeypatch):
+    from normet.gui import assistant as A
+
+    monkeypatch.setattr(A.uilang, "language", lambda: "zh")
+    assert "Simplified Chinese" in A.reply_language_text(None)
+    assert "English" in A.reply_language_text("en")
+    assert A.window_task_text("go", "en").startswith("go\n\n[Reply in English")
+
+
+def test_a_key_in_zshrc_is_found_before_the_environment(monkeypatch):
+    from normet.gui import assistant as A
+
+    monkeypatch.setattr(A, "keychain_get", lambda provider: None)
+    A._SESSION_KEYS.pop("deepseek", None)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "from-env")
+    monkeypatch.setattr(llm, "_zshrc_key", lambda env: "from-zshrc" if env else None)
+    assert A.find_key("deepseek") == "from-zshrc"
+    monkeypatch.setattr(llm, "_zshrc_key", lambda env: None)
+    assert A.find_key("deepseek") == "from-env"
+    assert A.find_key("ollama") is None
+
+
+def test_full_automatic_saves_beside_the_data_unless_a_folder_was_chosen(win, tmp_path):
+    from normet.gui import assistant as A
+
+    mine = tmp_path / "mine"
+    mine.mkdir()
+    data = mine / "obs.csv"
+    data.write_text("date,x\n")
+    assert A.auto_folder(str(data)) == str(mine / "normet-auto")
+    chosen = tmp_path / "chosen"
+    chosen.mkdir()
+    A._settings().setValue(A.SAVE_KEY, str(chosen))
+    assert A.auto_folder(str(data)) == str(chosen)
+    A._settings().setValue(A.SAVE_KEY, str(tmp_path / "gone"))  # no longer there
+    assert A.auto_folder(str(data)) == str(mine / "normet-auto")
+    A._settings().remove(A.SAVE_KEY)
+    # Inside the package (where the shipped examples are): never written to.
+    import normet
+
+    inside = os.path.join(os.path.dirname(normet.__file__), "somefile.csv")
+    assert A.auto_folder(inside) == A.documents_folder()
+    assert A.auto_folder(None) == A.documents_folder()
+
+
+def test_save_into_writes_what_exists_and_says_what_does_not(win, tmp_path):
+    from normet.gui import assistant as A
+
+    written, skipped = A.save_into(win, str(tmp_path / "out"), ["results", "script", "session"])
+    assert not written and len(skipped) == 3  # nothing open, nothing run
+    win.load_example()
+    written, skipped = A.save_into(win, str(tmp_path / "out"), ["session", "script"])
+    assert sorted(os.path.basename(p) for p in written) == sorted(
+        ["normet_session" + A_suffix(), "normet_session.py"]
+    )
+    assert not skipped
+    written, skipped = A.save_into(win, str(tmp_path / "out"), ["results", "report"])
+    assert not written and len(skipped) == 2  # no result tab has run yet
+
+
+def A_suffix():
+    from normet.gui._saved import SUFFIX
+
+    return SUFFIX
+
+
+def test_propose_save_checks_its_items_and_the_analyst_picks_the_folder(win, qapp, monkeypatch):
+    from PySide6.QtWidgets import QFileDialog, QPushButton
+
+    from normet.gui import assistant as A
+
+    win.load_example()
+    dock = win.assistant
+    with pytest.raises(ValueError, match="items: any of"):
+        dock.tools.propose_save(["figures"], "r")
+    with pytest.raises(ValueError, match="items: any of"):
+        dock.tools.propose_save([], "r")
+    said = dock.tools.propose_save(["session"], "keep the work")
+    assert "Save button" in said and "Stop here" in said
+    qapp.processEvents()
+    btn = [b for b in dock.view.findChildren(QPushButton) if b.text() == "Save"][0]
+    # Cancelling the folder leaves the card to be used again.
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *a, **k: "")
+    btn.click()
+    qapp.processEvents()
+    assert btn.isEnabled() and btn.text() == "Save"
+    out = os.path.join(os.path.dirname(A._settings().fileName()), "picked")
+    os.makedirs(out)
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *a, **k: out)
+    btn.click()
+    qapp.processEvents()
+    assert btn.text() == "Saved 1 file(s)" and not btn.isEnabled()
+    assert os.path.exists(os.path.join(out, "normet_session" + A_suffix()))
+    assert "normet_session" in dock.notes[-1] and "analyst saved" in dock.notes[-1]
+    assert "Saved into" in dock.view.toPlainText()
+
+
+def test_propose_save_in_full_automatic_writes_at_once(win, qapp, monkeypatch, tmp_path):
+    from normet.gui import assistant as A
+
+    win.load_example()
+    dock = win.assistant
+    folder = tmp_path / "auto"
+    folder.mkdir()
+    A._settings().setValue(A.SAVE_KEY, str(folder))
+    monkeypatch.setattr(A, "auto_on", lambda: True)
+    said = dock.tools.propose_save(["session"], "keep the work")
+    assert said.startswith("Carried out at once") and str(folder) in said
+    assert (folder / ("normet_session" + A_suffix())).exists()
+    assert dock.last_saved[0] == str(folder)
+
+
+def test_a_cli_turn_adds_its_tokens_and_cards_are_tagged(win, qapp):
+    from PySide6.QtWidgets import QLabel
+
+    dock = win.assistant
+    dock._cli_turn({"input": 1200, "output": 30})
+    dock._cli_turn({"input": 0, "output": 0})  # Copilot reports none
+    assert dock.usage == {"input": 1200, "output": 30}
+    dock._say_tokens()  # as the turn's end does
+    assert "1,200 in" in dock.status.text()
+    win.load_example()
+    dock.tools.propose_setup("NO2", ["t2m"], "Wind.", 0.8)
+    dock.tools.carry_out("print(1)", "check")
+    qapp.processEvents()
+    tags = [lab.text() for lab in dock.view.findChildren(QLabel)]
+    assert "Set-up" in tags and "Run in the window" in tags
+
+
+def test_the_run_card_is_marked_when_its_code_has_ended(win, qapp):
+    from PySide6.QtWidgets import QPushButton
+
+    win.load_example()
+    dock = win.assistant
+    dock.tools.carry_out("print(df.shape)", "the size")
+    qapp.processEvents()
+    btn = [b for b in dock.view.findChildren(QPushButton) if b.text() == "Run"][0]
+    btn.click()
+    assert btn.text() == "Running…"
+    _wait(qapp, lambda: btn.text() == "Ran")
+    assert not btn.isEnabled()
+
+
+def test_auto_asks_where_to_save_when_turned_on_and_stays_off_if_cancelled(
+    win, qapp, monkeypatch, tmp_path
+):
+    from PySide6.QtWidgets import QFileDialog
+
+    from normet.gui import assistant as A
+
+    dock = win.assistant
+    assert not dock.auto_btn.isChecked()
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *a, **k: "")
+    dock.auto_btn.click()
+    assert not dock.auto_btn.isChecked()
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *a, **k: str(tmp_path))
+    dock.auto_btn.click()
+    assert dock.auto_btn.isChecked() and A.chosen_folder() == str(tmp_path)
+    assert "Full automatic saves into" in dock.view.toPlainText()
