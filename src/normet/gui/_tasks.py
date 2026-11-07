@@ -92,6 +92,7 @@ class TaskMixin(QMainWindow):
         # A notice asking for a step that has now been taken has been answered.
         for key, done in (
             ("need-data", has_data),
+            ("need-features", has_data and bool(self._selected_features())),
             ("need-model", has_model),
             ("need-normalise", has_y_inf),
         ):

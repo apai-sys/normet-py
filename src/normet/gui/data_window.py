@@ -46,8 +46,6 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
-    QMessageBox,
-    QProgressBar,
     QPushButton,
     QScrollArea,
     QSplitter,
@@ -62,7 +60,7 @@ from normet import style as S
 
 from ._clock import TaskClock
 from ._station_map import StationMap
-from ._widgets import CanvasTab, NoWheelComboBox, hint_label, run_button
+from ._widgets import CanvasTab, NoWheelComboBox, SmoothProgress, hint_label, run_button
 from .workers import TaskRunner
 
 log = logging.getLogger(__name__)
@@ -510,12 +508,18 @@ class DataWindow(QMainWindow):
         self.runner.finished.connect(self._task_finished)
         self.task_clock = TaskClock(self, self.runner)
 
+        self._build_menu()
+
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self._build_panel())
         right = QWidget()
         rv = QVBoxLayout(right)
         rv.setContentsMargins(0, 4, 4, 0)
         rv.addWidget(self._build_action_bar())
+        from .notices import NoticeStack
+
+        self.notices = NoticeStack()
+        rv.addWidget(self.notices)
         rv.addWidget(self._build_tabs(), 1)
         splitter.addWidget(right)
         splitter.setStretchFactor(0, 0)
@@ -523,9 +527,8 @@ class DataWindow(QMainWindow):
         splitter.setSizes([360, 880])
         self.setCentralWidget(splitter)
 
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 1)
-        self.progress.setMaximumWidth(220)
+        self.progress = SmoothProgress()
+        self.progress.layout().setContentsMargins(0, 0, 8, 0)
         self.cancel_btn = QPushButton("Cancel")
         self.cancel_btn.setEnabled(False)
         self.cancel_btn.setToolTip("Abandon the running download.")
@@ -537,6 +540,14 @@ class DataWindow(QMainWindow):
             "pick a site, then ▶ Fetch & merge."
         )
         self._sync_enabled()
+
+    def _build_menu(self) -> None:
+        """File: save the merged table, close."""
+        fm = self.menuBar().addMenu("&File")
+        act = fm.addAction("Save merged CSV…", self._save_csv)
+        act.setShortcut("Ctrl+S")
+        fm.addSeparator()
+        fm.addAction("&Close", self.close).setShortcut("Ctrl+W")
 
     # ------------------------------------------------------------- left panel
     def _build_panel(self) -> QWidget:
@@ -761,8 +772,10 @@ class DataWindow(QMainWindow):
             self.statusBar().showMessage("Download abandoned.")
 
     def _show_error(self, tb: str) -> None:
-        QMessageBox.critical(
-            self, "Download failed", tb.splitlines()[-1] if tb else "Unknown error"
+        self.notices.notify(
+            "download-error",
+            f"Download failed: {tb.splitlines()[-1] if tb else 'Unknown error'}",
+            kind="error",
         )
         log.error("%s", tb)
 
@@ -809,13 +822,12 @@ class DataWindow(QMainWindow):
     def _run_find_stations(self) -> None:
         pollutants = self._checked_pollutants()
         if not pollutants:
-            QMessageBox.information(self, "No pollutants", "Tick at least one pollutant.")
+            self.notices.notify("no-pollutants", "Tick at least one pollutant.")
             return
         prov, src, country = self._provider()
         if prov in (PROV_EEA, PROV_OPENAQ) and not country:
-            QMessageBox.information(
-                self,
-                "No country",
+            self.notices.notify(
+                "no-country",
                 "Type an ISO-2 country code first (GB, DE, FR, …)."
                 if prov == PROV_EEA
                 else "Type an ISO-2 country code first (GB, US, BR, …).",
@@ -823,9 +835,8 @@ class DataWindow(QMainWindow):
             return
         key = self._openaq_key()
         if prov == PROV_OPENAQ and not key:
-            QMessageBox.information(
-                self,
-                "No OpenAQ key",
+            self.notices.notify(
+                "no-openaq-key",
                 "OpenAQ needs a free API key — paste one above or set OPENAQ_API_KEY. "
                 "Register at https://explore.openaq.org/register.",
             )
@@ -977,15 +988,15 @@ class DataWindow(QMainWindow):
     def _run_fetch(self) -> None:
         sites = self._selected_stations()
         if not sites:
-            QMessageBox.information(
-                self, "No station", "Find stations and select one in the table first."
+            self.notices.notify(
+                "no-station", "Find stations and select one in the table first."
             )
             return
         pollutants = self._checked_pollutants()
         d_from = self.date_from.date().toString("yyyy-MM-dd")
         d_to = self.date_to.date().toString("yyyy-MM-dd")
         if pd.Timestamp(d_from) >= pd.Timestamp(d_to):
-            QMessageBox.information(self, "Bad range", "'From' must be before 'To'.")
+            self.notices.notify("bad-range", "'From' must be before 'To'.")
             return
         met = self.met_combo.currentText()
         prov, src, country = self._provider()

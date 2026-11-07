@@ -48,7 +48,7 @@ from PySide6.QtWidgets import (
 
 from normet import style as S
 
-from ._widgets import CanvasTab, NoWheelComboBox, fill_sortable, table_context_menu
+from ._widgets import CanvasTab, NoWheelComboBox, fill_sortable, hint_style, table_context_menu
 from .dataframe_model import DataFrameModel
 
 PICK_HINT = (
@@ -422,7 +422,7 @@ class DataTab(QWidget):
         self.pick_info.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         said.addWidget(self.pick_info, 1)
         self.hover = QLabel("")
-        self.hover.setStyleSheet("color:#636366;")
+        self.hover.setStyleSheet(hint_style())
         self.hover.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
         said.addWidget(self.hover, 0, Qt.AlignmentFlag.AlignTop)
         pl.addLayout(said)

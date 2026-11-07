@@ -45,7 +45,6 @@ from PySide6.QtWidgets import (
     QListWidget,
     QMainWindow,
     QMessageBox,
-    QProgressBar,
     QPushButton,
     QSplitter,
     QTableWidget,
@@ -59,7 +58,7 @@ from normet import style as S
 from normet.io.trajectory import _missing_gdas1_files, _naive_utc
 
 from ._clock import TaskClock
-from ._widgets import CanvasTab, NoWheelSpinBox, hint_label, run_button, wrap_row
+from ._widgets import CanvasTab, NoWheelSpinBox, SmoothProgress, hint_label, run_button, wrap_row
 from .workers import TaskRunner
 
 log = logging.getLogger(__name__)
@@ -260,12 +259,18 @@ class TrajectoryWindow(QMainWindow):
         self.runner.finished.connect(self._task_finished)
         self.task_clock = TaskClock(self, self.runner)
 
+        self._build_menu()
+
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self._build_panel())
         right = QWidget()
         rv = QVBoxLayout(right)
         rv.setContentsMargins(0, 4, 4, 0)
         rv.addWidget(self._build_action_bar())
+        from .notices import NoticeStack
+
+        self.notices = NoticeStack()
+        rv.addWidget(self.notices)
         rv.addWidget(self._build_tabs(), 1)
         splitter.addWidget(right)
         splitter.setStretchFactor(0, 0)
@@ -273,9 +278,8 @@ class TrajectoryWindow(QMainWindow):
         splitter.setSizes([self.panel.least_width, 860])  # no gap: see StepPanel.least_width
         self.setCentralWidget(splitter)
 
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 1)
-        self.progress.setMaximumWidth(220)
+        self.progress = SmoothProgress()
+        self.progress.layout().setContentsMargins(0, 0, 8, 0)
         self.cancel_btn = QPushButton("Cancel")
         self.cancel_btn.setEnabled(False)
         self.cancel_btn.clicked.connect(self._abandon)
@@ -285,6 +289,13 @@ class TrajectoryWindow(QMainWindow):
             "Add tdump files (or run HYSPLIT on its page), then ▶ Build trajectory features."
         )
         self._sync_enabled()
+
+    def _build_menu(self) -> None:
+        """File: send features to the main window, close."""
+        fm = self.menuBar().addMenu("&File")
+        fm.addAction("Send features to main window", self._send_to_main).setShortcut("Ctrl+Return")
+        fm.addSeparator()
+        fm.addAction("&Close", self.close).setShortcut("Ctrl+W")
 
     # ------------------------------------------------------------- left panel
     def _build_panel(self) -> QWidget:
@@ -646,7 +657,11 @@ class TrajectoryWindow(QMainWindow):
 
                 names = list(load_source_regions(path))
             except Exception as exc:
-                QMessageBox.critical(self, "Failed to load region file", f"{path}:\n{exc}")
+                self.notices.notify(
+                    "region-load-error",
+                    f"Failed to load region file {path}: {exc}",
+                    kind="error",
+                )
                 continue
             default_name = Path(path).stem if len(names) == 1 else names[0] if names else "region"
             self.region_file_table.add_row(default_name, path)
@@ -710,13 +725,17 @@ class TrajectoryWindow(QMainWindow):
         )
 
     def _show_error(self, tb: str) -> None:
-        QMessageBox.critical(self, "Task failed", tb.splitlines()[-1] if tb else "Unknown error")
+        self.notices.notify(
+            "task-error",
+            f"Task failed: {tb.splitlines()[-1] if tb else 'Unknown error'}",
+            kind="error",
+        )
         log.error("%s", tb)
 
     # -------------------------------------------------------------- features
     def _run_build(self) -> None:
         if not self._tdump_paths:
-            QMessageBox.information(self, "No tdump files", "Add at least one tdump file.")
+            self.notices.notify("no-tdump", "Add at least one tdump file.")
             return
         from normet import build_trajectory_features
 
@@ -740,7 +759,7 @@ class TrajectoryWindow(QMainWindow):
         try:
             return True, self._merged_regions()
         except Exception as exc:  # a bad row, or a region file that will not load
-            QMessageBox.warning(self, "Source regions", str(exc))
+            self.notices.notify("bad-regions", f"Source regions: {exc}", kind="warn")
             return False, None
 
     def _on_build_result(self, result: pd.DataFrame) -> None:
@@ -844,7 +863,7 @@ class TrajectoryWindow(QMainWindow):
     def _run_download_gdas(self) -> None:
         cache_dir = self.gdas_dir_edit.text().strip()
         if not cache_dir:
-            QMessageBox.information(self, "No cache directory", "Pick a GDAS1 cache directory.")
+            self.notices.notify("no-cache", "Pick a GDAS1 cache directory.")
             return
         from normet import fetch_gdas1, gdas1_filenames
 
@@ -853,6 +872,7 @@ class TrajectoryWindow(QMainWindow):
         names = gdas1_filenames(date_from, date_to)
         todo = [n for n in names if not (Path(cache_dir).expanduser() / n).exists()]
         if len(todo) > _ASK_ABOVE_FILES:
+            # A several-GB download asks for a yes, not a notice.
             ans = QMessageBox.question(
                 self,
                 "Download GDAS1",
@@ -895,32 +915,30 @@ class TrajectoryWindow(QMainWindow):
     def _run_hysplit(self) -> None:
         exe = self.hysplit_exec_edit.text().strip()
         if not exe:
-            QMessageBox.information(
-                self, "No hyts_std", "Point 'hyts_std' at your HYSPLIT install."
+            self.notices.notify(
+                "no-hyts", "Point 'hyts_std' at your HYSPLIT install."
             )
             return
         if not self._gdas_paths:
-            QMessageBox.information(
-                self,
-                "No meteorology",
+            self.notices.notify(
+                "no-met",
                 "Download GDAS1 files first, or use existing ARL met files.",
             )
             return
         try:
             receptors = self.receptor_table.receptors()
         except ValueError as exc:
-            QMessageBox.warning(self, "Receptor sites", str(exc))
+            self.notices.notify("bad-receptors", f"Receptor sites: {exc}", kind="warn")
             return
         if not receptors:
-            QMessageBox.information(
-                self, "No receptors", "Add at least one receptor site (name, lat, lon)."
+            self.notices.notify(
+                "no-receptors", "Add at least one receptor site (name, lat, lon)."
             )
             return
         span = self._receptor_span()
         if span is None:
-            QMessageBox.information(
-                self,
-                "No receptor times",
+            self.notices.notify(
+                "no-receptor-times",
                 "Load data in the main window first — its dates set the receptor time range.",
             )
             return

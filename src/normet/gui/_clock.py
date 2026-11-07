@@ -66,7 +66,7 @@ class TaskClock(QObject):
     def start(self, name: str) -> None:
         self._name, self._t0 = name, time.monotonic()
         self._share, self._budget, self._took = None, None, None
-        self._window.progress.setRange(0, 0)
+        self._window.progress.start()
         self._timer.start()
         self._show()
 
@@ -98,9 +98,7 @@ class TaskClock(QObject):
         bar = self._window.progress
         if share is not None:
             parts.append(f"{100 * share:.0f} %")
-            if bar.maximum() != 1000:
-                bar.setRange(0, 1000)
-            bar.setValue(int(1000 * share))
+            bar.report(int(100 * share))
         parts.append(f"{format_duration(elapsed)} so far")
         # Past its budget a task is finishing (FLAML's last fit), for a time no one can say.
         over = self._share is None and self._budget is not None and elapsed >= self._budget
@@ -130,9 +128,7 @@ class TaskClock(QObject):
             self.settle()
         took = f"took {format_duration(self._took or 0.0)}"
         self._took = None
-        bar = self._window.progress
-        bar.setRange(0, 1)
-        bar.setValue(0)
+        self._window.progress.finish(done=True)
         status = self._window.statusBar()
         line = status.currentMessage()
         if not line or line == self._line:

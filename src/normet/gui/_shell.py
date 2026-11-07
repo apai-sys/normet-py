@@ -21,7 +21,6 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QPlainTextEdit,
-    QProgressBar,
     QPushButton,
     QSplitter,
     QTabWidget,
@@ -32,7 +31,7 @@ from PySide6.QtWidgets import (
 from . import _settings, commandlog, theme
 from ._constants import DOCS_URL
 from ._data_tab import DataTab
-from ._widgets import CanvasTab, FlowLayout
+from ._widgets import CanvasTab, FlowLayout, SmoothProgress
 from .theme import muted_color
 from .welcome import Welcome
 from .workers import QtLogHandler
@@ -450,9 +449,8 @@ class ShellMixin(QMainWindow):
         self.assistant.composer.setFocus()
 
     def _build_status_bar(self) -> None:
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 1)
-        self.progress.setMaximumWidth(220)
+        self.progress = SmoothProgress()
+        self.progress.layout().setContentsMargins(0, 0, 8, 0)
         self.cancel_btn = QPushButton("Cancel")
         self.cancel_btn.setEnabled(False)
         self.cancel_btn.setToolTip(
@@ -460,6 +458,12 @@ class ShellMixin(QMainWindow):
             "discarded when the background computation eventually finishes."
         )
         self.cancel_btn.clicked.connect(self._abandon_task)
+        # Esc abandons the running task, as the Cancel button does.
+        from PySide6.QtGui import QShortcut
+        from PySide6.QtCore import Qt
+
+        esc = QShortcut(Qt.Key.Key_Escape, self)
+        esc.activated.connect(self._abandon_task)
         # How far the analysis has come, one light per step; a click opens its page.
         self._step_lights: dict[str, QLabel] = {}
         lights = QWidget()

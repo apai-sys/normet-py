@@ -47,7 +47,6 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
-    QProgressBar,
     QPushButton,
     QSplitter,
     QTabWidget,
@@ -65,6 +64,7 @@ from ._widgets import (
     NoWheelComboBox,
     NoWheelDoubleSpinBox,
     NoWheelSpinBox,
+    SmoothProgress,
     hint_label,
     run_button,
 )
@@ -299,9 +299,8 @@ class SCMWindow(QMainWindow):
         splitter.setSizes([self.panel.least_width, 970])  # no gap: see StepPanel.least_width
         self.setCentralWidget(splitter)
 
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 1)
-        self.progress.setMaximumWidth(220)
+        self.progress = SmoothProgress()
+        self.progress.layout().setContentsMargins(0, 0, 8, 0)
         self.cancel_btn = QPushButton("Cancel")
         self.cancel_btn.setEnabled(False)
         self.cancel_btn.setToolTip(

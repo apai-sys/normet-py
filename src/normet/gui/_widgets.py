@@ -20,22 +20,34 @@ toolbar saves is always in the figure's own light colours.
 from __future__ import annotations
 
 import functools
+import time
 from collections.abc import Callable
 from typing import Any
 
 import pandas as pd
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT
-from PySide6.QtCore import QEvent, QRect, QSize, Qt, QTimer
+from PySide6.QtCore import (
+    QAbstractAnimation,
+    QEvent,
+    QEasingCurve,
+    QRect,
+    QPropertyAnimation,
+    QSize,
+    Qt,
+    QTimer,
+)
 from PySide6.QtGui import QAction, QColor, QIcon, QImage, QPainter, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QDoubleSpinBox,
+    QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QLayout,
     QListWidget,
     QMenu,
+    QProgressBar,
     QPushButton,
     QSpinBox,
     QTableWidget,
@@ -45,14 +57,27 @@ from PySide6.QtWidgets import (
     QWidgetItem,
 )
 
-from .theme import apply_figure_theme, light_figure, muted_color, theme_manager
+from .theme import apply_figure_theme, is_dark_mode, light_figure, muted_color, theme_manager
 
-#: Traffic-light palette for verdict banners.
+#: Traffic-light palette for verdict banners, per theme: the saturated Apple system
+#: colours read on a light window; their lighter dark-mode variants on a dark one.
 VERDICT_COLOR = {"ok": "#34c759", "warn": "#ff9500", "error": "#ff3b30"}
+VERDICT_COLOR_DARK = {"ok": "#30d158", "warn": "#ff9f0a", "error": "#ff453a"}
 
-#: Muted colour for secondary hints / file labels, per theme (see theme.muted_color).
-HINT_STYLE = f"color:{muted_color()};"
-HINT_STYLE_SMALL = f"color:{muted_color()};font-size:11px;"
+
+def verdict_color(level: str, dark: bool | None = None) -> str:
+    """The verdict-banner colour for *level* ("ok", "warn", "error") in the window's theme."""
+    if dark is None:
+        dark = is_dark_mode()
+    table = VERDICT_COLOR_DARK if dark else VERDICT_COLOR
+    return table.get(level, "palette(text)")
+
+
+def hint_style(small: bool = False) -> str:
+    """The muted secondary-hint / file-label style for the window's current theme
+    (see theme.muted_color); ask again after a theme change."""
+    size = "font-size:11px;" if small else ""
+    return f"color:{muted_color()};{size}"
 
 RUN_BUTTON_STYLE = "font-weight:600;padding:8px;"
 
@@ -214,6 +239,10 @@ def hint_label(text: str, small: bool = True) -> QLabel:
 def _apply_hint_style(lbl: QLabel, small: bool, dark: bool | None = None) -> None:
     size = "font-size:11px;" if small else ""
     lbl.setStyleSheet(f"color:{muted_color(dark)};{size}")
+
+
+def _style_verdict(lbl: QLabel, level: str, dark: bool | None = None) -> None:
+    lbl.setStyleSheet(f"color:{verdict_color(level, dark)};font-weight:600;padding:4px;")
 
 
 def as_figure(obj: Any):
@@ -635,6 +664,8 @@ class CanvasTab(QWidget):
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
         self.canvas = None
+        self._verdict: QLabel | None = None
+        self._verdict_level: str | None = None
         #: The time-series result being shown (see :meth:`show_timeseries`).
         self._series: tuple[Callable[[pd.DataFrame], Any], pd.DataFrame, dict[str, Any]] | None
         self._series = None
@@ -665,6 +696,8 @@ class CanvasTab(QWidget):
             self.canvas.draw_idle()
 
     def _retheme(self, dark: bool) -> None:
+        if self._verdict is not None:
+            _style_verdict(self._verdict, self._verdict_level, dark)
         if self.canvas is not None:
             apply_figure_theme(self.canvas.figure, dark)
             self.canvas.draw_idle()
@@ -695,6 +728,8 @@ class CanvasTab(QWidget):
         self.canvas = None
         self._series = None
         self._views = None
+        self._verdict = None
+        self._verdict_level = None
 
     # --------------------------------------------------------------- content
     def show_message(self, *lines: str) -> None:
@@ -915,9 +950,8 @@ class CanvasTab(QWidget):
             level, text = verdict
             lbl = QLabel(text)
             lbl.setWordWrap(True)
-            lbl.setStyleSheet(
-                f"color:{VERDICT_COLOR.get(level, 'palette(text)')};font-weight:600;padding:4px;"
-            )
+            _style_verdict(lbl, level)
+            self._verdict, self._verdict_level = lbl, level
             self._layout.addWidget(lbl)
         for text in lines or []:
             lbl = QLabel(text)
@@ -950,7 +984,7 @@ class CanvasTab(QWidget):
             from .figure_interact import readout as _fig_readout
 
             hover = QLabel("")
-            hover.setStyleSheet("color:#636366;")
+            hover.setStyleSheet(hint_style())
             hover.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
             self._layout.addWidget(hover)
             self.canvas.mpl_connect(
@@ -960,3 +994,169 @@ class CanvasTab(QWidget):
             self.canvas.draw_idle()  # now if the tab is in view, else when it comes into view
         else:
             self._layout.addStretch(1)
+
+
+class SmoothProgress(QWidget):
+    """A run's progress: a thin rounded bar in the system's accent colour.
+
+    A worker reports in steps -- the base runs settle together near the end of their
+    fit, each error estimate starts at its own place -- and a bar set to each value
+    jumped from one to the next (the user: it "always jumps"). This one moves to each
+    value over a fraction of a second, never goes back within a run, creeps on while a
+    step reports nothing (to at most CREEP points past the last value reported, slowing
+    as it nears them), fills when the run ends and fades out a moment later. Faded out
+    it keeps its place, so nothing beside it in the status bar moves.
+
+    value() is the percentage last reported, as the QProgressBar's was (the Assistant
+    reads it)."""
+
+    SCALE = 10  # the bar's units per percent: it moves in tenths of one
+    CREEP = 8.0  # how far past the last report the bar may creep, in percent
+
+    def __init__(self, parent=None, height: int = 6):
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addStretch(1)
+        self.bar = QProgressBar()
+        self.bar.setRange(0, 100 * self.SCALE)
+        self.bar.setValue(0)  # a new QProgressBar's is -1
+        self.bar.setTextVisible(False)
+        self.bar.setFixedHeight(height)
+        lay.addWidget(self.bar)
+        lay.addStretch(1)
+        self.setMinimumWidth(120)
+        self.setMaximumWidth(260)
+        self._shade = QGraphicsOpacityEffect(self.bar)
+        self._shade.setOpacity(0.0)
+        self.bar.setGraphicsEffect(self._shade)
+        self._moving = QPropertyAnimation(self.bar, b"value", self)
+        self._moving.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._fading = QPropertyAnimation(self._shade, b"opacity", self)
+        self._fading.setEasingCurve(QEasingCurve.Type.InOutQuad)
+        self._fading.finished.connect(self._faded)
+        self._creep = QTimer(self)
+        self._creep.setInterval(100)
+        self._creep.timeout.connect(self._step)
+        self._hold = QTimer(self)
+        self._hold.setSingleShot(True)
+        self._hold.timeout.connect(lambda: self._fade_to(0.0, 450))
+        self._pct, self._at, self._running = 0, 0.0, False
+        self.restyle()
+
+    def value(self) -> int:
+        return int(self._pct)
+
+    def running(self) -> bool:
+        return self._running
+
+    def start(self):
+        """A run begins: the bar fades in, empty -- or empties quickly, where the run
+        before it has only just ended."""
+        if self._running:
+            return
+        self._hold.stop()
+        self._moving.stop()
+        self._pct, self._at, self._running = 0, time.monotonic(), True
+        if self._shade.opacity() > 0.0 and self.bar.value() > 0:
+            self._animate(self.bar.value(), 0, 200)
+        else:
+            self.bar.setValue(0)
+        self._fade_to(1.0, 180)
+        self._creep.start()
+
+    def report(self, pct):
+        """The worker's percentage: moved to, not jumped to, and never back within a run."""
+        if not self._running:
+            self.start()
+        pct = max(0, min(100, int(pct)))
+        if pct <= self._pct:
+            return
+        self._pct, self._at = pct, time.monotonic()
+        cur, end = self.bar.value(), pct * self.SCALE
+        if end > cur:
+            self._animate(cur, end, int(min(900, 220 + 0.6 * (end - cur))))
+
+    def finish(self, done: bool = True):
+        """The run has ended: the bar fills if it was done, and fades out a moment later.
+        Nothing happens where no run was under way."""
+        if not self._running:
+            return
+        self._running = False
+        self._creep.stop()
+        if done:
+            self.report_end()
+            self._hold.start(900 + self._moving.duration())
+        else:
+            self._hold.start(250)
+
+    def report_end(self):
+        self._pct = 100
+        cur, end = self.bar.value(), 100 * self.SCALE
+        if end > cur:
+            self._animate(cur, end, int(min(700, 220 + 0.6 * (end - cur))))
+
+    def _animate(self, start: int, end: int, ms: int):
+        self._moving.stop()
+        self._moving.setStartValue(start)
+        self._moving.setEndValue(end)
+        self._moving.setDuration(ms)
+        self._moving.start()
+
+    def _step(self):
+        """A step reporting nothing: on toward a little past its last report, slower as
+        it nears it, and no further."""
+        if (
+            self._moving.state() == QAbstractAnimation.State.Running
+            or time.monotonic() - self._at < 0.8
+        ):
+            return
+        cap = int((self._pct + min(self.CREEP, (100 - self._pct) * 0.3)) * self.SCALE)
+        cur = self.bar.value()
+        if cur < cap:
+            self.bar.setValue(cur + max(1, (cap - cur) // 40))
+
+    def _fade_to(self, opacity: float, ms: int):
+        self._fading.stop()
+        self._fading.setStartValue(self._shade.opacity())
+        self._fading.setEndValue(opacity)
+        self._fading.setDuration(ms)
+        self._fading.start()
+
+    def _faded(self):
+        if not self._running and self._shade.opacity() <= 0.01:
+            self.bar.setValue(0)
+            self._pct = 0
+
+    def restyle(self):
+        """The bar's colours from the application's palette: the accent, on a track of the
+        text's colour faintly mixed into the window's."""
+        pal = QApplication.palette()
+        role = QPalette.ColorRole
+        accent = (
+            pal.color(role.Accent)
+            if hasattr(role, "Accent")
+            else pal.color(role.Highlight)
+        )
+        ground, ink = pal.color(role.Window), pal.color(role.WindowText)
+        t = 0.16 if ground.lightnessF() < 0.5 else 0.12
+        track = QColor.fromRgbF(
+            *(
+                a + (b - a) * t
+                for a, b in zip(
+                    (ground.redF(), ground.greenF(), ground.blueF()),
+                    (ink.redF(), ink.greenF(), ink.blueF()),
+                )
+            )
+        )
+        r = self.bar.height() // 2
+        self.bar.setStyleSheet(
+            f"QProgressBar {{ border: none; border-radius: {r}px; background: {track.name()}; }}"
+            f"QProgressBar::chunk {{ border-radius: {r}px; background: {accent.name()}; }}"
+        )
+
+    def changeEvent(self, e):
+        # Light or dark: this widget has no style sheet of its own, so it hears of it.
+        super().changeEvent(e)
+        if e.type() == QEvent.Type.PaletteChange:
+            self.restyle()
