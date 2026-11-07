@@ -104,15 +104,15 @@ def test_the_status_bar_says_how_far_a_task_has_come_and_how_long_it_took(qapp):
         # window's own handlers are (a plain function would run on the worker's).
         win.runner.submit("a test task", task, bar.showMessage, print)
         assert bar.currentMessage() == "Running: a test task… · 0 s so far"
-        assert win.progress.maximum() == 0  # nothing known yet: a busy bar
+        assert win.progress.running() and win.progress.value() == 0  # nothing known yet
         _until(qapp, lambda: "50 %" in bar.currentMessage())
         # (the seconds as a slow runner has them: the times are the clock tests' below)
         assert re.fullmatch(r"Running: a test task… · 50 % · \d+ s so far", bar.currentMessage())
-        assert win.progress.maximum() == 1000 and win.progress.value() == 500
+        assert win.progress.value() == 50
         seen.set()
         _until(qapp, lambda: not win.runner.busy)
         assert re.fullmatch(r"Done\. · took \d+ s", bar.currentMessage())
-        assert win.progress.maximum() == 1
+        assert not win.progress.running()
 
         # A task that fails writes no line of its own: the clock says it ended.
         def fails():
@@ -143,9 +143,9 @@ def test_once_a_result_is_in_the_clock_writes_no_more_over_its_line(qapp, monkey
         assert bar.currentMessage() == "Done."
         clock.stop()  # the time it took, not counting the wait for the end
         assert bar.currentMessage() == "Done. · took 3 s"
-        assert win.progress.maximum() == 1 and win.progress.value() == 0
+        assert not win.progress.running()
         clock.expect(60)  # no task at all: the bar stays idle
-        assert win.progress.maximum() == 1 and bar.currentMessage() == "Done. · took 3 s"
+        assert not win.progress.running() and bar.currentMessage() == "Done. · took 3 s"
     finally:
         win.close()
 

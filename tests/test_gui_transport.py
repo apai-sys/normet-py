@@ -173,15 +173,13 @@ def _example_tdumps(tmp_path, n=2):
     return [shutil.copy(p, tmp_path / p.name) for p in src]
 
 
-def test_build_says_what_is_wrong_with_a_region(studio, monkeypatch, tmp_path):
+def test_build_says_what_is_wrong_with_a_region(studio, tmp_path):
     studio._tdump_paths = [str(p) for p in _example_tdumps(tmp_path)]
     studio.region_table.add_row("bad", (5.0, 0.0, 1.0, 1.0))
-    seen = {}
-    monkeypatch.setattr(
-        "normet.gui.trajectory_window.QMessageBox.warning", lambda *a: seen.update(text=a[2])
-    )
     studio._run_build()
-    assert "lon_min must be less" in seen["text"] and not studio.runner.busy
+    bar = studio.notices.get("bad-regions")
+    assert bar is not None and "lon_min must be less" in bar.label.text()
+    assert not studio.runner.busy
 
 
 def test_build_nulls_short_trajectories_and_counts_features(studio, qapp, tmp_path):
