@@ -459,8 +459,8 @@ class ShellMixin(QMainWindow):
         )
         self.cancel_btn.clicked.connect(self._abandon_task)
         # Esc abandons the running task, as the Cancel button does.
-        from PySide6.QtGui import QShortcut
         from PySide6.QtCore import Qt
+        from PySide6.QtGui import QShortcut
 
         esc = QShortcut(Qt.Key.Key_Escape, self)
         esc.activated.connect(self._abandon_task)

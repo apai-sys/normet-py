@@ -915,9 +915,7 @@ class TrajectoryWindow(QMainWindow):
     def _run_hysplit(self) -> None:
         exe = self.hysplit_exec_edit.text().strip()
         if not exe:
-            self.notices.notify(
-                "no-hyts", "Point 'hyts_std' at your HYSPLIT install."
-            )
+            self.notices.notify("no-hyts", "Point 'hyts_std' at your HYSPLIT install.")
             return
         if not self._gdas_paths:
             self.notices.notify(
@@ -931,9 +929,7 @@ class TrajectoryWindow(QMainWindow):
             self.notices.notify("bad-receptors", f"Receptor sites: {exc}", kind="warn")
             return
         if not receptors:
-            self.notices.notify(
-                "no-receptors", "Add at least one receptor site (name, lat, lon)."
-            )
+            self.notices.notify("no-receptors", "Add at least one receptor site (name, lat, lon).")
             return
         span = self._receptor_span()
         if span is None:

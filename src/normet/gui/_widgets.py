@@ -28,10 +28,10 @@ import pandas as pd
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT
 from PySide6.QtCore import (
     QAbstractAnimation,
-    QEvent,
     QEasingCurve,
-    QRect,
+    QEvent,
     QPropertyAnimation,
+    QRect,
     QSize,
     Qt,
     QTimer,
@@ -78,6 +78,7 @@ def hint_style(small: bool = False) -> str:
     (see theme.muted_color); ask again after a theme change."""
     size = "font-size:11px;" if small else ""
     return f"color:{muted_color()};{size}"
+
 
 RUN_BUTTON_STYLE = "font-weight:600;padding:8px;"
 
@@ -1133,11 +1134,7 @@ class SmoothProgress(QWidget):
         text's colour faintly mixed into the window's."""
         pal = QApplication.palette()
         role = QPalette.ColorRole
-        accent = (
-            pal.color(role.Accent)
-            if hasattr(role, "Accent")
-            else pal.color(role.Highlight)
-        )
+        accent = pal.color(role.Accent) if hasattr(role, "Accent") else pal.color(role.Highlight)
         ground, ink = pal.color(role.Window), pal.color(role.WindowText)
         t = 0.16 if ground.lightnessF() < 0.5 else 0.12
         track = QColor.fromRgbF(
@@ -1146,6 +1143,7 @@ class SmoothProgress(QWidget):
                 for a, b in zip(
                     (ground.redF(), ground.greenF(), ground.blueF()),
                     (ink.redF(), ink.greenF(), ink.blueF()),
+                    strict=True,
                 )
             )
         )

@@ -988,9 +988,7 @@ class DataWindow(QMainWindow):
     def _run_fetch(self) -> None:
         sites = self._selected_stations()
         if not sites:
-            self.notices.notify(
-                "no-station", "Find stations and select one in the table first."
-            )
+            self.notices.notify("no-station", "Find stations and select one in the table first.")
             return
         pollutants = self._checked_pollutants()
         d_from = self.date_from.date().toString("yyyy-MM-dd")
