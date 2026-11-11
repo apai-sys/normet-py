@@ -18,6 +18,28 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   emission events that `deweather` absorbs survive. `deweather` is untouched.
   Tests in `tests/test_in_context.py` assert the headline property: future-only
   intervention recovers the weather response, past+future intervention collapses it.
+- **ICN: short records, honest aggregation names, separated uncertainty.** Four fixes
+  found while setting up the ICN design scan (2026-11-11):
+  - `ICNDesign.min_context` — an anchor used to need a full `context_length` of
+    history, so a record shorter than that produced **no output at all** (under 85.3
+    days at C=2048) and a three-month record yielded one partial anchor over its last
+    136 hours (6 % of the record). With `min_context` anchors may start earlier and
+    the first one uses whatever history exists. `None` keeps the old behaviour.
+  - `ICNDesign.aggregate`: `"median"` was a (lead-weighted) **mean** and
+    `"quantile_mean"` was the same code path as `"trimmed"`, so the three names were
+    two estimators. `"mean"`, `"median"` (weighted median) and `"trimmed"` are now
+    three, and `"quantile_mean"` is kept as a deprecated alias of `"trimmed"`. The
+    default is unchanged in value (`"trimmed"`).
+  - `ICNDesign.support_min_frac` was declared and never used; the A2 gate now drops
+    anchors whose observed future lies outside the pool's range and records them in
+    `diagnostics["low_support"]` (a no-op for record pools, which contain their own
+    blocks; it matters for the external climatology pool of PR-2).
+  - `ICNResult.spread_by_source["anchor"]` and `["mc"]` were both the std over every
+    draw of an hour. `mc` is now the within-anchor resample spread (pooled over
+    anchors) and `anchor` the across-anchor spread, i.e. two distinguishable
+    sources.
+  Tests in `tests/test_in_context.py` cover all four; `mean`/`median`/`trimmed` are
+  asserted to differ on a skewed draw set.
 - **Assistant: models forwarded by hpc-agent, and servers of your own.** A model that
   hpc-agent forwards from a cluster job is named `cluster:model`
   (`bede:hf.co/unsloth/GLM-5.3-Flash-GGUF:UD-Q4_K_XL`, or any unique part of the name,

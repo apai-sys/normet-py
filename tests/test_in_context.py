@@ -236,3 +236,69 @@ def test_lead_time_weighting_runs() -> None:
     # weighting must not change the shape contract
     assert len(res.level) == len(df)
     assert int(res.hour_contrib.max()) > 1
+
+
+# --------------------------------------------------------------------------- #
+# 2026-11-11: short records, honest aggregation, separated spread
+# --------------------------------------------------------------------------- #
+def test_min_context_gives_a_short_record_an_estimate() -> None:
+    """A record shorter than the context produced no output at all."""
+    df = _synthetic(n=1900)  # ~79 days, C = 2048
+    est = _estimator()
+    base = dict(context_length=2048, block_h=168, stride=168, n_resamples=3, seed=8)
+    none = normalise_in_context(est, df, "y", design=ICNDesign(**base), pipeline=FakeICLPipeline())
+    assert np.isfinite(none.level.to_numpy()).sum() == 0
+    short = normalise_in_context(
+        est, df, "y", design=ICNDesign(**base, min_context=400), pipeline=FakeICLPipeline()
+    )
+    # anchors now start at 400 h, so the rest of the record is estimated
+    assert np.isfinite(short.level.to_numpy()).sum() > 1000
+    assert short.diagnostics["min_context"] == 400
+
+
+def test_without_min_context_a_three_month_record_keeps_one_block() -> None:
+    """3 months at C=2048: one partial anchor over the last block, 6 % of hours."""
+    df = _synthetic(n=91 * 24)
+    est = _estimator()
+    design = ICNDesign(context_length=2048, block_h=168, stride=168, n_resamples=2, seed=11)
+    res = normalise_in_context(est, df, "y", design=design, pipeline=FakeICLPipeline())
+    assert np.isfinite(res.level.to_numpy()).sum() == 91 * 24 - 2048
+
+
+def test_aggregate_names_are_three_estimators() -> None:
+    """mean, median and trimmed must differ on a skewed draw set."""
+    from normet.foundation.in_context import _aggregate
+
+    items = [(1.0, 0), (2.0, 1), (2.0, 2), (3.0, 3), (100.0, 30)]  # one heavy tail
+    mean = _aggregate(items, "mean", 0.0)
+    median = _aggregate(items, "median", 0.0)
+    trimmed = _aggregate(items, "trimmed", 0.0)
+    assert mean == pytest.approx(21.6)
+    assert median == pytest.approx(2.0)
+    assert trimmed < mean
+    # the deprecated alias is the trimmed mean
+    assert _aggregate(items, "quantile_mean", 0.0) == pytest.approx(trimmed)
+    # lead weighting moves the mean towards the early draw
+    assert _aggregate(items, "mean", 1.0) < mean
+
+
+def test_anchor_spread_is_not_the_resample_spread() -> None:
+    """With one draw per anchor, mc spread is 0 while the anchors still disagree."""
+    df = _synthetic()
+    est = _estimator()
+    design = ICNDesign(context_length=1000, block_h=168, stride=84, n_resamples=1, seed=9)
+    res = normalise_in_context(est, df, "y", design=design, pipeline=FakeICLPipeline())
+    both = (res.hour_contrib.to_numpy() >= 2) & np.isfinite(res.level.to_numpy())
+    assert both.any()
+    assert np.nanmax(res.spread_by_source["mc"].to_numpy()[both]) < 1e-12
+    assert np.nanmax(res.spread_by_source["anchor"].to_numpy()[both]) > 0.0
+
+
+def test_support_gate_is_recorded() -> None:
+    """The A2 gate reports what it dropped; a record pool is inside its own range."""
+    df = _synthetic()
+    est = _estimator()
+    design = ICNDesign(context_length=1000, n_resamples=2, seed=10, support_min_frac=0.5)
+    res = normalise_in_context(est, df, "y", design=design, pipeline=FakeICLPipeline())
+    assert res.diagnostics["low_support"] == []
+    assert res.diagnostics["design"]["support_min_frac"] == 0.5

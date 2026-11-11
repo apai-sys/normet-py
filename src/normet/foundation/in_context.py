@@ -109,8 +109,12 @@ class ICNDesign:
     context_length:
         Conditioning window ``C`` (D6), hours.
     aggregate:
-        Per-hour aggregation across resamples/anchors (D9): ``"median"``,
-        ``"quantile_mean"`` (trimmed mean of the 10-90 % band) or ``"trimmed"``.
+        Per-hour aggregation across resamples/anchors (D9): ``"mean"``
+        (the default; weighted by ``lead_tau`` when it is set), ``"median"``
+        (weighted median) or ``"trimmed"`` (weighted mean of the 10-90 %
+        percentile band).  Until 2026-11-11 ``"median"`` was a mean and
+        ``"quantile_mean"`` was the same code path as ``"trimmed"``, so a
+        scan that compared the three names compared two estimators.
     lead_tau:
         Lead-time weighting (D4): when ``> 0``, each anchor's contribution to a
         given hour is weighted by ``exp(-lead / lead_tau)`` where ``lead`` is the
@@ -122,10 +126,22 @@ class ICNDesign:
         Counterfactual weather draws averaged into the level estimate.
     seed:
         RNG seed for reproducible pool draws.
+    min_context:
+        Shortest conditioning window an anchor may use, hours.  ``None`` keeps
+        the old behaviour -- an anchor only exists once ``context_length``
+        hours precede it, so a record shorter than ``context_length`` produced
+        **no output at all** (under 85.3 days at C=2048), and a three-month
+        record yielded one partial anchor over its last 136 hours (6 % of the
+        record).  With a value, anchors may start at ``min_context`` and the
+        first one uses the whole record up to its block; the context then
+        shrinks instead of disappearing.  The shortest usable value is set by
+        the forecaster's own minimum (Chronos-2 needs a few hundred hours).
     support_min_frac:
-        A2 support gate: if the factual future falls outside the pool's observed
-        range for more than this fraction of (hour, variable) cells, the block is
-        flagged in ``diagnostics`` rather than projected.
+        A2 support gate: an anchor whose factual future falls outside the
+        pool's observed range for more than this fraction of (hour, variable)
+        cells is dropped, and the anchor index and fraction are recorded in
+        ``diagnostics["low_support"]``.  A counterfactual drawn from a pool
+        that never saw such weather is an extrapolation, not an intervention.
     """
 
     intervene: str = "future_only"
@@ -135,10 +151,11 @@ class ICNDesign:
     stride: int = 168
     direction: str = "forward"
     context_length: int = 2048
-    aggregate: str = "quantile_mean"
+    aggregate: str = "trimmed"
     lead_tau: float = 0.0
     n_resamples: int = 20
     seed: int = 0
+    min_context: int | None = None
     support_min_frac: float = 0.5
 
     def __post_init__(self) -> None:
@@ -152,10 +169,12 @@ class ICNDesign:
             raise ValueError(
                 f"direction must be forward|reverse|bidirectional, got {self.direction!r}"
             )
-        if self.aggregate not in ("median", "quantile_mean", "trimmed"):
-            raise ValueError(
-                f"aggregate must be median|quantile_mean|trimmed, got {self.aggregate!r}"
-            )
+        if self.aggregate not in ("mean", "median", "trimmed", "quantile_mean"):
+            raise ValueError(f"aggregate must be mean|median|trimmed, got {self.aggregate!r}")
+        if self.min_context is not None and self.min_context <= 0:
+            raise ValueError(f"min_context must be positive or None, got {self.min_context}")
+        if not 0.0 <= self.support_min_frac <= 1.0:
+            raise ValueError(f"support_min_frac must be in [0, 1], got {self.support_min_frac}")
 
 
 # --------------------------------------------------------------------------- #
@@ -256,11 +275,22 @@ class _DirResult(NamedTuple):
     counterfactual point landing on hour ``h``; ``contrib[h]`` counts anchors. Kept as
     a :class:`~typing.NamedTuple` (rather than a bare 3-tuple) so the element types are
     unambiguous to static analysis across the forward / reverse / bidirectional branches.
+
+    ``anchor_values[h]`` keeps the *per-anchor* mean of the counterfactual level, one
+    entry per anchor covering ``h``, so the anchoring spread can be measured across
+    anchors; ``mc_vars[h]`` keeps each anchor's variance across its resamples, so the
+    resample spread is measured *within* anchors.  Before 2026-11-11 both columns were
+    the std over every draw of the hour, i.e. they measured the same dispersion.
+    ``low_support`` lists ``(anchor_start, support_fraction)`` for the blocks the A2
+    gate dropped.
     """
 
     level_draws: dict[int, list[tuple[float, int]]]
     paired_draws: dict[int, list[tuple[float, int]]]
     anchor_count: dict[int, int]
+    anchor_values: dict[int, list[float]]
+    mc_vars: dict[int, list[float]]
+    low_support: list[tuple[int, float]]
 
 
 @dataclass
@@ -337,8 +367,17 @@ def _aggregate(items: list[tuple[float, int]], mode: str, lead_tau: float) -> fl
     """Aggregate ``(value, lead)`` draws into one point estimate (D4 + D9).
 
     With ``lead_tau > 0`` each draw is weighted by ``exp(-lead / lead_tau)`` so an
-    hour is informed mostly by the anchor that sees it earliest. ``mode`` still
-    chooses the central tendency of the (weighted) sample.
+    hour is informed mostly by the anchor that sees it earliest. ``mode`` chooses
+    the central tendency of the (weighted) sample:
+
+    - ``"mean"`` -- the weighted mean;
+    - ``"median"`` -- the weighted median (first value whose cumulative weight
+      reaches one half), which tolerates a heavy right tail from anchors whose
+      counterfactual landed on a near-zero weather hour;
+    - ``"trimmed"`` -- the weighted mean of the draws inside the 10-90 %
+      percentile band, falling back to the full mean when the band is empty;
+    - ``"quantile_mean"`` -- deprecated alias of ``"trimmed"`` (it was a
+      separate name for the same code path).
     """
     if not items:
         return float("nan")
@@ -348,8 +387,12 @@ def _aggregate(items: list[tuple[float, int]], mode: str, lead_tau: float) -> fl
     leads = np.asarray([float(lead) for _, lead in items], dtype=float)
     w = np.exp(-leads / lead_tau) if lead_tau and lead_tau > 0 else np.ones_like(vals)
     w = w / w.sum()
-    if mode == "median":
+    if mode == "mean":
         return float(np.sum(w * vals))
+    if mode == "median":
+        order = np.argsort(vals, kind="stable")
+        cum = np.cumsum(w[order])
+        return float(vals[order][np.searchsorted(cum, 0.5 - 1e-12, side="left")])
     lo, hi = np.percentile(vals, [10, 90])
     sel = (vals >= lo) & (vals <= hi)
     if sel.sum() == 0:
@@ -382,11 +425,20 @@ def _one_direction(
 
     level_draws: dict[int, list[tuple[float, int]]] = {}
     paired_draws: dict[int, list[tuple[float, int]]] = {}
+    anchor_values: dict[int, list[float]] = {}
+    mc_vars: dict[int, list[float]] = {}
     contrib: dict[int, int] = {}
+    low_support: list[tuple[int, float]] = []
 
-    anchors = range(
-        design.context_length, max(design.context_length, n - design.block_h) + 1, design.stride
-    )
+    # Where the anchors start.  With ``min_context`` the first anchor may use a
+    # shortened context (a 6-month record at C=2048 otherwise yields a single
+    # anchor, and a 3-month one none at all); without it the first anchor needs
+    # a full ``context_length`` of history, as before.
+    if design.min_context is None:
+        first = design.context_length  # unchanged behaviour: needs a full context
+    else:
+        first = max(1, min(design.min_context, n - 1))
+    anchors = range(first, max(first, n - design.block_h) + 1, design.stride)
     for a in anchors:
         s = a
         e = min(a + design.block_h, n)
@@ -406,6 +458,14 @@ def _one_direction(
             past_cf = past.copy()
             pm = pool.sample_trajectory(len(past), rng)
             past_cf[met_cols] = pm[met_cols].to_numpy()
+
+        # A2 support: a block whose observed weather lies outside the pool is
+        # an extrapolation of the counterfactual, not an intervention on it.
+        if design.support_min_frac > 0:
+            support, _ = pool.support_check(factual_met[met_cols])
+            if support < design.support_min_frac:
+                low_support.append((int(s), float(support)))
+                continue
 
         # factual forecast (observed future weather)
         level_fact = pipeline.forecast(hist, past, factual_met[cols], cols, target)
@@ -440,10 +500,12 @@ def _one_direction(
         for offset, h in enumerate(range(s, e)):
             level_draws.setdefault(h, []).extend((float(v), offset) for v in cf_levels[:, offset])
             paired_draws.setdefault(h, []).append((float(paired[offset]), offset))
+            anchor_values.setdefault(h, []).append(float(cf_levels[:, offset].mean()))
+            mc_vars.setdefault(h, []).append(float(cf_levels[:, offset].var()))
         for h in range(s, e):
             contrib[h] = contrib.get(h, 0) + 1
 
-    return _DirResult(level_draws, paired_draws, contrib)
+    return _DirResult(level_draws, paired_draws, contrib, anchor_values, mc_vars, low_support)
 
 
 def normalise_in_context(
@@ -505,7 +567,10 @@ def normalise_in_context(
         fwd = _one_direction(df, target, design, pipe, met_cols, cols)
         level_d = fwd.level_draws
         paired_d = fwd.paired_draws
+        anchor_v = fwd.anchor_values
+        mc_v = fwd.mc_vars
         contrib = fwd.anchor_count
+        low_support = list(fwd.low_support)
     elif design.direction == "reverse":
         rev = df.iloc[::-1].copy()
         rev.index = df.index[::-1]
@@ -514,7 +579,10 @@ def normalise_in_context(
         n = len(df)
         level_d = {n - 1 - h: v for h, v in r.level_draws.items()}
         paired_d = {n - 1 - h: v for h, v in r.paired_draws.items()}
+        anchor_v = {n - 1 - h: v for h, v in r.anchor_values.items()}
+        mc_v = {n - 1 - h: v for h, v in r.mc_vars.items()}
         contrib = {n - 1 - h: v for h, v in r.anchor_count.items()}
+        low_support = [(n - 1 - a, x) for a, x in r.low_support]
     else:  # bidirectional
         fwd = _one_direction(df, target, design, pipe, met_cols, cols)
         rev = df.iloc[::-1].copy()
@@ -523,12 +591,20 @@ def normalise_in_context(
         n = len(df)
         level_d = {h: list(fwd.level_draws[h]) for h in fwd.level_draws}
         paired_d = {h: list(fwd.paired_draws[h]) for h in fwd.paired_draws}
+        anchor_v = {h: list(fwd.anchor_values[h]) for h in fwd.anchor_values}
+        mc_v = {h: list(fwd.mc_vars[h]) for h in fwd.mc_vars}
+        low_support = list(fwd.low_support)
         # forward already keyed by original hours; reverse keyed by reversed-frame
         # hours, so map each reversed key r -> original hour n-1-r.
-        for hr, v in revr.level_draws.items():
-            level_d.setdefault(n - 1 - hr, []).extend(v)
-        for hr, v in revr.paired_draws.items():
-            paired_d.setdefault(n - 1 - hr, []).extend(v)
+        for hr, lvals in revr.level_draws.items():
+            level_d.setdefault(n - 1 - hr, []).extend(lvals)
+        for hr, pvals in revr.paired_draws.items():
+            paired_d.setdefault(n - 1 - hr, []).extend(pvals)
+        for hr, avals in revr.anchor_values.items():
+            anchor_v.setdefault(n - 1 - hr, []).extend(avals)
+        for hr, mvals in revr.mc_vars.items():
+            mc_v.setdefault(n - 1 - hr, []).extend(mvals)
+        low_support.extend((n - 1 - a, x) for a, x in revr.low_support)
         contrib_keys = set(fwd.anchor_count) | {n - 1 - h for h in revr.anchor_count}
         contrib = {
             h: fwd.anchor_count.get(h, 0) + revr.anchor_count.get(n - 1 - h, 0)
@@ -538,20 +614,25 @@ def normalise_in_context(
     n = len(df)
     level_vals = np.full(n, np.nan)
     paired_vals = np.full(n, np.nan)
-    anchor_spread = np.full(n, np.nan)
     mc_spread = np.full(n, np.nan)
     contrib_arr = np.zeros(n, dtype=int)
     for h in range(n):
         if h in level_d and level_d[h]:
             level_vals[h] = _aggregate(level_d[h], design.aggregate, design.lead_tau)
-            mc_spread[h] = float(np.nanstd([v for v, _ in level_d[h]]))
+            if h in mc_v and mc_v[h]:
+                # within-anchor resample spread, pooled over the anchors that
+                # cover the hour (their resamples are independent draws)
+                mc_spread[h] = float(np.sqrt(np.mean(mc_v[h])))
         if h in paired_d and paired_d[h]:
             paired_vals[h] = _aggregate(paired_d[h], design.aggregate, design.lead_tau)
         if h in contrib:
             contrib_arr[h] = contrib[h]
 
-    # anchor spread: std of per-anchor means of the counterfactual level
-    anchor_spread = _anchor_spread(level_d, n)
+    # Anchor spread: std across anchors of each anchor's mean counterfactual
+    # level for the hour.  It was the std over every draw of the hour, i.e. the
+    # same quantity as ``mc`` (resample spread) plus the anchor offset, and the
+    # two columns were reported as separate uncertainty sources.
+    anchor_spread = _anchor_spread(anchor_v, n)
 
     index = df.index
     level = pd.Series(level_vals, index=index, name="level")
@@ -567,6 +648,8 @@ def normalise_in_context(
         "n_anchors": int(np.count_nonzero(contrib_arr)),
         "uncovered_hours": int(np.count_nonzero(contrib_arr == 0)),
         "schema": schema,
+        "min_context": design.min_context,
+        "low_support": low_support,
     }
     result = ICNResult(
         level=level,
@@ -581,18 +664,17 @@ def normalise_in_context(
     return result
 
 
-def _anchor_spread(level_d: dict[int, list[tuple[float, int]]], n: int) -> np.ndarray:
-    """Per-hour spread across anchors (the anchoring/认知 uncertainty).
+def _anchor_spread(anchor_values: dict[int, list[float]], n: int) -> np.ndarray:
+    """Per-hour spread across anchors (the anchoring uncertainty).
 
-    ``level_d[h]`` holds ``(value, lead)`` draws for hour ``h`` (across anchors
-    *and* resamples); we cannot recover the per-anchor split after the fact, so we
-    approximate the anchor spread by the empirical std of the values when an hour
-    is covered by several draws and set it to NaN otherwise. Reporting both
-    ``anchor`` and ``mc`` keeps the two uncertainty sources distinguishable even
-    though this proxy folds resample noise into the anchor band.
+    ``anchor_values[h]`` holds one mean counterfactual level per anchor covering
+    ``h``, so the std over it is the anchoring uncertainty alone.  Until
+    2026-11-11 this was the std over all ``(value, lead)`` draws of the hour,
+    which is the resample spread the ``mc`` column already reports (the two were
+    the same number whenever an hour had one anchor).
     """
     out = np.full(n, np.nan)
-    for h, items in level_d.items():
-        if len(items) >= 2:
-            out[h] = float(np.nanstd([v for v, _ in items]))
+    for h, vals in anchor_values.items():
+        if len(vals) >= 2:
+            out[h] = float(np.nanstd(vals))
     return out
