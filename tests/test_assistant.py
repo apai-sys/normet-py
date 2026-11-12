@@ -139,7 +139,12 @@ def test_adapters_write_and_read_each_format(monkeypatch):
     tools = [llm.as_tool(_echo)]
 
     reply = llm.Model("anthropic:claude-sonnet-5-5", api_key="k").chat("sys", history, tools)
-    assert sent["headers"]["x-api-key"] == "k" and sent["body"]["system"] == "sys"
+    assert sent["headers"]["x-api-key"] == "k"
+    # The prefix is sent marked for the cache: the system prompt as one marked block
+    # (the helpers' own tests are in test_agent.py).
+    assert sent["body"]["system"] == [
+        {"type": "text", "text": "sys", "cache_control": {"type": "ephemeral"}}
+    ]
     assert sent["body"]["messages"][2]["content"][0]["type"] == "tool_result"
     assert reply.text == "ok" and reply.calls[0].arguments == {"word": "w"}
     assert reply.usage == {"input": 3, "output": 4}
@@ -616,7 +621,8 @@ def test_unknown_agent_and_missing_key(win, qapp, monkeypatch):
     assert dock.key_btn.isEnabled()
     dock.send("hi")
     assert not dock.busy() and dock.messages == []
-    assert dock.effort_box.isHidden()  # an API model has no effort to choose
+    # An API model now has its provider's efforts too, auto (the server's own) first.
+    assert not dock.effort_box.isHidden() and dock.effort_box.itemText(0) == "auto"
     monkeypatch.setattr(assistant_cli, "find_cli", lambda c: None)
     dock.model_box.setCurrentText("Claude Code · sonnet")
     assert not dock.key_btn.isEnabled()
