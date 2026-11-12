@@ -531,6 +531,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   models too: `auto` (nothing sent) first, then the provider's values — DeepSeek's
   `low`/`high`/`xhigh`/`max`, the others' `low`/`medium`/`high` — sent as
   `reasoning_effort` or `output_config.effort`.
+- **Assistant: Up/Down recalls what was sent from the box** — at the first line, Up
+  walks back through the last 50 messages sent from it (a repeat after itself kept
+  once), and past the newest Down puts back the draft as it was left. Inside a longer
+  text the arrows move the caret first, as Qt's own. The history travels in the
+  settings; New chat forgets the conversation, not it.
 
 ### Changed
 - **`rolling` names its windows `window_01`, `window_02`, …** (was

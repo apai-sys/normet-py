@@ -429,6 +429,8 @@ def find_key(provider: str) -> str | None:
 #: models last used on them.
 SERVERS_KEY = "assistant/servers"
 EXTRA_KEY = "assistant/extra_models"
+#: Settings: the messages sent from the box, newest last (its Up/Down history).
+TYPED_KEY = "assistant/typed"
 _NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
@@ -2070,6 +2072,12 @@ class AssistantDock(QDockWidget):
         self.consented: set[tuple[str, str]] = set()
         #: The language of the analyst's last message in this chat (``written_language``).
         self._talk: str | None = None
+        #: The box's history, a shell's: what was sent from it, the last 50, kept in
+        #: the settings beside the model (Up and Down at the box's first and last
+        #: line, eventFilter). ``_typed_at`` is which one is shown; None is the draft.
+        self._typed: list[str] = [t for t in (_stored(TYPED_KEY) or []) if isinstance(t, str)][-50:]
+        self._typed_at: int | None = None
+        self._typed_draft = ""
         #: The button of the card whose Apply is being carried out (_post_card), for what
         #: the click starts to mark when it has ended.
         self._acting: QPushButton | None = None
@@ -2376,7 +2384,58 @@ class AssistantDock(QDockWidget):
             self.composer_box.setProperty("focus", ev.type() == QEvent.Type.FocusIn)
             self.composer_box.style().unpolish(self.composer_box)
             self.composer_box.style().polish(self.composer_box)
+        if (
+            box is not None
+            and obj is box
+            and isinstance(ev, QKeyEvent)
+            and ev.type() == QEvent.Type.KeyPress
+            and ev.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down)
+            and ev.modifiers() == Qt.KeyboardModifier.NoModifier
+            and self._typed_key(ev.key())
+        ):
+            return True
         return super().eventFilter(obj, ev)
+
+    def _typed_key(self, key: Qt.Key) -> bool:
+        """Up or Down in the box: what was sent before, a shell's history -- Up at
+        the box's first line, Down at its last. Inside a longer text the caret moves
+        as Qt moves it, so a message written over lines can be walked to its edge
+        first. False where the key is the box's own."""
+        box = self.composer
+        at_first = box.textCursor().blockNumber() == 0
+        at_last = box.textCursor().blockNumber() == box.document().blockCount() - 1
+        if not (at_first if key == Qt.Key.Key_Up else at_last) or not self._typed:
+            return False
+        if key == Qt.Key.Key_Up:
+            if self._typed_at is None:
+                self._typed_draft = box.toPlainText()
+                self._typed_at = len(self._typed) - 1
+            elif self._typed_at > 0:
+                self._typed_at -= 1
+            self._typed_show(self._typed[self._typed_at])
+        elif self._typed_at is not None:
+            if self._typed_at < len(self._typed) - 1:
+                self._typed_at += 1
+                self._typed_show(self._typed[self._typed_at])
+            else:  # past the newest: the draft, as it was left
+                self._typed_at = None
+                self._typed_show(self._typed_draft)
+        else:
+            return False
+        return True
+
+    def _typed_show(self, text: str) -> None:
+        self.composer.setPlainText(text)
+        self.composer.moveCursor(QTextCursor.MoveOperation.End)
+
+    def _remember_typed(self, text: str) -> None:
+        """The box's history, a shell's: a message kept once it is sent, the same one
+        after itself not kept twice; the oldest fall away past 50."""
+        if not self._typed or self._typed[-1] != text:
+            self._typed.append(text)
+            del self._typed[:-50]
+        self._typed_at, self._typed_draft = None, ""
+        _settings().setValue(TYPED_KEY, json.dumps(self._typed))
 
     # -- the model -------------------------------------------------------------------
     def _is_agent(self) -> bool:
@@ -2632,6 +2691,7 @@ class AssistantDock(QDockWidget):
         if not self._consent():
             return  # a message refused stays in the box, to be sent again
         if typed:
+            self._remember_typed(text)
             self.composer.clear()
             self.view.you(text)
             self._talk = written_language(text) or self._talk
@@ -2828,6 +2888,7 @@ class AssistantDock(QDockWidget):
         self._model_next = None
         self._state_parts = None
         self._talk = None
+        self._typed_at, self._typed_draft = None, ""
         self.tools._readings.clear()
         self._close_cli()
         self.view.clear()

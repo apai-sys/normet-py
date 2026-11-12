@@ -491,6 +491,37 @@ def win(qapp, monkeypatch, tmp_path):
         llm.forget_provider(name)
 
 
+def test_the_box_recalls_what_was_sent(win, qapp):
+    """Up at the box's first line, Down at its last: a shell's history, the draft
+    restored past the newest; inside a longer text the arrows are Qt's own."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QTextCursor
+
+    dock = win.assistant
+    dock._typed.clear()
+    dock._remember_typed("one")
+    dock._remember_typed("one")
+    dock._remember_typed("two")
+    assert dock._typed == ["one", "two"]  # a repeat after itself kept once
+
+    dock.composer.setPlainText("draft")
+    assert dock._typed_key(Qt.Key.Key_Up) is True
+    assert dock.composer.toPlainText() == "two"
+    assert dock._typed_key(Qt.Key.Key_Up) is True
+    assert dock.composer.toPlainText() == "one"
+    assert dock._typed_key(Qt.Key.Key_Up) is True  # at the oldest, it stays
+    assert dock.composer.toPlainText() == "one"
+    assert dock._typed_key(Qt.Key.Key_Down) is True
+    assert dock.composer.toPlainText() == "two"
+    assert dock._typed_key(Qt.Key.Key_Down) is True
+    assert dock.composer.toPlainText() == "draft"  # past the newest: the draft
+    assert dock._typed_key(Qt.Key.Key_Down) is False
+
+    dock.composer.setPlainText("a\nb")
+    dock.composer.moveCursor(QTextCursor.MoveOperation.End)
+    assert dock._typed_key(Qt.Key.Key_Up) is False  # not at the first line: Qt's
+
+
 def test_window_tools_read_and_propose(win, qapp):
     tools = win.assistant.tools
     assert "no table open" in tools.window()
