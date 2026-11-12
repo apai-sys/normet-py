@@ -172,6 +172,56 @@ def test_appearance_is_remembered(qapp, tmp_path, monkeypatch):
         theme.theme_manager().set_appearance("sepia")
 
 
+def test_a_theme_switch_reaches_a_palette_style_sheet(qapp):
+    """A style sheet's `palette(role)` is resolved when the sheet is applied.
+
+    The welcome cards' background is `palette(base)`; after a switch to the dark
+    theme a card kept the light `palette(base)` it was polished with, and a plain
+    container kept the whole light palette (measured in cume, 2026-11-12). A theme
+    change re-applies such a sheet and clears inherited palettes, so the card and its
+    container take the new palette's colours.
+    """
+    from PySide6.QtGui import QColor, QPalette
+    from PySide6.QtWidgets import QFrame, QVBoxLayout, QWidget
+
+    from normet.gui.theme import _refresh_widget_palettes
+
+    was = QPalette(qapp.palette())
+
+    light = QPalette()
+    light.setColor(QPalette.ColorRole.Window, QColor(0xEF, 0xEF, 0xEF))
+    light.setColor(QPalette.ColorRole.Base, QColor(0xFF, 0xFF, 0xFF))
+    light.setColor(QPalette.ColorRole.WindowText, QColor(0, 0, 0))
+    dark = QPalette(light)
+    dark.setColor(QPalette.ColorRole.Window, QColor(0x32, 0x32, 0x32))
+    dark.setColor(QPalette.ColorRole.Base, QColor(0x17, 0x17, 0x17))
+    dark.setColor(QPalette.ColorRole.WindowText, QColor(0xFF, 0xFF, 0xFF))
+
+    try:
+        qapp.setPalette(light)
+        _refresh_widget_palettes()
+        holder = QWidget()
+        QVBoxLayout(holder).addWidget(QFrame())
+        card = holder.findChild(QFrame)
+        assert card is not None
+        card.setObjectName("themeCard")
+        card.setStyleSheet("#themeCard { background: palette(base); }")
+        card.setMinimumSize(60, 60)
+        holder.show()
+        qapp.processEvents()
+        assert card.grab().toImage().pixelColor(30, 30).name() == "#ffffff"
+
+        qapp.setPalette(dark)
+        _refresh_widget_palettes()
+        qapp.processEvents()
+        assert card.grab().toImage().pixelColor(30, 30).name() == "#171717"
+        assert holder.palette().color(QPalette.ColorRole.Window) == QColor(0x32, 0x32, 0x32)
+        holder.close()
+    finally:
+        qapp.setPalette(was)
+        _refresh_widget_palettes()
+
+
 def test_toolbar_icons_follow_the_theme(qapp):
     from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
     from matplotlib.figure import Figure

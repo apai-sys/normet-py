@@ -97,7 +97,7 @@ def test_model_names_and_keys(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
         llm.Model("anthropic:claude-sonnet-5-5")
-    assert llm.Model("ollama:qwen3:8b").model == "qwen3:8b"
+    assert llm.Model("lmstudio:qwen3:8b").model == "qwen3:8b"
 
 
 def test_adapters_write_and_read_each_format(monkeypatch):
@@ -139,12 +139,17 @@ def test_adapters_write_and_read_each_format(monkeypatch):
     tools = [llm.as_tool(_echo)]
 
     reply = llm.Model("anthropic:claude-sonnet-5-5", api_key="k").chat("sys", history, tools)
-    assert sent["headers"]["x-api-key"] == "k" and sent["body"]["system"] == "sys"
+    assert sent["headers"]["x-api-key"] == "k"
+    # The prefix is sent marked for the cache: the system prompt as one marked block
+    # (the helpers' own tests are in test_agent.py).
+    assert sent["body"]["system"] == [
+        {"type": "text", "text": "sys", "cache_control": {"type": "ephemeral"}}
+    ]
     assert sent["body"]["messages"][2]["content"][0]["type"] == "tool_result"
     assert reply.text == "ok" and reply.calls[0].arguments == {"word": "w"}
     assert reply.usage == {"input": 3, "output": 4}
 
-    reply = llm.Model("ollama:qwen3:8b").chat("sys", history, tools)
+    reply = llm.Model("lmstudio:qwen3:8b").chat("sys", history, tools)
     assert sent["url"].endswith("/chat/completions") and "Authorization" not in sent["headers"]
     assert sent["body"]["messages"][0] == {"role": "system", "content": "sys"}
     assert sent["body"]["messages"][3] == {"role": "tool", "tool_call_id": "a", "content": "x"}
@@ -299,7 +304,7 @@ def test_a_server_the_analyst_names_is_a_provider(hpc, monkeypatch):
 
 
 def test_named_servers_cannot_take_a_built_in_or_a_cluster_name(hpc):
-    for name in ("anthropic", "ollama", "bede", "csf3"):
+    for name in ("anthropic", "lmstudio", "bede", "csf3"):
         with pytest.raises(ValueError, match="provider of its own"):
             llm.register_provider(name, "http://127.0.0.1:1/v1")
     for name, url in (
@@ -491,6 +496,37 @@ def win(qapp, monkeypatch, tmp_path):
         llm.forget_provider(name)
 
 
+def test_the_box_recalls_what_was_sent(win, qapp):
+    """Up at the box's first line, Down at its last: a shell's history, the draft
+    restored past the newest; inside a longer text the arrows are Qt's own."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QTextCursor
+
+    dock = win.assistant
+    dock._typed.clear()
+    dock._remember_typed("one")
+    dock._remember_typed("one")
+    dock._remember_typed("two")
+    assert dock._typed == ["one", "two"]  # a repeat after itself kept once
+
+    dock.composer.setPlainText("draft")
+    assert dock._typed_key(Qt.Key.Key_Up) is True
+    assert dock.composer.toPlainText() == "two"
+    assert dock._typed_key(Qt.Key.Key_Up) is True
+    assert dock.composer.toPlainText() == "one"
+    assert dock._typed_key(Qt.Key.Key_Up) is True  # at the oldest, it stays
+    assert dock.composer.toPlainText() == "one"
+    assert dock._typed_key(Qt.Key.Key_Down) is True
+    assert dock.composer.toPlainText() == "two"
+    assert dock._typed_key(Qt.Key.Key_Down) is True
+    assert dock.composer.toPlainText() == "draft"  # past the newest: the draft
+    assert dock._typed_key(Qt.Key.Key_Down) is False
+
+    dock.composer.setPlainText("a\nb")
+    dock.composer.moveCursor(QTextCursor.MoveOperation.End)
+    assert dock._typed_key(Qt.Key.Key_Up) is False  # not at the first line: Qt's
+
+
 def test_window_tools_read_and_propose(win, qapp):
     tools = win.assistant.tools
     assert "no table open" in tools.window()
@@ -585,7 +621,8 @@ def test_unknown_agent_and_missing_key(win, qapp, monkeypatch):
     assert dock.key_btn.isEnabled()
     dock.send("hi")
     assert not dock.busy() and dock.messages == []
-    assert dock.effort_box.isHidden()  # an API model has no effort to choose
+    # An API model now has its provider's efforts too, auto (the server's own) first.
+    assert not dock.effort_box.isHidden() and dock.effort_box.itemText(0) == "auto"
     monkeypatch.setattr(assistant_cli, "find_cli", lambda c: None)
     dock.model_box.setCurrentText("Claude Code · sonnet")
     assert not dock.key_btn.isEnabled()
@@ -688,6 +725,84 @@ def test_the_address_of_a_built_in_or_a_cluster_is_not_asked_for(win, qapp):
     assert "bede" not in assistant.saved_servers()
     assert dock.apply_server("bede", "", "http://x/v1") == "Nothing changed."
     assert "anthropic" not in llm.custom_providers() and "bede" not in llm.custom_providers()
+
+
+def test_add_a_server_names_it_in_one_dialog(win, qapp, monkeypatch):
+    """The list's last item names name, address, model and key together, and the model
+    is chosen and offered from then on; the item stays last."""
+    from PySide6.QtWidgets import QDialog
+
+    from normet.gui import assistant
+
+    dock = win.assistant
+    box = dock.model_box
+    assert box.itemText(box.count() - 1) == assistant.ADD_SERVER
+
+    def accept(dlg):
+        dlg.name_edit.setText("lab")
+        dlg.addr_edit.setText("http://127.0.0.1:8080/v1")
+        dlg.model_edit.setText("qwen3")
+        dlg.key_edit.setText("k1")
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(assistant._AddServerDialog, "exec", accept)
+    dock.add_server()
+    assert box.currentText() == "lab:qwen3"
+    assert "lab:qwen3" in assistant.models_offered()
+    assert llm.provider_spec("lab") == ("openai", "http://127.0.0.1:8080/v1", "LAB_API_KEY")
+    assert box.itemText(box.count() - 1) == assistant.ADD_SERVER
+    assert box.findText("lab:qwen3") < box.count() - 1
+
+
+def test_add_a_server_cancel_puts_the_model_back(win, qapp, monkeypatch):
+    from PySide6.QtWidgets import QDialog
+
+    from normet.gui import assistant
+
+    dock = win.assistant
+    box = dock.model_box
+    box.setCurrentText("anthropic:claude-opus-5-5")
+    calls = []
+
+    def reject(dlg):
+        calls.append(True)
+        return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(assistant._AddServerDialog, "exec", reject)
+    # The item's selection opens the dialog after the list's popup has closed...
+    box.setCurrentText(assistant.ADD_SERVER)
+    _wait(qapp, lambda: calls)
+    # ...and Cancel goes back to the model chosen before, not to the item's own text.
+    assert calls and box.currentText() == "anthropic:claude-opus-5-5"
+
+
+def test_add_a_server_says_why_it_will_not_close(win, qapp):
+    """The dialog's checks run while it is open: a bad name, an agent's own name, a
+    bad address and a missing model each leave it open with their sentence."""
+    from PySide6.QtWidgets import QDialog
+
+    from normet.gui import assistant
+
+    dlg = assistant._AddServerDialog(win.assistant)
+    dlg.name_edit.setText("bad name")
+    dlg.accept()
+    assert "letters" in dlg.error.text() and dlg.result() == 0
+    dlg.name_edit.setText("claude-code")
+    dlg.addr_edit.setText("http://127.0.0.1:8080/v1")
+    dlg.model_edit.setText("qwen3")
+    dlg.accept()
+    assert "choose another" in dlg.error.text() and dlg.result() == 0
+    dlg.name_edit.setText("lab")
+    dlg.addr_edit.setText("127.0.0.1:8080/v1")
+    dlg.accept()
+    assert "http" in dlg.error.text() and dlg.result() == 0
+    dlg.addr_edit.setText("http://127.0.0.1:8080/v1")
+    dlg.model_edit.setText("")
+    dlg.accept()
+    assert "model" in dlg.error.text() and dlg.result() == 0
+    dlg.model_edit.setText("qwen3")
+    dlg.accept()
+    assert dlg.result() == int(QDialog.DialogCode.Accepted)
 
 
 # -- agy and Copilot ----------------------------------------------------------------------
@@ -1404,7 +1519,7 @@ def test_readings_leave_the_machine_only_after_consent_asked_once(win, qapp, mon
     _wait(qapp, lambda: not dock.busy() and not dock.working.isVisible())
     assert len(asked) == 2 and len(seen) == 2
     # Another provider is another question; a local one is none.
-    dock.model_box.setCurrentText("ollama:qwen3:8b")
+    dock.model_box.setCurrentText("lmstudio:qwen3:8b")
     assert dock._consent() is True and len(asked) == 2
 
 
@@ -1470,7 +1585,7 @@ def test_a_window_turn_is_answered_in_the_language_the_analyst_writes(win, qapp,
     dock = win.assistant
     seen = []
     _fake(dock, monkeypatch, seen)
-    dock.model_box.setCurrentText("ollama:qwen3:8b")  # local: no question
+    dock.model_box.setCurrentText("lmstudio:qwen3:8b")  # local: no question
     assert dock._talk is None
     dock.send("请看一下这张表。")
     _wait(qapp, lambda: not dock.busy() and not dock.working.isVisible())
@@ -1506,7 +1621,7 @@ def test_a_key_in_zshrc_is_found_before_the_environment(monkeypatch):
     assert A.find_key("deepseek") == "from-zshrc"
     monkeypatch.setattr(llm, "_zshrc_key", lambda env: None)
     assert A.find_key("deepseek") == "from-env"
-    assert A.find_key("ollama") is None
+    assert A.find_key("lmstudio") is None
 
 
 def test_full_automatic_saves_beside_the_data_unless_a_folder_was_chosen(win, tmp_path):

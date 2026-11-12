@@ -227,10 +227,14 @@ def test_a_report_figure_in_chinese():
     dates = pd.date_range("2024-01-01", periods=60, freq="D")
     df = pd.DataFrame({"observed": np.arange(60.0), "normalised": np.arange(60.0)}, index=dates)
     ax = normalise_plot(df, title="Meteorologically normalised NO2", ylabel="NO2")
+    # A name the analyst wrote in Chinese is data: not translated, but it must get
+    # the face all the same or the text draws boxes.
+    ax.set_xlabel("交通源")
     translate_figure(ax.figure, "zh")
     texts = {t.get_text() for t in ax.figure.findobj(Text)}
     assert "NO2 的气象归一化序列" in texts
     assert {"观测", "归一化（去气象化）"} <= texts
+    assert figure_font("zh") in ax.xaxis.label.get_fontfamily()
 
 
 @needs_click

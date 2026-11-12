@@ -16,7 +16,7 @@ box fills it in.
 
 Models are named as :mod:`normet.agent.llm` names them
 (``"anthropic:claude-sonnet-5-5"``, ``"deepseek:deepseek-chat"``,
-``"ollama:qwen3:8b"``), or are a command-line agent signed in to the user's
+``"lmstudio:local-model"``), or are a command-line agent signed in to the user's
 own plan (:mod:`.assistant_cli`). A key is read from the macOS keychain
 (service "normet", account the provider: Key… stores it there), then from
 the provider's environment variable; it is never written anywhere else.
@@ -231,7 +231,11 @@ def auto_on() -> bool:
 
 
 #: Providers that run on this machine: nothing leaves it, so no consent is asked.
-LOCAL = ("ollama", "lmstudio")
+LOCAL = ("lmstudio",)
+#: The model list's last item: name a server of the analyst's own (an OpenAI-compatible
+#: one, e.g. a llama.cpp or vLLM behind a tunnel at 127.0.0.1:PORT) and the model it
+#: serves. Kept out of :func:`models_offered`, which the tests and the settings read.
+ADD_SERVER = "Add a server…"
 #: Settings: where full automatic saves (the folder chosen), and what may be saved.
 SAVE_KEY = "assistant/save_folder"
 SAVE_ITEMS = ("report", "results", "script", "session")
@@ -429,6 +433,8 @@ def find_key(provider: str) -> str | None:
 #: models last used on them.
 SERVERS_KEY = "assistant/servers"
 EXTRA_KEY = "assistant/extra_models"
+#: Settings: the messages sent from the box, newest last (its Up/Down history).
+TYPED_KEY = "assistant/typed"
 _NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
@@ -2032,6 +2038,73 @@ class _ServerDialog(QDialog):
         lay.addWidget(box)
 
 
+class _AddServerDialog(QDialog):
+    """A server of the analyst's own, named in one dialog: the name the model list knows
+    it by, the address it answers at (an OpenAI-compatible API, the ``/v1`` the calls go
+    under -- a llama.cpp or vLLM on this machine, or one a tunnel forwards to
+    127.0.0.1:PORT), the model it serves, and a key if it wants one.
+
+    The list's "Add a server…" opens it; what it gives is kept through ``apply_server``,
+    as Key… keeps an address, so the two paths write the same settings and a server added
+    here is edited, or removed, there.  The checks run before the dialog closes, while
+    there is still a dialog to say what is wrong in.
+    """
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Add a server")
+        lay = QVBoxLayout(self)
+        name_lab = QLabel("Name of the server")
+        name_lab.setWordWrap(True)
+        self.name_edit = QLineEdit("local")
+        lay.addWidget(name_lab)
+        lay.addWidget(self.name_edit)
+        addr_lab = QLabel("Address of the server (OpenAI-compatible).")
+        addr_lab.setWordWrap(True)
+        self.addr_edit = QLineEdit()
+        self.addr_edit.setPlaceholderText("http://127.0.0.1:8080/v1")
+        lay.addWidget(addr_lab)
+        lay.addWidget(self.addr_edit)
+        model_lab = QLabel("Model the server serves")
+        model_lab.setWordWrap(True)
+        self.model_edit = QLineEdit()
+        self.model_edit.setPlaceholderText("qwen3:32b")
+        lay.addWidget(model_lab)
+        lay.addWidget(self.model_edit)
+        key_lab = QLabel("API key, if the server wants one")
+        key_lab.setWordWrap(True)
+        self.key_edit = QLineEdit()
+        self.key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        lay.addWidget(key_lab)
+        lay.addWidget(self.key_edit)
+        self.error = QLabel("")
+        self.error.setWordWrap(True)
+        lay.addWidget(self.error)
+        box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        box.accepted.connect(self.accept)
+        box.rejected.connect(self.reject)
+        lay.addWidget(box)
+
+    def accept(self) -> None:
+        name = self.name_edit.text().strip()
+        address = self.addr_edit.text().strip()
+        if not _NAME.match(name):
+            self.error.setText("A name is letters, digits, '_', '-' and '.'.")
+            return
+        if name in assistant_cli.AGENTS or name in llm.hpc_clusters():
+            self.error.setText(f"{name} is a model's own name; choose another one.")
+            return
+        if not address.startswith(("http://", "https://")):
+            self.error.setText("The address begins with http:// or https://.")
+            return
+        if not self.model_edit.text().strip():
+            self.error.setText("Give the model the server serves.")
+            return
+        super().accept()
+
+
 class AssistantDock(QDockWidget):
     """The Assistant panel: a model, a conversation, proposals the analyst applies."""
 
@@ -2070,6 +2143,12 @@ class AssistantDock(QDockWidget):
         self.consented: set[tuple[str, str]] = set()
         #: The language of the analyst's last message in this chat (``written_language``).
         self._talk: str | None = None
+        #: The box's history, a shell's: what was sent from it, the last 50, kept in
+        #: the settings beside the model (Up and Down at the box's first and last
+        #: line, eventFilter). ``_typed_at`` is which one is shown; None is the draft.
+        self._typed: list[str] = [t for t in (_stored(TYPED_KEY) or []) if isinstance(t, str)][-50:]
+        self._typed_at: int | None = None
+        self._typed_draft = ""
         #: The button of the card whose Apply is being carried out (_post_card), for what
         #: the click starts to mark when it has ended.
         self._acting: QPushButton | None = None
@@ -2085,18 +2164,21 @@ class AssistantDock(QDockWidget):
         self.model_box = _ModelBox(self._refresh_models)
         self.model_box.setEditable(True)
         self.model_box.addItems([*models_offered(), *self._agents])
+        self.model_box.addItem(ADD_SERVER)
         self.model_box.setToolTip(
-            "An API model as provider:model (anthropic, openai, deepseek, gemini, ollama, "
+            "An API model as provider:model (anthropic, openai, deepseek, gemini, "
             "lmstudio); a model hpc-agent forwards from a cluster (bede:model, csf3:model); "
             "a server of your own (name:model, its address given by Key…); or a command-line "
             "agent signed in to your own plan: Claude Code, Codex, Antigravity agy or GitHub "
-            "Copilot."
+            "Copilot. Add a server… names one of your own in one dialog."
         )
         self.model_box.setCurrentText(str(_settings().value("assistant/model", API_MODELS[0])))
-        self.model_box.currentTextChanged.connect(self._model_changed)
+        #: The model picked before Add a server… opened: what Cancel puts back.
+        self._model_before_server = self.model_box.currentText()
+        self.model_box.currentTextChanged.connect(self._model_chosen)
         self.effort_box = QComboBox()
         self.effort_box.setToolTip(
-            "How hard the agent thinks: more effort is slower and spends more of your plan."
+            "Effort: how long the model thinks before it answers; auto leaves the server's own."
         )
         self.effort_box.currentTextChanged.connect(self._effort_changed)
         self.key_btn = QPushButton("Key…")
@@ -2376,21 +2458,88 @@ class AssistantDock(QDockWidget):
             self.composer_box.setProperty("focus", ev.type() == QEvent.Type.FocusIn)
             self.composer_box.style().unpolish(self.composer_box)
             self.composer_box.style().polish(self.composer_box)
+        if (
+            box is not None
+            and obj is box
+            and isinstance(ev, QKeyEvent)
+            and ev.type() == QEvent.Type.KeyPress
+            and ev.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down)
+            and ev.modifiers() == Qt.KeyboardModifier.NoModifier
+            and self._typed_key(ev.key())
+        ):
+            return True
         return super().eventFilter(obj, ev)
+
+    def _typed_key(self, key: Qt.Key) -> bool:
+        """Up or Down in the box: what was sent before, a shell's history -- Up at
+        the box's first line, Down at its last. Inside a longer text the caret moves
+        as Qt moves it, so a message written over lines can be walked to its edge
+        first. False where the key is the box's own."""
+        box = self.composer
+        at_first = box.textCursor().blockNumber() == 0
+        at_last = box.textCursor().blockNumber() == box.document().blockCount() - 1
+        if not (at_first if key == Qt.Key.Key_Up else at_last) or not self._typed:
+            return False
+        if key == Qt.Key.Key_Up:
+            if self._typed_at is None:
+                self._typed_draft = box.toPlainText()
+                self._typed_at = len(self._typed) - 1
+            elif self._typed_at > 0:
+                self._typed_at -= 1
+            self._typed_show(self._typed[self._typed_at])
+        elif self._typed_at is not None:
+            if self._typed_at < len(self._typed) - 1:
+                self._typed_at += 1
+                self._typed_show(self._typed[self._typed_at])
+            else:  # past the newest: the draft, as it was left
+                self._typed_at = None
+                self._typed_show(self._typed_draft)
+        else:
+            return False
+        return True
+
+    def _typed_show(self, text: str) -> None:
+        self.composer.setPlainText(text)
+        self.composer.moveCursor(QTextCursor.MoveOperation.End)
+
+    def _remember_typed(self, text: str) -> None:
+        """The box's history, a shell's: a message kept once it is sent, the same one
+        after itself not kept twice; the oldest fall away past 50."""
+        if not self._typed or self._typed[-1] != text:
+            self._typed.append(text)
+            del self._typed[:-50]
+        self._typed_at, self._typed_draft = None, ""
+        _settings().setValue(TYPED_KEY, json.dumps(self._typed))
 
     # -- the model -------------------------------------------------------------------
     def _is_agent(self) -> bool:
         return self.model_box.currentText() in self._agents
 
     def _fill_efforts(self) -> None:
-        """The efforts the chosen agent's model is offered at, the last one chosen kept;
-        hidden for an API model or a model offered at none."""
-        agent = self._agents.get(self.model_box.currentText())
-        offered = assistant_cli.efforts(*agent) if agent else ()
+        """The efforts the chosen model is offered at, the last one chosen kept;
+        hidden for a model offered at none.
+
+        A CLI agent's are the agent's own (:func:`assistant_cli.efforts`, put on its
+        command line); an API model's are its provider's
+        (:func:`normet.agent.llm.reasoning_efforts`, sent in the request as
+        ``reasoning_effort`` or ``output_config.effort``), first of them ``auto``:
+        nothing sent, the server's own default. The two choices are kept apart (an
+        agent's effort is not an API server's)."""
+        name = self.model_box.currentText().strip()
+        agent = self._agents.get(name)
+        if agent:
+            offered = assistant_cli.efforts(*agent)
+            key, default = "assistant/effort", "medium"
+        else:
+            provider, _, model = name.partition(":")
+            offered = llm.reasoning_efforts(provider, model)
+            if offered:
+                offered = ("auto", *offered)
+            key, default = "assistant/effort_api", "auto"
         self.effort_box.blockSignals(True)
         self.effort_box.clear()
         self.effort_box.addItems(list(offered))
-        kept = str(_settings().value("assistant/effort", "medium"))
+        kept = str(_settings().value(key, default))
         self.effort_box.setCurrentText(
             kept if kept in offered else (offered[len(offered) // 2] if offered else "")
         )
@@ -2399,7 +2548,8 @@ class AssistantDock(QDockWidget):
 
     def _effort_changed(self, effort: str) -> None:
         if effort:
-            _settings().setValue("assistant/effort", effort)
+            key = "assistant/effort" if self._is_agent() else "assistant/effort_api"
+            _settings().setValue(key, effort)
         self._close_cli()
 
     def _sync_key_button(self) -> None:
@@ -2408,6 +2558,41 @@ class AssistantDock(QDockWidget):
         self.key_btn.setEnabled(
             not self._is_agent() and ":" in name and bool(_NAME.match(provider))
         )
+
+    def _model_chosen(self, name: str) -> None:
+        """Add a server… (the list's last item) opens its dialog; every other choice is
+        the model Cancel puts back, and is remembered as before."""
+        if name == ADD_SERVER:
+            # After the popup has closed, so the dialog is not opened from inside the
+            # list's own selection event.
+            QTimer.singleShot(0, self.add_server)
+            return
+        self._model_before_server = name
+        self._model_changed(name)
+
+    def add_server(self) -> None:
+        """Name a server of the analyst's own and choose the model it serves, in one
+        dialog -- the same settings Key… keeps for a name typed by hand, so a server added
+        here is edited, or removed, there."""
+        dlg = _AddServerDialog(self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            self.model_box.setCurrentText(self._model_before_server)
+            return
+        name = dlg.name_edit.text().strip()
+        model = dlg.model_edit.text().strip()
+        said = self.apply_server(name, dlg.key_edit.text(), dlg.addr_edit.text())
+        self.view.note(said)
+        if name not in llm.custom_providers() and name not in llm.PROVIDERS:
+            # apply_server refused it (the name is a cluster's, or the address was bad):
+            # the dialog is closed by now, so the list goes back to the model before.
+            self.model_box.setCurrentText(self._model_before_server)
+            return
+        full = f"{name}:{model}"
+        remember_model(full)
+        if self.model_box.findText(full) < 0:
+            # Before the list's last item, Add a server…, which stays last.
+            self.model_box.insertItem(max(self.model_box.count() - 1, 0), full)
+        self.model_box.setCurrentText(full)
 
     def _model_changed(self, name: str) -> None:
         """The analyst chose another model: remembered for the next session."""
@@ -2486,10 +2671,12 @@ class AssistantDock(QDockWidget):
                 f"No server is named {provider!r}: click Key… to give its address, or use "
                 "one of " + ", ".join(llm.known_providers())
             )
+        effort = self.effort_box.currentText() if self.effort_box.count() else ""
         model = llm.Model(
             name,
             api_key=find_key(provider) if llm.provider_spec(provider) else None,
             max_tokens=MAX_TOKENS,
+            effort=None if effort in ("", "auto") else effort,
         )
         llm.ca_bundle()  # certificates for the provider's HTTPS where the system has none
         remember_model(name)
@@ -2613,6 +2800,7 @@ class AssistantDock(QDockWidget):
         if not self._consent():
             return  # a message refused stays in the box, to be sent again
         if typed:
+            self._remember_typed(text)
             self.composer.clear()
             self.view.you(text)
             self._talk = written_language(text) or self._talk
@@ -2809,6 +2997,7 @@ class AssistantDock(QDockWidget):
         self._model_next = None
         self._state_parts = None
         self._talk = None
+        self._typed_at, self._typed_draft = None, ""
         self.tools._readings.clear()
         self._close_cli()
         self.view.clear()

@@ -6,11 +6,11 @@ formats the providers share:
 - ``anthropic`` -- Anthropic's Messages API (Claude);
 - ``openai`` -- the OpenAI chat-completions API with function calling: OpenAI's
   own, and every server that speaks it -- DeepSeek, Gemini's compatible
-  endpoint, a model on this machine (Ollama, LM Studio);
+  endpoint, a model on this machine (LM Studio, llama.cpp, vLLM);
 - :class:`FakeModel` -- a scripted policy, for tests.
 
 A model is named ``"provider:model"``, e.g. ``"anthropic:claude-sonnet-5-5"`` or
-``"ollama:qwen3:8b"``; :data:`PROVIDERS` gives each provider's format, address
+``"lmstudio:local-model"``; :data:`PROVIDERS` gives each provider's format, address
 and the environment variable its key is read from. Two more kinds of provider
 are resolved by :func:`provider_spec`:
 
@@ -58,7 +58,6 @@ PROVIDERS: dict[str, tuple[str, str, str | None]] = {
         "https://generativelanguage.googleapis.com/v1beta/openai",
         "GEMINI_API_KEY",
     ),
-    "ollama": ("openai", "http://localhost:11434/v1", None),
     "lmstudio": ("openai", "http://localhost:1234/v1", None),
 }
 
@@ -75,6 +74,53 @@ HPC_CLUSTERS = ("csf3", "bede")
 #: Kept apart from :data:`PROVIDERS`, which stays the fixed set the library ships.
 _CUSTOM: dict[str, tuple[str, str, str | None]] = {}
 _PROVIDER_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+#: provider -> the reasoning efforts its models are offered at, sent in the request when
+#: one is chosen: ``reasoning_effort`` on the OpenAI-compatible servers,
+#: ``output_config.effort`` on the Messages API. DeepSeek's list is its chat template's
+#: own -- measured 2026-11-11 on the Bede forward of DeepSeek-V4.1-Flash, "medium" is
+#: refused ("must be low, high, xhigh, max, or an integer within [1, 100]"); OpenAI's,
+#: Gemini's and LM Studio's are their compatible APIs' low/medium/high; Anthropic's is
+#: low through max on its current models (an older one may refuse xhigh and max).
+REASONING_EFFORTS: dict[str, tuple[str, ...]] = {
+    "anthropic": ("low", "medium", "high", "xhigh", "max"),
+    "openai": ("low", "medium", "high"),
+    "gemini": ("low", "medium", "high"),
+    "deepseek": ("low", "high", "xhigh", "max"),
+    "lmstudio": ("low", "medium", "high"),
+}
+
+
+def reasoning_efforts(provider: str, model: str) -> tuple[str, ...]:
+    """The reasoning efforts a model is offered at; empty where it takes none.
+
+    A server the program does not ship -- the analyst's own, or a cluster's forward --
+    takes its model family's set, read from the model's name (a DeepSeek served from a
+    cluster is DeepSeek's), and the OpenAI-compatible low/medium/high otherwise.
+
+    Parameters
+    ----------
+    provider : str
+        The provider part of ``provider:model``, or a cluster's name.
+    model : str
+        The model name, read for a model family on a server not in
+        :data:`REASONING_EFFORTS`.
+
+    Returns
+    -------
+    tuple of str
+        The values the provider accepts, in the order to offer them; ``()`` where a
+        value must not be sent.
+    """
+    if provider in REASONING_EFFORTS:
+        return REASONING_EFFORTS[provider]
+    if provider in _CUSTOM or provider in hpc_clusters():
+        return (
+            REASONING_EFFORTS["deepseek"]
+            if "deepseek" in model.lower()
+            else ("low", "medium", "high")
+        )
+    return ()
 
 
 def _listening(port: int) -> bool:
@@ -381,13 +427,72 @@ def _post(
     raise RuntimeError(f"{url}: no answer")  # pragma: no cover - the loop returns or raises
 
 
+#: Anthropic's ``cache_control``, on the last block of each prefix worth keeping: the
+#: tools, the system prompt, and the history a round carries. Without it every round of
+#: a tool loop sends all of that again at the full price -- a full-automatic task
+#: measured 160,874 input tokens to 6,530 output (median,
+#: docs/benchmarks/assistant_auto_deepseek_after_2026-10-20.csv) -- where a cache read
+#: is 0.1x the price and a write 1.25x. The OpenAI-compatible servers (OpenAI,
+#: DeepSeek, Gemini) cache by themselves; the Anthropic API has to be told.
+_CACHE = {"type": "ephemeral"}
+
+
+def _cache_tools(tools: list[Tool]) -> list[dict[str, Any]]:
+    """The tools as the API takes them, the last marked: the tools are the first part
+    of the prefix, and a later round reads them back instead of buying them again."""
+    out = [{"name": t.name, "description": t.description, "input_schema": t.schema} for t in tools]
+    if out:
+        out[-1] = dict(out[-1], cache_control=_CACHE)
+    return out
+
+
+def _cache_system(system: str) -> list[dict[str, Any]]:
+    """The system prompt as the API takes a cached one: one text block, marked."""
+    return [{"type": "text", "text": system, "cache_control": _CACHE}]
+
+
+def _cache_last(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """``messages`` with their last block marked, the end of the history this round
+    sends: a later round reads everything up to it from the cache and pays only for
+    what it adds."""
+    out: list[dict[str, Any]] = [dict(m) for m in messages]
+    if not out:
+        return out
+    raw = out[-1].get("content")
+    if isinstance(raw, str):
+        blocks: list[dict[str, Any]] = [{"type": "text", "text": raw}]
+    elif isinstance(raw, list):
+        blocks = [dict(b) for b in raw]
+    else:
+        blocks = []
+    if blocks:
+        blocks[-1] = dict(blocks[-1], cache_control=_CACHE)
+    if raw is not None:
+        out[-1]["content"] = blocks
+    return out
+
+
+def _input_tokens(usage: dict[str, Any]) -> int:
+    """The round's input as the panel counts it: the uncached tokens, the cache's write
+    and its read. ``input_tokens`` alone leaves the cached part out, and the count
+    shown would fall as the cache starts to work (the CLI agents' path counts the same
+    three, :mod:`normet.gui.assistant_cli`)."""
+    return (
+        int(usage.get("input_tokens") or 0)
+        + int(usage.get("cache_creation_input_tokens") or 0)
+        + int(usage.get("cache_read_input_tokens") or 0)
+    )
+
+
 class Model:
     """A model by name: ``"provider:model"`` (:data:`PROVIDERS`).
 
     The output budget defaults to 16384: a model that thinks first spends it on its
     thinking too, and a completion cut at a small budget comes back with no answer.
     A key not given is read from the provider's environment variable, then from an
-    ``export`` line of ``~/.zshrc``.
+    ``export`` line of ``~/.zshrc``. *effort* is the reasoning effort chosen for the
+    model (:func:`reasoning_efforts`); ``None`` sends nothing and leaves the server's
+    own default.
     """
 
     def __init__(
@@ -398,6 +503,7 @@ class Model:
         api_key: str | None = None,
         max_tokens: int = 16384,
         temperature: float | None = 0.0,
+        effort: str | None = None,
     ) -> None:
         provider, _, model = name.partition(":")
         spec = provider_spec(provider)
@@ -425,6 +531,9 @@ class Model:
         self.name, self.model = name, model
         self.base_url = (base_url or url).rstrip("/")
         self.max_tokens, self.temperature = max_tokens, temperature
+        #: The reasoning effort chosen for this model (None: the server's own, nothing
+        #: sent); a provider's own values are in :data:`REASONING_EFFORTS`.
+        self.effort = effort or None
 
     # The loop keeps messages in a neutral form; each adapter writes its own.
     def chat(self, system: str, messages: list[dict[str, Any]], tools: list[Tool]) -> Reply:
@@ -464,15 +573,14 @@ class Model:
         body: dict[str, Any] = {
             "model": self.model,
             "max_tokens": self.max_tokens,
-            "system": system,
-            "messages": out,
-            "tools": [
-                {"name": t.name, "description": t.description, "input_schema": t.schema}
-                for t in tools
-            ],
+            "system": _cache_system(system),
+            "messages": _cache_last(out),
+            "tools": _cache_tools(tools),
         }
         if self.temperature is not None:
             body["temperature"] = self.temperature
+        if self.effort:
+            body["output_config"] = {"effort": self.effort}
         r = _post(
             self.base_url + "/v1/messages",
             body,
@@ -486,7 +594,7 @@ class Model:
         ]
         u = r.get("usage") or {}
         return Reply(
-            text, calls, {"input": u.get("input_tokens", 0), "output": u.get("output_tokens", 0)}, r
+            text, calls, {"input": _input_tokens(u), "output": u.get("output_tokens", 0)}, r
         )
 
     def _openai(self, system: str, messages: list[dict[str, Any]], tools: list[Tool]) -> Reply:
@@ -529,6 +637,8 @@ class Model:
         }
         if self.temperature is not None:
             body["temperature"] = self.temperature
+        if self.effort:
+            body["reasoning_effort"] = self.effort
         headers = {"Authorization": "Bearer " + self.key} if self.key else {}
         r = _post(self.base_url + "/chat/completions", body, headers)
         msg = r["choices"][0]["message"]

@@ -1871,9 +1871,11 @@ applied at once too, and works the chain as far as its own loop allows.
 \section{Choosing a model}
 \begin{description}
   \item[An API model] named \code{provider:model}: \code{anthropic}, \code{openai},
-        \code{deepseek}, \code{gemini}, or a local \code{ollama} or \code{lmstudio}
-        server --- for example \code{anthropic:claude-sonnet-5-5},
-        \code{deepseek:deepseek-chat}, \code{ollama:qwen3:8b}. Its key is read from the
+        \code{deepseek}, \code{gemini}, or a local \code{lmstudio} server --- for
+        example \code{anthropic:claude-sonnet-5-5}, \code{deepseek:deepseek-chat},
+        \code{lmstudio:local-model}; a server of your own, at any OpenAI-compatible
+        address, is named by \emph{Add a server\ldots} on the model list. Its key is
+        read from the
         macOS keychain (\emph{Key\ldots} stores it there) or the provider's environment
         variable (\code{ANTHROPIC\_API\_KEY}, \code{OPENAI\_API\_KEY},
         \code{DEEPSEEK\_API\_KEY}, \code{GEMINI\_API\_KEY}), and written nowhere else.

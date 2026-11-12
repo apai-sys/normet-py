@@ -522,8 +522,38 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   runs) of at least `Min length` steps, and the new Events tab shows the
   score strip with each flagged window shaded beside a table of the windows:
   start, end, steps, max and mean score, ranked by the maximum.
+- **Assistant: cached API prefixes and a reasoning effort for API models** — an
+  Anthropic round now marks its tools, system prompt and history end with
+  `cache_control`, so a later round of a tool loop reads the prefix at 0.1× the price
+  instead of buying it again (measured 43,446 → 15,609 billed-equivalent input tokens
+  over a 6-round loop), and the token count adds the cache's write and read back to
+  input. The Effort selector, until now the command-line agents', is offered for API
+  models too: `auto` (nothing sent) first, then the provider's values — DeepSeek's
+  `low`/`high`/`xhigh`/`max`, the others' `low`/`medium`/`high` — sent as
+  `reasoning_effort` or `output_config.effort`.
+- **Assistant: Up/Down recalls what was sent from the box** — at the first line, Up
+  walks back through the last 50 messages sent from it (a repeat after itself kept
+  once), and past the newest Down puts back the draft as it was left. Inside a longer
+  text the arrows move the caret first, as Qt's own. The history travels in the
+  settings; New chat forgets the conversation, not it.
+- **Assistant: "Add a server…" names a server of your own in one dialog** — the model
+  list's last item asks for the name, the OpenAI-compatible address, the model it
+  serves and a key if it wants one, checks them while the dialog is still open, and
+  selects `name:model` once they are kept. It writes the same settings **Key…** does,
+  so a server added here is edited, or removed, there; Cancel goes back to the model
+  chosen before.
 
 ### Changed
+- **Ollama is no longer a shipped provider.** LM Studio remains the local one
+  (`lmstudio:...`); a server on another port — llama.cpp, vLLM, or an Ollama left
+  running — is named with **Add a server…** on the model list, which keeps its
+  address in the settings. A model still named `ollama:...` says that no server is
+  named `ollama` and points at **Key…** to give its address.
+- **The packaged app's start-up card follows the window's theme and language.** It
+  was drawn dark and in English whatever View → Appearance and View → Language said.
+  The card now reads the stored `appearance` and `ui_language` with Qt alone, before
+  `import normet`, and takes the dark or light palette and the Chinese or English
+  line — the same two choices the window applies when it starts.
 - **`rolling` names its windows `window_01`, `window_02`, …** (was
   `rolling_0`, `rolling_1`, …): counted from 1 and zero-padded, to three
   digits past 99 windows, so the names sort in the windows' order. Code that
@@ -579,6 +609,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   darkest), and the band panels above the ranking use the same colours.
 
 ### Internal
+- **Start-up guard tests** — `tests/test_startup_imports.py` runs the window's import
+  and the layout it opens in (`MainWindow().start_layout()`) in a subprocess and
+  asserts that torch, sklearn, flaml and chronos stay out of the wait before the
+  window shows. The packaged app draws its splash before `import normet`, so a
+  heavy import creeping back into either path would only lengthen that wait.
 - **CI: two non-blocking probe jobs for the version upgrades.**
   `probe: numpy 2.x (py3.12)` installs the suite's dependencies and then forces
   `numpy>=2.0` on top of the deliberate `numpy<2.0` pin; `probe: python 3.13`
@@ -640,6 +675,24 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   trajectory window each had their own copy, identical down to the margins.
 
 ### Fixed
+- **A file that cannot be read is named in the dialog.** Every Load dialog showed
+  the reader's own sentence as the whole message; pandas' errors often name no file
+  ("No columns to parse from file"), and the window's phrase-by-phrase translation
+  could bend a library's `"{s0}: {s1}"` sentence. The first line is now
+  "Could not read <name>."; the reader's words keep a line of their own.
+- **The HTML report build says it is running, and a failure is shown.** The status
+  line and a wait cursor are painted before the figures are drawn (scipy's first
+  import can be most of the wait), and a build that raises says "Could not build the
+  report." in a box instead of leaving a traceback in the terminal.
+- **A Chinese name in a figure gets the Chinese face** even when no catalogue entry
+  translates it — a factor, site or column the analyst wrote in Chinese is data, and
+  `localize_figure` now gives it the fallback font rather than drawing boxes.
+- **A light/dark switch now reaches the parameter panel and the welcome cards.**
+  Qt changes the application palette, but a plain container keeps the palette it
+  resolved at its last polish, and a style sheet's `palette(role)` is resolved when
+  the sheet is applied — the welcome cards' `palette(base)` stayed white on a dark
+  window. A theme change now clears inherited palettes and re-applies the sheets that
+  name a palette role before the `themeChanged` signal is sent.
 - **Worker pools were sized from the machine, not the allocation.**
   Nine parallel sections (normalise's threaded path, PDP, rolling,
   decomposition, placebo-in-space, effect bands, staggered/batch SCM and

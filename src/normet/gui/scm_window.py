@@ -58,6 +58,7 @@ from normet import style as S
 from normet.utils._time import to_datetime_coerced
 
 from ._clock import TaskClock
+from ._errors import read_error
 from ._lists import ALL_TIP, _toggle_all
 from ._widgets import (
     CanvasTab,
@@ -677,7 +678,7 @@ class SCMWindow(QMainWindow):
         try:
             df = read_table(path)
         except Exception as exc:  # noqa: BLE001 - a file pandas cannot read, said as it is
-            QMessageBox.critical(self, "Failed to read the file", str(exc))
+            QMessageBox.critical(self, "Failed to read the file", read_error(path, exc))
             return
         self._ingest(df, os.path.basename(path))
 

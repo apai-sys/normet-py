@@ -1469,9 +1469,10 @@ Nature 指南对它的要求——唯一未通过的是 4.9~pt 的下标，低�
 \section{选择模型}
 \begin{description}
   \item[API 模型] 命名为 \code{provider:model}：\code{anthropic}、\code{openai}、
-        \code{deepseek}、\code{gemini}，或本地的 \code{ollama} 或 \code{lmstudio} 服务器
-        ——例如 \code{anthropic:claude-sonnet-5-5}、\code{deepseek:deepseek-chat}、
-        \code{ollama:qwen3:8b}。其密钥从 macOS 钥匙串（\emph{密钥…}把它存在那里）或该
+        \code{deepseek}、\code{gemini}，或本地的 \code{lmstudio} 服务器——例如
+        \code{anthropic:claude-sonnet-5-5}、\code{deepseek:deepseek-chat}、
+        \code{lmstudio:local-model}；你自己的服务器（任何兼容 OpenAI 的地址）可在
+        模型列表上用\emph{添加服务器…}命名。其密钥从 macOS 钥匙串（\emph{密钥…}把它存在那里）或该
         服务商的环境变量（\code{ANTHROPIC\_API\_KEY}、\code{OPENAI\_API\_KEY}、
         \code{DEEPSEEK\_API\_KEY}、\code{GEMINI\_API\_KEY}）读取，不写到任何其他地方。本地
         服务器不需要密钥。
