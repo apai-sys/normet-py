@@ -544,6 +544,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   chosen before.
 
 ### Changed
+- **Every export lives in the action bar's Export menu.** The bar carried two export
+  buttons and the File menu repeated both, so a command had three homes. One
+  **⬇ Export** menu now holds **Result table as CSV…** (Ctrl+E) and the **HTML
+  report** submenu of languages, each entry on while the window has what it writes;
+  File keeps none of them. The command palette indexes the Export menu too.
 - **Ollama is no longer a shipped provider.** LM Studio remains the local one
   (`lmstudio:...`); a server on another port — llama.cpp, vLLM, or an Ollama left
   running — is named with **Add a server…** on the model list, which keeps its

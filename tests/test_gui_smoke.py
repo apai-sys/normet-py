@@ -1174,12 +1174,15 @@ def test_the_groups_names_are_not_cut_short(qapp, method):
 
 
 def test_the_report_language_is_chosen_where_the_report_is_exported(qapp, monkeypatch, tmp_path):
-    """As cume's: File > Export HTML Report and the HTML report button each list the
-    languages, named in themselves and none ticked; the one chosen writes the report and is
-    kept for the next. A Chinese window names English as English."""
+    """As cume's: every export lives in the bar's Export menu, the result table and
+    the HTML report's languages together, and the languages are named in themselves,
+    none ticked; the one chosen writes the report and is kept for the next. File keeps
+    no export of its own. A Chinese window names English as English."""
     import pandas as pd
     from PySide6.QtCore import QSettings
-    from PySide6.QtWidgets import QFileDialog
+    from PySide6.QtGui import QKeySequence
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QFileDialog, QMenu
 
     import normet
     from normet.gui import uilang
@@ -1190,10 +1193,29 @@ def test_the_report_language_is_chosen_where_the_report_is_exported(qapp, monkey
     kept = prefs.value("report_language")
     win = MainWindow()
     try:
-        menu = win._report_action.menu()
-        assert [a.text() for a in menu.actions()] == list(uilang.LANGUAGES.values())
-        assert not any(a.isCheckable() for a in menu.actions())
-        assert [a.text() for a in win.exp_html.menu().actions()] == list(uilang.LANGUAGES.values())
+        menu = win.export_btn.menu()
+        entries = [a.text() for a in menu.actions() if not a.isSeparator()]
+        assert entries[0] == "Result table as CSV…"
+        assert win._export_action.shortcut().toString() == "Ctrl+E"
+        report = next(a for a in menu.actions() if a.menu() is not None)
+        assert report.text() == "HTML report"
+        lang_menu = report.menu()
+        assert [a.text() for a in lang_menu.actions()] == list(uilang.LANGUAGES.values())
+        assert not any(a.isCheckable() for a in lang_menu.actions())
+        # One home: File holds no export of its own.
+        file_menu = next(m for m in win.findChildren(QMenu) if m.title() == "&File")
+        assert not [a.text() for a in file_menu.actions() if "Export" in a.text()]
+        # Ctrl+E reaches the menu's action: an action in a button's menu is not in
+        # the window's shortcut context until it is added to the window too.
+        win.show()
+        win.activateWindow()
+        QTest.qWait(20)
+        fired = []
+        win._export_action.triggered.connect(lambda: fired.append(True))
+        win._export_action.setEnabled(True)
+        QTest.keySequence(win, QKeySequence("Ctrl+E"))
+        QTest.qWait(20)
+        assert fired
         assert uilang.tr("English", "zh") == "English" and uilang.tr("中文", "en") == "中文"
 
         written = []
@@ -1206,14 +1228,14 @@ def test_the_report_language_is_chosen_where_the_report_is_exported(qapp, monkey
         monkeypatch.setattr(
             normet, "generate_html_report", lambda run, p, lang: written.append((p, lang))
         )
-        menu.actions()[list(uilang.LANGUAGES).index("zh")].trigger()
+        lang_menu.actions()[list(uilang.LANGUAGES).index("zh")].trigger()
         assert written == [(path, "zh")] and report_language() == "zh"
-        menu.actions()[list(uilang.LANGUAGES).index("en")].trigger()
+        lang_menu.actions()[list(uilang.LANGUAGES).index("en")].trigger()
         assert written[-1] == (path, "en") and report_language() == "en"
 
         # A cancelled save changes nothing.
         monkeypatch.setattr(QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: ("", "")))
-        menu.actions()[list(uilang.LANGUAGES).index("zh")].trigger()
+        lang_menu.actions()[list(uilang.LANGUAGES).index("zh")].trigger()
         assert len(written) == 2 and report_language() == "en"
     finally:
         win.close()

@@ -813,8 +813,8 @@ between them, and a saved session brings both back.
 Above the tabs: \emph{Collapse / Expand Panel}; the studios side by side ---
 \emph{Get data} (the Data Studio, Section~\ref{sec:datastudio}), \emph{Transport
 Studio} (Section~\ref{sec:transport}) and \emph{SCM Studio} (Chapter~\ref{ch:scm}); then
-what is done with a result --- \emph{Export result CSV} (the current tab's table) and
-\emph{HTML report} (the current tab's result as a report with its provenance).
+what is done with a result, one \emph{Export} menu: the current tab's table as CSV, and
+the current tab's result as an HTML report with its provenance.
 
 \section{Run buttons}
 \begin{center}\small
@@ -869,11 +869,11 @@ File     & Open Data\ldots                      & Ctrl+O \\
          & Reopen Last Session                  & \\
          & Load Session Script\ldots            & \\
          & Methods Paragraph\ldots              & \\
-         & Export Current Result\ldots          & Ctrl+E \\
-         & Export HTML Report: English, Chinese & \\
          & Save Session as Script\ldots         & \\
          & Save Config\ldots{} / Load Config\ldots & \\
          & Run History\ldots                    & \\
+Export   & Result table as CSV\ldots            & Ctrl+E \\
+         & HTML report: English, Chinese       & \\
 View     & Command Palette\ldots                & Ctrl+K \\
          & Collapse / Expand Panel              & Ctrl+B \\
          & Log\ldots, Command Log\ldots       & \\
@@ -918,7 +918,7 @@ itself stays in the system's language whichever the window is written in: the
 open and save panels, their titles too, and, on a Mac, the items macOS adds to the menus
 (\emph{AutoFill}, \emph{Start Dictation}, \emph{Emoji \& Symbols}). An HTML
 report (Section~\ref{sec:commandlog}) is written in the language picked as it is exported
---- \tab{File $\rightarrow$ Export HTML Report}, or the \emph{HTML report} button, lists
+--- the \emph{Export} menu's \emph{HTML report} lists
 each language named in itself --- its headings, labels and figure; the language is kept
 for the next report, and is the system's until one is picked.
 
@@ -1679,12 +1679,13 @@ north-east.}{fig:polar}
 
 \section{Tables and reports}
 \begin{description}
-  \item[Export result CSV] (Ctrl+E) The table behind the current tab: the loaded data on
+  \item[Result table as CSV] (Ctrl+E, in the \emph{Export} menu) The table behind the
+        current tab: the loaded data on
         \tab{Data}, the statistics on \tab{Model}, the normalised series with its
         quantiles, the decomposition, every rolling window, the multi-scale series, the
         partial-dependence values.
-  \item[HTML report] (File $\rightarrow$ Export HTML Report, or the button; pick the
-        report's language from its menu.) The current tab's result as one self-contained HTML file --- figures
+  \item[HTML report] (The \emph{Export} menu's \emph{HTML report}; pick the report's
+        language from its submenu.) The current tab's result as one self-contained HTML file --- figures
         embedded, no scripts or external links --- with a summary of the model and the
         result, and its provenance: \nm{}'s version, the time, the platform and Python
         version, the host and user names, the shape and hash of the data, the panel's
@@ -1785,7 +1786,7 @@ drag the legend or a colour bar where it reads best.
 \emph{Save\ldots} writes the formats the journal takes --- PDF, EPS or SVG with the text
 kept as editable text and the fonts embedded, TIFF or PNG at the resolution chosen --- at
 exactly the size shown, on a white page. While the dialog is open the figure is in the
-report's language (the one last picked under File $\rightarrow$ Export HTML Report). When it closes the figure goes back
+report's language (the one last picked in the Export menu's HTML report). When it closes the figure goes back
 to its tab as it was; the journal, width, panel labels, formulas and resolution are kept
 for the next figure. Check the journal's current guide before submitting.
 

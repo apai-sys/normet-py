@@ -39,11 +39,18 @@ def _clean(text: str) -> str:
     return text.replace("&&", "\0").replace("&", "").replace("\0", "&")
 
 
-def menu_commands(window: QMainWindow, skip: Iterable[Any] = ()) -> list[Command]:
+def menu_commands(
+    window: QMainWindow,
+    skip: Iterable[Any] = (),
+    extra: Iterable[tuple[str, QMenu | None]] = (),
+) -> list[Command]:
     """Every item of the window's menus, submenus walked into, separators left out.
 
     Each menu's ``aboutToShow`` is sent first, as opening it would, so a menu
-    that sets its items on or off then is read as it would be shown.
+    that sets its items on or off then is read as it would be shown. *extra*
+    menus, ``(path, menu)`` each, are walked as the menubar's are: the Export
+    menu hangs from a button outside the menubar, and its commands are the
+    window's too.
     """
     skip = set(skip)
     out: list[Command] = []
@@ -74,6 +81,20 @@ def menu_commands(window: QMainWindow, skip: Iterable[Any] = ()) -> list[Command
     for act in window.menuBar().actions():
         if act in menus and act.isVisible():
             walk(menus[act], [_clean(act.text())])
+    for path, menu in extra:
+        if menu is not None:
+            walk(menu, [path])
+    return out
+
+
+def _button_menus(window: QMainWindow) -> list[tuple[str, QMenu | None]]:
+    """The menus that hang from a button outside the menubar, with the path the
+    palette shows them under. The Export menu is the window's one such menu: every
+    export lives there, so the palette must find it as it finds File's items."""
+    out: list[tuple[str, QMenu | None]] = []
+    btn = getattr(window, "export_btn", None)
+    if btn is not None:
+        out.append(("Export", btn.menu()))
     return out
 
 
@@ -240,7 +261,7 @@ def open_palette(window: QMainWindow, skip: Iterable[Any] = ()) -> CommandPalett
     """
     from shiboken6 import isValid
 
-    commands = menu_commands(window, skip)
+    commands = menu_commands(window, skip, _button_menus(window))
     tabs = getattr(window, "tabs", None)
     if isinstance(tabs, QTabWidget):
         commands += tab_commands(tabs)
