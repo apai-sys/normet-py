@@ -34,6 +34,7 @@ from normet.io.tables import TABLE_SUFFIXES
 
 from . import _settings, commandlog
 from ._constants import MET_DEFAULTS
+from ._errors import read_error
 from ._lists import ALL_TIP, _checked_items, _fill_checklist, _toggle_all
 from ._widgets import NoWheelComboBox, hint_label
 
@@ -227,7 +228,7 @@ class InputsMixin(QMainWindow):
             QMessageBox.warning(self, "No times found", str(exc))
             return
         except Exception as exc:  # noqa: BLE001 - a file pandas cannot read, said as it is
-            QMessageBox.critical(self, "Failed to read the meteorology", str(exc))
+            QMessageBox.critical(self, "Failed to read the meteorology", read_error(path, exc))
             return
 
         base = self.df_loaded
@@ -334,7 +335,7 @@ class InputsMixin(QMainWindow):
             )
             return
         except Exception as exc:  # noqa: BLE001 - a file pandas cannot read, said as it is
-            QMessageBox.critical(self, "Failed to read the file", str(exc))
+            QMessageBox.critical(self, "Failed to read the file", read_error(path, exc))
             return
         self._data_path = path
         self._ingest(df, os.path.basename(path))

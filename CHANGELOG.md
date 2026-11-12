@@ -536,6 +536,12 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   once), and past the newest Down puts back the draft as it was left. Inside a longer
   text the arrows move the caret first, as Qt's own. The history travels in the
   settings; New chat forgets the conversation, not it.
+- **Assistant: "Add a server…" names a server of your own in one dialog** — the model
+  list's last item asks for the name, the OpenAI-compatible address, the model it
+  serves and a key if it wants one, checks them while the dialog is still open, and
+  selects `name:model` once they are kept. It writes the same settings **Key…** does,
+  so a server added here is edited, or removed, there; Cancel goes back to the model
+  chosen before.
 
 ### Changed
 - **The packaged app's start-up card follows the window's theme and language.** It
@@ -664,6 +670,18 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   trajectory window each had their own copy, identical down to the margins.
 
 ### Fixed
+- **A file that cannot be read is named in the dialog.** Every Load dialog showed
+  the reader's own sentence as the whole message; pandas' errors often name no file
+  ("No columns to parse from file"), and the window's phrase-by-phrase translation
+  could bend a library's `"{s0}: {s1}"` sentence. The first line is now
+  "Could not read <name>."; the reader's words keep a line of their own.
+- **The HTML report build says it is running, and a failure is shown.** The status
+  line and a wait cursor are painted before the figures are drawn (scipy's first
+  import can be most of the wait), and a build that raises says "Could not build the
+  report." in a box instead of leaving a traceback in the terminal.
+- **A Chinese name in a figure gets the Chinese face** even when no catalogue entry
+  translates it — a factor, site or column the analyst wrote in Chinese is data, and
+  `localize_figure` now gives it the fallback font rather than drawing boxes.
 - **A light/dark switch now reaches the parameter panel and the welcome cards.**
   Qt changes the application palette, but a plain container keeps the palette it
   resolved at its last polish, and a style sheet's `palette(role)` is resolved when
