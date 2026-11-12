@@ -1847,8 +1847,10 @@ Markdown reads (code shaded, tables ruled), each tool the Assistant calls one qu
 refusal under it --- whose result opens with a click. Ctrl/Cmd $+$ and $-$ (or the wheel
 with the key held) size its text, and Ctrl/Cmd 0 resets it; the size is kept. You write
 in the rounded box at its foot, which grows with what you write: Enter sends, Shift+Enter
-starts a new line. \emph{Send}, \emph{Stop} and \emph{New chat}, which starts the
-conversation again, are inside the box.
+starts a new line; Up and Down at the box's first and last line recall what was sent
+before, the draft put back below the newest --- a shell's history; inside a message
+written over lines they move the caret first. \emph{Send}, \emph{Stop} and \emph{New
+chat}, which starts the conversation again, are inside the box.
 
 Where it helps most is what to model and how to read the result. It \emph{proposes} a
 target and predictors as a card with an \emph{Apply} button, saying what it left out and
@@ -1874,7 +1876,13 @@ applied at once too, and works the chain as far as its own loop allows.
         \code{deepseek}, \code{gemini}, or a local \code{lmstudio} server --- for
         example \code{anthropic:claude-sonnet-5-5}, \code{deepseek:deepseek-chat},
         \code{lmstudio:local-model}; a server of your own, at any OpenAI-compatible
-        address, is named by \emph{Add a server\ldots} on the model list. Its key is
+        address, is named by \emph{Add a server\ldots} on the model list. The model's
+        \emph{Effort} beside the name is sent with each message: \emph{auto} sends none
+        and leaves the server's default; \code{deepseek} offers low, high, \emph{xhigh}
+        and \emph{max} (its template refuses \emph{medium}), \code{openai}, \code{gemini}
+        and LM Studio low, medium and high, Anthropic low through \emph{max}, and a model
+        from a cluster or a server of your own its family's set (a DeepSeek's four, any
+        other's low, medium and high). Its key is
         read from the
         macOS keychain (\emph{Key\ldots} stores it there) or the provider's environment
         variable (\code{ANTHROPIC\_API\_KEY}, \code{OPENAI\_API\_KEY},
