@@ -727,6 +727,84 @@ def test_the_address_of_a_built_in_or_a_cluster_is_not_asked_for(win, qapp):
     assert "anthropic" not in llm.custom_providers() and "bede" not in llm.custom_providers()
 
 
+def test_add_a_server_names_it_in_one_dialog(win, qapp, monkeypatch):
+    """The list's last item names name, address, model and key together, and the model
+    is chosen and offered from then on; the item stays last."""
+    from PySide6.QtWidgets import QDialog
+
+    from normet.gui import assistant
+
+    dock = win.assistant
+    box = dock.model_box
+    assert box.itemText(box.count() - 1) == assistant.ADD_SERVER
+
+    def accept(dlg):
+        dlg.name_edit.setText("lab")
+        dlg.addr_edit.setText("http://127.0.0.1:8080/v1")
+        dlg.model_edit.setText("qwen3")
+        dlg.key_edit.setText("k1")
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(assistant._AddServerDialog, "exec", accept)
+    dock.add_server()
+    assert box.currentText() == "lab:qwen3"
+    assert "lab:qwen3" in assistant.models_offered()
+    assert llm.provider_spec("lab") == ("openai", "http://127.0.0.1:8080/v1", "LAB_API_KEY")
+    assert box.itemText(box.count() - 1) == assistant.ADD_SERVER
+    assert box.findText("lab:qwen3") < box.count() - 1
+
+
+def test_add_a_server_cancel_puts_the_model_back(win, qapp, monkeypatch):
+    from PySide6.QtWidgets import QDialog
+
+    from normet.gui import assistant
+
+    dock = win.assistant
+    box = dock.model_box
+    box.setCurrentText("anthropic:claude-opus-5-5")
+    calls = []
+
+    def reject(dlg):
+        calls.append(True)
+        return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(assistant._AddServerDialog, "exec", reject)
+    # The item's selection opens the dialog after the list's popup has closed...
+    box.setCurrentText(assistant.ADD_SERVER)
+    _wait(qapp, lambda: calls)
+    # ...and Cancel goes back to the model chosen before, not to the item's own text.
+    assert calls and box.currentText() == "anthropic:claude-opus-5-5"
+
+
+def test_add_a_server_says_why_it_will_not_close(win, qapp):
+    """The dialog's checks run while it is open: a bad name, an agent's own name, a
+    bad address and a missing model each leave it open with their sentence."""
+    from PySide6.QtWidgets import QDialog
+
+    from normet.gui import assistant
+
+    dlg = assistant._AddServerDialog(win.assistant)
+    dlg.name_edit.setText("bad name")
+    dlg.accept()
+    assert "letters" in dlg.error.text() and dlg.result() == 0
+    dlg.name_edit.setText("claude-code")
+    dlg.addr_edit.setText("http://127.0.0.1:8080/v1")
+    dlg.model_edit.setText("qwen3")
+    dlg.accept()
+    assert "choose another" in dlg.error.text() and dlg.result() == 0
+    dlg.name_edit.setText("lab")
+    dlg.addr_edit.setText("127.0.0.1:8080/v1")
+    dlg.accept()
+    assert "http" in dlg.error.text() and dlg.result() == 0
+    dlg.addr_edit.setText("http://127.0.0.1:8080/v1")
+    dlg.model_edit.setText("")
+    dlg.accept()
+    assert "model" in dlg.error.text() and dlg.result() == 0
+    dlg.model_edit.setText("qwen3")
+    dlg.accept()
+    assert dlg.result() == int(QDialog.DialogCode.Accepted)
+
+
 # -- agy and Copilot ----------------------------------------------------------------------
 def test_agent_models_and_efforts(monkeypatch, tmp_path):
     from normet.gui import assistant_cli as cli
