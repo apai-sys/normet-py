@@ -1,4 +1,5 @@
-"""The user manual's two books: normet_manual_zh.tex is normet_manual.tex translated."""
+"""The user manual's two books: normet_manual_zh.tex is written in Chinese, chapter for
+chapter with normet_manual.tex."""
 
 from __future__ import annotations
 

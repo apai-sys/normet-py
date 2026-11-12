@@ -113,7 +113,7 @@ def test_matches_ranks_prefix_then_name_then_place():
 
 def test_palette_lists_menus_and_tabs(qapp):
     from normet.gui.main_window import MainWindow
-    from normet.gui.palette import CommandPalette, menu_commands, tab_commands
+    from normet.gui.palette import CommandPalette, menu_commands, open_palette, tab_commands
 
     win = MainWindow()
     try:
@@ -131,6 +131,18 @@ def test_palette_lists_menus_and_tabs(qapp):
         dlg._run()
         assert dlg.chosen is not None and dlg.chosen.text.startswith("Synthetic site")
         dlg.deleteLater()
+
+        # The Export menu hangs from the bar's button, not the menu bar, and the
+        # palette finds its commands as it finds File's: one export home still
+        # one place to look.
+        dlg = open_palette(win)
+        try:
+            places = {(c.text, c.where) for c in dlg.shown()}
+            assert ("Result table as CSV…", "Export") in places
+            assert ("English", "Export › HTML report") in places
+        finally:
+            dlg.close()
+            dlg.deleteLater()
     finally:
         win.close()
 

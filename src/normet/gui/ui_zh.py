@@ -37,6 +37,13 @@ TEXTS = {
     "&Export Current Result…": "导出当前结果(&E)…",
     "Export &HTML Report…": "导出 HTML 报告(&H)…",
     "Export &HTML Report": "导出 HTML 报告(&H)",
+    "Export": "导出",
+    "⬇ Export": "⬇ 导出",
+    "Result table as CSV…": "结果表（CSV）…",
+    "HTML report": "HTML 报告",
+    "The current tab's result table as CSV, or the result as a single-file HTML report.": (
+        "当前标签页的结果表导出为 CSV，或把结果导出为单文件 HTML 报告。"
+    ),
     "Save Session as &Script…": "将会话保存为脚本(&S)…",
     "Save Session as Script": "将会话保存为脚本",
     "Save Con&fig…": "保存配置(&F)…",

@@ -1669,7 +1669,7 @@ def state_parts(win: MainWindow) -> list[str]:
         from ._shell import report_language
 
         parts.append(f"results: {', '.join(made)}")
-        # The analyst picks it under File > Export HTML Report.
+        # The analyst picks it in the Export menu's HTML report.
         parts.append(f"the report in {uilang.LANGUAGES[report_language()]}")
     if win.runner.busy:
         parts.append(f"running: {win.runner.task_name}")
