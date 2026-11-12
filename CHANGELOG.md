@@ -593,6 +593,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   darkest), and the band panels above the ranking use the same colours.
 
 ### Internal
+- **Start-up guard tests** — `tests/test_startup_imports.py` runs the window's import
+  and the layout it opens in (`MainWindow().start_layout()`) in a subprocess and
+  asserts that torch, sklearn, flaml and chronos stay out of the wait before the
+  window shows. The packaged app draws its splash before `import normet`, so a
+  heavy import creeping back into either path would only lengthen that wait.
 - **CI: two non-blocking probe jobs for the version upgrades.**
   `probe: numpy 2.x (py3.12)` installs the suite's dependencies and then forces
   `numpy>=2.0` on top of the deliberate `numpy<2.0` pin; `probe: python 3.13`
