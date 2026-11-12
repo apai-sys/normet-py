@@ -97,7 +97,7 @@ def test_model_names_and_keys(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
         llm.Model("anthropic:claude-sonnet-5-5")
-    assert llm.Model("ollama:qwen3:8b").model == "qwen3:8b"
+    assert llm.Model("lmstudio:qwen3:8b").model == "qwen3:8b"
 
 
 def test_adapters_write_and_read_each_format(monkeypatch):
@@ -149,7 +149,7 @@ def test_adapters_write_and_read_each_format(monkeypatch):
     assert reply.text == "ok" and reply.calls[0].arguments == {"word": "w"}
     assert reply.usage == {"input": 3, "output": 4}
 
-    reply = llm.Model("ollama:qwen3:8b").chat("sys", history, tools)
+    reply = llm.Model("lmstudio:qwen3:8b").chat("sys", history, tools)
     assert sent["url"].endswith("/chat/completions") and "Authorization" not in sent["headers"]
     assert sent["body"]["messages"][0] == {"role": "system", "content": "sys"}
     assert sent["body"]["messages"][3] == {"role": "tool", "tool_call_id": "a", "content": "x"}
@@ -304,7 +304,7 @@ def test_a_server_the_analyst_names_is_a_provider(hpc, monkeypatch):
 
 
 def test_named_servers_cannot_take_a_built_in_or_a_cluster_name(hpc):
-    for name in ("anthropic", "ollama", "bede", "csf3"):
+    for name in ("anthropic", "lmstudio", "bede", "csf3"):
         with pytest.raises(ValueError, match="provider of its own"):
             llm.register_provider(name, "http://127.0.0.1:1/v1")
     for name, url in (
@@ -1519,7 +1519,7 @@ def test_readings_leave_the_machine_only_after_consent_asked_once(win, qapp, mon
     _wait(qapp, lambda: not dock.busy() and not dock.working.isVisible())
     assert len(asked) == 2 and len(seen) == 2
     # Another provider is another question; a local one is none.
-    dock.model_box.setCurrentText("ollama:qwen3:8b")
+    dock.model_box.setCurrentText("lmstudio:qwen3:8b")
     assert dock._consent() is True and len(asked) == 2
 
 
@@ -1585,7 +1585,7 @@ def test_a_window_turn_is_answered_in_the_language_the_analyst_writes(win, qapp,
     dock = win.assistant
     seen = []
     _fake(dock, monkeypatch, seen)
-    dock.model_box.setCurrentText("ollama:qwen3:8b")  # local: no question
+    dock.model_box.setCurrentText("lmstudio:qwen3:8b")  # local: no question
     assert dock._talk is None
     dock.send("请看一下这张表。")
     _wait(qapp, lambda: not dock.busy() and not dock.working.isVisible())
@@ -1621,7 +1621,7 @@ def test_a_key_in_zshrc_is_found_before_the_environment(monkeypatch):
     assert A.find_key("deepseek") == "from-zshrc"
     monkeypatch.setattr(llm, "_zshrc_key", lambda env: None)
     assert A.find_key("deepseek") == "from-env"
-    assert A.find_key("ollama") is None
+    assert A.find_key("lmstudio") is None
 
 
 def test_full_automatic_saves_beside_the_data_unless_a_folder_was_chosen(win, tmp_path):

@@ -6,11 +6,11 @@ formats the providers share:
 - ``anthropic`` -- Anthropic's Messages API (Claude);
 - ``openai`` -- the OpenAI chat-completions API with function calling: OpenAI's
   own, and every server that speaks it -- DeepSeek, Gemini's compatible
-  endpoint, a model on this machine (Ollama, LM Studio);
+  endpoint, a model on this machine (LM Studio, llama.cpp, vLLM);
 - :class:`FakeModel` -- a scripted policy, for tests.
 
 A model is named ``"provider:model"``, e.g. ``"anthropic:claude-sonnet-5-5"`` or
-``"ollama:qwen3:8b"``; :data:`PROVIDERS` gives each provider's format, address
+``"lmstudio:local-model"``; :data:`PROVIDERS` gives each provider's format, address
 and the environment variable its key is read from. Two more kinds of provider
 are resolved by :func:`provider_spec`:
 
@@ -58,7 +58,6 @@ PROVIDERS: dict[str, tuple[str, str, str | None]] = {
         "https://generativelanguage.googleapis.com/v1beta/openai",
         "GEMINI_API_KEY",
     ),
-    "ollama": ("openai", "http://localhost:11434/v1", None),
     "lmstudio": ("openai", "http://localhost:1234/v1", None),
 }
 
@@ -88,7 +87,6 @@ REASONING_EFFORTS: dict[str, tuple[str, ...]] = {
     "openai": ("low", "medium", "high"),
     "gemini": ("low", "medium", "high"),
     "deepseek": ("low", "high", "xhigh", "max"),
-    "ollama": ("low", "medium", "high"),
     "lmstudio": ("low", "medium", "high"),
 }
 

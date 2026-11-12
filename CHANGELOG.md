@@ -544,6 +544,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   chosen before.
 
 ### Changed
+- **Ollama is no longer a shipped provider.** LM Studio remains the local one
+  (`lmstudio:...`); a server on another port — llama.cpp, vLLM, or an Ollama left
+  running — is named with **Add a server…** on the model list, which keeps its
+  address in the settings. A model still named `ollama:...` says that no server is
+  named `ollama` and points at **Key…** to give its address.
 - **The packaged app's start-up card follows the window's theme and language.** It
   was drawn dark and in English whatever View → Appearance and View → Language said.
   The card now reads the stored `appearance` and `ui_language` with Qt alone, before

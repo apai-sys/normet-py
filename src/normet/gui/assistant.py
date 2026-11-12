@@ -16,7 +16,7 @@ box fills it in.
 
 Models are named as :mod:`normet.agent.llm` names them
 (``"anthropic:claude-sonnet-5-5"``, ``"deepseek:deepseek-chat"``,
-``"ollama:qwen3:8b"``), or are a command-line agent signed in to the user's
+``"lmstudio:local-model"``), or are a command-line agent signed in to the user's
 own plan (:mod:`.assistant_cli`). A key is read from the macOS keychain
 (service "normet", account the provider: Key… stores it there), then from
 the provider's environment variable; it is never written anywhere else.
@@ -231,7 +231,7 @@ def auto_on() -> bool:
 
 
 #: Providers that run on this machine: nothing leaves it, so no consent is asked.
-LOCAL = ("ollama", "lmstudio")
+LOCAL = ("lmstudio",)
 #: The model list's last item: name a server of the analyst's own (an OpenAI-compatible
 #: one, e.g. a llama.cpp or vLLM behind a tunnel at 127.0.0.1:PORT) and the model it
 #: serves. Kept out of :func:`models_offered`, which the tests and the settings read.
@@ -2166,7 +2166,7 @@ class AssistantDock(QDockWidget):
         self.model_box.addItems([*models_offered(), *self._agents])
         self.model_box.addItem(ADD_SERVER)
         self.model_box.setToolTip(
-            "An API model as provider:model (anthropic, openai, deepseek, gemini, ollama, "
+            "An API model as provider:model (anthropic, openai, deepseek, gemini, "
             "lmstudio); a model hpc-agent forwards from a cluster (bede:model, csf3:model); "
             "a server of your own (name:model, its address given by Key…); or a command-line "
             "agent signed in to your own plan: Claude Code, Codex, Antigravity agy or GitHub "
