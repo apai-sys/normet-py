@@ -2096,7 +2096,7 @@ class AssistantDock(QDockWidget):
         self.model_box.currentTextChanged.connect(self._model_changed)
         self.effort_box = QComboBox()
         self.effort_box.setToolTip(
-            "How hard the agent thinks: more effort is slower and spends more of your plan."
+            "Effort: how long the model thinks before it answers; auto leaves the server's own."
         )
         self.effort_box.currentTextChanged.connect(self._effort_changed)
         self.key_btn = QPushButton("Key…")
@@ -2383,14 +2383,30 @@ class AssistantDock(QDockWidget):
         return self.model_box.currentText() in self._agents
 
     def _fill_efforts(self) -> None:
-        """The efforts the chosen agent's model is offered at, the last one chosen kept;
-        hidden for an API model or a model offered at none."""
-        agent = self._agents.get(self.model_box.currentText())
-        offered = assistant_cli.efforts(*agent) if agent else ()
+        """The efforts the chosen model is offered at, the last one chosen kept;
+        hidden for a model offered at none.
+
+        A CLI agent's are the agent's own (:func:`assistant_cli.efforts`, put on its
+        command line); an API model's are its provider's
+        (:func:`normet.agent.llm.reasoning_efforts`, sent in the request as
+        ``reasoning_effort`` or ``output_config.effort``), first of them ``auto``:
+        nothing sent, the server's own default. The two choices are kept apart (an
+        agent's effort is not an API server's)."""
+        name = self.model_box.currentText().strip()
+        agent = self._agents.get(name)
+        if agent:
+            offered = assistant_cli.efforts(*agent)
+            key, default = "assistant/effort", "medium"
+        else:
+            provider, _, model = name.partition(":")
+            offered = llm.reasoning_efforts(provider, model)
+            if offered:
+                offered = ("auto", *offered)
+            key, default = "assistant/effort_api", "auto"
         self.effort_box.blockSignals(True)
         self.effort_box.clear()
         self.effort_box.addItems(list(offered))
-        kept = str(_settings().value("assistant/effort", "medium"))
+        kept = str(_settings().value(key, default))
         self.effort_box.setCurrentText(
             kept if kept in offered else (offered[len(offered) // 2] if offered else "")
         )
@@ -2399,7 +2415,8 @@ class AssistantDock(QDockWidget):
 
     def _effort_changed(self, effort: str) -> None:
         if effort:
-            _settings().setValue("assistant/effort", effort)
+            key = "assistant/effort" if self._is_agent() else "assistant/effort_api"
+            _settings().setValue(key, effort)
         self._close_cli()
 
     def _sync_key_button(self) -> None:
@@ -2486,10 +2503,12 @@ class AssistantDock(QDockWidget):
                 f"No server is named {provider!r}: click Key… to give its address, or use "
                 "one of " + ", ".join(llm.known_providers())
             )
+        effort = self.effort_box.currentText() if self.effort_box.count() else ""
         model = llm.Model(
             name,
             api_key=find_key(provider) if llm.provider_spec(provider) else None,
             max_tokens=MAX_TOKENS,
+            effort=None if effort in ("", "auto") else effort,
         )
         llm.ca_bundle()  # certificates for the provider's HTTPS where the system has none
         remember_model(name)

@@ -527,6 +527,81 @@ def test_default_max_tokens_and_zshrc_key(tmp_path, monkeypatch):
     assert llm.Model("anthropic:claude-sonnet-5-5").key == "from-env"
 
 
+def test_anthropic_round_caches_its_prefix_and_counts_the_cache(monkeypatch):
+    """The system prompt, the tools and the history's end carry cache_control.
+
+    Without it every round of a tool loop buys the whole prefix again; with it a later
+    round reads it at 0.1x. The usage count adds the write and the read back to input,
+    or the panel's count falls as the cache starts to work.
+    """
+    from normet.agent import llm
+
+    seen = {}
+
+    def post(url, body, headers, **kwargs):
+        seen["body"] = body
+        return {
+            "content": [{"type": "text", "text": "hi"}],
+            "usage": {
+                "input_tokens": 10,
+                "cache_creation_input_tokens": 100,
+                "cache_read_input_tokens": 1000,
+                "output_tokens": 5,
+            },
+        }
+
+    monkeypatch.setattr(llm, "_post", post)
+    tool = llm.Tool("t", "does t", {"type": "object"}, lambda: None)
+    model = llm.Model("anthropic:claude-sonnet-5-5", api_key="k", effort="high")
+    reply = model.chat(
+        "SYS", [{"role": "user", "content": "go"}, {"role": "user", "content": "x"}], [tool]
+    )
+
+    body = seen["body"]
+    assert body["system"][-1]["cache_control"] == {"type": "ephemeral"}
+    assert body["tools"][-1]["cache_control"] == {"type": "ephemeral"}
+    assert body["messages"][-1]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+    assert body["output_config"] == {"effort": "high"}
+    assert reply.usage["input"] == 1110
+
+
+def test_openai_compatible_round_sends_the_reasoning_effort(monkeypatch):
+    from normet.agent import llm
+
+    seen = {}
+
+    def post(url, body, headers, **kwargs):
+        seen["body"] = body
+        return {
+            "choices": [{"message": {"content": "hi"}}],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 1},
+        }
+
+    monkeypatch.setattr(llm, "_post", post)
+    model = llm.Model("deepseek:deepseek-chat", api_key="k", effort="xhigh")
+    model.chat("SYS", [{"role": "user", "content": "go"}], [])
+    assert seen["body"]["reasoning_effort"] == "xhigh"
+    # auto sends nothing
+    model = llm.Model("deepseek:deepseek-chat", api_key="k")
+    model.chat("SYS", [{"role": "user", "content": "go"}], [])
+    assert "reasoning_effort" not in seen["body"]
+
+
+def test_reasoning_efforts_follow_the_provider_and_the_model_family():
+    from normet.agent import llm
+
+    assert llm.reasoning_efforts("anthropic", "claude-sonnet-5-5")[-1] == "max"
+    # DeepSeek's template refuses "medium"
+    assert llm.reasoning_efforts("deepseek", "deepseek-chat") == ("low", "high", "xhigh", "max")
+    # a server of the analyst's own reads the family off the model's name
+    llm.register_provider("lab", "http://127.0.0.1:8080/v1")
+    try:
+        assert llm.reasoning_efforts("lab", "deepseek-chat") == llm.REASONING_EFFORTS["deepseek"]
+        assert llm.reasoning_efforts("lab", "qwen3") == ("low", "medium", "high")
+    finally:
+        llm.forget_provider("lab")
+
+
 def test_ca_bundle_falls_back_to_certifi(monkeypatch):
     import ssl
     import types

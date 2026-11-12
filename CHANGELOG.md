@@ -522,6 +522,15 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   runs) of at least `Min length` steps, and the new Events tab shows the
   score strip with each flagged window shaded beside a table of the windows:
   start, end, steps, max and mean score, ranked by the maximum.
+- **Assistant: cached API prefixes and a reasoning effort for API models** — an
+  Anthropic round now marks its tools, system prompt and history end with
+  `cache_control`, so a later round of a tool loop reads the prefix at 0.1× the price
+  instead of buying it again (measured 43,446 → 15,609 billed-equivalent input tokens
+  over a 6-round loop), and the token count adds the cache's write and read back to
+  input. The Effort selector, until now the command-line agents', is offered for API
+  models too: `auto` (nothing sent) first, then the provider's values — DeepSeek's
+  `low`/`high`/`xhigh`/`max`, the others' `low`/`medium`/`high` — sent as
+  `reasoning_effort` or `output_config.effort`.
 
 ### Changed
 - **`rolling` names its windows `window_01`, `window_02`, …** (was
