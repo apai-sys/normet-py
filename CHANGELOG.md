@@ -649,6 +649,12 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   trajectory window each had their own copy, identical down to the margins.
 
 ### Fixed
+- **A light/dark switch now reaches the parameter panel and the welcome cards.**
+  Qt changes the application palette, but a plain container keeps the palette it
+  resolved at its last polish, and a style sheet's `palette(role)` is resolved when
+  the sheet is applied — the welcome cards' `palette(base)` stayed white on a dark
+  window. A theme change now clears inherited palettes and re-applies the sheets that
+  name a palette role before the `themeChanged` signal is sent.
 - **Worker pools were sized from the machine, not the allocation.**
   Nine parallel sections (normalise's threaded path, PDP, rolling,
   decomposition, placebo-in-space, effect bands, staggered/batch SCM and

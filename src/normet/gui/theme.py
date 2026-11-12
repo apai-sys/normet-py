@@ -83,6 +83,35 @@ def muted_color(dark: bool | None = None) -> str:
     return MUTED_DARK if dark else MUTED
 
 
+def _refresh_widget_palettes() -> None:
+    """Let every widget that inherits its palette resolve it again, and every style
+    sheet that names a palette role be applied again.
+
+    A switch of the colour scheme changes the application's palette, and most widgets
+    follow it; but a plain container that resolved its palette at its last polish keeps
+    the old one until it is shown again -- the parameter panel and a scroll area's
+    widget stayed light in a dark window (measured in cume, 2026-11-12: the window's
+    palette #323232, theirs still #ececec). A palette with no roles of the widget's
+    own is cleared, and its next polish resolves it against its parent's; a palette
+    set on the widget (a category's colour, the print page's white) is its own and is
+    left. A style sheet's ``palette(role)`` is resolved when the sheet is applied, so
+    a sheet that names one -- the welcome cards' ``palette(base)`` -- is applied
+    again, or the card keeps the light colour it was polished with.
+    """
+    app = QApplication.instance()
+    if not isinstance(app, QApplication):
+        return
+    for w in app.allWidgets():
+        try:
+            if not int(w.palette().resolveMask()):
+                w.setPalette(QPalette())
+            sheet = w.styleSheet()
+            if "palette(" in sheet:
+                w.setStyleSheet(sheet)
+        except RuntimeError:  # deleted while the list was walked
+            pass
+
+
 def _hex(color: Any) -> str | None:
     from matplotlib.colors import to_hex
 
@@ -226,6 +255,10 @@ class ThemeManager(QObject):
         dark = is_dark_mode()
         if dark != self._dark:
             self._dark = dark
+            # The palette has changed under the widgets: some resolved it at their
+            # last polish and a style sheet resolved palette(role) when it was applied,
+            # so both are given the new one before anything redraws.
+            _refresh_widget_palettes()
             self.themeChanged.emit(dark)
 
     def set_appearance(self, appearance: str) -> None:
