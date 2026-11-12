@@ -441,6 +441,11 @@ def localize_figure(fig: Any, lang: str) -> None:
         if tr is not None and tr != s:
             t.set_text(tr)
             fallback(t)
+        elif _CJK_CHAR.search(s):
+            # A name the analyst wrote in the language's characters -- a factor's, a
+            # site's, a column's -- is data and is not translated, but it needs the
+            # font all the same, or the figure draws boxes for it.
+            fallback(t)
     for ax in fig.axes:
         for axis in (ax.xaxis, ax.yaxis):
             # Axes sharing an axis share its formatters: each is wrapped once.
