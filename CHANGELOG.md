@@ -538,6 +538,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   settings; New chat forgets the conversation, not it.
 
 ### Changed
+- **The packaged app's start-up card follows the window's theme and language.** It
+  was drawn dark and in English whatever View → Appearance and View → Language said.
+  The card now reads the stored `appearance` and `ui_language` with Qt alone, before
+  `import normet`, and takes the dark or light palette and the Chinese or English
+  line — the same two choices the window applies when it starts.
 - **`rolling` names its windows `window_01`, `window_02`, …** (was
   `rolling_0`, `rolling_1`, …): counted from 1 and zero-padded, to three
   digits past 99 windows, so the names sort in the windows' order. Code that

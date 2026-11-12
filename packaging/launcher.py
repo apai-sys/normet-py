@@ -43,10 +43,53 @@ def _keep_font_cache() -> None:
     os.environ["MPLCONFIGDIR"] = cache
 
 
+def _splash_look(app):
+    """The card's theme and language, from the settings the window will use.
+
+    Read with Qt alone, before ``import normet``: the stored ``appearance``
+    (View → Appearance) and ``ui_language`` (View → Language), the system's when
+    neither is pinned. The window applies the same two choices when it starts, so the
+    card and the window agree.
+    """
+    from PySide6.QtCore import QLocale, QSettings, Qt
+    from PySide6.QtGui import QPalette
+
+    s = QSettings("apai-sys", "normet-gui")
+    appearance = str(s.value("appearance", "system"))
+    if appearance == "dark":
+        dark = True
+    elif appearance == "light":
+        dark = False
+    else:
+        hints = app.styleHints()
+        scheme = hints.colorScheme() if hasattr(hints, "colorScheme") else None
+        schemes = getattr(Qt, "ColorScheme", None)
+        if schemes is not None and scheme == schemes.Dark:
+            dark = True
+        elif schemes is not None and scheme == schemes.Light:
+            dark = False
+        else:
+            dark = app.palette().color(QPalette.ColorRole.Window).lightnessF() < 0.5
+
+    forced = os.environ.get("NORMET_UI_LANGUAGE")
+    choice = forced if forced in ("en", "zh") else str(s.value("ui_language", "system"))
+    lang = (
+        choice
+        if choice in ("en", "zh")
+        else ("zh" if QLocale.system().name().startswith("zh") else "en")
+    )
+    return dark, lang
+
+
 def _splash(app):
-    """A plain splash card: drawn with Qt alone, so it shows before normet loads."""
+    """A plain splash card: drawn with Qt alone, so it shows before normet loads.
+
+    In the window's theme and language -- the start-up wait is the first thing the
+    app shows, and a dark card in front of a light window, or an English line in a
+    Chinese one, made the two look like different programs.
+    """
     from PySide6.QtCore import Qt
-    from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen, QPixmap
+    from PySide6.QtGui import QBrush, QColor, QFont, QLinearGradient, QPainter, QPen, QPixmap
     from PySide6.QtWidgets import QSplashScreen
 
     try:
@@ -56,35 +99,64 @@ def _splash(app):
     except Exception:
         ver = ""
 
+    dark, lang = _splash_look(app)
+    if dark:
+        top, bottom, edge, ink, sub, line = (
+            "#1c1c1e",
+            "#121214",
+            "#3a3a3c",
+            "#ffffff",
+            "#98989d",
+            "#2c2c2e",
+        )
+    else:
+        top, bottom, edge, ink, sub, line = (
+            "#ffffff",
+            "#f2f2f7",
+            "#d1d1d6",
+            "#1c1c1e",
+            "#6e6e73",
+            "#e5e5ea",
+        )
+
     w, h = 440, 250
     pix = QPixmap(w, h)
     pix.fill(Qt.GlobalColor.transparent)
     p = QPainter(pix)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    p.setBrush(QBrush(QColor("#1c1c1e")))
-    p.setPen(QPen(QColor("#3a3a3c"), 1.5))
+    grad = QLinearGradient(0, 0, 0, h)
+    grad.setColorAt(0.0, QColor(top))
+    grad.setColorAt(1.0, QColor(bottom))
+    p.setBrush(QBrush(grad))
+    p.setPen(QPen(QColor(edge), 1.5))
     p.drawRoundedRect(1, 1, w - 2, h - 2, 14, 14)
 
     logo = QPixmap(os.path.join(getattr(sys, "_MEIPASS", ""), "packaging", "assets", "normet.png"))
-    top = 40
+    top_y = 40
     if not logo.isNull():
         logo = logo.scaled(
             64, 64, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
         )
-        p.drawPixmap((w - logo.width()) // 2, top, logo)
-        top += 76
+        p.drawPixmap((w - logo.width()) // 2, top_y, logo)
+        top_y += 76
     else:
-        top += 30
+        top_y += 30
 
-    p.setPen(QColor("#ffffff"))
+    p.setPen(QColor(ink))
     p.setFont(QFont("Helvetica Neue", 22, QFont.Weight.Bold))
-    p.drawText(0, top, w, 32, Qt.AlignmentFlag.AlignCenter, "Normet")
-    p.setPen(QColor("#98989d"))
+    p.drawText(0, top_y, w, 32, Qt.AlignmentFlag.AlignCenter, "Normet")
+    p.setPen(QColor(sub))
     p.setFont(QFont("Helvetica Neue", 11))
-    sub = "Weather normalisation & counterfactual modelling"
-    p.drawText(
-        0, top + 34, w, 20, Qt.AlignmentFlag.AlignCenter, f"{sub}  •  v{ver}" if ver else sub
+    words = (
+        "气象归一化与反事实建模"
+        if lang == "zh"
+        else "Weather normalisation & counterfactual modelling"
     )
+    p.drawText(
+        0, top_y + 34, w, 20, Qt.AlignmentFlag.AlignCenter, f"{words}  •  v{ver}" if ver else words
+    )
+    p.setPen(QPen(QColor(line), 1))
+    p.drawLine(30, h - 25, w - 30, h - 25)
     p.end()
 
     splash = QSplashScreen(
@@ -92,9 +164,9 @@ def _splash(app):
     )
     splash.show()
     splash.showMessage(
-        "Loading…",
+        "载入中…" if lang == "zh" else "Loading…",
         Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter,
-        QColor("#8e8e93"),
+        QColor(sub),
     )
     app.processEvents()
     return splash
