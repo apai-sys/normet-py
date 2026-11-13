@@ -172,9 +172,42 @@ def _splash(app):
     return splash
 
 
+def _skip_qt_import_scan() -> None:
+    """Stop PySide6's import hook from reading every later module's source.
+
+    Same patch as ``normet.gui.app._skip_qt_import_scan`` (read its docstring
+    for the measurements). It is repeated here because the launcher imports Qt
+    before normet, and importing the helper would be the very import it saves:
+    this script deliberately touches nothing but Qt until after the splash.
+    """
+    try:
+        import importlib
+
+        feature = importlib.import_module("shibokensupport.feature")
+    except Exception:  # pragma: no cover - PySide6 always provides it
+        return
+
+    class _NotQtModules(dict):
+        def __contains__(self, name: object) -> bool:
+            if isinstance(name, str) and not name.startswith(("PySide6", "shiboken6")):
+                return True
+            return dict.__contains__(self, name)
+
+    try:
+        feature.pyside_feature_dict = _NotQtModules(  # type: ignore[attr-defined]
+            feature.pyside_feature_dict
+        )
+    except Exception:  # pragma: no cover - likewise
+        return
+
+
 _keep_font_cache()
 
 from PySide6.QtWidgets import QApplication  # noqa: E402
+
+# Before `import normet` below: PySide6's hook would otherwise read the source
+# of pandas, numpy and the whole library (6.2 s against 1.1 s, warm).
+_skip_qt_import_scan()
 
 _app = QApplication(sys.argv)
 try:

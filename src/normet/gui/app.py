@@ -58,6 +58,46 @@ def _install_excepthook() -> None:
     sys.excepthook = hook
 
 
+def _skip_qt_import_scan() -> None:
+    """Stop PySide6's import hook from reading the source of every later module.
+
+    ``import PySide6`` replaces ``builtins.__import__`` with a hook that, for
+    each module imported afterwards, reads the module's source to decide whether
+    it uses ``from __feature__ import ...``
+    (``shibokensupport.feature.feature_imported``). A module already named in
+    ``pyside_feature_dict`` is not read. For a library this size that read is
+    the startup: importing normet after PySide6 measured **6.2 s against 1.1 s**
+    the other way round (warm, both orders; pandas and numpy alone are hundreds
+    of files), and the window's own modules paid ~1 s more when first imported.
+
+    The mapping below answers "already known" for every module that is not Qt's.
+    None of normet's modules uses the feature switch (no ``from __feature__
+    import`` in the tree), so the scan has nothing to find; PySide6's own
+    modules still get their feature defaults. Guarded because this is a PySide6
+    internal: a version that renames either object starts the app unpatched,
+    never broken.
+    """
+    try:
+        import importlib
+
+        feature = importlib.import_module("shibokensupport.feature")
+    except Exception:  # pragma: no cover - PySide6 always provides it
+        return
+
+    class _NotQtModules(dict):
+        def __contains__(self, name: object) -> bool:
+            if isinstance(name, str) and not name.startswith(("PySide6", "shiboken6")):
+                return True
+            return dict.__contains__(self, name)
+
+    try:
+        feature.pyside_feature_dict = _NotQtModules(  # type: ignore[attr-defined]
+            feature.pyside_feature_dict
+        )
+    except Exception:  # pragma: no cover - likewise
+        return
+
+
 def _configure_frozen_runtime() -> None:
     """Make joblib safe inside a PyInstaller bundle.
 
@@ -115,6 +155,9 @@ def main(argv: list[str] | None = None, *, splash: object | None = None) -> int:
             "PySide6 is required for the GUI. Install it with:\n    pip install 'normet[gui]'"
         ) from exc
 
+    # First, before any module import of ours: PySide6 is loaded now, and its
+    # hook would read each later module's file (see the docstring above).
+    _skip_qt_import_scan()
     _configure_frozen_runtime()
 
     import matplotlib
