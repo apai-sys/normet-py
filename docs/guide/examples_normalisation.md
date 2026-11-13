@@ -66,6 +66,7 @@ out_sw = nm.normalise(
 Values may be scalar (exact match), an iterable (`isin` semantics), or a
 callable (any boolean mask).
 
+(log-scale-fits)=
 ## Log-scale fits (low-concentration, multi-decade pollutants)
 
 A pollutant that ranges from sub-unit to hundreds of µg/m³ spends most of its

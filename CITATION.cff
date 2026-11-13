@@ -1,0 +1,28 @@
+cff-version: 1.2.0
+message: "If you use normet in your work, please cite it as below."
+type: software
+title: "normet: Normalisation, Decomposition, and Counterfactual Modelling for Environmental Time-series"
+abstract: >-
+  normet is a Python package for deweathering, causal inference, and policy
+  evaluation on environmental time-series data. It wraps AutoML model training,
+  Monte Carlo meteorological normalisation, and Synthetic Control Methods behind
+  a high-level API.
+authors:
+  - given-names: Congbo
+    family-names: Song
+    affiliation: University of Manchester
+  - name: "normet contributors"
+version: 1.0.0
+license: MIT
+repository-code: "https://github.com/apai-sys/normet-py"
+url: "https://normet.readthedocs.io"
+keywords:
+  - environmental-data
+  - time series
+  - deweathering
+  - normalisation
+  - counterfactual
+  - synthetic control
+  - causal inference
+  - air quality
+  - air pollution
