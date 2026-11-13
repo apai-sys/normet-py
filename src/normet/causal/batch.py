@@ -9,7 +9,6 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from joblib import Parallel, delayed
 
 from ..utils._config import resolve_workers
 from ..utils._time import to_datetime_coerced
@@ -108,6 +107,9 @@ def scm_all(
         except Exception as e:
             log.warning("%s failed for unit %s: %s", scm_backend, code, e)
             return None
+
+    # joblib is ~100 ms of `import normet`; the parallel branches pay it.
+    from joblib import Parallel, delayed
 
     pieces = Parallel(n_jobs=n_cores_eff)(delayed(_one)(code) for code in units)
     pieces = [p for p in pieces if p is not None]
@@ -320,6 +322,8 @@ def run_scm_staggered(
             ss_tot = float(np.sum((y - y.mean()) ** 2))
             pre_r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
         return (unit, cutoff, stat, pre_r2, n_pre, n_post)
+
+    from joblib import Parallel, delayed
 
     # One pool for the real runs and for every donor taking every treated
     # unit's role — the cross-unit reference, and the material of each unit's

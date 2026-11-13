@@ -47,6 +47,10 @@ class NormaliseConfig:
     aggregate: bool = True
     seed: int = 7_654_321
     n_cores: int | None = None
+    """Workers for a parallel section. The per-seed path sizes its joblib pool
+    with it; the batch-reduce path has no pool, so it sizes LightGBM's
+    prediction threads instead (other backends ignore it). ``None`` uses the
+    allocation minus one, as everywhere else."""
     resample_df: pd.DataFrame | None = None
     memory_save: bool = False
     verbose: bool = False
@@ -596,7 +600,12 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
             df_batch_dict = _stacked_columns(df, draw_arrays, batch_seeds, _cfg.replace)
             df_batch = pd.DataFrame(df_batch_dict)
 
-            batch_preds = ml_predict(model, df_batch)  # shape (b_size × n_rows,)
+            # The batch path has no per-seed worker pool, so n_cores sizes the
+            # prediction threads instead (LightGBM only; other backends ignore
+            # it). Results do not depend on the thread count.
+            batch_preds = ml_predict(
+                model, df_batch, num_threads=n_cores_eff
+            )  # shape (b_size × n_rows,)
 
             # Accumulate into running sums and immediately free batch arrays
             batch_preds_2d = batch_preds.reshape(b_size, n_rows)
@@ -673,7 +682,9 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
         df_all = pd.DataFrame(_stacked_columns(df, draw_arrays, random_seeds, _cfg.replace))
         df_all["seed"] = np.repeat(random_seeds, n_rows)
 
-        preds = ml_predict(model, df_all)
+        # Like the batch path, this path has no pool of its own: n_cores sizes
+        # the prediction threads (LightGBM only; other backends ignore it).
+        preds = ml_predict(model, df_all, num_threads=n_cores_eff)
 
         df_result = pd.DataFrame(
             {

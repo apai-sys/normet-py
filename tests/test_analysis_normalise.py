@@ -146,16 +146,52 @@ def test_generate_resampled_replaces_values():
 # ---------------------------------------------------------------------------
 
 
+def test_batch_path_passes_n_cores_as_predict_threads(monkeypatch):
+    """The batch-reduce path has no worker pool; ``n_cores`` sizes the predictor.
+
+    LightGBM reads its thread count from the OpenMP environment at first use,
+    which HPC harnesses pin to 1; without this hop ``n_cores`` would be ignored
+    on the path most users take (aggregate=True, no quantiles).
+    """
+    import sys
+
+    from normet.analysis.normalise import normalise
+
+    # `normet.analysis.normalise` as an attribute of the package is the
+    # re-exported *function*; the monkeypatch has to hit the module.
+    normalise_mod = sys.modules["normet.analysis.normalise"]
+    seen: dict = {}
+
+    def mock_ml_predict(model, df, **kwargs):
+        seen.update(kwargs)
+        return np.full(len(df), 10.0)
+
+    monkeypatch.setattr(normalise_mod, "ml_predict", mock_ml_predict)
+    common = dict(
+        df=_weather_df(n=30),
+        model="dummy-model",
+        covariates=["ws", "wd"],
+        variables_resample=["ws", "wd"],
+        n_samples=5,
+        n_cores=3,
+        verbose=False,
+    )
+    normalise(**common, aggregate=True)
+    assert seen == {"num_threads": 3}
+    # The vectorised path (quantiles / wide table) has no pool either.
+    normalise(**common, aggregate=True, return_quantiles=[0.025, 0.975])
+    assert seen == {"num_threads": 3}
+
+
 def test_normalise_core_runs(monkeypatch):
     import sys
 
-    import normet.analysis.normalise
-
-    normalise_mod = sys.modules["normet.analysis.normalise"]
     from normet.analysis.normalise import normalise
 
+    normalise_mod = sys.modules["normet.analysis.normalise"]
+
     # Dummy predictor returning 10.0 for every sample
-    def mock_ml_predict(model, df):
+    def mock_ml_predict(model, df, **kwargs):
         return np.full(len(df), 10.0)
 
     monkeypatch.setattr(normalise_mod, "ml_predict", mock_ml_predict)

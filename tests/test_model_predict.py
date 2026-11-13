@@ -126,3 +126,26 @@ class TestMlPredict:
         df = pd.DataFrame({"a": np.ones(10)})
         result = ml_predict(model, df, chunk_size=1)
         assert result.shape == (10,)
+
+    def test_num_threads_reaches_a_lightgbm_backend(self) -> None:
+        """LightGBM takes ``num_threads``; the wrapper must forward it."""
+        calls: list[dict] = []
+
+        class _Threaded(_StubModel):
+            def __init__(self) -> None:
+                super().__init__(["a"], backend="lightgbm")
+
+            def predict(self, X, **kwargs):  # type: ignore[override]
+                calls.append(kwargs)
+                return np.ones(len(X))
+
+        df = pd.DataFrame({"a": [1.0, 2.0]})
+        ml_predict(_Threaded(), df, num_threads=3)
+        assert calls == [{"num_threads": 3}]
+
+    def test_num_threads_is_not_forwarded_to_other_backends(self) -> None:
+        """A sklearn/FLAML estimator would raise on the keyword; it is lgb-only."""
+        model = _StubModel(["a"])  # predict() takes X alone
+        df = pd.DataFrame({"a": [1.0, 2.0]})
+        result = ml_predict(model, df, num_threads=3)
+        assert result.shape == (2,)

@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from joblib import Parallel, delayed
 
 from ..backends import backend_registry
 from ..model.predict import ml_predict
@@ -45,7 +44,9 @@ def pdp(
     training_only : bool, default True
         If True and df has a 'set' column, use only rows with `set == "training"`.
     n_cores : int | None
-        Parallel workers. Default: all cores - 1.
+        Worker threads. Default: all cores - 1. PDP is dispatched over
+        threads, so no worker copies the frame; the predictor releases the
+        GIL while scoring.
     grid_points : int, default 50
         Number of evaluation points on the value grid.
     quantile_range : (float, float), default (0.01, 0.99)
@@ -120,19 +121,42 @@ def pdp(
             )
             return pd.DataFrame(columns=["variable", "value", "pdp_mean", "pdp_std"])
 
-        X_work = X_df.copy()
+        # One prediction per stacked block, not one per grid point: every
+        # point changes only ``var``, so stack one copy of the frame per
+        # point (``np.repeat`` puts point g into block g) and read each
+        # point's mean/SD off the result. Fifty small predict calls each pay
+        # the frame -> matrix conversion and the backend dispatch; one
+        # stacked call pays them once. The stack is capped at ~1e6 rows
+        # (~100 MB of float64 features) so a large training frame is not
+        # inflated by the full grid.
+        n = len(X_df)
+        per_block = max(1, 1_000_000 // max(n, 1))
         means: list[float] = []
         stds: list[float] = []
-        for g in grid:
-            X_work[var] = g
-            yhat = ml_predict(model, X_work)
-            yhat = np.asarray(yhat, dtype=float)
-            means.append(float(np.nanmean(yhat)) if yhat.size else np.nan)
-            stds.append(float(np.nanstd(yhat)) if yhat.size else np.nan)
+        for start in range(0, len(grid), per_block):
+            g = grid[start : start + per_block]
+            X_stack = pd.concat([X_df] * len(g), ignore_index=True)
+            X_stack[var] = np.repeat(g, n)
+            yhat = np.asarray(ml_predict(model, X_stack), dtype=float)
+            for j in range(len(g)):
+                block_y = yhat[j * n : (j + 1) * n]
+                means.append(float(np.nanmean(block_y)) if block_y.size else np.nan)
+                stds.append(float(np.nanstd(block_y)) if block_y.size else np.nan)
 
         return pd.DataFrame({"variable": var, "value": grid, "pdp_mean": means, "pdp_std": stds})
 
-    pieces = Parallel(n_jobs=n_cores_eff)(delayed(_one)(v) for v in vars_for_pdp)
+    # Imported here, not at module level: joblib (and loky under it) is ~100 ms
+    # of `import normet`, and only the parallel branch needs it.
+    from joblib import Parallel, delayed
+
+    # Threads, not processes: the tasks predict through LightGBM (which
+    # releases the GIL) on a frame shared with the parent, while a loky worker
+    # re-imports normet and pickles the frame per task. Measured at 4,344
+    # training rows: three variables took 5.0 s through the process pool the
+    # default used to pick, 1.7 s on four threads and 2.6 s serially; the
+    # full 13-variable panel is 5.1 s on the default seven threads vs 6.4 s
+    # serially.
+    pieces = Parallel(n_jobs=n_cores_eff, prefer="threads")(delayed(_one)(v) for v in vars_for_pdp)
     return (
         pd.concat(pieces, ignore_index=True)
         if pieces

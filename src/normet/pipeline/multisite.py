@@ -14,7 +14,6 @@ from collections.abc import Callable
 from typing import Any
 
 import pandas as pd
-from joblib import Parallel, delayed
 
 from ..utils._config import resolve_workers
 from ..utils.logging import get_logger
@@ -102,6 +101,9 @@ def multisite_apply(
             log.warning("Site %s failed: %s", site_value, e)
             return None
 
+    # joblib is ~100 ms of `import normet`; only this driver needs it.
+    from joblib import Parallel, delayed
+
     pieces = Parallel(n_jobs=n_workers)(delayed(_run)(s) for s in sites)
     pieces = [p for p in pieces if p is not None]
     if not pieces:
@@ -171,6 +173,8 @@ def do_all_multisite(
         except Exception as e:
             log.warning("Site %s failed in do_all: %s", site_value, e)
             return None
+
+    from joblib import Parallel, delayed
 
     results = Parallel(n_jobs=n_workers)(delayed(_run)(s) for s in sites)
     results = [r for r in results if r is not None]

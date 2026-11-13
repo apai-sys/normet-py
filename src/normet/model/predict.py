@@ -21,6 +21,7 @@ def ml_predict(
     newdata: pd.DataFrame,
     *,
     chunk_size: int | None = None,
+    num_threads: int | None = None,
 ) -> np.ndarray:
     """
     Predict using a trained AutoML model.
@@ -34,9 +35,21 @@ def ml_predict(
         Feature matrix for prediction. Must contain the columns used by the model.
     chunk_size : int, optional
         If set and the input has more than ``chunk_size`` rows, predictions
-        are computed in chunks and concatenated. Useful when the model's
-        predict path materialises a large intermediate (e.g., LightGBM with
-        wide feature matrices). Defaults to 200_000.
+        are computed in chunks and concatenated, bounding the float64 copy the
+        backend materialises per call. The default derives the row count from
+        the frame's width for a ~256 MB payload (13 features: ~2.4M rows, so
+        an ordinary frame is predicted in one call; 1,000 features: ~33k
+        rows). A fixed 200k-row default split a 13-feature, 1.74M-row
+        normalise into 9 calls and cost 12% against a single call at 8
+        threads (4.85 s vs 4.28 s).
+    num_threads : int, optional
+        Thread count for backends that take one (LightGBM; ignored by the
+        others). LightGBM's prediction is memory-bound and scales ~5.6x from
+        1 to 8 threads on a 300-resample normalise of the bundled MY1 record
+        (23.1 s -> 4.1 s, bit-identical results), but it reads the thread
+        count from the OpenMP environment at first use -- which HPC test
+        harnesses often pin to 1. Passing it per call lets ``normalise``'s
+        ``n_cores`` mean what it says on the batch path too.
 
     Returns
     -------
@@ -78,17 +91,29 @@ def ml_predict(
     if n_rows == 0:
         return np.array([], dtype=float)
 
+    # Only LightGBM's wrapper takes a thread count; passing it to a sklearn or
+    # FLAML estimator would be a TypeError, so it is opted into by backend name.
+    predict_kwargs: dict[str, Any] = {}
+    if num_threads is not None and model_type == "lightgbm":
+        predict_kwargs["num_threads"] = max(1, int(num_threads))
+
     try:
-        cs = int(chunk_size) if chunk_size is not None else 200_000
+        # See the docstring: the default bounds each call's float64 feature
+        # copy at ~256 MB instead of fixing a row count that is far too small
+        # for a narrow frame and far too large for a wide one.
+        default_cs = max(1_000, (256 * 1024**2) // (max(1, X.shape[1]) * 8))
+        cs = int(chunk_size) if chunk_size is not None else int(default_cs)
         if cs > 0 and n_rows > cs:
             parts: list[np.ndarray] = []
             for start in range(0, n_rows, cs):
                 stop = min(start + cs, n_rows)
                 chunk = X.iloc[start:stop] if hasattr(X, "iloc") else X[start:stop]
-                parts.append(np.asarray(model.predict(chunk), dtype=float).reshape(-1))
+                parts.append(
+                    np.asarray(model.predict(chunk, **predict_kwargs), dtype=float).reshape(-1)
+                )
             yhat = np.concatenate(parts, axis=0)
         else:
-            yhat = model.predict(X)
+            yhat = model.predict(X, **predict_kwargs)
 
         return np.asarray(yhat, dtype=float).reshape(-1)
 

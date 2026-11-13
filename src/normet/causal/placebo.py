@@ -7,7 +7,6 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from joblib import Parallel, delayed
 
 from ..utils._config import resolve_workers
 from ..utils._time import to_datetime_coerced
@@ -121,6 +120,9 @@ def placebo_in_space(
         except Exception as e:
             log.warning("Placebo failed for unit %s: %s", u, e)
             return None
+
+    # joblib is ~100 ms of `import normet`; the parallel branches pay it.
+    from joblib import Parallel, delayed
 
     results = Parallel(n_jobs=n_cores_eff)(delayed(_one_donor_placebo)(u) for u in donor_pool)
     placebo_effects: dict[str, pd.DataFrame] = {
@@ -293,6 +295,8 @@ def placebo_in_time(
             return None
 
     n_cores_eff = _eff_cores(n_cores)
+    from joblib import Parallel, delayed
+
     jobs = Parallel(n_jobs=n_cores_eff)(delayed(_one_placebo)(pc) for pc in placebo_candidates)
     jobs = [j for j in jobs if j is not None]
     if not jobs:
