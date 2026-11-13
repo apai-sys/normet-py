@@ -544,6 +544,19 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   chosen before.
 
 ### Changed
+- **Documentation reorganised.** The README is now a short overview (capabilities
+  table, installation, quick start, links); the material it carried moved to the
+  documentation site, which gains Getting started (installation with every extra,
+  quick start), a step-by-step workflow page, pages for the desktop GUI, the CLI and
+  the MCP server, a notebooks index, and an About section that includes the
+  changelog, contributing guide, code of conduct, security policy, citing page and
+  roadmap. The README's CLI examples (`normet do-all --config config.yaml`) omitted
+  the required input file and `--out`; the CLI page gives the working form. Snippets
+  for `wind_to_uv`, `cv_score`, `do_all_multisite`, `make_run` and the `resample_df`
+  reference period now match the functions' signatures. New `CITATION.cff` and
+  `SECURITY.md`; `CONTRIBUTING.md` documents the CI checks, the 70 % coverage gate,
+  the macOS libomp hang, the docs build and the commit conventions; `pyproject.toml`
+  lists the Documentation, Repository and Changelog URLs.
 - **Opening a large table is ~4× faster.** `read_table`'s blank-row check
   converted every column to text and stripped each cell, so a 1M-row,
   six-column CSV spent 3.1 s of its 9.0 s read proving that five numeric

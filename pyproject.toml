@@ -129,7 +129,10 @@ normet-gui = "normet.gui:main"
 
 [project.urls]
 Homepage = "https://github.com/apai-sys/normet-py"
+Documentation = "https://normet.readthedocs.io"
+Repository = "https://github.com/apai-sys/normet-py"
 Issues = "https://github.com/apai-sys/normet-py/issues"
+Changelog = "https://github.com/apai-sys/normet-py/blob/main/CHANGELOG.md"
 
 [tool.setuptools]
 package-dir = { "" = "src" }

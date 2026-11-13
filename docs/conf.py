@@ -60,6 +60,8 @@ autosummary_imported_members = False
 autosummary_filename_map = {
     "normet.agent.llm.hpc_clusters": "normet.agent.llm.hpc_clusters-function",
     "normet.agent.llm.hpc_forwards": "normet.agent.llm.hpc_forwards-function",
+    # The same collision for ``REASONING_EFFORTS``/``reasoning_efforts``.
+    "normet.agent.llm.reasoning_efforts": "normet.agent.llm.reasoning_efforts-function",
 }
 autodoc_default_options = {
     "undoc-members": False,

@@ -22,24 +22,10 @@
    without this policy?" by building a counterfactual from untreated donor
    units, with placebo tests and uncertainty bands.
 
-### Contents
+Zero-shot de-weathering with the Chronos-2 foundation model, data adapters, a CLI, an
+MCP server for AI assistants and a desktop app build on the same API.
 
-- [Core capabilities](#core-capabilities)
-- [Installation](#installation)
-- [Quick start: one-shot meteorological normalisation](#quick-start-one-shot-meteorological-normalisation)
-- [Step-by-step workflow](#step-by-step-workflow)
-- [Decomposition](#decomposition)
-- [Counterfactual modelling (Synthetic Control)](#counterfactual-modelling-synthetic-control)
-- [Zero-shot de-weathering (Chronos-2)](#zero-shot-de-weathering-chronos-2)
-- [Advanced features](#advanced-features)
-- [CLI](#cli)
-- [AI assistants (MCP server)](#ai-assistants-mcp-server)
-- [Desktop GUI](#desktop-gui)
-- [Dependencies](#dependencies)
-- [Documentation](#documentation)
-- [How to cite](#how-to-cite)
-- [Contributing](#contributing)
-- [License](#license)
+![The normet desktop app after a normalisation run](https://raw.githubusercontent.com/apai-sys/normet-py/main/docs/manual/figures/ui_normalise.png)
 
 ---
 
@@ -53,7 +39,7 @@
 | `nm.decompose` | Split time series into emission-driven and met-driven components |
 | `nm.rolling` | Rolling-window normalisation for trend analysis |
 | `nm.run_scm` / `nm.scm` | Synthetic Control Method (classic, augmented ridge); several treated units each with its own cutoff via `nm.run_scm_staggered` (staggered adoption: per-unit effects and placebo p-values, plus the pooled mean/median with a cross-unit permutation test — rolling-out schemes such as the UK ULEZ expansion) |
-| `nm.mlscm` | ML-augmented SCM (**experimental** — see [Counterfactual modelling](#counterfactual-modelling-synthetic-control)) |
+| `nm.mlscm` | ML-augmented SCM (**experimental** — see [Synthetic control](https://normet.readthedocs.io/en/latest/guide/examples_scm_guide.html)) |
 | `nm.placebo_in_space` / `nm.placebo_in_time` | Placebo significance tests |
 | `nm.uncertainty_bands` | Bootstrap / Jackknife confidence intervals |
 | `nm.do_all` | End-to-end pipeline in one call |
@@ -82,51 +68,41 @@
 
 ## Installation
 
-Install the stable release from PyPI:
-
 ```bash
-pip install normet
+pip install "normet[flaml]"     # with the recommended AutoML backend
 ```
 
-Install the development version from GitHub:
+`normet` needs at least one model backend; the core package installs only `numpy`,
+`pandas`, `scipy`, `scikit-learn`, `joblib` and `matplotlib`. Other optional features
+come as extras, which combine (`pip install "normet[gui,flaml]"`):
+
+| Extra | For |
+|---|---|
+| `flaml` / `lgb` | AutoML (FLAML, recommended) or the lightweight LightGBM tuner |
+| `data` | ERA5 / EEA / OpenAQ / UK air quality (ukaq) data adapters |
+| `foundation` | Chronos-2 foundation model (zero-shot de-weathering, station embeddings) |
+| `cli` | The `normet` command-line tool |
+| `mcp` | MCP server for AI assistants (Claude Code, Claude Desktop, ...) |
+| `gui` | The desktop app (`normet-gui`) |
+| `all` | Everything |
+
+The development version, which the documentation tracks:
 
 ```bash
 pip install git+https://github.com/apai-sys/normet-py.git
 ```
 
-### Extras
+**Desktop app.** `pip install "normet[gui,flaml]"`, then run `normet-gui`. Ready-made
+installers — `.dmg` (macOS), `.exe` (Windows), `.AppImage` (Linux) — are built by the
+[`build-gui.yml`](.github/workflows/build-gui.yml) workflow (**Actions → Artifacts**);
+see [`packaging/README.md`](packaging/README.md) to build one locally.
 
-`normet` requires at least one ML backend. Install extras as needed:
-
-```bash
-# AutoML backend (recommended)
-pip install "normet[flaml]"
-
-# Lightweight LightGBM tuner
-pip install "normet[lgb]"
-
-# Dask support for large datasets
-pip install "normet[dask]"
-
-# ERA5 / EEA / OpenAQ / UK air quality (ukaq) data adapters
-pip install "normet[data]"
-
-# CLI entry point
-pip install "normet[cli]"
-
-# Chronos-2 foundation model (zero-shot de-weathering, station embeddings)
-pip install "normet[foundation]"
-
-# MCP server for AI assistants (Claude Code, Claude Desktop, ...)
-pip install "normet[mcp]"
-
-# Everything
-pip install "normet[all]"
-```
+The [installation guide](https://normet.readthedocs.io/en/latest/getting_started/installation.html)
+lists every extra and its dependencies.
 
 ---
 
-## Quick start: one-shot meteorological normalisation
+## Quick start
 
 `nm.do_all` runs the full pipeline — prepare → train → normalise — in a single
 call. The example uses `normet`'s bundled real-world dataset: hourly NO2 and
@@ -156,566 +132,42 @@ print(out.head())
 nm.modStats(df_prep, model)
 ```
 
-`do_all` returns a 3-tuple: `(normalised_df, model, prepared_df)`.
-
-### Bundled example data
-
-Four real datasets from the normet model-description paper's case studies
-ship with the package (`normet.datasets`):
-
-| Loader | Contents |
-|---|---|
-| `load_my1()` | Hourly NO2 + ERA5 met at London Marylebone Road (MY1), Jan–Aug 2020 |
-| `load_scm()` | Monthly deweathered NO2 panel, 104 UK sites, 2016–2021 (ULEZ SCM case) |
-| `load_my1_pm25()` | Hourly PM2.5 + met at MY1, Jan–Aug 2020 (transport-aware case) |
-| `load_traj_my1()` | 6-hourly HYSPLIT back-trajectory features arriving at MY1 |
-| `example_traj_dir()` | Two-day sample of raw HYSPLIT `tdump` files for the trajectory readers |
-
-Sources: UK AURN (Defra, Open Government Licence v3.0); ERA5 (Copernicus
-Climate Change Service); HYSPLIT (NOAA ARL).
-
----
-
-## Step-by-step workflow
-
-### 1. Prepare data
-
-```python
-df_prep = nm.prepare_data(
-    df=df,
-    target="NO2",
-    covariates=predictors,
-    split_method="random",   # "random" | "ts" | "month_ts" | "season_ts"
-    train_fraction=0.75,
-)
-```
-
-### 2. Train model
-
-```python
-model = nm.train_model(
-    df=df_prep,
-    target="value",
-    backend="flaml",
-    covariates=predictors,
-    model_config={
-        "time_budget": 120,
-        "metric": "r2",
-        "estimator_list": ["lgbm"],
-    },
-    n_cores=4,
-)
-
-nm.modStats(df_prep, model)
-```
-
-### 3. Normalise
-
-```python
-df_norm = nm.normalise(
-    df=df_prep,
-    model=model,
-    covariates=predictors,
-    variables_resample=met_vars,
-    n_samples=300,
-    n_cores=4,
-    return_quantiles=[0.025, 0.975],  # optional uncertainty bands
-)
-```
-
-`df_norm` is indexed by `date` with columns `observed` and `normalised`.
-Passing `return_quantiles` adds one column per quantile (e.g. `q025`,
-`q975`); passing `aggregate=False` instead returns one `normalised` column
-per resampling seed.
-
-Supply a different reference period with `resample_df`:
-
-```python
-ref_weather = df_prep.loc["2019", met_vars]
-
-df_norm_ref = nm.normalise(
-    df=df_prep,
-    model=model,
-    covariates=predictors,
-    variables_resample=met_vars,
-    resample_df=ref_weather,
-    n_samples=300,
-)
-```
-
-For a target that spans sub-unit to hundreds of µg/m³, fit on the log scale:
-`nm.do_all(..., log_transform=True)` (also on `do_all_unc` and `normalise`)
-trains on `log1p(value)` and back-transforms every result column through
-`expm1`, so the output is in the original units and non-negative by
-construction. See the user guide's "Log-scale fits" section.
-
----
-
-## Decomposition
-
-Split the time series into emission-driven and meteorology-driven components:
-
-```python
-df_emi = nm.decompose(df=df_prep, model=model,
-                      covariates=predictors, method="emission")
-
-df_met = nm.decompose(df=df_prep, model=model,
-                      covariates=predictors, method="meteorology")
-```
-
----
-
-## Counterfactual modelling (Synthetic Control)
-
-SCM asks: *what would have happened to the treated unit if the intervention
-had not occurred?* It builds a synthetic counterfactual from a weighted
-combination of untreated "donor" units and compares it to what was actually
-observed after the intervention.
-
-The bundled `load_scm()` panel reproduces the paper's ULEZ case study: the
-London Ultra Low Emission Zone (launched 2019-04-08) is evaluated at the
-kerbside site MY1, using deweathered monthly NO2 from traffic-type sites
-elsewhere in the UK as the donor pool:
-
-```python
-scm_df = nm.datasets.load_scm()
-
-treated_unit = "MY1"
-cutoff_date = "2019-04-01"  # ULEZ launch month
-
-# Paper's primary design: pre-COVID window, complete traffic-type donors
-df = scm_df.query("'2017-01-01' <= date < '2020-03-01'")
-df = df[df["type"].str.contains("Traffic")]
-counts = df.dropna(subset=["NO2_dw"]).groupby("code").size()
-donor_pool = [c for c in counts[counts == df["date"].nunique()].index if c != treated_unit]
-df = df[df["code"].isin(donor_pool + [treated_unit])]
-```
-
-### Run SCM
-
-```python
-result = nm.run_scm(
-    df=df,
-    date_col="date",
-    outcome_col="NO2_dw",
-    unit_col="code",
-    treated_unit=treated_unit,
-    donors=donor_pool,
-    cutoff_date=cutoff_date,
-    scm_backend="scm",      # "scm" | "mlscm"
-)
-print(result.tail())
-```
-
-Available backends: `scm` (augmented ridge SCM), `abadie` (classic simplex), `did` (DiD), `mcnnm` (matrix completion), `robust` (Robust SCM — HSVT de-noising, Amjad et al. 2018), `mlscm` (**experimental** — emits `ExperimentalWarning`).
-
-### Placebo tests
-
-```python
-placebo = nm.placebo_in_space(
-    df=df, date_col="date", outcome_col="NO2_dw", unit_col="code",
-    treated_unit=treated_unit, donors=donor_pool,
-    cutoff_date=cutoff_date, scm_backend="scm",
-)
-
-bands = nm.effect_bands_space(placebo, level=0.95)
-nm.plot_effect_with_bands(bands, cutoff_date=cutoff_date)
-```
-
-### Uncertainty quantification
-
-```python
-boot_bands = nm.uncertainty_bands(
-    df=df, date_col="date", outcome_col="NO2_dw", unit_col="code",
-    treated_unit=treated_unit, donors=donor_pool,
-    cutoff_date=cutoff_date, scm_backend="scm",
-    method="bootstrap", B=200,
-)
-nm.plot_uncertainty_bands(boot_bands, cutoff_date=cutoff_date)
-```
-
----
-
-## Zero-shot de-weathering (Chronos-2)
-
-`normet[foundation]` wraps Amazon's Chronos-2 time-series foundation model.
-Nothing is trained: the checkpoint conditions on the meteorology through its
-covariate channel and the weather is marginalised out by resampling, as in
-`normalise`. Useful when there is not enough history to train on, when a site
-has just come online, or as a second estimate from a model that never saw the
-target's own record.
-
-```python
-from normet.foundation import Chronos2Estimator, to_regular_index
-
-df = pd.read_csv("my_site.csv", parse_dates=["date"]).set_index("date").sort_index()
-df = to_regular_index(df)          # Chronos-2 reads position as time
-
-met = ["t2m", "blh", "u10", "v10"]
-est = Chronos2Estimator(met_covariates=met)
-
-out = est.deweather(df, "PM2.5", met_features=met, n_samples=8, schema="normet")
-nm.normalise_plot(out, ci_low="q100", ci_high="q900")
-```
-
-`schema="normet"` puts the result on the same `observed`/`normalised`/`qNNN`
-shape `normalise` emits, so the existing plot and HTML-report paths apply
-unchanged. `est.counterfactual(...)` projects a business-as-usual series across
-an intervention and reports its own pre-intervention bias alongside the effect.
-
-The pipelines take the same backend switch:
-
-```python
-out, estimator, df_prep = nm.do_all(df, target="PM2.5", backend="chronos-2",
-                                    covariates=met, variables_resample=met)
-
-# Meteorological decomposition works; method="emission" is refused, because the
-# trend rides in the target's own history rather than the covariate channel.
-parts = nm.decompose(df, target="PM2.5", method="meteorology",
-                     backend="chronos-2", covariates=met)
-
-# One 768-D vector per site, describing how it behaves rather than where it is.
-vectors = nm.embed_multisite(df, site_col="site", target="PM2.5")
-```
-
-Three things decide whether this is the right tool for a given record:
-
-- **The first `context_length` rows are not a result.** The model has no history
-  to condition on until then, so `deweather` seeds them with the observed values
-  and the curves coincide there by construction. Give it years, not months.
-- **Every Monte-Carlo sample is a full forward pass**, so `n_samples` defaults to
-  8 here rather than the AutoML path's 300. `device=None` picks CUDA, else Apple
-  Silicon's Metal backend (`mps`), else the CPU; the CLI takes `--device` and the
-  GUI has a **Device** selector.
-- **`covariate_sensitivity` is the quality gate.** There is no parity plot and no
-  feature importance — nothing was fitted. Shuffle the future weather and see how
-  far the forecast moves; below ~1% the model is autoregressing and its
-  "normalised" series means nothing.
-
-`decompose`, `rolling` and `pdp` have no Chronos-2 equivalent — they are defined
-in terms of a fitted model's response surface. Full guide:
-[docs/guide/examples_foundation.md](docs/guide/examples_foundation.md).
-
----
-
-## Advanced features
-
-### Ensemble uncertainty
-
-`nm.do_all_unc` runs the full pipeline `n_models` times with different seeds and
-returns meteorologically normalised contributions with confidence bands plus per-model
-statistics:
-
-```python
-out, stats = nm.do_all_unc(
-    df=df,
-    target="PM2.5",
-    backend="flaml",
-    covariates=predictors,
-    variables_resample=met_vars,
-    n_samples=300,
-    n_models=10,
-    confidence_level=0.95,
-    n_cores=4,
-)
-```
-
-`do_all_unc` returns a 2-tuple: `(normalised_df_with_bands, model_stats_df)`.
-
-### Multisite pipelines
-
-```python
-sites = {"Beijing": df_bj, "Shanghai": df_sh, "Guangzhou": df_gz}
-
-results = nm.do_all_multisite(
-    site_dfs=sites,
-    target="PM2.5",
-    backend="lightgbm",
-    covariates=predictors,
-    variables_resample=met_vars,
-    n_cores=4,
-)
-```
-
-### Feature engineering
-
-```python
-df = nm.add_lag_features(df, cols=["PM2.5"], lags=[1, 2, 24])
-df = nm.add_rolling_features(df, cols=["PM2.5"], windows=[7, 30])
-df = nm.cyclical_encode(df, col="hour", period=24)
-df = nm.wind_to_uv(df, speed_col="ws", dir_col="wd")
-```
-
-### Cross-validation
-
-```python
-scores = nm.cv_score(df_prep, model, covariates=predictors, n_splits=5)
-print(scores)
-```
-
-### Caching long-running computations
-
-```python
-memory = nm.make_memory(".normet_cache")
-
-@memory.cache
-def cached_normalise(df_hash, **cfg):
-    df = pd.read_parquet("data.parquet")
-    return nm.normalise(df, model, **cfg)
-
-key = nm.dataframe_hash(df_prep)
-result = cached_normalise(key, covariates=predictors, n_samples=300)
-```
-
-### Provenance tracking
-
-```python
-run = nm.make_run(
-    model=model,
-    df=df_prep,
-    config={"value": "PM2.5", "backend": "flaml"},
-    tags={"site": "MY1"},
-)
-nm.save_run(run, "runs/my1_run.joblib")
-```
-
-### I/O adapters
-
-```python
-import normet.io as nio
-
-# ERA5 reanalysis — single-point time-series straight from the CDS
-era5 = nio.fetch_era5_timeseries(
-    sites={"MY1": (51.52, -0.13)},
-    variables=nio.ERA5_AQ_VARIABLES_DEFAULT,
-    date_from="2018-01-01", date_to="2023-12-31",
-    cache_dir=".era5_cache",
-)
-
-# UK air quality — 6 networks (AURN, AQE, SAQN, WAQN, NI, LMAM) from
-# whole-year archives, or source="aurn_live" for a near-real-time window
-aurn = nio.fetch_ukaq_measurements(
-    "MY1", range(2018, 2024), source="aurn", pollutant="PM2.5",
-)
-
-# Open-Meteo — keyless ERA5-derived meteorology (no CDS account needed)
-met = nio.fetch_openmeteo_timeseries(
-    sites={"MY1": (51.52, -0.13)},
-    date_from="2018-01-01", date_to="2023-12-31",
-)
-
-# OpenAQ
-openaq = nio.fetch_openaq_measurements(
-    location_id=12345, parameter="pm25",
-    date_from="2024-01-01", date_to="2024-01-07",
-)
-```
-
----
-
-## CLI
-
-```bash
-# One-shot normalisation from the command line
-normet do-all --config config.yaml
-
-# Decomposition
-normet decompose --config config.yaml
-
-# SCM
-normet scm --config config.yaml
-
-# Zero-shot de-weathering with Chronos-2 (needs normet[foundation])
-normet deweather my_site.csv \
-  --target PM2.5 --met-vars t2m,blh,u10,v10 --out normalised.csv
-
-# Show installed version and available backends
-normet info
-```
-
----
-
-## AI assistants (MCP server)
-
-`normet-mcp` serves normet to an AI assistant over the Model Context Protocol,
-so Claude Code, Claude Desktop or any other MCP client can drive an analysis:
-look at a table, train and normalise, decompose, run a synthetic control, read
-the results and draw them.
-
-```bash
-pip install "normet[mcp]"
-claude mcp add normet -- normet-mcp          # Claude Code
-# Claude Desktop, claude_desktop_config.json:
-#   {"mcpServers": {"normet": {"command": "normet-mcp"}}}
-```
-
-- **Jobs.** Each fit is a `normet` CLI command run in its own process and folder
-  (`$NORMET_MCP_HOME`, `~/.normet/mcp` by default). Its command line is its
-  record and runs again as it is, without the assistant.
-- **Readings, not data.** The assistant is given normet's readings of a table or
-  a result as text (a model's `modStats` on the held-out rows, the normalised
-  series' means by year or month, a synthetic control's pre-period fit and
-  effect), plus figures. The tables stay on your machine, and files are read only
-  under `$NORMET_MCP_ROOTS` (your home folder by default).
-- **You decide.** The server tells the assistant to propose the target, the
-  predictors and the donor pool with its reasons, to let you confirm them, and to
-  quote only the numbers the tools return.
-
----
-
-## Desktop GUI
-
-A native Qt desktop app covers the full workflow without writing code, and
-runs on macOS, Windows, and Linux.
-
-**Install from PyPI:**
-
-```bash
-pip install "normet[gui,flaml]"   # or normet[gui,lgb]
-normet-gui                        # optionally: normet-gui mydata.csv
-```
-
-**Or download a ready-made installer** — `.dmg` (macOS), `.exe` (Windows,
-Inno Setup), `.AppImage` (Linux) — built by
-[`build-gui.yml`](.github/workflows/build-gui.yml)'s 3-OS matrix; grab the
-latest from the workflow's **Actions → Artifacts**, or build one locally with
-`packaging/macos/build_dmg.sh` (macOS) or `pyinstaller packaging/normet_gui.spec`
-(any OS — see [`packaging/README.md`](packaging/README.md)).
-
-**Main window** — the meteorological-normalisation workflow as numbered steps in a left-hand
-panel (Data → Columns → Train → Normalise → Decompose → Rolling → PDP), with
-results in tabs that activate as each step finishes. The result tabs and the
-status-bar step lights follow the workflow's order — Data, Model, Normalise,
-Decompose, then the questions the decomposition invites (Multi-scale, Trend,
-Events, Uncertainty), then the separate steps Rolling and PDP. Model quality,
-and every other result, is summarised by a traffic-light verdict banner. Step 1 exposes
-the flaml estimator search list, plus "Time variables"/"Met only" one-click
-toggles for the PDP variable list, and a **Backend** selector — `flaml`,
-`lightgbm`, or `chronos-2` for the zero-shot path, which hides the training
-controls it has nothing to act on, reports a covariate-sensitivity verdict
-in place of the parity plot, and can **fine-tune** the checkpoint to the site
-(LoRA or full); Step 3's meteorological decomposition runs on either backend,
-by variable or by named group, with sequential or Shapley attribution; Step 2 lets you choose exactly which
-variables are resampled in the Monte-Carlo ("Met only" by default); Step 4's
-Rolling plot shows the overall rolling mean (± spread across overlapping
-windows), and an adjacent **Multi-scale decomposition** panel differences
-rolling-deweathered series at increasing window widths (14/90/365 d by
-default) against each other and against Step 2's full-record baseline —
-isolating the meteorological residual specific to each timescale band,
-analogous to wavelet detail coefficients. An energy-by-band ranking (σ) names
-the dominant timescale at a glance, each band drawn in its own cascade colour.
-Includes drag-and-drop CSV
-loading, recent files, config save/load, run history, CSV/HTML export, a
-live log dock, and one-click synthetic example data.
-
-**Assistant** (View → Assistant, Ctrl+Shift+A) — a language model working in
-the window. It reads what the window holds (the table, the model's fit on the
-held-out rows, the normalised series, the decomposition) and runs its steps as
-their buttons do. It *proposes* a target and predictors as a card with an
-**Apply** button: nothing in the panel changes until you click it, and it trains
-or normalises only once you have agreed. Choose an API model as
-`provider:model` (`anthropic:claude-sonnet-5-5`, `deepseek:deepseek-chat`,
-`lmstudio:local-model`, …), its key kept in the macOS keychain (**Key…**) or read from
-the provider's environment variable. A model that
-hpc-agent forwards from a CSF3 or Bede job
-is listed as `bede:<model>` / `csf3:<model>` and follows the forward's port when the
-job restarts; a server of your own is named in one dialog, **Add a server…** on the
-model list (or by typing `name:model` and giving its address under **Key…**). Or
-choose a command-line agent signed in to
-your own plan -- Claude Code, Codex, Antigravity agy or GitHub Copilot -- with
-the effort it thinks at: the window serves its tools to the agent over MCP on
-127.0.0.1 with a per-window token, and gives it no shell or files of its own.
-
-The window and its figures follow the system's light/dark appearance (or View →
-Appearance), Ctrl+K (⌘K) finds any menu command or result tab by typing, and
-before a table is open the Data tab offers the examples and recent tables.
-
-**Command Log** (View → Command Log) — every step you run, written as the normet
-call that repeats it, with the arguments it actually ran with; File → Save
-Session as Script… turns a session done by clicking into a Python script that
-reproduces it. **For print…** on any figure's toolbar lays the
-figure out at a journal's column width (Nature, Elsevier, ACS, or custom) with
-its lettering in points, shows it at its printed size to finish -- drag or place
-the legend and set its columns, set line widths and markers, letter the panels,
-double-click any text or tick numbers to edit them -- and saves it at that exact
-width on a white page, leaving the figure on its tab as it was.
-
-**Data Studio** (🌐 toolbar button, or File → Get Data) — assemble a
-model-ready dataset without leaving the app: pick a network — the six UK
-networks (AURN, AQE, SAQN, WAQN, NI, LMAM), the EEA reporting network for
-Europe (country code, no key), or OpenAQ for most of the world (free API
-key) — then find its stations by the pollutants they measure and pick one,
-or several, by name, by official site code (e.g. "MAN3" for Manchester
-Piccadilly) or on the map: a click, a box drawn around them, or ⌘/Ctrl-click
-to add. The map sits on OpenStreetMap or Esri tiles, zooms and pans. Choose
-a date range and fetch the hourly measurements together with ERA5-derived
-meteorology from Open-Meteo (no API key; Copernicus CDS optional); several
-stations become one panel-shaped table with a site column. The merged table
-can be saved as CSV or sent straight into Step 1.
-
-**SCM Studio** (Analysis → Synthetic Control, or the 🧪 toolbar button) — the
-counterfactual workflow on panel data: map date/unit/outcome columns, pick the
-treated unit, cutoff and donor pool, choose an estimator
-(`scm`, `mlscm`, `abadie`, `did`, `mcnnm`, `robust`, `bayesian`), then run
-fit + diagnostics, placebo-in-space/time, jackknife/bootstrap uncertainty
-bands and the all-units batch — each with a p-value / fit-quality verdict.
-With the `foundation` extra, **Rank donors by similarity** embeds every unit's
-pre-cutoff record with Chronos-2 and ranks the others by how alike their
-dynamics are to the treated unit's, and can tick the top N as the donor pool.
-
-**Transport Studio** (🧭 toolbar button) — build transport-aware predictors
-from HYSPLIT back-trajectories: parse existing `tdump` files (no external
-binary needed) into per-receptor features (inflow direction, transport
-distance/speed, residence time over named source regions, along-path
-rainfall/boundary-layer height), preview them, then join them onto the loaded
-dataset — each row takes the latest trajectory to have arrived, within one
-release interval, and each site its own — with the new `traj_*` columns
-auto-ticked as predictors in Step 1. An advanced panel can also drive
-`hyts_std` itself for a set of receptor times, with GDAS1 meteorology it
-downloads or met files already on disk, if HYSPLIT is installed locally.
-
-Long computations run on a background thread; the window stays responsive and
-tasks can be abandoned from the status bar.
-
----
-
-## Dependencies
-
-| Group | Packages |
-|---|---|
-| Core | `numpy`, `pandas`, `scipy`, `scikit-learn`, `joblib`, `matplotlib` |
-| AutoML | `flaml` (recommended) or `lightgbm` |
-| I/O (data adapters) | `requests`, `cdsapi`, `rdata`, `pyarrow` |
-| Parallel/large data | `dask` |
-| CLI | `click`, `pyyaml` |
-| GUI | `PySide6`, `pyarrow`, `openpyxl`, `xlrd` |
+`do_all` returns a 3-tuple: `(normalised_df, model, prepared_df)`. The
+[step-by-step workflow](https://normet.readthedocs.io/en/latest/guide/workflow.html)
+takes it apart and continues into decomposition and synthetic control.
 
 ---
 
 ## Documentation
 
-Full guides and the API reference are on [Read the Docs](https://normet.readthedocs.io):
+The full documentation is at **[normet.readthedocs.io](https://normet.readthedocs.io)**:
 
-- [Meteorological normalisation](https://normet.readthedocs.io/en/latest/guide/examples_normalisation.html)
-- [Decomposition](https://normet.readthedocs.io/en/latest/guide/examples_decomposition.html)
-- [Synthetic Control (SCM)](https://normet.readthedocs.io/en/latest/guide/examples_scm_guide.html)
-- [Multisite pipelines](https://normet.readthedocs.io/en/latest/guide/examples_multisite.html)
-- [Caching](https://normet.readthedocs.io/en/latest/guide/examples_caching.html)
-- [Data adapters](https://normet.readthedocs.io/en/latest/guide/examples_data_adapters.html)
-- [API reference](https://normet.readthedocs.io/en/latest/api.html)
+- **Getting started** — [installation](https://normet.readthedocs.io/en/latest/getting_started/installation.html)
+  and [quick start](https://normet.readthedocs.io/en/latest/getting_started/quickstart.html),
+  including the bundled example datasets.
+- **User guide** — the [step-by-step workflow](https://normet.readthedocs.io/en/latest/guide/workflow.html),
+  then [meteorological normalisation](https://normet.readthedocs.io/en/latest/guide/examples_normalisation.html),
+  [zero-shot de-weathering with Chronos-2](https://normet.readthedocs.io/en/latest/guide/examples_foundation.html),
+  [decomposition](https://normet.readthedocs.io/en/latest/guide/examples_decomposition.html),
+  [trend analysis](https://normet.readthedocs.io/en/latest/guide/examples_trend.html),
+  [synthetic control](https://normet.readthedocs.io/en/latest/guide/examples_scm_guide.html),
+  [multisite pipelines](https://normet.readthedocs.io/en/latest/guide/examples_multisite.html),
+  [caching](https://normet.readthedocs.io/en/latest/guide/examples_caching.html),
+  [data adapters](https://normet.readthedocs.io/en/latest/guide/examples_data_adapters.html)
+  and more.
+- **Interfaces** — the [desktop GUI](https://normet.readthedocs.io/en/latest/guide/gui.html),
+  the [command-line interface](https://normet.readthedocs.io/en/latest/guide/cli.html)
+  and the [MCP server for AI assistants](https://normet.readthedocs.io/en/latest/guide/mcp.html).
+- **[API reference](https://normet.readthedocs.io/en/latest/api.html)**, generated
+  from the docstrings.
+- **PDF user manuals** for the desktop app, in [English](docs/manual/normet_manual.pdf)
+  and [Chinese](docs/manual/normet_manual_zh.pdf).
+- **Notebooks** — [`notebooks/`](notebooks) reproduces each case study of the normet
+  model-description paper end-to-end on the bundled data
+  ([list](https://normet.readthedocs.io/en/latest/guide/notebooks.html)).
 
-Paper-reproducibility notebooks live in [`notebooks/`](notebooks) — one per
-case study of the normet model-description paper, each running end-to-end on
-the bundled example data:
-
-1. [Deweathering + adaptive convergence](notebooks/01_deweathering_and_adaptive_convergence.ipynb) — MY1 NO2, COVID lockdown signal, series-RSE stopping rule
-2. [Decomposition + rolling normalisation](notebooks/02_decomposition_and_rolling.ipynb) — emission vs met components, moving-window trends
-3. [ULEZ Synthetic Control](notebooks/03_scm_ulez.ipynb) — causal effect of the London ULEZ with placebo bands
-4. [Transport-aware normalisation](notebooks/04_transport_aware_normalisation.ipynb) — HYSPLIT back-trajectory features and the transport contribution to PM2.5
-
-Beyond the paper's case studies:
-
-5. [Transport vs local attribution](notebooks/05_transport_vs_local_attribution.ipynb) — `decom_met` groups (Shapley) split PM2.5 into local-weather and transport contributions, against the average air mass or a clean-air reference (`resample_pools`)
+What changed in each release is in [CHANGELOG.md](CHANGELOG.md), and planned work in
+the [roadmap](https://normet.readthedocs.io/en/latest/roadmap.html).
 
 ---
 
@@ -733,11 +185,14 @@ Beyond the paper's case studies:
 }
 ```
 
+The same metadata is in [CITATION.cff](CITATION.cff), which GitHub's **Cite this
+repository** button reads.
+
 ---
 
 ## Contributing
 
-Contributions are welcome. Please open an issue or pull request on [GitHub](https://github.com/apai-sys/normet-py/issues), and see [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
+Contributions are welcome. Please open an issue or pull request on [GitHub](https://github.com/apai-sys/normet-py/issues), and see [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines. Report security problems privately, as described in [SECURITY.md](SECURITY.md). Participation is governed by the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## License
 

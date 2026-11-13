@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Documentation
+    url: https://normet.readthedocs.io
+    about: Installation, user guide and API reference.
+  - name: Security vulnerability
+    url: https://github.com/apai-sys/normet-py/blob/main/SECURITY.md
+    about: Please report security problems privately, as described in the security policy, not in a public issue.
