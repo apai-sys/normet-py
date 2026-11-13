@@ -47,6 +47,23 @@ def test_the_times_are_found_and_read_however_written(tmp_path, text, first):
     assert df.attrs["normet_dates"]
 
 
+def test_rows_with_nothing_in_any_field_are_dropped(tmp_path):
+    path = tmp_path / "gaps.csv"
+    path.write_text(
+        "date,NO2,PM10\n2020-01-01 00:00,1,2\n,,\n   ,  ,\n2020-01-01 01:00,3,\n",
+        encoding="utf-8",
+    )
+    df = read_table(path)
+    assert df["date"].tolist() == ["2020-01-01 00:00", "2020-01-01 01:00"]
+    assert df["PM10"].isna().tolist() == [False, True]
+
+
+def test_a_year_first_column_is_read_as_written():
+    dates, how = parse_dates(pd.Series(["2020-01-31", "2020-02-01"]))
+    assert how == "as written"  # no day-first probe: the year leads
+    assert [str(t) for t in dates.dt.date] == ["2020-01-31", "2020-02-01"]
+
+
 def test_a_decimal_comma_and_a_semicolon_are_read_from_the_file(tmp_path):
     path = tmp_path / "eu.csv"
     path.write_text("date;NO2\n2020-01-01 00:00;1,5\n2020-01-01 01:00;2,25\n", encoding="cp1252")

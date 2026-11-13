@@ -5,7 +5,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
@@ -570,6 +569,11 @@ def plot_effect_with_bands(
     matplotlib.axes.Axes
     """
     if ax is None:
+        # matplotlib is imported here, not at module level: `import normet` pulls
+        # `causal` in, and pyplot alone is ~0.35 s of a ~1.5 s import. Only the
+        # plotting helpers need it.
+        import matplotlib.pyplot as plt
+
         _, ax = plt.subplots(figsize=(8, 3), layout="constrained")
 
     if "effect" not in bands_df.columns:
@@ -699,6 +703,8 @@ def plot_uncertainty_bands(
     high = out.get("high")
 
     if ax is None:
+        import matplotlib.pyplot as plt
+
         _, ax = plt.subplots(figsize=(8, 3), layout="constrained")
 
     # Plot bands if available
@@ -804,6 +810,8 @@ def plot_event_study(
     effect = df["effect"].to_numpy(dtype=float)
 
     if ax is None:
+        import matplotlib.pyplot as plt
+
         _, ax = plt.subplots(figsize=(8, 3), layout="constrained")
 
     if band is not None and n_post:

@@ -544,6 +544,76 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   chosen before.
 
 ### Changed
+- **Opening a large table is ~4× faster.** `read_table`'s blank-row check
+  converted every column to text and stripped each cell, so a 1M-row,
+  six-column CSV spent 3.1 s of its 9.0 s read proving that five numeric
+  columns held no blanks. The mask now asks `isna()` of numeric and datetime
+  columns and strips only text columns (3.1 s → 0.36 s on the same frame,
+  identical rows), and `parse_dates` skips its day-first probes for a column
+  that is entirely year-first (a full-column match; ~0.7 s per million rows).
+  Opening that file in the window: **10.9 s → 2.6 s** (the read 9.0 → 2.0 s).
+- **`import normet` no longer imports matplotlib's plotting layer.** `normet.causal.bands`
+  imported `matplotlib.pyplot` at module level, though only its three plotting helpers
+  use it, so every import paid ~0.35 s for the figure stack. The import moved into
+  those helpers: a cold `import normet` is **1.53 s → 1.12 s** (median of 7 starts;
+  GUI import 1.80 s → 1.65 s), and `sys.modules` after the import no longer holds
+  matplotlib. Results are unchanged; matplotlib arrives when a figure is drawn.
+- **`import normet` no longer imports joblib.** The four modules that run work in
+  parallel imported `Parallel`/`delayed` at module level, pulling joblib's loky and
+  cloudpickle stack into every import (~0.28 s of the start-up path once matplotlib was
+  gone too). The imports moved into the parallel branches; `import normet` is now
+  **0.84 s** cold (from 1.53 s; GUI import 1.80 s → 1.16 s), and PDP/SCM calls import
+  joblib when they first parallelise.
+- **`normalise` uses `n_cores` on every in-process path.** The batch-reduce path
+  (the default with `aggregate=True`) and the vectorised path (quantiles or the wide
+  seed table) have no worker pool of their own, so `n_cores` — which sizes the
+  per-seed joblib pool on the memory-saving path — was accepted and ignored. It now
+  sizes LightGBM's prediction threads (other backends ignore it). 300 resamples of
+  the bundled MY1 record take **23.6 s at one thread, 6.4 s at four, 4.5 s at the
+  default**; 60 resamples with quantiles **4.9 s → 1.3 s** at four. Output is
+  bit-identical (prediction is per-row). This matters on HPC harnesses that pin
+  `OMP_NUM_THREADS=1`, where LightGBM would otherwise never use more than one.
+- **`ml_predict`'s default chunk size scales with the frame's width.** The fixed
+  200,000-row default split a 13-feature, 1.74M-row normalise batch into nine
+  predict calls, where one call is 12% faster at eight threads (4.28 s vs
+  4.85 s) — the per-call setup is paid nine times and the tail chunk is small.
+  The default now derives the row count from the frame's width for a ~256 MB
+  float64 payload: ~2.4M rows at 13 features (an ordinary batch predicts in
+  one call), ~33k rows at 1,000 features, so a wide frame still chunks. An
+  explicit `chunk_size` is unchanged; predictions are per-row and identical.
+- **Importing the GUI no longer imports matplotlib.** The figure toolbar
+  subclassed `NavigationToolbar2QT`, which pulled in
+  `matplotlib.backends.backend_qtagg` — ~1.2 s of a cold start — at
+  `import normet.gui.main_window`, before any figure exists. The class moved to
+  `normet.gui._toolbar` (still importable from `_widgets`, which loads it when
+  a figure widget is built): the window import drops
+  **1.51 s → ~1.06 s** and `matplotlib` is absent from `sys.modules` until a
+  figure is created. The GUI app itself still sets the Qt backend at launch.
+- **The window's start no longer pays PySide6's source scan.** `import PySide6`
+  replaces `builtins.__import__` with a hook that reads every later module's
+  source to look for `from __feature__ import ...`; a name already in
+  `pyside_feature_dict` is skipped. Normet is hundreds of files, pandas and
+  numpy among them: importing it after PySide6 measured **6.2 s against 1.1 s**
+  in the other order (warm), and the window's own modules added ~1 s more when
+  first imported. The GUI entry now gives the hook a mapping that answers
+  "known" for every non-Qt module — none of normet's uses the feature switch,
+  and PySide6's own modules keep their handling — so the read is skipped. In
+  the app's order (Qt → library → window) the start measured **7.4 s → 2.4 s**
+  to the constructed window (offscreen, warm); `packaging/launcher.py` applies
+  the same patch before its own `import normet`. These are PySide6 internals,
+  so the patch is guarded and pinned by `tests/test_startup_imports.py`.
+- **`pdp` scores each variable's whole grid in one stacked prediction.** The
+  per-feature loop predicted once per grid point, so all 50 points re-paid the
+  frame-to-matrix conversion and the backend dispatch. One copy of the frame is
+  now stacked per point (blocks capped at ~1e6 rows, so a large training set is
+  not inflated by the full grid) and each point's mean/SD is read off the
+  result. Three features at one worker **2.6 s → 1.8 s**, all 13 features
+  **11.9 s → 7.2 s**; values are bit-identical to the per-point loop. The
+  dispatch also moved from loky processes to threads, which share the frame
+  and let LightGBM score while holding no lock: three features at
+  `n_cores=4` **6.9 s → 1.5 s** — the process pool was slower than serial —
+  and the 13-feature panel takes 5.6 s on the default pool. The R package's
+  `nm_pdp()` carries the same change (its NEWS).
 - **Every export lives in the action bar's Export menu.** The bar carried two export
   buttons and the File menu repeated both, so a command had three homes. One
   **⬇ Export** menu now holds **Result table as CSV…** (Ctrl+E) and the **HTML
