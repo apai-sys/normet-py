@@ -1,9 +1,10 @@
-# Building normet GUI installers
+# Packaging normet
 
 The GUI (`normet.gui`) is PySide6 + matplotlib, so the frozen app is
 cross-platform. PyInstaller, however, **cannot cross-compile** — each OS's
 installer must be built on that OS. The supported path is GitHub Actions
-(`.github/workflows/build-gui.yml`), one spec, three OSes.
+(`.github/workflows/build-gui.yml`), one spec, three OSes. The conda recipe is
+in [`conda/`](conda/README.md).
 
 ## Local build (macOS only)
 
@@ -106,3 +107,10 @@ Actions tab (`workflow_dispatch`).
 - The installer is unsigned, so SmartScreen shows "Windows protected your PC"
   on first run; users have to click through *More info → Run anyway*. Signing
   it needs a code-signing certificate and an `[Setup] SignTool` entry.
+
+## Conda
+
+`conda/meta.yaml` builds the PyPI sdist as a `noarch: python` conda package
+(core dependencies only; the optional extras are installed as the matching
+conda-forge packages). Build and channel/conda-forge submission steps are in
+[`conda/README.md`](conda/README.md).
