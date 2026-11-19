@@ -1,0 +1,498 @@
+"""A time series from a table file, whatever form the file and its times take.
+
+The window's *Open Data…* reads with :func:`read_time_series`, and a session script
+repeats the same call.
+
+    TABLE_SUFFIXES             the files read: text, Excel, Parquet, Feather, JSON
+    read_table(path)           the file as a DataFrame
+    find_dates(df)             its times in a column named 'date', and how they were read
+    parse_dates(values)        one column of times, in whichever form they are written
+    on_clock(dates, zone)      times on one clock: a table's own (local time, or UTC)
+    clock_to_utc / utc_to_clock  between that clock and UTC
+    read_time_series(path)     a table ready for the window, on its clock
+
+Times. A table's times may be one column or several (a date and a time, or a year,
+month, day and hour), written as text in any of the usual orders (2020-01-31,
+31/01/2020, 01/31/2020, 31.01.2020, 2020年1月31日), as numbers (Unix seconds or
+milliseconds, Excel's serial days, 20200131 or 2020013113), or with their own UTC
+offset (2020-03-29T02:00+01:00).
+
+Clocks. A table is analysed, and its figures drawn, on the clock it is kept on -- a
+site's local time (Asia/Shanghai, Europe/London) or UTC: the hour and the weekday a
+model learns from are then the site's, so a rush hour stays at its hour through summer
+time. Times written with their own offset are put on that clock. The meteorology joined
+to a table -- ERA5, Open-Meteo, HYSPLIT -- is on UTC, and is put on the table's clock as
+it is joined (:func:`utc_to_clock`); what it is fetched for, the other way
+(:func:`clock_to_utc`).
+"""
+
+from __future__ import annotations
+
+import csv
+import io
+import os
+import re
+from typing import Any
+
+import numpy as np
+import pandas as pd
+
+from ..utils._time import to_datetime_coerced
+
+#: Spreadsheets, read from their first sheet.
+EXCEL_SUFFIXES = (".xlsx", ".xlsm", ".xls")
+#: Delimited text, plain or gzipped.
+TEXT_SUFFIXES = (".csv", ".txt", ".tsv", ".dat")
+#: Columnar files.
+BINARY_SUFFIXES = (".parquet", ".feather", ".json")
+#: Every file :func:`read_table` reads.
+TABLE_SUFFIXES = (
+    TEXT_SUFFIXES + tuple(s + ".gz" for s in TEXT_SUFFIXES) + EXCEL_SUFFIXES + BINARY_SUFFIXES
+)
+
+#: Headers a table's times go under, compared without case, spaces or punctuation.
+DATE_NAMES = (
+    "date",
+    "datetime",
+    "datetimeutc",
+    "dateutc",
+    "timestamp",
+    "time",
+    "times",
+    "dt",
+    "dateandtime",
+    "datetimelocal",
+    "starttime",
+    "start",
+    "readingdatetime",
+    "日期",
+    "时间",
+    "日期时间",
+)
+#: A separate time-of-day column beside a date column.
+TIME_NAMES = ("time", "hour", "hourofday", "timeofday", "时间", "小时")
+#: Calendar parts in columns of their own.
+PART_NAMES = {
+    "year": ("year", "yr", "年"),
+    "month": ("month", "mon", "月"),
+    "day": ("day", "dayofmonth", "date", "日"),
+    "hour": ("hour", "hr", "时", "小时"),
+}
+
+
+def _key(name: Any) -> str:
+    """A header compared without case, spaces or punctuation: "Date/Time (UTC)" is
+    "datetimeutc"."""
+    return re.sub(r"[\s_\-/().:]+", "", str(name)).lower()
+
+
+def path_suffix(path: Any) -> str:
+    """The suffix a file is read by: ".csv.gz" for a gzipped CSV, else the last one."""
+    name = str(path).lower()
+    for s in TABLE_SUFFIXES:
+        if name.endswith(s):
+            return s
+    return os.path.splitext(name)[1]
+
+
+def read_table(path: Any, **kwargs: Any) -> pd.DataFrame:
+    """A table file as a DataFrame.
+
+    An Excel workbook (.xlsx, .xlsm, .xls) is read from its first sheet; Parquet, Feather
+    and JSON (records or columns) as pandas reads them. Anything else is delimited text,
+    plain or gzipped, which instruments and spreadsheets write several ways: commas,
+    semicolons, tabs or bars between fields, a decimal comma where the fields are not
+    comma-separated, UTF-8 with or without Excel's byte-order mark, or a Windows code page
+    for a "µg" or "°C" in the header. Each is settled from the file itself. Rows that hold
+    nothing in any field (lines of separators alone) are dropped. ``kwargs`` go on to the
+    pandas reader.
+    """
+    suffix = path_suffix(path)
+    if suffix in EXCEL_SUFFIXES:
+        keep = {k: v for k, v in kwargs.items() if k in ("header", "usecols", "nrows", "skiprows")}
+        try:
+            df = pd.read_excel(path, sheet_name=0, **keep)
+        except ImportError as exc:
+            need = "xlrd" if suffix == ".xls" else "openpyxl"
+            raise ImportError(
+                f"Reading {os.path.basename(str(path))} needs the {need} package "
+                f"(pip install {need}), or save the sheet as .xlsx or .csv."
+            ) from exc
+        df.columns = [str(c) for c in df.columns]
+        return _without_blank_rows(df)
+    if suffix == ".parquet":
+        return pd.read_parquet(path, **kwargs)
+    if suffix == ".feather":
+        return pd.read_feather(path, **kwargs)
+    if suffix == ".json":
+        return _without_blank_rows(pd.read_json(path, **kwargs))
+    import gzip
+
+    # Sniff the delimiter and the encoding from the head of the file, then let
+    # pandas read the file itself. The old path read the whole file into memory,
+    # decoded it to a str and wrapped that in StringIO -- three copies of a
+    # 112 MB text and ~0.5 s of a 2.0 s read (measured). Gzipped input keeps the
+    # in-memory path: a prefix of a gzip stream is not decompressible without
+    # its member state.
+    with open(path, "rb") as fh:
+        head = fh.read(1 << 16)
+    compressed = suffix.endswith(".gz") or head[:2] == b"\x1f\x8b"
+    if compressed:
+        with open(path, "rb") as fh:
+            head = gzip.decompress(fh.read())
+    elif len(head) == 1 << 16:
+        head = head[:-4]  # a UTF-8 character cut at the sample's edge
+    text = head.decode("latin-1")
+    encoding = "latin-1"
+    for candidate in ("utf-8-sig", "gb18030", "cp1252"):
+        try:
+            text = head.decode(candidate)
+            encoding = candidate
+            break
+        except UnicodeDecodeError:
+            continue
+    sample = "\n".join(text.splitlines()[:50])
+    if "sep" not in kwargs and "delimiter" not in kwargs:
+        try:
+            kwargs["sep"] = csv.Sniffer().sniff(sample, delimiters=",;\t|").delimiter
+        except csv.Error:
+            kwargs["sep"] = r"\s+" if suffix.startswith((".dat", ".txt")) else ","
+    if "decimal" not in kwargs and kwargs.get("sep") != ",":
+        body = sample.splitlines()[1:]
+        commas = sum(bool(re.search(r"\d,\d", line)) for line in body)
+        points = sum(bool(re.search(r"\d\.\d", line)) for line in body)
+        if commas > points:
+            kwargs["decimal"] = ","
+    if compressed:
+        return _without_blank_rows(pd.read_csv(io.StringIO(text), **kwargs))
+    kwargs.setdefault("encoding", encoding)
+    return _without_blank_rows(pd.read_csv(path, **kwargs))
+
+
+def _without_blank_rows(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    # A row is blank when every cell is missing or whitespace-only. Numeric and
+    # datetime cells can never be whitespace, so they need only ``isna()``: a
+    # per-column apply that converted every column to text took 3.1 s on a
+    # million-row, six-column file, ~9x the mask below on the same frame (measured;
+    # identical output), because five numeric columns were turned into a million
+    # strings each for a test their dtype already answers.
+    blank = df.isna()
+    for col in df.columns:
+        s = df[col]
+        if pd.api.types.is_numeric_dtype(s) or pd.api.types.is_datetime64_any_dtype(s):
+            continue
+        blank[col] = blank[col] | s.astype("string").str.strip().eq("")
+    mask = blank.all(axis=1).to_numpy()
+    return df.loc[~mask].reset_index(drop=True) if mask.any() else df
+
+
+# -- times ----------------------------------------------------------------------------------
+
+_NUMERIC_DMY = re.compile(r"^\s*(\d{1,2})[/.\-](\d{1,2})[/.\-](\d{2,4})")
+_CLOCK_ONLY = re.compile(r"^\s*\d{1,2}:\d{2}(?::\d{2})?\s*$")
+_CJK_DATE = re.compile(r"(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日?")
+_CJK_TIME = re.compile(r"(\d{1,2})\s*[时點点]\s*(?:(\d{1,2})\s*分)?\s*(?:(\d{1,2})\s*秒)?")
+
+
+def _day_first(text: pd.Series) -> bool | None:
+    """Whether dates written as two numbers then the year put the day first: True where
+    one of the first numbers passes 12, False where one of the second does, None where
+    neither does (01/02/2020 alone could be either) -- and None for text not so written."""
+    found = text.str.extract(_NUMERIC_DMY)
+    found = found.dropna()
+    if found.empty:
+        return None
+    first, second = found[0].astype(int), found[1].astype(int)
+    if (first > 12).any():
+        return True
+    if (second > 12).any():
+        return False
+    return None
+
+
+def _from_cjk(text: pd.Series) -> pd.Series:
+    """2020年1月31日 13时05分 as 2020-01-31 13:05."""
+
+    def one(s: str) -> str:
+        s = _CJK_DATE.sub(lambda m: f"{m[1]}-{int(m[2]):02d}-{int(m[3]):02d} ", s)
+        s = _CJK_TIME.sub(lambda m: f"{int(m[1]):02d}:{int(m[2] or 0):02d}:{int(m[3] or 0):02d}", s)
+        return s.strip()
+
+    return text.map(one)
+
+
+def parse_dates(values: Any, *, dayfirst: bool | None = None) -> tuple[pd.Series, str]:
+    """One column of times as datetimes, and how they were read, in words (short parts
+    joined with " · ", each translated on its own in the window).
+
+    Numbers are read by their size: Unix seconds (1e9 to 1e10) or milliseconds (1e12 to
+    1e13), Excel serial days (20 000 to 80 000, from 1899-12-30), 20200131 and
+    2020013113 as dates and hours. Text is read value by value; dates written as two
+    numbers and a year (31/01/2020) take the order the column itself shows -- the day
+    first where a first number passes 12, the month where a second does -- or
+    ``dayfirst`` where it shows neither (by default: the day first after a dot,
+    31.01.2020, the month first otherwise). Times with their own UTC offset keep it.
+    """
+    s = pd.Series(values)
+    if pd.api.types.is_datetime64_any_dtype(s):
+        return s, "as stored"
+    if pd.api.types.is_numeric_dtype(s):
+        v = pd.to_numeric(s, errors="coerce")
+        lo, hi = float(np.nanmin(v)), float(np.nanmax(v))
+        if lo >= 19000101 and hi <= 21001231:
+            return pd.to_datetime(
+                v.astype("Int64").astype(str), format="%Y%m%d", errors="coerce"
+            ), "as YYYYMMDD"
+        if lo >= 1900010100 and hi <= 2100123123:
+            return pd.to_datetime(
+                v.astype("Int64").astype(str), format="%Y%m%d%H", errors="coerce"
+            ), "as YYYYMMDDHH"
+        if lo >= 1e12 and hi < 1e13:
+            return pd.to_datetime(v, unit="ms", errors="coerce"), "as Unix milliseconds"
+        if lo >= 1e8 and hi < 1e10:
+            return pd.to_datetime(v, unit="s", errors="coerce"), "as Unix seconds"
+        if lo >= 2e4 and hi <= 8e4:
+            return (
+                pd.to_datetime(v, unit="D", origin="1899-12-30", errors="coerce"),
+                "as Excel serial days",
+            )
+        raise ValueError(
+            f"the numbers {lo:g} to {hi:g} are not times normet can read "
+            "(Unix seconds, Excel serial days, or 20200131-style dates)"
+        )
+    text = s.astype("string").str.strip()
+    how = "as written"
+    # A year-first date (2020-01-31, 2020/01/31, 2020.01.31) has no day/month
+    # order to settle, so the probes below -- which scan the whole column and
+    # cost ~0.7 s per million rows -- can be skipped. The match runs over the
+    # whole column rather than a sample: a 31/01/2020 further down needs the
+    # day-first read, and only a full match proves there is none.
+    if text.str.match(r"^\s*\d{4}[-/.]\d{1,2}[-/.]\d{1,2}", na=False).all():
+        first: bool | None = False
+    else:
+        if text.str.contains("年", na=False).any():
+            text = _from_cjk(text)
+            how = "as written (年月日)"
+        first = _day_first(text)
+        if first is None:
+            if dayfirst is None:
+                dayfirst = bool(text.str.match(r"^\s*\d{1,2}\.\d{1,2}\.\d{2,4}").any())
+            first = dayfirst
+            if text.str.match(_NUMERIC_DMY).any():
+                how = "day first (31/01)" if first else "month first (01/31)"
+                how += " · the column does not tell the order"
+        elif first:
+            how = "day first (31/01)"
+        else:
+            how = "month first (01/31)"
+    return to_datetime_coerced(text, dayfirst=first), how
+
+
+def _match(columns: list[Any], names: tuple[str, ...]) -> Any:
+    """The first column matching ``names`` in *name* order, not header order.
+
+    ``DATE_NAMES`` starts with "date" and only then "time", so a table with
+    a ``time,date`` header still finds its full-date column. Iterating the
+    columns instead (as an earlier version did) picked whichever name the
+    file happened to put first.
+    """
+    by_key = {_key(c): c for c in columns}
+    for n in names:
+        c = by_key.get(_key(n))
+        if c is not None:
+            return c
+    return None
+
+
+def _clock_only(values: Any) -> bool:
+    """Whether every non-missing value is a bare time of day (``13:00``).
+
+    Such a column has no date; pandas reads it as *today*, which made a
+    ``time,NO2`` table silently carry the day it was read.
+    """
+    s = pd.Series(values)
+    if pd.api.types.is_datetime64_any_dtype(s):
+        return False
+    text = s.astype("string").str.strip()
+    return bool(text.notna().all() and text.str.match(_CLOCK_ONLY).all())
+
+
+def find_dates(df: pd.DataFrame, *, dayfirst: bool | None = None) -> tuple[pd.DataFrame, str]:
+    """``df`` with its times parsed in a column named 'date', first; and how they were
+    found and read, in words.
+
+    The times are a column named as times are (date, datetime, timestamp, time, 日期, ...)
+    -- joined with a time-of-day column beside it where the dates have no hours -- or
+    year, month, day (and hour) columns, joined; else the first text column that reads as
+    times. Raises ValueError, in words for the user, where none does.
+    """
+    cols = list(df.columns)
+    out = df.copy()
+    parts = {k: _match(cols, v) for k, v in PART_NAMES.items()}
+
+    # The calendar-parts branch runs only when the day column really is a
+    # day of the month. A full date column is a candidate for the times
+    # *named* "date" too (PART_NAMES lists it), and reading it as
+    # ``pd.to_numeric`` gave all-NaT dates whenever redundant year/month
+    # columns sat beside the real one.
+    day_part = parts["day"]
+    day_is_part = day_part is None or bool(
+        pd.to_numeric(df[day_part], errors="coerce").notna().mean() >= 0.9
+    )
+    if parts["year"] is not None and parts["month"] is not None and day_is_part:
+        frame = pd.DataFrame(
+            {
+                "year": pd.to_numeric(df[parts["year"]], errors="coerce"),
+                "month": pd.to_numeric(df[parts["month"]], errors="coerce"),
+                "day": pd.to_numeric(df[parts["day"]], errors="coerce") if parts["day"] else 1,
+                "hour": pd.to_numeric(df[parts["hour"]], errors="coerce") if parts["hour"] else 0,
+            }
+        )
+        part_dates = pd.to_datetime(frame, errors="coerce")
+        used = [c for c in parts.values() if c is not None]
+        out = out.drop(columns=used)
+        if "date" in out.columns:
+            out = out.drop(columns=["date"])
+        out.insert(0, "date", part_dates)
+        return out, "joined from " + ", ".join(map(str, used))
+
+    # Candidates by name preference first -- a header order "time,date" is
+    # a clock beside a full date, and "date" must win -- then any datetime
+    # column, then anything else that reads as times. A candidate is only
+    # used if its *values* parse: a numeric day-of-month called "date" is a
+    # calendar part, not the times. A named (or datetime-typed) candidate
+    # keeps its place with a minority of bad rows left as NaT -- the header
+    # says what the column is, and a typo in one cell must not send the
+    # loader looking for another column.
+    by_name = {_key(c): c for c in cols}
+    named: list[Any] = []
+    for n in DATE_NAMES:
+        c = by_name.get(_key(n))
+        if c is not None and c not in named:
+            named.append(c)
+    datetimes = [c for c in cols if pd.api.types.is_datetime64_any_dtype(df[c])]
+    candidates = datetimes + [c for c in named if c not in datetimes]
+
+    found: Any = None
+    dates: pd.Series | None = None
+    how = ""
+    for c in candidates:
+        try:
+            trial, trial_how = parse_dates(df[c], dayfirst=dayfirst)
+        except (ValueError, TypeError):
+            continue
+        if trial.notna().mean() >= 0.5:
+            found, dates, how = c, trial, trial_how
+            break
+
+    if found is None:
+        # The first text column that reads as times, whatever it is called.
+        for c in cols:
+            if c in candidates:
+                continue
+            if df[c].dtype == object or pd.api.types.is_string_dtype(df[c]):
+                try:
+                    trial, trial_how = parse_dates(df[c].head(200), dayfirst=dayfirst)
+                except (ValueError, TypeError):
+                    continue
+                if trial.notna().mean() >= 0.9:
+                    found, dates, how = c, trial, trial_how
+                    break
+    if found is None:
+        raise ValueError(
+            "No column of times was found: name it 'date' (or datetime, timestamp, time), "
+            "or give year, month, day and hour columns."
+        )
+    assert dates is not None
+    if _clock_only(df[found]):
+        raise ValueError(
+            f"'{found}' holds only a time of day, with no date: add a date column "
+            "(or year, month and day columns) beside it."
+        )
+    said = f"from '{found}' · {how}" if str(found) != "date" else how
+    clock = _match([c for c in cols if c != found], TIME_NAMES)
+    if clock is not None and dates.notna().any():
+        times = dates.dropna()
+        if bool((times == times.dt.normalize()).all()):
+            if pd.api.types.is_numeric_dtype(df[clock]):
+                offset = pd.to_timedelta(pd.to_numeric(df[clock], errors="coerce"), unit="h")
+            else:
+                # 13:00 as 13:00:00: pandas reads a time of day only with its seconds
+                clock_text = df[clock].astype("string").str.strip()
+                clock_text = clock_text.str.replace(r"^(\d{1,2}:\d{2})$", r"\1:00", regex=True)
+                offset = pd.to_timedelta(clock_text, errors="coerce")
+            dates = dates + offset
+            out = out.drop(columns=[clock])
+            said += f" · hours from '{clock}'"
+    out = out.drop(columns=[found])
+    if "date" in out.columns:
+        # A redundant calendar column the chosen candidate supersedes; an
+        # unconditional insert would raise "cannot insert date, already
+        # exists".
+        out = out.drop(columns=["date"])
+    out.insert(0, "date", dates)
+    return out, said
+
+
+def _utc_zone(zone: str | None) -> bool:
+    return not zone or zone.upper() == "UTC"
+
+
+def on_clock(dates: Any, zone: str | None) -> pd.Series:
+    """Times on ``zone``'s clock (an IANA name: Asia/Shanghai, Europe/London; None for
+    UTC), without a zone of their own: times written with their own offset are converted
+    to it; times without one are taken to be on it already, and left as they are."""
+    s = pd.Series(dates)
+    if not pd.api.types.is_datetime64_any_dtype(s):
+        s = to_datetime_coerced(s)
+    if getattr(s.dt, "tz", None) is None:
+        return s
+    return s.dt.tz_convert("UTC" if _utc_zone(zone) else zone).dt.tz_localize(None)
+
+
+def _localized(s: pd.Series, zone: str) -> pd.Series:
+    """Naive times taken to be on ``zone``'s clock: an hour a change to summer time skips
+    moved forward, one it repeats taken in order (NaT where the order cannot tell)."""
+    try:
+        return s.dt.tz_localize(zone, ambiguous="infer", nonexistent="shift_forward")
+    except Exception:  # noqa: BLE001 - a repeated hour the order cannot settle
+        return s.dt.tz_localize(zone, ambiguous="NaT", nonexistent="shift_forward")
+
+
+def clock_to_utc(dates: Any, zone: str | None) -> pd.Series:
+    """Times on ``zone``'s clock, on UTC (naive both): what HYSPLIT, ERA5 and Open-Meteo
+    are asked for."""
+    s = on_clock(dates, zone)
+    if _utc_zone(zone):
+        return s
+    return _localized(s, str(zone)).dt.tz_convert("UTC").dt.tz_localize(None)
+
+
+def utc_to_clock(dates: Any, zone: str | None) -> pd.Series:
+    """Times on UTC (naive, or with their offset), on ``zone``'s clock: meteorology and
+    trajectories fetched on UTC, joined to a table kept on local time."""
+    s = pd.Series(dates)
+    if not pd.api.types.is_datetime64_any_dtype(s):
+        s = to_datetime_coerced(s)
+    if getattr(s.dt, "tz", None) is None:
+        s = s.dt.tz_localize("UTC")
+    return s.dt.tz_convert("UTC" if _utc_zone(zone) else zone).dt.tz_localize(None)
+
+
+def read_time_series(
+    path: Any, zone: str | None = None, *, dayfirst: bool | None = None
+) -> pd.DataFrame:
+    """A table file with its times in a column named 'date', on ``zone``'s clock (the
+    clock the analysis and its figures keep: the site's local time, or UTC):
+    :func:`read_table`, :func:`find_dates`, then :func:`on_clock`. How the times were
+    found and read is in ``df.attrs["normet_dates"]``, the clock in
+    ``df.attrs["normet_zone"]``."""
+    df, how = find_dates(read_table(path), dayfirst=dayfirst)
+    if getattr(df["date"].dt, "tz", None) is not None:
+        how += " · UTC offsets put on " + ("UTC" if _utc_zone(zone) else str(zone))
+    df["date"] = on_clock(df["date"], zone)
+    df.attrs["normet_dates"] = how
+    df.attrs["normet_zone"] = "UTC" if _utc_zone(zone) else zone
+    return df

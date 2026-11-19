@@ -1,0 +1,309 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "normet"
+version = "0.3.0"
+description = "Meteorological Normalisation, Decomposition, and Counterfactual Modelling for Air Quality Time Series"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+authors = [{ name = "Congbo Song", email = "congbo.song@manchester.ac.uk" }]
+keywords = [
+  "environmental-data",
+  "time series",
+  "deweathering",
+  "normalisation",
+  "counterfactual",
+  "synthetic control",
+  "causal inference",
+  "air quality",
+  "air pollution"
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Topic :: Scientific/Engineering :: Atmospheric Science"
+]
+
+# Core dependencies
+dependencies = [
+    "numpy>=1.22",
+    # 2.0 for `format="mixed"` in to_datetime (see normet.utils._time): on 1.5 a
+    # format inferred from the first value was applied to the rest, silently
+    # coercing anything that did not match to NaT.
+    "pandas>=2.0,<3.0",
+    "scipy>=1.10",
+    "scikit-learn>=1.1",
+    "joblib>=1.2",
+    "matplotlib>=3.6"
+]
+
+# Optional dependencies: user can choose one AutoML backend
+[project.optional-dependencies]
+# The [automl] extra, not bare flaml: flaml.automl.model imports xgboost at
+# module level, and flaml.automl's __init__ swallows that ImportError, so
+# without it `flaml.automl.AutoML` simply does not exist.
+flaml = ["flaml[automl]>=2.1"]
+lgb = ["lightgbm>=4.0"]
+
+dask = ["dask[dataframe]>=2023.1"]
+# requests: the HTTP adapters; cdsapi: ERA5; rdata: the .RData readers;
+# pyarrow: the EEA download service answers in Parquet.
+data = ["requests>=2.31", "cdsapi>=0.6", "rdata>=0.9", "pyarrow>=10.0.1"]
+cli = ["click>=8.0", "pyyaml>=6.0"]
+# The readers pandas needs for the tables Open Data offers beyond text: Parquet and
+# Feather (pyarrow), .xlsx/.xlsm (openpyxl), .xls (xlrd).
+gui = ["PySide6-Essentials>=6.5", "pyarrow>=10.0.1", "openpyxl>=3.1", "xlrd>=2.0"]
+geo = ["shapely>=2.0", "pyshp>=2.3"]
+stats = ["statsmodels>=0.14"]
+# Chronos-2 time-series foundation model (normet.foundation).
+foundation = ["chronos-forecasting>=2.3", "torch>=2.0"]
+# Fine-tuning the checkpoint (Chronos2Estimator.finetune). `accelerate` is what
+# the HuggingFace Trainer needs to run at all; `peft` is only for mode="lora",
+# and finetune refuses that mode outright when it is absent rather than letting
+# upstream fall back to full fine-tuning behind the caller's back.
+finetune = ["chronos-forecasting>=2.3", "torch>=2.0", "accelerate>=0.26", "peft>=0.10"]
+bayes = ["pymc>=5.0", "arviz>=0.17"]
+# normet-mcp: normet as an MCP server (normet.mcp_server), for Claude Code,
+# Claude Desktop and other MCP clients. 1.x and 2.x of the SDK both served.
+mcp = ["mcp>=1.21.1"]
+docs = ["sphinx>=7.0", "sphinx-rtd-theme>=1.3", "myst-parser>=2.0"]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.4",
+    "mypy>=1.6",
+    "pre-commit>=3.0",
+    # Pinned, not floated. mypy's answer here is a function of the pandas-stubs
+    # and numpy versions as much as of the code: the same tree reports 13 errors
+    # under one pairing and 14 under another, with only four in common. Floating
+    # the stubs means CI disagrees with every contributor's laptop about what
+    # "clean" is. Bump this deliberately, with the diff that follows it.
+    "pandas-stubs==2.3.2.250926",
+    "types-PyYAML",
+]
+# Everything optional except dev/docs tooling.
+all = [
+    "flaml[automl]>=2.1",
+    "lightgbm>=4.0",
+    "dask[dataframe]>=2023.1",
+    "requests>=2.31",
+    "cdsapi>=0.6",
+    "rdata>=0.9",
+    "click>=8.0",
+    "pyyaml>=6.0",
+    "statsmodels>=0.14",
+    "pymc>=5.0",
+    "arviz>=0.17",
+    "PySide6-Essentials>=6.5",
+    "pyarrow>=10.0.1",
+    "openpyxl>=3.1",
+    "xlrd>=2.0",
+    "shapely>=2.0",
+    "pyshp>=2.3",
+    "chronos-forecasting>=2.3",
+    "torch>=2.0",
+    "accelerate>=0.26",
+    "peft>=0.10",
+    "mcp>=1.21.1",
+]
+
+[project.scripts]
+normet = "normet.cli:main"
+normet-mcp = "normet.mcp_server:main"
+
+[project.gui-scripts]
+normet-gui = "normet.gui:main"
+
+[project.urls]
+Homepage = "https://github.com/apai-sys/normet-py"
+Documentation = "https://github.com/apai-sys/normet-py/tree/main/docs"
+Repository = "https://github.com/apai-sys/normet-py"
+Issues = "https://github.com/apai-sys/normet-py/issues"
+Changelog = "https://github.com/apai-sys/normet-py/blob/main/CHANGELOG.md"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["normet*"]
+
+# Include non-code files (README, LICENSE) in sdists/wheels
+[tool.setuptools.package-data]
+"normet" = ["py.typed", "data/*.csv.gz", "data/traj/tdump_*", "gui/assets/*.png"]
+
+# Optional: exclude heavy assets if you add any later
+[tool.setuptools.exclude-package-data]
+"normet" = ["*.ipynb_checkpoints*", "*.tmp"]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-ra -q"
+testpaths = ["tests"]
+markers = [
+    "slow: hits the real checkpoint with an optimiser step; minutes, not seconds",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning:pandas",
+    "ignore::FutureWarning:joblib",
+    # arviz announces its own upcoming refactor at import time. Nothing here can
+    # act on it, and it fires for any test that touches the Bayesian SCM path.
+    "ignore::FutureWarning:arviz",
+]
+
+# ----------------------
+# Developer tools
+# ----------------------
+
+[tool.black]
+line-length = 88
+target-version = ["py310", "py311", "py312"]
+
+[tool.isort]
+profile = "black"
+line_length = 88
+known_first_party = ["normet"]
+
+# ----------------------
+# Ruff (lint + format)
+# ----------------------
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = ["notebooks", "docs/_build", "examples"]
+
+[tool.ruff.lint]
+# UP (pyupgrade) is enabled: minimum is Python 3.10, so annotations use the
+# modern `X | None` / `list[X]` forms.
+select = ["E", "F", "W", "I", "B", "SIM", "UP"]
+ignore = [
+    "E501",  # line length handled by formatter
+    "B008",  # function defaults
+    "B007",  # unused loop var (often intentional in tight tests)
+    "SIM105", # contextlib.suppress nags are noisy on try/except pass blocks
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["F401", "F811"]
+
+# ----------------------
+# mypy (lenient by default; strict on public surface)
+# ----------------------
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+warn_redundant_casts = true
+warn_unreachable = true
+show_error_codes = true
+files = ["src/normet"]
+
+# The package ships `py.typed`, so a missing annotation is a missing promise:
+# `--strict` is the default posture here. Two of its flags are deliberately
+# off, and the reason is the same for both.
+#
+#   warn_return_any        ~100 hits, all "Returning Any" from a pandas or
+#                          numpy call that upstream itself types as Any.
+#   disallow_any_generics  ~94 hits, almost all `np.ndarray` written without
+#                          its dtype parameters.
+#
+# Satisfying them means a `cast()` around the result of nearly every DataFrame
+# operation and `npt.NDArray[np.float64]` spelled out across ~40 files. Those
+# casts assert rather than check: they silence mypy without telling anyone
+# whether the dtype is actually what we claim. The rest of `--strict` does
+# catch real things -- it found two `Any | None` arguments reaching `float`
+# and `int` parameters in the CLI -- so it is on.
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_untyped_calls = true
+disallow_untyped_decorators = true
+check_untyped_defs = true
+no_implicit_optional = true
+strict_equality = true
+extra_checks = true
+warn_return_any = false
+disallow_any_generics = false
+# Off for the same reason as the two above, arrived at the hard way. The set of
+# `type: ignore` comments this tree needs is a function of the pandas-stubs and
+# numpy versions, not of the code: an ignore that is load-bearing under one
+# pairing is "unused" under the next, and the package supports pandas>=2.0 and
+# numpy across a major version boundary. Turning this on made CI red for lines
+# that were clean locally and vice versa. The stubs are pinned above so mypy has
+# one contract to check; this flag stays off so a stub bump does not turn every
+# ignore in the tree into an error at once.
+warn_unused_ignores = false
+
+# Optional deps are lazy-imported; tell mypy not to choke if they're absent.
+[[tool.mypy.overrides]]
+module = [
+    "flaml.*", "dask.*",
+    "lightgbm.*", "xgboost.*", "matplotlib.*", "scipy.*",
+    "sklearn.*", "joblib.*", "yaml.*", "click.*", "cdsapi.*", "pymc.*", "shapely.*", "shapefile.*",
+    "mcp.*",
+]
+ignore_missing_imports = true
+
+# The CLI builds its command tree from `click`, which is an optional dependency
+# reached through `require()` -- so `click` is an `Any`-typed local, and every
+# `@click.option` reads to mypy as an untyped decorator (56 of them). The flag
+# is asking for something the optional-dependency pattern cannot give it here;
+# it stays on everywhere else, where it does mean something.
+[[tool.mypy.overrides]]
+module = "normet.cli"
+disallow_untyped_decorators = false
+
+# The MCP server's class comes from whichever SDK major is installed (1.x's
+# FastMCP or 2.x's MCPServer), so it is an `Any` here and its @resource and
+# @prompt decorators read as untyped -- the same case as the CLI's click.
+[[tool.mypy.overrides]]
+module = "normet.mcp_server"
+disallow_untyped_decorators = false
+
+# The PySide6 desktop app: dynamic Qt attribute/mixin patterns (setattr-style
+# widget wiring, Qt's C++-backed signal/slot typing) aren't worth annotating
+# to satisfy mypy — not part of the package's typed public API.
+[[tool.mypy.overrides]]
+module = "normet.gui.*"
+ignore_errors = true
+
+# ----------------------
+# Coverage
+# ----------------------
+[tool.coverage.run]
+source = ["normet"]
+branch = true
+omit = [
+    "*/tests/*",
+    "*/cli.py",
+    # A job's child process (normet.agent.runner): it runs, and its record is
+    # checked, through the job tests, but in a process coverage does not follow.
+    "*/agent/runner.py",
+    "*/_lazy.py",
+    # Qt GUI: exercised by the offscreen smoke tests but excluded from the
+    # coverage gate — window/dialog code is validated by the packaged-app
+    # builds, and holding it to the library threshold would gate releases
+    # on UI-interaction tests.
+    "*/gui/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+]
+show_missing = true
+skip_covered = true

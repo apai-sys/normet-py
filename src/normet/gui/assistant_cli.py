@@ -1,0 +1,812 @@
+"""The Assistant through a command-line agent signed in to the user's own plan,
+which no API key gives: Claude Code (a Claude plan), Codex (ChatGPT), Google
+Antigravity's agy (Google AI Pro) or GitHub Copilot's CLI (a Copilot plan).
+
+The agent brings its own loop and model; what it
+is given are the window's tools, the same the API models get
+(:class:`normet.gui.assistant.WindowTools`), served by the window over MCP's
+HTTP transport on 127.0.0.1 with a token drawn per window
+(:class:`normet.agent.mcp_http.ToolServer`). How each agent is told of it:
+
+- ``claude``: ``--mcp-config`` with ``--strict-mcp-config`` for the one call --
+  no other server, nothing written to its configuration; ``--tools ""`` leaves
+  it no tool of its own (no shell, no files) and ``--allowedTools`` lets it call
+  the window's unasked.
+- ``codex``: ``-c mcp_servers.normet-window.url=...`` with
+  ``--ignore-user-config`` for the one call (the token in an environment
+  variable, not on the command line); its shell is held to a read-only sandbox
+  in an empty folder.
+- ``copilot``: ``--additional-mcp-config`` for the one call, its built-in
+  servers off, and ``--available-tools`` naming the window's tools alone (no
+  shell, no files).
+- ``agy``: its own configuration (``agy mcp add normet-window URL``), which is
+  global: the entry is enabled while agy answers a message and disabled once it
+  has, so an agy started for anything else meanwhile finds nothing there. Its
+  own tools are denied by hooks in its (empty) workspace (:func:`agy_guard`).
+
+Each message is one process; the conversation is carried from one to the next
+by its id (``claude --resume``, ``codex exec resume``, ``agy --conversation``,
+``copilot --session-id``). Stop ends the process; the conversation is kept.
+"""
+
+from __future__ import annotations
+
+import glob
+import json
+import os
+import re
+import shutil
+import subprocess
+import tempfile
+import threading
+import uuid
+from collections.abc import Callable
+from typing import Any
+
+from PySide6.QtCore import QObject, QThread, Signal
+
+from normet.agent.mcp_http import SERVER_NAME, ToolServer
+
+#: The agents: name -> (command, how the model list names it).
+AGENTS: dict[str, tuple[str, str]] = {
+    "claude-code": ("claude", "Claude Code"),
+    "codex": ("codex", "Codex"),
+    "agy": ("agy", "Antigravity agy"),
+    "copilot": ("copilot", "GitHub Copilot"),
+}
+
+CLAUDE_MODELS = ("sonnet", "opus", "haiku")
+CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+#: Codex: "default" is the model of the user's own ~/.codex/config.toml (a call
+#: made with --ignore-user-config does not read it); the others its cache lists.
+CODEX_EFFORTS = ("low", "medium", "high")
+#: agy's models, each offered at these efforts (``agy models``, 2026-10).
+AGY_EFFORTS: dict[str, tuple[str, ...]] = {
+    "gemini-4-argon": ("low", "medium", "high"),
+    "gemini-3.8-flash": ("low", "medium", "high"),
+    "claude-sonnet-5-5": ("low", "medium", "high"),
+    "claude-opus-5-5": ("low", "medium", "high"),
+    "gpt-oss-120b": ("medium",),
+}
+COPILOT_MODELS = ("default", "auto")
+COPILOT_EFFORTS = ("low", "medium", "high")
+
+#: Where installers and Node's version managers put an agent's command -- npm-installed
+#: Codex and Copilot land in the active Node's bin -- each a glob, the newest version's
+#: first. An app started from the Dock is given a PATH with none of them.
+CLI_PLACES = (
+    "~/.local/bin",
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "~/.claude/local",
+    "~/.nvm/versions/node/*/bin",  # nvm
+    "~/.local/share/fnm/node-versions/*/installation/bin",  # fnm (Linux)
+    "~/Library/Application Support/fnm/node-versions/*/installation/bin",  # fnm (macOS)
+    "~/.volta/bin",
+    "~/.asdf/shims",
+    "~/.local/share/mise/shims",  # Volta, asdf, mise
+    "~/.npm-global/bin",
+    "~/bin",
+    "~/.bun/bin",
+    "~/Library/pnpm",
+    "~/.local/share/pnpm",
+    "~/AppData/Roaming/npm",  # npm on Windows
+)
+#: Kept for callers of the earlier name: the plain folders among CLI_PLACES.
+_EXTRA_DIRS = tuple(p for p in CLI_PLACES if "*" not in p)
+
+_FOUND: dict[str, str] = {}
+#: The PATH the user's login shell has -- its rc files set nvm and the rest up as a
+#: terminal has them -- once read (:func:`login_path_in_background`); None until then.
+LOGIN_PATH: str | None = None
+_login_asked = False
+
+#: Told with the first message to an agent that takes no system prompt of its own.
+NOTE = (
+    "Use only the tools of the normet-window server: they act on the analyst's open window. "
+    "Do not use a terminal, files or a browser for this work."
+)
+
+#: What agy reports when its model stream broke (seen repeatedly):
+#: the turn ends on this line. A message ending so is asked once more on its own.
+STREAM_INTERRUPTED = "The stream was interrupted. Please continue the task you were working on."
+
+
+def _version_key(path: str) -> tuple[int, ...]:
+    """A Node version folder's version, to put the newest first (v22.11.0 > v9.0.0)."""
+    m = re.search(r"v?(\d+)\.(\d+)\.(\d+)", path)
+    return tuple(int(x) for x in m.groups()) if m else (-1,)
+
+
+def _runnable(p: str) -> bool:
+    return os.path.isfile(p) and os.access(p, os.X_OK)
+
+
+def read_login_path(timeout: float = 30) -> str | None:
+    """The PATH of the user's login shell. It runs the shell's rc files: seconds (7 s
+    measured on a zsh with nvm and conda), so never on the window's thread."""
+    shell = os.environ.get("SHELL") or "/bin/zsh"
+    if os.name == "nt" or not os.path.exists(shell):
+        return None
+    try:
+        out = subprocess.run(
+            [shell, "-lic", "printf '\\n__NORMET_PATH__%s\\n' \"$PATH\""],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            stdin=subprocess.DEVNULL,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.search(r"__NORMET_PATH__(.*)", out)
+    return m.group(1).strip() if m else None
+
+
+def login_path_in_background(then: Callable[[], None] | None = None) -> None:
+    """Read the login shell's PATH once, on a thread of its own; ``then()`` (called
+    from that thread) once it is in :data:`LOGIN_PATH`."""
+    global _login_asked
+    if _login_asked:
+        return
+    _login_asked = True
+
+    def job() -> None:
+        global LOGIN_PATH
+        LOGIN_PATH = read_login_path()
+        if then is not None and LOGIN_PATH:
+            then()
+
+    threading.Thread(target=job, daemon=True).start()
+
+
+def stream_interrupted(text: str) -> bool:
+    """Whether an agent's failure notice says its stream broke, whatever its wording."""
+    t = str(text).strip().lower()
+    return "stream was interrupted" in t or "please continue the task" in t
+
+
+def find_cli(command: str) -> str | None:
+    """The agent's command: on PATH; else where installers and Node's version managers
+    (nvm, fnm, Volta, asdf, mise, npm's own prefix) put it, the newest Node's first; else
+    on the login shell's PATH once that has been read. Never runs a shell itself."""
+    if command in _FOUND:
+        return _FOUND[command]
+    found = shutil.which(command)
+    if not found:
+        names = [command] + ([command + ".cmd", command + ".exe"] if os.name == "nt" else [])
+        for place in CLI_PLACES:
+            dirs = sorted(glob.glob(os.path.expanduser(place)), key=_version_key, reverse=True)
+            found = next(
+                (os.path.join(d, n) for d in dirs for n in names if _runnable(os.path.join(d, n))),
+                None,
+            )
+            if found:
+                break
+    if not found and LOGIN_PATH:
+        found = shutil.which(command, path=LOGIN_PATH)
+    if found:
+        _FOUND[command] = found
+    return found
+
+
+def _env_with(command: str, env: dict[str, str]) -> dict[str, str]:
+    """*env* with the command's folder first on PATH: an npm-installed agent is a
+    Node script that finds ``node`` beside it."""
+    folder = os.path.dirname(os.path.abspath(command))
+    return dict(env, PATH=folder + os.pathsep + env.get("PATH", ""))
+
+
+def _tokens(input_tokens: int = 0, output_tokens: int = 0) -> dict[str, int]:
+    """The usage dict :attr:`CliChat.turn_done` carries."""
+    return {"input": int(input_tokens), "output": int(output_tokens)}
+
+
+# -- models and efforts -------------------------------------------------------------------
+def _codex_cache() -> list[dict[str, Any]]:
+    home = os.path.expanduser(os.environ.get("CODEX_HOME") or os.path.join("~", ".codex"))
+    try:
+        with open(os.path.join(home, "models_cache.json"), encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return []
+    models = data.get("models") if isinstance(data, dict) else data
+    return [m for m in models or [] if isinstance(m, dict) and m.get("slug")]
+
+
+def models(agent: str) -> tuple[str, ...]:
+    """The models an agent is offered with; "default" is the agent's own choice."""
+    if agent == "claude-code":
+        return CLAUDE_MODELS
+    if agent == "codex":
+        return ("default", *(m["slug"] for m in _codex_cache() if m.get("visibility") == "list"))
+    if agent == "agy":
+        return tuple(AGY_EFFORTS)
+    return COPILOT_MODELS
+
+
+def efforts(agent: str, model: str) -> tuple[str, ...]:
+    """The efforts a model is offered at by its agent; () where none is chosen."""
+    if agent == "claude-code":
+        return CLAUDE_EFFORTS
+    if agent == "codex":
+        for m in _codex_cache():
+            if m["slug"] == model:
+                levels = tuple(
+                    x["effort"]
+                    for x in m.get("supported_reasoning_levels") or []
+                    if isinstance(x, dict) and x.get("effort")
+                )
+                if levels:
+                    return levels
+        return CODEX_EFFORTS
+    if agent == "agy":
+        return AGY_EFFORTS.get(model, ())
+    return () if model in COPILOT_MODELS else COPILOT_EFFORTS
+
+
+def agy_model(name: str, effort: str) -> str:
+    """agy's name for a model at an effort: ``gemini-4-argon-high``."""
+    offered = AGY_EFFORTS.get(name)
+    if not offered:
+        return name
+    return f"{name}-{effort if effort in offered else offered[len(offered) // 2]}"
+
+
+def choices() -> list[tuple[str, str, str]]:
+    """Every (label, agent, model) the panel's model list offers for the agents."""
+    return [
+        (f"{AGENTS[agent][1]} · {model}", agent, model)
+        for agent in AGENTS
+        for model in models(agent)
+    ]
+
+
+# -- the conversation ---------------------------------------------------------------------
+class _Reader(QThread):
+    """Reads an agent's events, a JSON object per line, and hands each to its chat."""
+
+    line = Signal(object)
+
+    def __init__(self, proc: subprocess.Popen[str], chat: CliChat) -> None:
+        super().__init__()
+        self.proc, self.chat = proc, chat
+        self.raw: list[str] = []
+
+    def run(self) -> None:
+        assert self.proc.stdout is not None
+        for text in self.proc.stdout:
+            text = text.strip()
+            if not text:
+                continue
+            try:
+                self.line.emit(json.loads(text))
+            except ValueError:  # not an event: an error the agent printed
+                self.raw.append(text)
+        self.proc.wait()
+
+
+class CliChat(QObject):
+    """The conversation with an agent, a process per message.
+
+    Signals: ``text`` (the reply's text as it comes), ``step`` (a tool of the
+    agent's own, by name), ``turn_done(object)`` (once per message, the usage as
+    ``{"input": int, "output": int}`` tokens -- zeros where the agent reports
+    none), ``failed(str)`` and ``ended()`` (the message's process is gone). ``interrupted`` is set when the agent's stream broke
+    mid-answer, for the panel to ask once more.
+    """
+
+    text = Signal(str)
+    step = Signal(str)
+    turn_done = Signal(object)  # the dict itself, not a QVariantMap copy
+    failed = Signal(str)
+    ended = Signal()
+
+    def __init__(self, command: str, model: str, effort: str, server: ToolServer) -> None:
+        super().__init__()
+        self.command, self.model, self.effort, self.server = command, model, effort, server
+        self.proc: subprocess.Popen[str] | None = None
+        self.conversation: str | None = None
+        self.workspace = tempfile.mkdtemp(prefix="normet-agent-")  # empty: nothing to edit
+        self.interrupted = False
+        self._reader: _Reader | None = None
+
+    def running(self) -> bool:
+        return self.proc is not None and self.proc.poll() is None
+
+    # what each agent is given, and how its events read
+    def argv(self, system: str) -> list[str]:
+        raise NotImplementedError
+
+    def message(self, text: str, system: str) -> str | None:
+        """What goes to the agent's input; None where the message is on its command line."""
+        raise NotImplementedError
+
+    def parse(self, e: dict[str, Any]) -> None:
+        raise NotImplementedError
+
+    def env(self) -> dict[str, str]:
+        return dict(os.environ)
+
+    def before(self) -> None:
+        """Before the message's process starts."""
+
+    def after(self) -> None:
+        """Once it has ended."""
+
+    def send(self, text: str, system: str) -> None:
+        """One message: a process that answers it and ends."""
+        if self.running():
+            raise RuntimeError("the agent is still answering the last message")
+        self.interrupted = False
+        self.before()
+        msg = self.message(text, system)  # before argv: a prompt may go in it
+        self.proc = subprocess.Popen(
+            self.argv(system),
+            cwd=self.workspace,
+            env=_env_with(self.command, self.env()),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        self._reader = _Reader(self.proc, self)
+        self._reader.line.connect(self._event)
+        self._reader.finished.connect(self._done)
+        self._reader.start()
+        try:
+            assert self.proc.stdin is not None
+            if msg is not None:
+                self.proc.stdin.write(msg + "\n")
+            self.proc.stdin.close()
+        except (OSError, ValueError) as exc:
+            self.failed.emit(f"{os.path.basename(self.command)}: {exc}")
+
+    def _event(self, e: Any) -> None:
+        if isinstance(e, dict):
+            self.parse(e)
+
+    def _done(self) -> None:
+        self.after()
+        code = self.proc.returncode if self.proc is not None else 0
+        raw = self._reader.raw if self._reader is not None else []
+        if code not in (0, None) and code > 0 and raw:
+            self.failed.emit(f"{os.path.basename(self.command)}: " + " ".join(raw[-3:])[:500])
+        self.ended.emit()
+
+    def stop(self) -> None:
+        """End the message's process; the conversation is kept for the next."""
+        if self.proc is not None and self.running():
+            self.proc.terminate()
+            try:
+                self.proc.wait(10)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+
+    def close(self) -> None:
+        self.stop()
+        shutil.rmtree(self.workspace, ignore_errors=True)
+
+
+class ClaudeChat(CliChat):
+    """Claude Code: the window's server for this call alone, no tool of its own,
+    the system prompt as its own, the session resumed by id."""
+
+    def argv(self, system: str) -> list[str]:
+        cfg = {
+            "mcpServers": {
+                SERVER_NAME: {
+                    "type": "http",
+                    "url": self.server.url,
+                    "headers": {"Authorization": "Bearer " + self.server.token},
+                }
+            }
+        }
+        cmd = [
+            self.command,
+            "-p",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--mcp-config",
+            json.dumps(cfg),
+            "--strict-mcp-config",
+            "--tools",
+            "",
+            "--allowedTools",
+            "mcp__" + SERVER_NAME,
+            "--setting-sources",
+            "",
+            "--system-prompt",
+            system,
+        ]
+        if self.model:
+            cmd += ["--model", self.model]
+        if self.effort:
+            cmd += ["--effort", self.effort]
+        if self.conversation:
+            cmd += ["--resume", self.conversation]
+        return cmd
+
+    def env(self) -> dict[str, str]:
+        # Started from inside a Claude Code session, it would be taken for that
+        # session's own child.
+        return {
+            k: v for k, v in os.environ.items() if not k.startswith(("CLAUDECODE", "CLAUDE_CODE_"))
+        }
+
+    def message(self, text: str, system: str) -> str:
+        return json.dumps({"type": "user", "message": {"role": "user", "content": text}})
+
+    def parse(self, e: dict[str, Any]) -> None:
+        kind = e.get("type")
+        self.conversation = e.get("session_id") or self.conversation
+        if kind == "assistant":
+            for block in (e.get("message") or {}).get("content") or []:
+                if block.get("type") == "text" and block.get("text"):
+                    self.text.emit(block["text"])
+                elif block.get("type") == "tool_use" and not str(block.get("name", "")).startswith(
+                    "mcp__" + SERVER_NAME
+                ):
+                    self.step.emit(str(block.get("name")))
+        elif kind == "result" and (e.get("is_error") or e.get("subtype") not in (None, "success")):
+            self.failed.emit(f"claude: {e.get('result') or e.get('subtype')}")
+        if kind == "result":
+            u = e.get("usage") or {}
+            self.turn_done.emit(
+                _tokens(
+                    sum(
+                        int(u.get(k) or 0)
+                        for k in (
+                            "input_tokens",
+                            "cache_creation_input_tokens",
+                            "cache_read_input_tokens",
+                        )
+                    ),
+                    u.get("output_tokens") or 0,
+                )
+            )
+
+
+class CodexChat(CliChat):
+    """Codex: the window's server for this call alone (the user's config.toml not
+    read), the system prompt in the first message, the thread resumed by id."""
+
+    TOKEN_ENV = "NORMET_WINDOW_TOKEN"
+
+    def argv(self, system: str) -> list[str]:
+        key = f"mcp_servers.{SERVER_NAME}"
+        cmd = [
+            self.command,
+            "exec",
+            "--json",
+            "--ignore-user-config",
+            "--skip-git-repo-check",
+            "-s",
+            "read-only",
+            "-C",
+            self.workspace,
+            "-c",
+            f'{key}.url="{self.server.url}"',
+            "-c",
+            f'{key}.bearer_token_env_var="{self.TOKEN_ENV}"',
+            # Its own limit on a call is a minute; a training run can take longer.
+            "-c",
+            f"{key}.tool_timeout_sec=1800",
+            # Unapproved, exec cancels every call ("user cancelled MCP tool call").
+            "-c",
+            f'{key}.default_tools_approval_mode="approve"',
+        ]
+        if self.model and self.model != "default":
+            cmd += ["-m", self.model]
+        if self.effort:
+            cmd += ["-c", f'model_reasoning_effort="{self.effort}"']
+        if self.conversation:
+            cmd += ["resume", self.conversation]
+        return [*cmd, "-"]
+
+    def env(self) -> dict[str, str]:
+        return dict(os.environ, **{self.TOKEN_ENV: self.server.token})
+
+    def message(self, text: str, system: str) -> str:
+        if self.conversation is None:
+            text = system + "\n" + NOTE + "\n\n" + text
+        return text
+
+    def parse(self, e: dict[str, Any]) -> None:
+        kind = e.get("type", "")
+        if kind == "thread.started":
+            self.conversation = e.get("thread_id") or self.conversation
+        elif kind in ("item.started", "item.completed"):
+            item = e.get("item") or {}
+            it = item.get("type")
+            if kind == "item.completed" and it == "agent_message" and item.get("text"):
+                self.text.emit(item["text"] + "\n")
+            elif kind == "item.started" and it == "command_execution":
+                self.step.emit("shell: " + str(item.get("command", ""))[:80])
+            elif (
+                kind == "item.started"
+                and it == "mcp_tool_call"
+                and item.get("server") != SERVER_NAME
+            ):
+                self.step.emit(f"{item.get('server')}/{item.get('tool')}")
+            elif kind == "item.started" and it == "web_search":
+                self.step.emit("web search")
+        elif kind == "turn.completed":
+            u = e.get("usage") or {}
+            self.turn_done.emit(_tokens(u.get("input_tokens") or 0, u.get("output_tokens") or 0))
+        elif kind == "turn.failed":
+            err = e.get("error") if isinstance(e.get("error"), dict) else e
+            msg = str((err or {}).get("message") or kind)
+            try:  # the provider's own error, as JSON in it
+                msg = json.loads(msg)["error"]["message"]
+            except (ValueError, KeyError, TypeError):
+                pass
+            self.failed.emit(f"codex: {msg}")
+
+
+class CopilotChat(CliChat):
+    """GitHub Copilot's CLI: the window's server added for the one call, only its
+    tools available, the prompt on the command line, the session named by an id
+    of ours."""
+
+    _prompt = ""
+
+    def argv(self, system: str) -> list[str]:
+        cfg = {
+            "mcpServers": {
+                SERVER_NAME: {
+                    "type": "http",
+                    "url": self.server.url,
+                    "tools": ["*"],
+                    "headers": {"Authorization": "Bearer " + self.server.token},
+                }
+            }
+        }
+        cmd = [
+            self.command,
+            "-p",
+            self._prompt,
+            "--output-format",
+            "json",
+            "--additional-mcp-config",
+            json.dumps(cfg),
+            "--disable-builtin-mcps",
+            "--allow-tool",
+            SERVER_NAME,
+            "--available-tools",
+            *[f"{SERVER_NAME}-{n}" for n in self.server.tools],
+            "--no-ask-user",
+            "--no-custom-instructions",
+            "--no-color",
+            "--session-id",
+            str(self.conversation),
+        ]
+        if self.model and self.model != "default":
+            cmd += ["--model", self.model]
+        if self.effort and self.model not in COPILOT_MODELS:
+            cmd += ["--reasoning-effort", self.effort]
+        return cmd
+
+    def message(self, text: str, system: str) -> None:
+        if self.conversation is None:  # a new session, by an id of ours
+            self.conversation = str(uuid.uuid4())
+            text = system + "\n" + NOTE + "\n\n" + text
+        self._prompt = text
+        return None
+
+    def parse(self, e: dict[str, Any]) -> None:
+        kind, data = e.get("type", ""), e.get("data") or {}
+        if kind == "assistant.message":
+            if data.get("content"):
+                self.text.emit(data["content"] + "\n")
+        elif kind == "tool.execution_start":
+            if data.get("mcpServerName") != SERVER_NAME:
+                self.step.emit(str(data.get("toolName") or "tool"))
+        elif kind == "result":
+            self.turn_done.emit(_tokens())  # it reports requests, not tokens
+        elif kind.endswith(".error") or kind == "error":
+            self.failed.emit(f"copilot: {data.get('message') or kind}")
+
+
+# -- agy ------------------------------------------------------------------------------------
+#: agy's own tools, by name, for Windows, where no shell reads its calls.
+AGY_OWN_TOOLS = (
+    "run_command|shell_exec|send_command_input|read_terminal|command_status|"
+    "replace_file_content|multi_replace_file_content|write_to_file|file_change|propose_code|"
+    "code_action|write_blob|delete_directory|move|edit_notebook|execute_notebook|"
+    "read_notebook|grep_search|find_by_name|find|list_dir|list_directory|view_file_outline|"
+    "view_code_item|view_content_chunk|search_web|read_url_content|open_browser_url|"
+    "read_browser_page|browser_.*|execute_browser_javascript|capture_browser_.*|"
+    "click_browser_pixel|list_browser_pages|invoke_subagent|define_subagent|"
+    "manage_subagents|send_message|schedule|generate_image|git_commit|run_extension_code"
+)
+_DENY = (
+    '{"decision":"deny","reason":"In the normet window the analysis is done with the tools '
+    'of the window (normet-window) alone: no shell, files or web."}'
+)
+
+
+def agy_guard(workspace: str, home: str | None = None) -> str:
+    """agy held to the window's tools, by hooks in its workspace
+    (``.agents/hooks.json``, read for that workspace alone -- the user's own agy
+    configuration is not touched). Asked about the window, an agy otherwise
+    reaches for its shell, and a shell, files and the web reach the analyst's
+    data, which only the window's tools are to read. Everything is denied but a
+    call to the window's server, agy reading that server's tool schemas, and its
+    task list; on Windows, agy's own tools by name. Returns the hooks file's path."""
+    home = home or os.path.expanduser("~")
+    folder = os.path.join(workspace, ".agents")
+    os.makedirs(folder, exist_ok=True)
+    rule: dict[str, Any]
+    if os.name == "nt":  # pragma: no cover - Windows
+        rule = {
+            "matcher": f"^({AGY_OWN_TOOLS})$",
+            "hooks": [{"type": "command", "timeout": 10, "command": f"echo {_DENY}"}],
+        }
+    else:
+        schemas = os.path.join(home, ".gemini", "antigravity-cli", "mcp", SERVER_NAME) + "/"
+        script = os.path.join(folder, "window_only.sh")
+        with open(script, "w") as f:
+            f.write(
+                f"""#!/bin/sh
+# normet: agy in the Assistant calls the window's tools and nothing else (assistant_cli.agy_guard).
+allow='{{"decision":"allow"}}'
+deny='{_DENY}'
+in=$(cat)
+case "$in" in
+  *'"name":"call_mcp_tool"'*)
+    case "$in" in *'"ServerName":"{SERVER_NAME}"'*) echo "$allow" ;; *) echo "$deny" ;; esac ;;
+  *'"name":"view_file"'*)
+    case "$in" in
+      *..*) echo "$deny" ;;
+      *'"AbsolutePath":"{schemas}'*) echo "$allow" ;;
+      *) echo "$deny" ;;
+    esac ;;
+  *'"name":"manage_task"'*) echo "$allow" ;;
+  *) echo "$deny" ;;
+esac
+"""
+            )
+        rule = {
+            "matcher": "*",
+            "hooks": [{"type": "command", "timeout": 10, "command": "sh window_only.sh"}],
+        }
+    path = os.path.join(folder, "hooks.json")
+    with open(path, "w") as f:
+        json.dump({"normet-window-only": {"PreToolUse": [rule]}}, f, indent=1)
+    return path
+
+
+def _agy(agy: str, *args: str, timeout: float = 60) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [agy, *args],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        env=_env_with(agy, dict(os.environ)),
+    )
+
+
+def register(agy: str, server: ToolServer) -> None:
+    """The window's server in agy's configuration, enabled (add updates an entry there)."""
+    p = _agy(
+        agy,
+        "mcp",
+        "add",
+        "--header",
+        f"Authorization: Bearer {server.token}",
+        SERVER_NAME,
+        server.url,
+    )
+    if p.returncode != 0:
+        raise RuntimeError(f"agy mcp add failed: {(p.stderr or p.stdout).strip()[:300]}")
+    _agy(agy, "mcp", "enable", SERVER_NAME)
+
+
+def forget(agy: str) -> None:
+    """The window's entry taken out of agy's configuration, as it was before."""
+    try:
+        _agy(agy, "mcp", "remove", SERVER_NAME, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def unregister(agy: str) -> None:
+    """Disabled: an agy started for anything else does not look for the window."""
+    try:
+        _agy(agy, "mcp", "disable", SERVER_NAME, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+class AgyChat(CliChat):
+    """agy: the model named with its effort, the system prompt in the first message
+    (agy takes none of its own), the window's entry enabled for the message, and
+    its own tools denied in its workspace (:func:`agy_guard`)."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        agy_guard(self.workspace)
+        self._said = ""
+
+    def argv(self, system: str) -> list[str]:
+        cmd = [
+            self.command,
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--model",
+            agy_model(self.model, self.effort),
+            "--sandbox",
+        ]
+        if self.conversation:
+            cmd += ["--conversation", self.conversation]
+        return [*cmd, "-p="]
+
+    def message(self, text: str, system: str) -> str:
+        if self.conversation is None:
+            text = system + "\n" + NOTE + "\n\n" + text
+        self._said = ""
+        return json.dumps({"event": "user", "message": {"role": "user", "content": text}})
+
+    def before(self) -> None:
+        register(self.command, self.server)
+        self._registered = True
+
+    def close(self) -> None:
+        super().close()
+        if getattr(self, "_registered", False):
+            forget(self.command)
+            self._registered = False
+
+    def after(self) -> None:
+        unregister(self.command)
+        self.interrupted = STREAM_INTERRUPTED in self._said[-len(STREAM_INTERRUPTED) - 20 :]
+
+    def parse(self, e: dict[str, Any]) -> None:
+        kind = e.get("event")
+        if kind == "init":
+            self.conversation = e.get("conversation_id") or self.conversation
+        elif kind == "step_update":
+            s = e.get("step_update") or {}
+            self.conversation = s.get("conversation_id") or self.conversation
+            st = s.get("step_type", "")
+            if st == "agent_response" and s.get("text_delta"):
+                self._said += s["text_delta"]
+                self.text.emit(s["text_delta"])
+            elif (
+                st == "tool"
+                and s.get("state") == "ACTIVE"
+                and s.get("tool_name") not in ("call_mcp_tool", "view_file")
+            ):
+                # Its reading of the tools' schemas, and its calls to them, are
+                # shown as the server takes them.
+                self.step.emit(s.get("tool_name") or "tool")
+        elif kind == "result":
+            r = e.get("result") or {}
+            self.conversation = r.get("conversation_id") or self.conversation
+            if r.get("status") not in (None, "SUCCESS"):
+                self.failed.emit(f"agy: {r.get('error') or r.get('status')}")
+            u = r.get("usage") or {}
+            self.turn_done.emit(_tokens(u.get("input_tokens") or 0, u.get("output_tokens") or 0))
+
+
+CHATS: dict[str, type[CliChat]] = {
+    "claude-code": ClaudeChat,
+    "codex": CodexChat,
+    "agy": AgyChat,
+    "copilot": CopilotChat,
+}
+
+
+def make_chat(agent: str, model: str, effort: str, server: ToolServer) -> CliChat | None:
+    """The conversation with *agent* (a key of :data:`AGENTS`) at *model* and
+    *effort*; None where its command is not installed."""
+    path = find_cli(AGENTS[agent][0])
+    if path is None:
+        return None
+    return CHATS[agent](path, model, effort, server)

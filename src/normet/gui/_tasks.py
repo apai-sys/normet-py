@@ -1,0 +1,202 @@
+"""The task runner's lifecycle, and which controls a task leaves enabled.
+
+``_sync_enabled`` is the one method that knows about every step's button; it
+lives here, next to the runner, rather than being spread over the panels.
+"""
+
+from __future__ import annotations
+
+import sys
+
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox
+
+from ._session import _TASK_WORDS
+from ._widgets import NoWheelSpinBox
+
+
+class TaskMixin(QMainWindow):
+    def _sync_enabled(self) -> None:
+        busy = self.runner.busy
+        has_data = self.df_raw is not None
+        has_model = self.model is not None
+        has_y_inf = "normalise" in self.results
+        self.train_button.setEnabled(not busy and has_data)
+        self.cv_button.setEnabled(not busy and has_model and not self._is_chronos())
+        if not has_model:
+            self.cv_button.setToolTip("Train a model first.")
+        elif self._is_chronos():
+            self.cv_button.setToolTip(
+                "Not available for chronos-2 — its check is the quantile backtest on the Model tab."
+            )
+        self.ft_button.setEnabled(not busy and has_model and self._is_chronos())
+        for b in (self.norm_button, self.decom_button, self.roll_button, self.pdp_button):
+            b.setEnabled(not busy and has_model)
+        if not has_model:
+            tip = "Train a model first."
+            for b in (self.norm_button, self.decom_button, self.roll_button, self.pdp_button):
+                b.setToolTip(tip)
+        elif self._is_chronos():
+            # Rolling and PDP call ml_predict() on a fitted scikit-learn-style
+            # estimator. Chronos-2 forecasts autoregressively from a context
+            # window instead, so there is nothing for them to call. The
+            # meteorological decomposition has its own zero-shot path.
+            tip = "Not available for chronos-2 — use flaml or lightgbm for this step."
+            for b in (self.roll_button, self.pdp_button):
+                b.setEnabled(False)
+                b.setToolTip(tip)
+        self.ms_button.setEnabled(not busy and has_model and has_y_inf)
+        self.ms_button.setToolTip(
+            self._ms_button_tip
+            if has_y_inf
+            else "Run the normalisation first — it provides Y_∞, the full-record baseline."
+        )
+        # The trend tests a series: the decomposition's part (the default) or the
+        # observed target, so a model is all it needs to be ticked; the choice that
+        # needs a decomposition says why on the click.
+        self.trend_button.setEnabled(not busy and has_model)
+        if not has_model:
+            self.trend_button.setToolTip("Train a model first.")
+        elif self._is_chronos() and self.trend_series.currentText().startswith(
+            ("emission", "long-term")
+        ):
+            self.trend_button.setToolTip(
+                "The emission part and its separated long-term trend need the "
+                "emission decomposition, which chronos-2 cannot make: choose the "
+                "observed target, or train with flaml or lightgbm."
+            )
+        # The event search scores whatever series the box points at; like the
+        # trend it needs a model only because that is what puts the observed
+        # target through the de-weathering the parts come from.
+        self.events_button.setEnabled(not busy and has_model)
+        if not has_model:
+            self.events_button.setToolTip("Train a model first.")
+        elif self._is_chronos() and self.events_series.currentText().startswith(
+            ("emission", "long-term")
+        ):
+            self.events_button.setToolTip(
+                "The emission part and its separated long-term trend need the "
+                "emission decomposition, which chronos-2 cannot make: choose the "
+                "observed target, or train with flaml or lightgbm."
+            )
+        # The uncertainty attribution trains its own members, so it needs a model
+        # to exist at all and the feature set to vary a model form; chronos-2's
+        # zero-shot forecasts carry neither to speak of.
+        self.unc_button.setEnabled(not busy and has_model and not self._is_chronos())
+        if not has_model:
+            self.unc_button.setToolTip("Train a model first.")
+        elif self._is_chronos():
+            self.unc_button.setToolTip(
+                "Not available for chronos-2 -- train with flaml or lightgbm first."
+            )
+        # A notice asking for a step that has now been taken has been answered.
+        for key, done in (
+            ("need-data", has_data),
+            ("need-features", has_data and bool(self._selected_features())),
+            ("need-model", has_model),
+            ("need-normalise", has_y_inf),
+        ):
+            if done:
+                self.notices.clear(key)
+        if hasattr(self, "_step_lights"):
+            self._update_step_lights()
+        has_result = bool(self.results)
+        self._export_action.setEnabled(has_data)
+        self._report_action.setEnabled(has_result)
+        self.export_btn.setEnabled(has_data or has_result)
+        self.cancel_btn.setEnabled(busy)
+
+    def _task_started(self, name: str) -> None:
+        # The status bar and the progress bar are the task clock's (._clock).
+        for b in self._run_buttons:
+            b.setEnabled(False)
+        self.cancel_btn.setEnabled(True)
+
+    def _task_finished(self) -> None:
+        self._sync_enabled()
+        self._notify_done()
+        # A decomposition's end asked for the trend: the runner is free now, so it
+        # can start (its button's own click does the same).
+        if getattr(self, "_trend_wanted", False):
+            self._trend_wanted = False
+            if self.trend_after.isChecked():
+                self._run_trend()
+        self.autosave_session()  # File -> Reopen Last Session, should the window go
+
+    def _notify_done(self) -> None:
+        """Call the analyst back when a task ends while they are in another window.
+
+        A Dock bounce and the system beep always; a macOS notification when osascript
+        takes it. Offscreen (the tests) and while the window is active, nothing."""
+        try:
+            if QApplication.platformName() in ("offscreen", "minimal"):
+                return
+            if QApplication.applicationState() == Qt.ApplicationState.ApplicationActive:
+                return
+            name = getattr(self.runner, "task_name", "") or ""
+            word = _TASK_WORDS.get(name.split(" ")[0], name.split(" ")[0].title())
+            from .uilang import tr
+
+            message = tr("{s0} done.").format(s0=tr(word))
+            QApplication.beep()
+            QApplication.alert(self, 0)
+            if sys.platform == "darwin":
+                import subprocess
+
+                body = message.replace("\\", "\\\\").replace('"', '\\"')[:200]
+                subprocess.Popen(
+                    ["osascript", "-e", f'display notification "{body}" with title "Normet"'],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+        except Exception:  # noqa: BLE001 - a notification, not a step
+            pass
+
+    def _abandon_task(self) -> None:
+        if self.runner.busy:
+            self.runner.abandon()
+            self.statusBar().showMessage(
+                "Task abandoned — it finishes in the background and its result is discarded."
+            )
+
+    def _check_data(self) -> bool:
+        if self.df_raw is None:
+            self.notify(
+                "Open a table first: a CSV with a date column, the pollutant and its meteorology.",
+                key="need-data",
+                actions=(("Open Data…", self._open_csv), ("Load example", self.load_example)),
+            )
+            return False
+        if not self._selected_features():
+            self.notify(
+                "Tick at least one feature (predictor) under Columns.",
+                key="need-features",
+                actions=(("Met only", self._check_met_only),),
+            )
+            return False
+        return True
+
+    def _check_model(self) -> bool:
+        if self.model is None or self.df_prep is None:
+            self.notify(
+                "Train a model first: every later step reads it.",
+                key="need-model",
+                actions=(("Train model", self._run_train),),
+            )
+            return False
+        return True
+
+    def _show_error(self, tb: str) -> None:
+        # The last line is the error; the full traceback stays reachable, not hidden.
+        last = tb.splitlines()[-1] if tb else "Unknown error"
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Critical)
+        box.setWindowTitle("Task failed")
+        box.setText(last)
+        if len(tb.splitlines()) > 1:
+            box.setDetailedText(tb)
+        box.exec()
+        self.log_view.appendPlainText(tb)
+
+    def _n_cores(self, spin: NoWheelSpinBox) -> int | None:
+        return None if spin.value() == 0 else spin.value()

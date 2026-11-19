@@ -1,0 +1,345 @@
+"""Tests for the in-context normalisation (ICN) module.
+
+These run without torch/checkpoints: the heavy forward pass is behind
+:class:`normet.foundation.in_context.ICLPipeline`, and the test injects
+:class:`FakeICLPipeline`, a torch-free stand-in that fits a ridge regression of
+the past target on the past meteorology and applies it to the future.
+
+The headline assertion (research plan WP3.1) is the one that separates ICN from
+the baseline ``deweather`` configuration: *future-only intervention recovers the
+truth, past+future intervention does not.* ``FakeICLPipeline`` makes that
+concrete -- with the observed past it learns the true weather response and the
+counterfactual forecast tracks the (weather-driven) truth; with the past
+meteorology swapped for random pool draws it cannot, and the forecast collapses
+to a constant.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from normet.foundation import (
+    Chronos2Estimator,
+    ICNDesign,
+    MetPool,
+    normalise_in_context,
+)
+
+
+class FakeICLPipeline:
+    """Torch-free stand-in satisfying :class:`ICLPipeline`.
+
+    Fits a ridge regression of the past target on the past meteorology and
+    extrapolates to the future meteorology. Future-only intervention keeps the
+    observed past, so the fit recovers the true weather response; past+future
+    intervention swaps the past meteorology for random pool draws, destroying it.
+    """
+
+    def forecast(
+        self,
+        target_history: np.ndarray,
+        past: pd.DataFrame,
+        future_met: pd.DataFrame,
+        cols: list[str],
+        target: str,
+    ) -> np.ndarray:
+        met = [c for c in cols if c in past.columns]
+        Xp = past[met].to_numpy(dtype=float)
+        yp = past[target].to_numpy(dtype=float)
+        good = np.isfinite(yp) & np.all(np.isfinite(Xp), axis=1)
+        Xp, yp = Xp[good], yp[good]
+        if Xp.shape[0] == 0 or Xp.shape[1] == 0:
+            return np.full(len(future_met), float(np.nanmean(yp)) if yp.size else np.nan)
+        XtX = Xp.T @ Xp + 1e-6 * np.eye(Xp.shape[1])
+        w = np.linalg.solve(XtX, Xp.T @ yp)
+        intercept = yp.mean() - w @ Xp.mean(0)
+        Xf = future_met[met].to_numpy(dtype=float)
+        return (intercept + Xf @ w).astype(np.float64)
+
+
+def _synthetic(n: int = 3000, seed: int = 0) -> pd.DataFrame:
+    """y = 10 + 5*w + noise, with a +5 step event in the future of the first anchor.
+
+    ``w`` is the (only) weather driver, so the counterfactual truth is exactly a
+    function of ``w``. The ICN level estimate averages the forecast over the
+    counterfactual weather (like ``deweather``), so it is a *weather-removed*
+    baseline -- its variance comes only from how strongly the fitted weather
+    response survives. A future-only intervention keeps the observed past and
+    recovers that response (level carries weather amplitude); a past+future
+    intervention swaps the past meteorology for random pool draws and kills the
+    response (level collapses to a constant).
+    """
+    rng = np.random.default_rng(seed)
+    idx = pd.date_range("2019-01-01", periods=n, freq="h")
+    # White-noise weather: independent of position, so a random pool draw carries no
+    # relationship to the observed target, while the observed past (same series)
+    # lets the pipeline learn the true 5*w response. This is what makes the
+    # past+future intervention collapse: swapped past weather is uninformative.
+    w = rng.standard_normal(n)
+    y = 10.0 + 5.0 * w + 0.1 * rng.standard_normal(n)
+    df = pd.DataFrame({"y": y, "w": w}, index=idx)
+    # event: +10 for 24 h starting at hour 1100 (inside the first anchor's future)
+    df.loc[df.index[1100:1124], "y"] += 10.0
+    return df
+
+
+def _estimator() -> Chronos2Estimator:
+    est = Chronos2Estimator()
+    est.fit(_synthetic()[["w"]], _synthetic()["y"])
+    return est
+
+
+def test_icn_design_validation() -> None:
+    with pytest.raises(ValueError):
+        ICNDesign(intervene="bogus")
+    with pytest.raises(ValueError):
+        ICNDesign(pool="bogus")
+    with pytest.raises(ValueError):
+        ICNDesign(direction="bogus")
+    with pytest.raises(ValueError):
+        ICNDesign(aggregate="bogus")
+
+
+def test_metpool_draws() -> None:
+    df = _synthetic()
+    pool = MetPool(df[["w"]], ["w"])
+    rng = np.random.default_rng(1)
+    pt = pool.sample_pointwise(50, rng)
+    tr = pool.sample_trajectory(50, rng)
+    cl = pool.sample_climatology(df.index[2000], 50, rng)
+    assert len(pt) == 50 and len(tr) == 50 and len(cl) == 50
+    frac, per = pool.support_check(df.iloc[1000:1050])
+    assert 0.0 <= frac <= 1.0
+    assert set(per) == {"w"}
+
+
+class _NumericFakeICLPipeline(FakeICLPipeline):
+    """The fake over numeric covariates only, holding a categorical column at
+    its factual values, as the Chronos adapter does."""
+
+    def forecast(
+        self,
+        target_history: np.ndarray,
+        past: pd.DataFrame,
+        future_met: pd.DataFrame,
+        cols: list[str],
+        target: str,
+    ) -> np.ndarray:
+        numeric = [c for c in cols if pd.api.types.is_numeric_dtype(past[c])]
+        return super().forecast(target_history, past, future_met, numeric, target)
+
+
+def test_a_categorical_covariate_is_not_resampled_as_weather() -> None:
+    """A site or season label Chronos accepts is not weather with a range.
+
+    Inferred meteorological columns used to be every non-calendar covariate,
+    categoricals included; the A2 support check then read the label with
+    ``dtype=float`` and raised. The label must stay a factual covariate and
+    the counterfactual pool must hold the numeric columns alone.
+    """
+    df = _synthetic(n=1500)
+    df["site"] = np.where(np.arange(len(df)) % 2, "A", "B")
+    est = Chronos2Estimator()
+    est.fit(df[["w", "site"]], df["y"])
+    design = ICNDesign(
+        intervene="future_only",
+        pool="record_trajectory",
+        block_h=96,
+        stride=96,
+        context_length=400,
+        n_resamples=2,
+        seed=1,
+    )
+    res = normalise_in_context(est, df, "y", design=design, pipeline=_NumericFakeICLPipeline())
+    assert np.isfinite(res.level.to_numpy()).any()
+
+
+def test_future_only_recovers_truth() -> None:
+    df = _synthetic()
+    est = _estimator()
+    design = ICNDesign(
+        intervene="future_only",
+        pool="record_trajectory",
+        block_h=168,
+        stride=168,
+        context_length=1000,
+        n_resamples=5,
+        seed=3,
+    )
+    res = normalise_in_context(est, df, "y", design=design, pipeline=FakeICLPipeline())
+    level = res.level.to_numpy()
+    covered = np.isfinite(level)
+    # The counterfactual truth is 10 + 2*w (std ~ 1.5). A future-only intervention
+    # keeps the observed past, so the fitted weather response is recovered and the
+    # level carries the full weather amplitude instead of collapsing to a constant.
+    assert np.std(level[covered]) > 0.6, "future-only level must keep the weather amplitude"
+    # the event is preserved: observed - level shows the +10 bump
+    weather_effect = res.weather_effect.to_numpy()
+    assert weather_effect[1110] > 5.0, "event must survive future-only intervention"
+
+
+def test_past_future_does_not_recover() -> None:
+    df = _synthetic()
+    est = _estimator()
+    design = ICNDesign(
+        intervene="past_future",
+        pool="record_trajectory",
+        block_h=168,
+        stride=168,
+        context_length=1000,
+        n_resamples=5,
+        seed=3,
+    )
+    res = normalise_in_context(est, df, "y", design=design, pipeline=FakeICLPipeline())
+    level = res.level.to_numpy()
+    covered = np.isfinite(level)
+    # swapping the past meteorology for random pool draws destroys the fit, so the
+    # level collapses to a constant and loses the weather amplitude.
+    assert np.std(level[covered]) < 0.3, "past+future level should collapse to a constant"
+
+
+def test_result_shapes_and_uncovered() -> None:
+    df = _synthetic()
+    est = _estimator()
+    design = ICNDesign(context_length=2500, block_h=168, stride=168, n_resamples=3, seed=2)
+    res = normalise_in_context(est, df, "y", design=design, pipeline=FakeICLPipeline())
+    assert len(res.level) == len(df)
+    assert len(res.paired) == len(df)
+    assert res.spread_by_source.shape[0] == len(df)
+    assert res.hour_contrib.shape[0] == len(df)
+    # a single forward pass leaves the first context_length hours uncovered
+    assert int((res.hour_contrib.to_numpy() == 0).sum()) >= design.context_length
+
+
+def test_schema_normet_renames_level() -> None:
+    df = _synthetic()
+    est = _estimator()
+    design = ICNDesign(context_length=1000, n_resamples=3, seed=4)
+    res = normalise_in_context(
+        est, df, "y", design=design, pipeline=FakeICLPipeline(), schema="normet"
+    )
+    assert res.level.name == "normalised"
+
+
+def test_deweather_untouched() -> None:
+    # the new method is additive; the existing de-weathering entry point remains
+    assert hasattr(Chronos2Estimator, "deweather")
+    assert hasattr(Chronos2Estimator, "normalise_in_context")
+
+
+def test_d4_multi_anchor_overlap() -> None:
+    df = _synthetic()
+    est = _estimator()
+    # stride < block_h -> anchors overlap, so interior hours are covered by >1 anchor
+    design = ICNDesign(context_length=1000, block_h=168, stride=84, n_resamples=3, seed=5)
+    res = normalise_in_context(est, df, "y", design=design, pipeline=FakeICLPipeline())
+    assert int(res.hour_contrib.max()) > 1, "overlapping anchors must cover hours >1 times"
+    assert res.diagnostics["n_anchors"] > (3000 - 168) // 168
+
+
+def test_d5_bidirectional_fills_hole() -> None:
+    df = _synthetic()
+    est = _estimator()
+    # a single forward pass leaves the first context_length hours uncovered; the
+    # reverse orientation covers them, so bidirectional should leave almost none.
+    fwd = normalise_in_context(
+        est,
+        df,
+        "y",
+        design=ICNDesign(context_length=1000, direction="forward", n_resamples=3, seed=6),
+        pipeline=FakeICLPipeline(),
+    )
+    bid = normalise_in_context(
+        est,
+        df,
+        "y",
+        design=ICNDesign(context_length=1000, direction="bidirectional", n_resamples=3, seed=6),
+        pipeline=FakeICLPipeline(),
+    )
+    assert fwd.diagnostics["uncovered_hours"] >= 1000
+    # bidirectional fills the middle of the record: the uncovered count drops to a
+    # fraction of the forward-only hole (the first ~context hours stay uncovered on
+    # both ends, which is expected -- both orientations still need a conditioning
+    # window). It must not leave the forward-size hole behind.
+    assert bid.diagnostics["uncovered_hours"] < fwd.diagnostics["uncovered_hours"] * 0.6
+
+
+def test_lead_time_weighting_runs() -> None:
+    df = _synthetic()
+    est = _estimator()
+    design = ICNDesign(
+        context_length=1000, block_h=168, stride=84, lead_tau=24.0, n_resamples=3, seed=7
+    )
+    res = normalise_in_context(est, df, "y", design=design, pipeline=FakeICLPipeline())
+    assert np.isfinite(res.level.to_numpy()).any()
+    # weighting must not change the shape contract
+    assert len(res.level) == len(df)
+    assert int(res.hour_contrib.max()) > 1
+
+
+# --------------------------------------------------------------------------- #
+# 2026-11-11: short records, honest aggregation, separated spread
+# --------------------------------------------------------------------------- #
+def test_min_context_gives_a_short_record_an_estimate() -> None:
+    """A record shorter than the context produced no output at all."""
+    df = _synthetic(n=1900)  # ~79 days, C = 2048
+    est = _estimator()
+    base = dict(context_length=2048, block_h=168, stride=168, n_resamples=3, seed=8)
+    none = normalise_in_context(est, df, "y", design=ICNDesign(**base), pipeline=FakeICLPipeline())
+    assert np.isfinite(none.level.to_numpy()).sum() == 0
+    short = normalise_in_context(
+        est, df, "y", design=ICNDesign(**base, min_context=400), pipeline=FakeICLPipeline()
+    )
+    # anchors now start at 400 h, so the rest of the record is estimated
+    assert np.isfinite(short.level.to_numpy()).sum() > 1000
+    assert short.diagnostics["min_context"] == 400
+
+
+def test_without_min_context_a_three_month_record_keeps_one_block() -> None:
+    """3 months at C=2048: one partial anchor over the last block, 6 % of hours."""
+    df = _synthetic(n=91 * 24)
+    est = _estimator()
+    design = ICNDesign(context_length=2048, block_h=168, stride=168, n_resamples=2, seed=11)
+    res = normalise_in_context(est, df, "y", design=design, pipeline=FakeICLPipeline())
+    assert np.isfinite(res.level.to_numpy()).sum() == 91 * 24 - 2048
+
+
+def test_aggregate_names_are_three_estimators() -> None:
+    """mean, median and trimmed must differ on a skewed draw set."""
+    from normet.foundation.in_context import _aggregate
+
+    items = [(1.0, 0), (2.0, 1), (2.0, 2), (3.0, 3), (100.0, 30)]  # one heavy tail
+    mean = _aggregate(items, "mean", 0.0)
+    median = _aggregate(items, "median", 0.0)
+    trimmed = _aggregate(items, "trimmed", 0.0)
+    assert mean == pytest.approx(21.6)
+    assert median == pytest.approx(2.0)
+    assert trimmed < mean
+    # the deprecated alias is the trimmed mean
+    assert _aggregate(items, "quantile_mean", 0.0) == pytest.approx(trimmed)
+    # lead weighting moves the mean towards the early draw
+    assert _aggregate(items, "mean", 1.0) < mean
+
+
+def test_anchor_spread_is_not_the_resample_spread() -> None:
+    """With one draw per anchor, mc spread is 0 while the anchors still disagree."""
+    df = _synthetic()
+    est = _estimator()
+    design = ICNDesign(context_length=1000, block_h=168, stride=84, n_resamples=1, seed=9)
+    res = normalise_in_context(est, df, "y", design=design, pipeline=FakeICLPipeline())
+    both = (res.hour_contrib.to_numpy() >= 2) & np.isfinite(res.level.to_numpy())
+    assert both.any()
+    assert np.nanmax(res.spread_by_source["mc"].to_numpy()[both]) < 1e-12
+    assert np.nanmax(res.spread_by_source["anchor"].to_numpy()[both]) > 0.0
+
+
+def test_support_gate_is_recorded() -> None:
+    """The A2 gate reports what it dropped; a record pool is inside its own range."""
+    df = _synthetic()
+    est = _estimator()
+    design = ICNDesign(context_length=1000, n_resamples=2, seed=10, support_min_frac=0.5)
+    res = normalise_in_context(est, df, "y", design=design, pipeline=FakeICLPipeline())
+    assert res.diagnostics["low_support"] == []
+    assert res.diagnostics["design"]["support_min_frac"] == 0.5

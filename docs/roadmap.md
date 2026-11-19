@@ -1,0 +1,99 @@
+# Roadmap
+
+`normet` is at version **0.3.0**, the first PyPI upload since 0.2.4. The 1.0
+line, when it is tagged, is about *hardening* rather than adding features, and
+it will commit the project to API stability for downstream users.
+
+## What 1.0 means
+
+- **Public API is stable.** Anything exported from the top-level `normet`
+  package follows [Semantic Versioning](https://semver.org). Breaking changes
+  require a major version bump and a deprecation window of at least one minor
+  release.
+- **Internal modules** (anything imported via `normet._something` or
+  `normet.subpkg.module.private_helper`) are explicitly *not* part of the
+  contract.
+- **Optional dependencies** stay optional; importing `normet` itself will never
+  require any of `flaml`, `lightgbm`, `dask`, `click`, `pyyaml`, `cdsapi`,
+  `pymc`, `torch`, `chronos-forecasting`, `PySide6`.
+
+## Shipped
+
+| Status | Item |
+|:------:|------|
+| ✅ | Core normalisation / decomposition / SCM pipelines |
+| ✅ | Walk-forward CV + per-time-bucket diagnostics |
+| ✅ | Multiple SCM backends + diagnostics + inference |
+| ✅ | Multi-site batch drivers |
+| ✅ | Provenance archives (`NormetRun`) |
+| ✅ | CLI |
+| ✅ | Sphinx docs |
+| ✅ | Real-world data adapters (OpenAQ / ERA5 / EEA / AURN) |
+| ✅ | Plotting suite (polar / PDP grid / decomposition / SCM dashboard) |
+| ✅ | HTML / Markdown report generator |
+| ✅ | Bayesian SCM + event detection |
+| ✅ | Qt desktop GUI (`normet-gui`) with packaged installers |
+| ✅ | Chronos-2 foundation model: zero-shot de-weathering, counterfactuals, station embeddings |
+| ✅ | Zero-shot paths through `do_all` and `decompose(method="meteorology")` |
+| ✅ | `embed_multisite`: station embeddings meet the multi-site drivers |
+| ✅ | mypy strict on the public surface (`warn_return_any` and `disallow_any_generics` deliberately off; `disallow_untyped_decorators` off for `normet.cli` and `normet.mcp_server` -- see CHANGELOG for why) |
+| ✅ | Test coverage ≥ 80% (80% measured; the CI gate stays at 70% so an unlucky branch does not block a merge) |
+| ✅ | Fine-tuning via `Chronos2Estimator.finetune` (LoRA or full). Deliberately not `fit`, which stays free so `do_all` cannot start a training run by accident |
+| ✅ | `cross_learning=True` for joint multi-site prediction (`predict_quantiles_multisite`) |
+| ✅ | Multivariate targets (`predict_quantiles_multivariate`): several species at one site, or neighbouring stations as variates |
+| ✅ | Categorical covariates encoded natively, no one-hotting |
+| ✅ | Trend statistics `nm.trend` (Mann-Kendall + Theil-Sen, block-bootstrap-corrected) and the segmented fit `detect_trend_breaks` |
+| ✅ | Probabilistic skill verification: CRPS / pinball scores and the baseline-comparison notebook |
+| ✅ | `decompose_uncertainty` — a de-weathered estimate's spread attributed to weather vs model form |
+| ✅ | Chronos-2 quantile calibration (`calibrate_quantiles`, hold-out conformal thresholds) |
+| ✅ | SCM pre-trend test `pre_trend_test` and the event-study figure |
+| ✅ | Log-scale fits (`log_transform`: train on log1p, report in original units) |
+| ✅ | Embedding diagnostics: silhouette curve, projection, the two-panel figure |
+| ✅ | Donor spatial diagnostics: per-donor distance, bearing and sector; the pool's centroid and sector coverage |
+| ✅ | Staggered adoption `run_scm_staggered`, per-unit placebo p-values and the cross-unit permutation test |
+| ✅ | numpy 2.x and Python 3.13 support: the `numpy<2.0` / `pyarrow<26` pins are lifted and the CI matrix spans 3.10–3.13 |
+
+## Open
+
+The 1.1 scope is tracked in the execution plan
+(`docs/plans/execution_plan.md`, which also carries the per-milestone progress
+notes); the table below is its snapshot.
+
+| Status | Item |
+|:------:|------|
+| 📋 | China data adapters — scoped as issue + data-format doc; not in the 1.1 schedule (data licences and station coordinates first) (P3) |
+| ⏸ | Device passthrough for `normalise` / `train_model` / `do_all`; the normalise/PDP profiling that precedes it is done (see CHANGELOG) (P3) |
+
+The finished 1.1 rows have joined the Shipped table above; what remains is
+the unscheduled P3 work below.
+
+What is deliberately *not* a roadmap item: whether fine-tuning, cross-learning
+or a multivariate stack improves a given analysis. Each is a question about a
+particular record, and upstream is explicit that cross-learning in particular
+does not always help and must be tested per use case. The package supplies the
+paths and the means to compare them; choosing between them is the analyst's
+call, not a feature to be shipped.
+
+## Deprecation policy
+
+In force. It covers the public API as defined under *What 1.0 means* above --
+anything exported from the top-level `normet` package -- and nothing else.
+
+- A symbol marked for removal will:
+  1. Emit a `DeprecationWarning` for at least one minor release.
+  2. Be documented as deprecated in the docstring and CHANGELOG.
+  3. Have a replacement linked from the warning message.
+- Symbols are only removed in a major release.
+- A symbol that has never appeared in a release is not covered and may be
+  changed or withdrawn outright: no downstream code can yet depend on it, so a
+  warning cycle would protect nobody and would ship the mistake instead of
+  fixing it. `cluster_multisite` was withdrawn on those grounds before it ever
+  reached a release.
+
+Nothing has been deprecated under this policy so far, so no removal is due.
+
+## Out of scope
+
+- A Streamlit or web dashboard. The desktop GUI covers the no-code workflow;
+  a hosted equivalent is a separate project, and community-contributed
+  examples are welcome but not part of the library proper.
