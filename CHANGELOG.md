@@ -6,6 +6,12 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Added
+- **Conda recipe.** `packaging/conda/meta.yaml` packages the 0.3.0 PyPI sdist
+  as a `noarch: python` conda package (core dependencies; the CLI/MCP/GUI
+  entry points), with local-build, personal-channel and conda-forge steps in
+  `packaging/conda/README.md`. The root `packaging/README.md` points to it.
+
 ## [0.3.0] — 2026-11-19
 
 First PyPI upload since 0.2.4 (2025-10-29). This section covers everything
