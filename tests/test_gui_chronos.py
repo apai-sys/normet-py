@@ -264,3 +264,53 @@ def test_the_assistant_reads_the_chronos_check(chronos_win):
     assert "zero-shot" in text and "12.7" in text and "verdict (ok): Meteorology drives it." in text
     with pytest.raises(ValueError, match="not available on chronos-2"):
         w.assistant.tools.decompose("emission")
+
+
+def test_chronos_gui_helpers_icn_and_save_load(monkeypatch, tmp_path):
+    import normet.foundation.estimator as est_mod
+    from normet.foundation import Chronos2Estimator
+    from normet.gui import _chronos
+
+    levels = [0.1, 0.5, 0.9]
+
+    class _FakePipe:
+        quantiles = levels
+
+        def predict(self, inputs, prediction_length, **kwargs):
+            out = []
+            for item in inputs:
+                hist = np.asarray(item["target"], dtype=float)
+                med = np.full(prediction_length, float(np.nanmedian(hist)))
+                out.append(np.stack([med - 0.5, med, med + 0.5])[None, ...])
+            return out
+
+        def save_pretrained(self, d):
+            from pathlib import Path
+
+            p = Path(d)
+            p.mkdir(parents=True, exist_ok=True)
+            (p / "config.json").write_text('{"architectures": ["Chronos2Model"]}', encoding="utf-8")
+
+    est = Chronos2Estimator(context_length=24, prediction_length=12, device="cpu")
+    est._pipeline = _FakePipe()
+    est._quantiles = np.asarray(levels, dtype=float)
+
+    df_prep = pd.DataFrame(
+        {
+            "date": pd.date_range("2024-01-01", periods=72, freq="h"),
+            "value": np.linspace(10.0, 20.0, 72),
+            "ws": np.linspace(1.0, 5.0, 72),
+        }
+    )
+    out = _chronos.deweather(
+        est, df_prep, ["ws"], with_quantiles=True, n_samples=2, method="icn", estimate="paired"
+    )
+    assert out.index.name == "date"
+    assert {"observed", "normalised", "q100", "q500", "q900"} <= set(out.columns)
+
+    saved = _chronos.save_estimator(est, tmp_path / "gui-ckpt")
+    assert (saved / "normet_estimator.json").exists()
+    monkeypatch.setattr(est_mod, "resolve_device", lambda req=None: req or "cpu")
+    monkeypatch.setattr(est_mod, "_load_pipeline_on", lambda name, dev, auto: (est._pipeline, dev))
+    reloaded = _chronos.load_saved_estimator(saved, device="cpu")
+    assert reloaded.context_length == 24

@@ -522,15 +522,34 @@ def _decom_met_zero_shot(
     arbitrary order still yields a valid decomposition, only a less
     interpretable one. Shapley attribution needs no ranking.
     """
-    from ..foundation import Chronos2Estimator, to_indexed_frame
+    from ..foundation import (
+        Chronos2Estimator,
+        ICNDesign,
+        MetPool,
+        add_calendar_covariates,
+        to_indexed_frame,
+    )
 
     if cfg.target is None:
         raise DataError("`target` must be provided.")
-    refused = [
-        n
-        for n in ("resample_df", "resample_pools", "conditional_on")
-        if getattr(cfg, n) is not None
-    ]
+    mc = dict(cfg.model_config or {})
+    method_mode = str(mc.pop("method", "deweather")).lower()
+    estimate = str(mc.pop("estimate", "level")).lower()
+    model_path = mc.pop("model_path", None)
+    icn_design = mc.pop("icn_design", None)
+    if method_mode not in ("deweather", "icn"):
+        raise ConfigError(
+            f"model_config['method'] must be 'deweather' or 'icn', got {method_mode!r}"
+        )
+    if estimate not in ("level", "paired"):
+        raise ConfigError(f"model_config['estimate'] must be 'level' or 'paired', got {estimate!r}")
+
+    refuse_names = (
+        ("resample_pools", "conditional_on")
+        if method_mode == "icn"
+        else ("resample_df", "resample_pools", "conditional_on")
+    )
+    refused = [n for n in refuse_names if getattr(cfg, n) is not None]
     if refused:
         raise ConfigError(
             f"{', '.join(refused)} not available on the chronos-2 backend: "
@@ -558,8 +577,13 @@ def _decom_met_zero_shot(
     indexed = to_indexed_frame(work)
     est = model if isinstance(model, Chronos2Estimator) else None
     if est is None:
-        est = Chronos2Estimator(met_covariates=met, **(cfg.model_config or {}))
-        est._load_pipeline()
+        if model_path is not None:
+            est = Chronos2Estimator.load(model_path, device=mc.get("device"))
+            if est.met_covariates is None:
+                est.met_covariates = list(met)
+        else:
+            est = Chronos2Estimator(met_covariates=met, **mc)
+            est._load_pipeline()
     est._check_index(indexed.index)
 
     players, method = _attribution_plan(
@@ -570,7 +594,47 @@ def _decom_met_zero_shot(
     result = pd.DataFrame({"observed": observed}, index=pd.DatetimeIndex(work["date"]))
     result.index.name = "date"
 
+    ext_pool: MetPool | None = None
+    indexed_icn: pd.DataFrame | None = None
+    if method_mode == "icn":
+        indexed_icn = add_calendar_covariates(indexed)
+        if cfg.resample_df is not None:
+            rw = cfg.resample_df.copy()
+            if not isinstance(rw.index, pd.DatetimeIndex) and "date" not in rw.columns:
+                rw = process_date(rw)
+            pool_indexed = to_indexed_frame(rw)
+            ext_pool = MetPool.from_frame(pool_indexed, met)
+
     def value_of(resample: list[str]) -> np.ndarray:
+        if method_mode == "icn":
+            assert indexed_icn is not None
+            if isinstance(icn_design, ICNDesign):
+                design = icn_design
+            else:
+                overrides: dict[str, Any] = {
+                    "context_length": est.context_length,
+                    "n_resamples": n_samples,
+                    "seed": cfg.seed,
+                }
+                if "prediction_length" in mc:
+                    bh = int(mc["prediction_length"])
+                    overrides["block_h"] = bh
+                    overrides["stride"] = max(1, bh // 2)
+                if isinstance(icn_design, Mapping):
+                    overrides.update(icn_design)
+                design = ICNDesign.v1(**overrides)
+            out_icn = est.normalise_in_context(
+                indexed_icn,
+                "value",
+                design=design,
+                met_features=resample,
+                pool=ext_pool,
+            )
+            return (
+                out_icn.to_normet_frame(estimate=estimate)["normalised"]
+                .reindex(result.index)
+                .to_numpy()
+            )
         out = est.deweather(
             indexed,
             "value",

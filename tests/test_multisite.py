@@ -294,3 +294,90 @@ def test_wide_by_site_rejects_a_missing_column():
     df = pd.DataFrame({"date": pd.date_range("2024-01-01", periods=3, freq="h"), "site": "A"})
     with pytest.raises(ValueError, match="PM2.5"):
         _wide_by_site(df, "site", "PM2.5", "date")
+
+
+def test_do_all_multisite_chronos_single_checkpoint_deweather_and_icn(monkeypatch):
+    """backend='chronos-2' loads one checkpoint in-process for both deweather and cross-learning ICN."""
+    import numpy as np
+
+    import normet.foundation.estimator as est_mod
+
+    levels = [0.1, 0.5, 0.9]
+    load_count = 0
+    seen_cross: list[bool] = []
+
+    class _FakePipe:
+        quantiles = levels
+
+        def predict(self, inputs, prediction_length, cross_learning=False, **kwargs):
+            seen_cross.append(bool(cross_learning))
+            out = []
+            for item in inputs:
+                hist = np.asarray(item["target"], dtype=float)
+                med = np.full(prediction_length, float(np.nanmedian(hist)))
+                out.append(np.stack([med - 1.0, med, med + 1.0])[None, ...])
+            return out
+
+    def _fake_load(name, dev, auto):
+        nonlocal load_count
+        load_count += 1
+        return _FakePipe(), dev or "cpu"
+
+    monkeypatch.setattr(est_mod, "_load_pipeline_on", _fake_load)
+    monkeypatch.setattr(est_mod, "resolve_device", lambda req=None: req or "cpu")
+
+    def _fail_parallel(*a, **k):
+        raise AssertionError("chronos-2 fast path should not spawn joblib.Parallel")
+
+    import joblib
+
+    monkeypatch.setattr(joblib, "Parallel", _fail_parallel)
+
+    dates = pd.date_range("2024-01-01", periods=96, freq="h")
+    df = pd.concat(
+        [
+            pd.DataFrame(
+                {"date": dates, "site": s, "PM2.5": np.linspace(15.0, 25.0, 96), "ws": 2.0}
+            )
+            for s in ("A", "B")
+        ],
+        ignore_index=True,
+    )
+
+    dew_out, dew_models = do_all_multisite(
+        df,
+        site_col="site",
+        target="PM2.5",
+        covariates=["ws"],
+        backend="chronos-2",
+        n_samples=2,
+        return_models=True,
+        model_config={"context_length": 24, "prediction_length": 12, "device": "cpu"},
+    )
+    assert load_count == 1
+    assert set(dew_out["site"]) == {"A", "B"}
+    assert dew_models["A"] is dew_models["B"]
+
+    seen_cross.clear()
+    icn_out, icn_models = do_all_multisite(
+        df,
+        site_col="site",
+        target="PM2.5",
+        covariates=["ws"],
+        backend="chronos-2",
+        n_samples=2,
+        return_models=True,
+        model_config={
+            "method": "icn",
+            "estimate": "paired",
+            "context_length": 24,
+            "prediction_length": 12,
+            "cross_learning": True,
+            "device": "cpu",
+        },
+    )
+    assert load_count == 2  # one load per do_all_multisite call (not 2 per site)
+    assert any(seen_cross)
+    assert set(icn_out["site"]) == {"A", "B"}
+    assert {"observed", "normalised", "q100", "q500", "q900"} <= set(icn_out.columns)
+    assert icn_models["A"] is icn_models["B"]

@@ -120,3 +120,39 @@ def test_pdp_workers_do_not_each_open_a_predictor_pool(
     monkeypatch.setattr(_pdp_module, "ml_predict", mock_ml_predict)
     _pdp_module.pdp(sample_df, trivial_model, var_list=feature_names, n_cores=3)
     assert calls and all(c == {"num_threads": 1} for c in calls)
+
+
+def test_pdp_dispatches_to_chronos2_estimator():
+    """pdp() routes Chronos2Estimator models through chronos_pdp for date-column & indexed frames."""
+    from normet.foundation import Chronos2Estimator
+
+    levels = [0.1, 0.5, 0.9]
+
+    class _FakePipe:
+        quantiles = levels
+
+        def predict(self, inputs, prediction_length, **kwargs):
+            out = []
+            for item in inputs:
+                ws = np.asarray(item["future_covariates"]["ws"], dtype=float)
+                med = 10.0 + 2.0 * ws
+                out.append(np.stack([med - 1.0, med, med + 1.0])[None, ...])
+            return out
+
+    est = Chronos2Estimator(context_length=24, prediction_length=8, device="cpu")
+    est._pipeline = _FakePipe()
+    est._quantiles = np.asarray(levels, dtype=float)
+
+    n = 60
+    idx = pd.date_range("2024-01-01", periods=n, freq="h")
+    ws = np.linspace(1.0, 6.0, n)
+    df_col = pd.DataFrame({"date": idx, "pm25": 10.0 + 2.0 * ws, "ws": ws})
+
+    res = _pdp_module.pdp(
+        df_col, est, target="pm25", var_list=["ws"], grid_points=5, n_anchors=2, horizon=8
+    )
+    assert len(res) == 5
+    assert {"variable", "value", "pdp_mean", "pdp_std", "pdp_lower", "pdp_upper"} <= set(
+        res.columns
+    )
+    assert np.diff(res["pdp_mean"].to_numpy()).min() > 0.0

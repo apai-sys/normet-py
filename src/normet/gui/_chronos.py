@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import importlib.util
 import logging
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -122,13 +123,48 @@ def deweather(
     met_features: list[str],
     with_quantiles: bool,
     n_samples: int = DEFAULT_SAMPLES,
+    *,
+    method: str = "deweather",
+    estimate: str = "level",
+    log_transform: bool = False,
 ) -> pd.DataFrame:
     """De-weather on normet's schema so the existing plot and report paths apply.
 
     ``n_samples`` is the dominant cost here -- see :data:`DEFAULT_SAMPLES`.
+    ``method="icn"`` routes through In-Context Normalisation (ICN-v1) and
+    supports ``estimate="level"|"paired"`` and ``log_transform=True``.
     """
     indexed = to_indexed_frame(df_prep)
     quantiles = QUANTILES if with_quantiles else (0.5,)
+    method_norm = str(method).lower()
+    if method_norm == "icn":
+        estimate_norm = str(estimate).lower()
+        if estimate_norm not in ("level", "paired"):
+            raise ValueError(f"estimate must be 'level' or 'paired', got {estimate!r}")
+        from normet.foundation import ICNDesign, add_calendar_covariates
+
+        bh = int(estimator.prediction_length)
+        design = ICNDesign.v1(
+            context_length=int(estimator.context_length),
+            block_h=bh,
+            stride=max(1, bh // 2),
+            n_resamples=int(n_samples),
+            seed=0,
+            log_transform=bool(log_transform),
+        )
+        res = estimator.normalise_in_context(
+            add_calendar_covariates(indexed),
+            "value",
+            design=design,
+            met_features=met_features,
+            quantiles=quantiles,
+        )
+        out = res.to_normet_frame(estimate=estimate_norm)
+        out.index.name = "date"
+        return out
+    if method_norm != "deweather":
+        raise ValueError(f"method must be 'deweather' or 'icn', got {method!r}")
+
     out = estimator.deweather(
         indexed,
         "value",
@@ -140,6 +176,18 @@ def deweather(
     )
     out.index.name = "date"
     return out
+
+
+def save_estimator(estimator: Any, path: str | Path) -> Path:
+    """Persist a loaded or fine-tuned Chronos-2 estimator directory for GUI sessions."""
+    return Path(estimator.save(path))
+
+
+def load_saved_estimator(path: str | Path, device: str | None = None) -> Any:
+    """Reload a saved Chronos-2 checkpoint or LoRA adapter directory."""
+    from normet.foundation import Chronos2Estimator
+
+    return Chronos2Estimator.load(path, device=device)
 
 
 def verdict_for(shift: dict[str, float]) -> tuple[str, str]:

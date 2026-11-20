@@ -10,11 +10,12 @@ each station independently.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import pandas as pd
 
+from ..foundation.estimator import CHRONOS_BACKEND, resolve_n_samples
 from ..utils._config import dispatch_batch_size, resolve_workers
 from ..utils.logging import get_logger
 
@@ -141,6 +142,188 @@ def multisite_apply(
     return pd.concat(pieces, ignore_index=True)
 
 
+def _do_all_multisite_chronos(
+    df: pd.DataFrame,
+    site_col: str,
+    target: str,
+    *,
+    covariates: list[str] | None,
+    return_models: bool,
+    do_all_kwargs: dict[str, Any],
+) -> Any:
+    """Single-checkpoint fast path for ``do_all_multisite(..., backend="chronos-2")``.
+
+    Loads Chronos-2 once in-process instead of spawning one loky worker per site,
+    and routes ``model_config={"method": "icn"}`` through
+    :meth:`Chronos2Estimator.normalise_in_context_multisite` so cross-learning
+    information sharing can span all sites in one batched call.
+    """
+    from ..foundation import (
+        Chronos2Estimator,
+        ICNDesign,
+        MetPool,
+        add_calendar_covariates,
+        to_indexed_frame,
+    )
+    from ..utils.prepare import expm1_columns, log1p_target, prepare_data
+
+    if site_col not in df.columns:
+        raise ValueError(f"`site_col` '{site_col}' not in df.")
+
+    sites = list(pd.unique(df[site_col]))
+    if not sites:
+        raise RuntimeError("All per-site do_all runs failed.")
+
+    mc = dict(do_all_kwargs.get("model_config") or {})
+    model_path = mc.pop("model_path", None)
+    method = str(mc.pop("method", "deweather")).lower()
+    estimate = str(mc.pop("estimate", "level")).lower()
+    icn_design = mc.pop("icn_design", None)
+    ext_pool = mc.pop("pool", None)
+    cross_learning = bool(mc.pop("cross_learning", True))
+    estimator_arg = mc.pop("estimator", None)
+    if method not in ("deweather", "icn"):
+        raise ValueError(f"model_config['method'] must be 'deweather' or 'icn', got {method!r}")
+    if estimate not in ("level", "paired"):
+        raise ValueError(f"model_config['estimate'] must be 'level' or 'paired', got {estimate!r}")
+
+    cov_list = list(covariates or [])
+    variables_resample = do_all_kwargs.get("variables_resample")
+    met = list(variables_resample) if variables_resample else cov_list
+    if not met:
+        raise ValueError(
+            "the chronos-2 backend needs meteorological covariates to condition on: "
+            "pass variables_resample (or covariates), otherwise the run is a plain "
+            "forecast rather than a de-weathering"
+        )
+    kept = cov_list + [c for c in met if c not in cov_list]
+
+    n_samples = resolve_n_samples(do_all_kwargs.get("n_samples"), CHRONOS_BACKEND)
+    seed = int(do_all_kwargs.get("seed", 7_654_321))
+    log_transform = bool(do_all_kwargs.get("log_transform", False))
+    split_method = str(do_all_kwargs.get("split_method", "random"))
+    train_fraction = float(do_all_kwargs.get("train_fraction", 0.75))
+    resample_df = do_all_kwargs.get("resample_df")
+
+    if estimator_arg is not None:
+        estimator = estimator_arg
+        if estimator.met_covariates is None:
+            estimator.met_covariates = list(met)
+    elif model_path is not None:
+        estimator = Chronos2Estimator.load(model_path, device=mc.get("device"))
+        if estimator.met_covariates is None:
+            estimator.met_covariates = list(met)
+    else:
+        estimator = Chronos2Estimator(met_covariates=met, **mc)
+    estimator._load_pipeline()
+    log.info(
+        "do_all_multisite (chronos-2, %s): %d sites sharing one checkpoint on %s",
+        method,
+        len(sites),
+        estimator.device,
+    )
+
+    prepared: list[tuple[Any, pd.DataFrame]] = []
+    for site_value in sites:
+        sub = df[df[site_col] == site_value]
+        if sub.empty:
+            continue
+        try:
+            df_prep = prepare_data(
+                sub.drop(columns=[site_col]),
+                target=target,
+                covariates=kept,
+                split_method=split_method,
+                train_fraction=train_fraction,
+                seed=seed,
+            )
+            if log_transform and method == "deweather":
+                df_prep = log1p_target(df_prep)
+            indexed = to_indexed_frame(df_prep)
+            estimator._check_index(indexed.index)
+            prepared.append((site_value, indexed))
+        except Exception as exc:
+            log.warning("Site %s failed in do_all preparation: %s", site_value, exc)
+
+    if not prepared:
+        raise RuntimeError("All per-site do_all runs failed.")
+
+    pieces: list[pd.DataFrame] = []
+    models: dict[Any, Any] = {}
+
+    if method == "icn":
+        if isinstance(icn_design, ICNDesign):
+            design = icn_design
+        else:
+            overrides: dict[str, Any] = {
+                "context_length": estimator.context_length,
+                "n_resamples": n_samples,
+                "seed": seed,
+                "log_transform": log_transform,
+            }
+            if "prediction_length" in mc:
+                bh = int(mc["prediction_length"])
+                overrides["block_h"] = bh
+                overrides["stride"] = max(1, bh // 2)
+            if isinstance(icn_design, Mapping):
+                overrides.update(icn_design)
+            design = ICNDesign.v1(**overrides)
+
+        pool_arg: Any = ext_pool
+        if pool_arg is None and resample_df is not None:
+            pool_arg = MetPool.from_frame(to_indexed_frame(resample_df), met)
+
+        site_frames: dict[str, pd.DataFrame] = {}
+        orig_keys: dict[str, Any] = {}
+        for site_value, indexed in prepared:
+            key = str(site_value)
+            site_frames[key] = add_calendar_covariates(indexed)
+            orig_keys[key] = site_value
+
+        res_map = estimator.normalise_in_context_multisite(
+            site_frames,
+            "value",
+            design=design,
+            met_features=met,
+            pool=pool_arg,
+            quantiles=(0.1, 0.5, 0.9),
+            cross_learning=cross_learning,
+        )
+        for key, res in res_map.items():
+            site_value = orig_keys[key]
+            out = res.to_normet_frame(estimate=estimate)
+            df_out = out.reset_index().rename(columns={out.index.name or "index": "date"})
+            df_out[site_col] = site_value
+            pieces.append(df_out)
+            models[site_value] = estimator
+    else:
+        for site_value, indexed in prepared:
+            try:
+                out = estimator.deweather(
+                    indexed,
+                    "value",
+                    met_features=met,
+                    n_samples=n_samples,
+                    random_state=seed,
+                    schema="normet",
+                )
+                out.index.name = "date"
+                if log_transform:
+                    out = expm1_columns(out)
+                df_out = out.reset_index().rename(columns={out.index.name or "index": "date"})
+                df_out[site_col] = site_value
+                pieces.append(df_out)
+                models[site_value] = estimator
+            except Exception as exc:
+                log.warning("Site %s failed in do_all: %s", site_value, exc)
+
+    if not pieces:
+        raise RuntimeError("All per-site do_all runs failed.")
+
+    df_norm = pd.concat(pieces, ignore_index=True)
+    return (df_norm, models) if return_models else df_norm
+
+
 def do_all_multisite(
     df: pd.DataFrame,
     site_col: str,
@@ -165,8 +348,11 @@ def do_all_multisite(
         Target column name (e.g., "PM2.5").
     covariates : list of str, optional
         Predictor columns. Required by ``do_all`` for non-trivial runs.
-    backend : {"flaml", "lightgbm"}, default "flaml"
-        AutoML or model training backend.
+    backend : {"flaml", "lightgbm", "chronos-2"}, default "flaml"
+        AutoML, model training, or zero-shot Chronos-2 backend. On
+        ``chronos-2``, one checkpoint is loaded in-process and shared across
+        all sites (supporting ``model_config={"method": "icn", ...}`` via
+        cross-learning multi-site ICN).
     n_cores : int, optional
         Parallel workers across sites. With more than one site each site's
         own model training and resampling run single-threaded, so the outer
@@ -184,7 +370,20 @@ def do_all_multisite(
         Long-format normalised series with the ``site_col`` column appended.
         If ``return_models=True``, returns ``(df_norm, models)``.
     """
+    if str(backend).lower() == CHRONOS_BACKEND:
+        return _do_all_multisite_chronos(
+            df,
+            site_col,
+            target,
+            covariates=covariates,
+            return_models=return_models,
+            do_all_kwargs=do_all_kwargs,
+        )
+
     from .do_all import do_all
+
+    if site_col not in df.columns:
+        raise ValueError(f"`site_col` '{site_col}' not in df.")
 
     sites = list(pd.unique(df[site_col]))
     n_workers = _resolve_workers(n_cores)

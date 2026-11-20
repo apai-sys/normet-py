@@ -9,6 +9,7 @@ models for uncertainty quantification), plus their config dataclasses
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -76,7 +77,7 @@ class UncConfig(SingleConfig):
 def _do_all_zero_shot(
     df: pd.DataFrame, cfg: SingleConfig
 ) -> tuple[pd.DataFrame, object, pd.DataFrame]:
-    """The Chronos-2 branch of :func:`do_all`: prepare -> load -> de-weather.
+    """The Chronos-2 branch of :func:`do_all`: prepare -> load -> de-weather / ICN.
 
     The AutoML path is prepare -> train -> normalise, and the middle step has no
     counterpart here: nothing is fitted, so there is no held-out set, no model
@@ -84,12 +85,30 @@ def _do_all_zero_shot(
     the loaded :class:`~normet.foundation.Chronos2Estimator`, which is what the
     caller needs to run further projections or the covariate-sensitivity check.
 
-    ``split_method``, ``train_fraction`` and ``model_config``'s search settings
-    have nothing to act on. Rather than ignore ``model_config`` entirely, its
-    keys are passed to the estimator's constructor, which is where ``device``,
-    ``context_length`` and ``prediction_length`` belong.
+    ``model_config`` supports ``device``, ``context_length``, ``prediction_length``,
+    optional ``model_path`` (to load a fine-tuned checkpoint/LoRA adapter via
+    :meth:`Chronos2Estimator.load`), ``method`` (``"deweather"`` default, or
+    ``"icn"`` for future-only ICN-v1), ``estimate`` (``"level"`` or ``"paired"``
+    for ``method="icn"``), ``icn_design``, and ``pool``.
     """
-    from ..foundation import Chronos2Estimator, to_indexed_frame
+    from ..foundation import (
+        Chronos2Estimator,
+        ICNDesign,
+        MetPool,
+        add_calendar_covariates,
+        to_indexed_frame,
+    )
+
+    mc = dict(cfg.model_config or {})
+    model_path = mc.pop("model_path", None)
+    method = str(mc.pop("method", "deweather")).lower()
+    estimate = str(mc.pop("estimate", "level")).lower()
+    icn_design = mc.pop("icn_design", None)
+    ext_pool = mc.pop("pool", None)
+    if method not in ("deweather", "icn"):
+        raise ValueError(f"model_config['method'] must be 'deweather' or 'icn', got {method!r}")
+    if estimate not in ("level", "paired"):
+        raise ValueError(f"model_config['estimate'] must be 'level' or 'paired', got {estimate!r}")
 
     covariates = list(cfg.covariates or [])
     met = list(cfg.variables_resample) if cfg.variables_resample else covariates
@@ -113,12 +132,17 @@ def _do_all_zero_shot(
         train_fraction=cfg.train_fraction,
         seed=cfg.seed,
     )
-    if cfg.log_transform:
+    if cfg.log_transform and method == "deweather":
         df_prep = log1p_target(df_prep)
     indexed = to_indexed_frame(df_prep)
 
-    estimator = Chronos2Estimator(met_covariates=met, **(cfg.model_config or {}))
-    estimator._load_pipeline()
+    if model_path is not None:
+        estimator = Chronos2Estimator.load(model_path, device=mc.get("device"))
+        if estimator.met_covariates is None:
+            estimator.met_covariates = list(met)
+    else:
+        estimator = Chronos2Estimator(met_covariates=met, **mc)
+        estimator._load_pipeline()
     log.info(
         "Chronos-2 ready on %s | context=%d | horizon=%d",
         estimator.device,
@@ -126,6 +150,45 @@ def _do_all_zero_shot(
         estimator.prediction_length,
     )
     estimator._check_index(indexed.index)
+
+    if method == "icn":
+        indexed_icn = add_calendar_covariates(indexed)
+        if isinstance(icn_design, ICNDesign):
+            design = icn_design
+        else:
+            overrides: dict[str, Any] = {
+                "context_length": estimator.context_length,
+                "n_resamples": cast(int, cfg.n_samples),
+                "seed": cfg.seed,
+                "log_transform": bool(cfg.log_transform),
+            }
+            if "prediction_length" in mc:
+                bh = int(mc["prediction_length"])
+                overrides["block_h"] = bh
+                overrides["stride"] = max(1, bh // 2)
+            if isinstance(icn_design, Mapping):
+                overrides.update(icn_design)
+            design = ICNDesign.v1(**overrides)
+        pool_arg: Any = ext_pool
+        if pool_arg is None and cfg.resample_df is not None:
+            pool_arg = MetPool.from_frame(to_indexed_frame(cfg.resample_df), met)
+        icn_res = estimator.normalise_in_context(
+            indexed_icn,
+            "value",
+            design=design,
+            met_features=met,
+            pool=pool_arg,
+            quantiles=(0.1, 0.5, 0.9),
+        )
+        out = icn_res.to_normet_frame(estimate=estimate)
+        uncovered = int(icn_res.diagnostics["uncovered_hours"])
+        log.info(
+            "do_all (ICN-v1, %s) finished: %d timestamps, %d uncovered hours",
+            estimate,
+            len(out),
+            uncovered,
+        )
+        return out, estimator, df_prep
 
     out = estimator.deweather(
         indexed,
