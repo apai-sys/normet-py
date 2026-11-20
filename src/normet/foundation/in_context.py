@@ -24,19 +24,31 @@ without loading a checkpoint.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import hashlib
+import json
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from typing import Any, NamedTuple, Protocol, runtime_checkable
 
 import numpy as np
 import pandas as pd
 
+from .estimator import _qname
+
 __all__ = [
     "ICLPipeline",
+    "BatchICLPipeline",
+    "MultivariateICLPipeline",
     "ICNDesign",
     "MetPool",
     "ICNResult",
+    "ICNDrawBank",
     "Chronos2ICLPipeline",
+    "Chronos2MultivariateICLPipeline",
+    "build_icn_draw_bank",
     "normalise_in_context",
+    "normalise_in_context_multivariate",
+    "normalise_in_context_multisite",
 ]
 
 
@@ -76,6 +88,31 @@ class ICLPipeline(Protocol):
         future_met: pd.DataFrame,
         cols: list[str],
         target: str,
+    ) -> np.ndarray: ...
+
+
+@runtime_checkable
+class BatchICLPipeline(ICLPipeline, Protocol):
+    """Batched extension of :class:`ICLPipeline` for GPU/accelerated passes."""
+
+    def forecast_batch(
+        self,
+        items: Sequence[tuple[np.ndarray, pd.DataFrame, pd.DataFrame]],
+        cols: list[str],
+        target: str,
+    ) -> np.ndarray: ...
+
+
+@runtime_checkable
+class MultivariateICLPipeline(Protocol):
+    """Joint multivariate batched extension for shared-frame multi-target ICN."""
+
+    def forecast_multivariate_batch(
+        self,
+        items: Sequence[tuple[np.ndarray, pd.DataFrame, pd.DataFrame]],
+        cols: list[str],
+        targets: Sequence[str],
+        quantiles: Sequence[float] | None = None,
     ) -> np.ndarray: ...
 
 
@@ -157,6 +194,7 @@ class ICNDesign:
     seed: int = 0
     min_context: int | None = None
     support_min_frac: float = 0.5
+    log_transform: bool = False
 
     def __post_init__(self) -> None:
         if self.intervene not in ("future_only", "past_future"):
@@ -175,6 +213,28 @@ class ICNDesign:
             raise ValueError(f"min_context must be positive or None, got {self.min_context}")
         if not 0.0 <= self.support_min_frac <= 1.0:
             raise ValueError(f"support_min_frac must be in [0, 1], got {self.support_min_frac}")
+
+    @classmethod
+    def v1(cls, **overrides: Any) -> ICNDesign:
+        """Frozen ICN-v1 preset (2026-11-16), with optional field overrides."""
+        params: dict[str, Any] = {
+            "intervene": "future_only",
+            "pool": "record_trajectory",
+            "gap_h": 0,
+            "block_h": 336,
+            "stride": 168,
+            "direction": "bidirectional",
+            "context_length": 2048,
+            "aggregate": "trimmed",
+            "lead_tau": 0.0,
+            "n_resamples": 5,
+            "seed": 0,
+            "min_context": None,
+            "support_min_frac": 0.5,
+            "log_transform": False,
+        }
+        params.update(overrides)
+        return cls(**params)
 
 
 # --------------------------------------------------------------------------- #
@@ -196,6 +256,30 @@ class MetPool:
 
     df: pd.DataFrame
     met_cols: list[str]
+
+    @classmethod
+    def from_frame(cls, df: pd.DataFrame, met_cols: Sequence[str] | None = None) -> MetPool:
+        """Construct a :class:`MetPool` from a datetime-indexed or ``date``-column frame."""
+        work = df.copy()
+        if not isinstance(work.index, pd.DatetimeIndex):
+            if "date" in work.columns:
+                work = work.set_index("date")
+            work.index = pd.to_datetime(work.index)
+        work = work.sort_index()
+        if met_cols is None:
+            cols = [c for c in work.columns if pd.api.types.is_numeric_dtype(work[c])]
+        else:
+            cols = list(met_cols)
+            missing = [c for c in cols if c not in work.columns]
+            if missing:
+                raise KeyError(f"pool columns absent from frame: {missing}")
+        return cls(df=work[cols].copy(), met_cols=cols)
+
+    def reversed(self) -> MetPool:
+        """Return a time-reversed copy so reverse-direction trajectories align with context."""
+        rev = self.df.iloc[::-1].copy()
+        rev.index = self.df.index[::-1]
+        return MetPool(df=rev, met_cols=list(self.met_cols))
 
     # -- draws --------------------------------------------------------------- #
     def sample_pointwise(self, length: int, rng: np.random.Generator) -> pd.DataFrame:
@@ -299,6 +383,8 @@ class _DirResult(NamedTuple):
     anchor_values: dict[int, list[float]]
     mc_vars: dict[int, list[float]]
     low_support: list[tuple[int, float]]
+    quantile_draws: dict[float, dict[int, list[tuple[float, int]]]]
+    paired_quantile_draws: dict[float, dict[int, list[tuple[float, int]]]]
 
 
 @dataclass
@@ -310,9 +396,9 @@ class ICNResult:
     level:
         Counterfactual (weather-removed) median, indexed by the frame's time.
     paired:
-        Observed rescaled by ``level_cf / level_factual`` (D11), the ICN-P
-        estimate that keeps the event but re-bases it onto the counterfactual
-        weather.
+        Observed rescaled by ``level_cf / level_factual`` (D11), or additive in
+        ``log1p`` space when ``log_transform=True``, the ICN-P estimate that keeps
+        the event but re-bases it onto the counterfactual weather.
     weather_effect:
         ``observed - level``: the part of the record attributed to weather.
     spread_by_source:
@@ -323,6 +409,14 @@ class ICNResult:
         hole; bidirectional fills it).
     diagnostics:
         Free-form run metadata: design hash, low-support block flags, counts.
+    observed:
+        Optional observed target series aligned with ``level`` / ``paired``.
+    quantiles:
+        Optional DataFrame of aggregated counterfactual level quantiles (``qNNN``),
+        populated when ``quantiles`` are requested.
+    paired_quantiles:
+        Optional DataFrame of aggregated paired counterfactual quantiles (``qNNN``),
+        populated when ``quantiles`` are requested.
     """
 
     level: pd.Series
@@ -331,23 +425,135 @@ class ICNResult:
     spread_by_source: pd.DataFrame
     hour_contrib: pd.Series
     diagnostics: dict[str, Any] = field(default_factory=dict)
+    observed: pd.Series | None = None
+    quantiles: pd.DataFrame | None = None
+    paired_quantiles: pd.DataFrame | None = None
+
+    def to_normet_frame(self, estimate: str = "level") -> pd.DataFrame:
+        """Convert the result onto :func:`normet.normalise`'s ``observed/normalised/qNNN`` schema."""
+        if estimate not in ("level", "paired"):
+            raise ValueError(f"estimate must be 'level' or 'paired', got {estimate!r}")
+        if self.observed is None:
+            raise ValueError("ICNResult has no `observed` series to build a normet frame")
+        series = self.level if estimate == "level" else self.paired
+        out = pd.DataFrame(
+            {
+                "observed": self.observed.to_numpy(),
+                "normalised": series.to_numpy(),
+            },
+            index=pd.Index(self.observed.index, name="date"),
+        )
+        q_src = self.quantiles if estimate == "level" else self.paired_quantiles
+        if q_src is not None:
+            for col in q_src.columns:
+                out[col] = q_src[col].reindex(self.observed.index).to_numpy()
+        return out
+
+
+@dataclass
+class ICNDrawBank:
+    """Cached raw ICN draws decoupled from orientation/aggregation parameters.
+
+    Enables zero-inference sensitivity sweeps across ``direction``, ``aggregate``,
+    ``lead_tau``, and ``schema`` without re-running the foundation model.
+    """
+
+    index: pd.DatetimeIndex
+    observed: np.ndarray
+    target: str
+    design: ICNDesign
+    forward: _DirResult | None
+    reverse: _DirResult | None
+    quantiles: tuple[float, ...] | None = None
+    external_pool: bool = False
+    schema: str = "chronos"
+
+    def aggregate(
+        self,
+        *,
+        direction: str | None = None,
+        aggregate: str | None = None,
+        lead_tau: float | None = None,
+        schema: str | None = None,
+    ) -> ICNResult:
+        """Materialise an :class:`ICNResult` from cached draws under updated aggregation."""
+        dir_eff = direction if direction is not None else self.design.direction
+        agg_eff = aggregate if aggregate is not None else self.design.aggregate
+        tau_eff = float(lead_tau) if lead_tau is not None else self.design.lead_tau
+        schema_eff = schema if schema is not None else self.schema
+        if dir_eff not in ("forward", "reverse", "bidirectional"):
+            raise ValueError(f"direction must be forward|reverse|bidirectional, got {dir_eff!r}")
+        if agg_eff not in ("mean", "median", "trimmed", "quantile_mean"):
+            raise ValueError(f"aggregate must be mean|median|trimmed, got {agg_eff!r}")
+        if schema_eff not in ("chronos", "normet"):
+            raise ValueError(f"schema must be 'chronos' or 'normet', got {schema_eff!r}")
+
+        n = len(self.index)
+        if dir_eff == "forward":
+            if self.forward is None:
+                raise ValueError("ICNDrawBank has no cached 'forward' pass")
+            merged = self.forward
+        elif dir_eff == "reverse":
+            if self.reverse is None:
+                raise ValueError("ICNDrawBank has no cached 'reverse' pass")
+            merged = _mirror_dir_result(self.reverse, n)
+        else:
+            if self.forward is None or self.reverse is None:
+                raise ValueError("ICNDrawBank requires both forward and reverse passes")
+            merged = _merge_dir_results(self.forward, self.reverse, n)
+
+        eff_design = replace(self.design, direction=dir_eff, aggregate=agg_eff, lead_tau=tau_eff)
+        return _assemble_icn_result(
+            index=self.index,
+            observed_arr=self.observed,
+            merged=merged,
+            design=eff_design,
+            req_qs=self.quantiles,
+            ext_pool=self.external_pool,
+            schema=schema_eff,
+        )
 
 
 # --------------------------------------------------------------------------- #
 # Chronos-2 adapter
 # --------------------------------------------------------------------------- #
-class Chronos2ICLPipeline:
-    """Bridge :class:`Chronos2Estimator` to :class:`ICLPipeline`.
+def _uniform_horizon(
+    items: Sequence[tuple[np.ndarray, pd.DataFrame, pd.DataFrame]],
+    name: str,
+) -> int:
+    """Extract and validate a single uniform future horizon across batched items."""
+    horizons = {len(future) for _, _, future in items}
+    if len(horizons) != 1:
+        raise ValueError(f"{name} requires uniform horizons, got {sorted(horizons)}")
+    return int(horizons.pop())
 
-    Wraps a fitted estimator and forwards one ``(history, past, future)`` triple
+
+class Chronos2ICLPipeline:
+    """Bridge :class:`Chronos2Estimator` to :class:`ICLPipeline` / :class:`BatchICLPipeline`.
+
+    Wraps a fitted estimator and forwards ``(history, past, future)`` triples
     through its internal ``_forecast_blocks`` machinery, returning the median
-    quantile. Swapping the future meteorology is the caller's responsibility:
-    pass the observed future for a factual forecast and a :class:`MetPool` draw
-    for a counterfactual one.
+    (or requested quantile) trajectories. Swapping the future meteorology is the
+    caller's responsibility: pass the observed future for a factual forecast and
+    a :class:`MetPool` draw for a counterfactual one.
     """
 
-    def __init__(self, estimator: Any) -> None:
+    def __init__(self, estimator: Any, *, cross_learning: bool = False) -> None:
         self.estimator = estimator
+        self.cross_learning = bool(cross_learning)
+
+    def _run_blocks(
+        self,
+        items: Sequence[tuple[np.ndarray, pd.DataFrame, pd.DataFrame]],
+        cols: list[str],
+        horizon: int,
+    ) -> np.ndarray:
+        prepared = [
+            (np.asarray(hist, dtype=np.float64), past, future[cols]) for hist, past, future in items
+        ]
+        if self.cross_learning:
+            return self.estimator._forecast_blocks(prepared, cols, horizon, cross_learning=True)
+        return self.estimator._forecast_blocks(prepared, cols, horizon)
 
     def forecast(
         self,
@@ -360,12 +566,90 @@ class Chronos2ICLPipeline:
         horizon = len(future_met)
         if horizon == 0:
             return np.empty(0, dtype=np.float64)
-        block = self.estimator._forecast_blocks(
-            [(np.asarray(target_history, dtype=np.float64), past, future_met[cols])],
-            cols,
-            horizon,
-        )
+        block = self._run_blocks([(target_history, past, future_met)], cols, horizon)
         return block[0, self.estimator._q_index(0.5), :].astype(np.float64)
+
+    def forecast_batch(
+        self,
+        items: Sequence[tuple[np.ndarray, pd.DataFrame, pd.DataFrame]],
+        cols: list[str],
+        target: str,
+    ) -> np.ndarray:
+        """Batch-evaluate uniform-horizon ``(history, past, future)`` items, returning ``(n, H)``."""
+        if not items:
+            return np.empty((0, 0), dtype=np.float64)
+        horizon = _uniform_horizon(items, "forecast_batch")
+        if horizon == 0:
+            return np.empty((len(items), 0), dtype=np.float64)
+        blocks = self._run_blocks(items, cols, horizon)
+        return blocks[:, self.estimator._q_index(0.5), :].astype(np.float64)
+
+    def forecast_quantiles_batch(
+        self,
+        items: Sequence[tuple[np.ndarray, pd.DataFrame, pd.DataFrame]],
+        cols: list[str],
+        target: str,
+        quantiles: Sequence[float],
+    ) -> np.ndarray:
+        """Batch-evaluate uniform-horizon items for multiple quantile levels ``(n, Q, H)``."""
+        if not items:
+            return np.empty((0, len(quantiles), 0), dtype=np.float64)
+        horizon = _uniform_horizon(items, "forecast_quantiles_batch")
+        if horizon == 0:
+            return np.empty((len(items), len(quantiles), 0), dtype=np.float64)
+        blocks = self._run_blocks(items, cols, horizon)
+        q_idx = [self.estimator._q_index(float(q)) for q in quantiles]
+        return blocks[:, q_idx, :].astype(np.float64)
+
+
+class Chronos2MultivariateICLPipeline:
+    """Adapter executing joint multivariate Chronos-2 predictions for ICN."""
+
+    def __init__(self, estimator: Any, *, cross_learning: bool = False) -> None:
+        self.estimator = estimator
+        self.cross_learning = bool(cross_learning)
+
+    def forecast_multivariate_batch(
+        self,
+        items: Sequence[tuple[np.ndarray, pd.DataFrame, pd.DataFrame]],
+        cols: list[str],
+        targets: Sequence[str],
+        quantiles: Sequence[float] | None = None,
+    ) -> np.ndarray:
+        n_var = len(targets)
+        if not items:
+            if quantiles is None:
+                return np.empty((0, n_var, 0), dtype=np.float64)
+            return np.empty((0, n_var, len(quantiles), 0), dtype=np.float64)
+        horizon = _uniform_horizon(items, "forecast_multivariate_batch")
+        if horizon == 0:
+            if quantiles is None:
+                return np.empty((len(items), n_var, 0), dtype=np.float64)
+            return np.empty((len(items), n_var, len(quantiles), 0), dtype=np.float64)
+
+        inputs: list[dict[str, Any]] = []
+        for hist, past, future in items:
+            stacked = np.asarray(hist, dtype=np.float32)
+            if stacked.ndim != 2 or stacked.shape[0] != n_var:
+                raise ValueError(f"Expected target_history shape ({n_var}, T), got {stacked.shape}")
+            for row in stacked:
+                self.estimator._check_context(row)
+            inputs.append(self.estimator._make_input(stacked, past, future[cols], cols))
+
+        raw = (
+            self.estimator._predict_raw(inputs, horizon, cross_learning=True)
+            if self.cross_learning
+            else self.estimator._predict_raw(inputs, horizon)
+        )
+        if len(raw) != len(items):
+            raise RuntimeError(f"pipeline returned {len(raw)} forecasts for {len(items)} inputs")
+        blocks = np.stack(raw, axis=0)
+        if blocks.shape[1] != n_var:
+            raise RuntimeError(f"Expected {n_var} variates from pipeline, got {blocks.shape[1]}")
+        if quantiles is None:
+            return blocks[:, :, self.estimator._q_index(0.5), :].astype(np.float64)
+        q_idx = [self.estimator._q_index(float(q)) for q in quantiles]
+        return blocks[:, :, q_idx, :].astype(np.float64)
 
 
 # --------------------------------------------------------------------------- #
@@ -409,6 +693,442 @@ def _aggregate(items: list[tuple[float, int]], mode: str, lead_tau: float) -> fl
     return float(np.sum(wsel * vals[sel]))
 
 
+class _PendingAnchor(NamedTuple):
+    """Prepared anchor awaiting chunked pipeline execution."""
+
+    start: int
+    end: int
+    factual_item: tuple[np.ndarray, pd.DataFrame, pd.DataFrame]
+    cf_items: list[tuple[np.ndarray, pd.DataFrame, pd.DataFrame]]
+
+
+class _PreparedSiteAnchor(NamedTuple):
+    """Per-site anchor keyed for cross-site slot batching in multisite ICN."""
+
+    site: str
+    start: int
+    end: int
+    obs_seg: np.ndarray
+    z_obs_seg: np.ndarray
+    factual_item: tuple[np.ndarray, pd.DataFrame, pd.DataFrame]
+    cf_items: list[tuple[np.ndarray, pd.DataFrame, pd.DataFrame]]
+
+
+def _design_hash(design: ICNDesign) -> str:
+    payload = json.dumps(design.__dict__, sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+
+
+def _empty_dir_result(quantiles: tuple[float, ...] | None) -> _DirResult:
+    qs = quantiles or ()
+    return _DirResult(
+        level_draws={},
+        paired_draws={},
+        anchor_count={},
+        anchor_values={},
+        mc_vars={},
+        low_support=[],
+        quantile_draws={q: {} for q in qs},
+        paired_quantile_draws={q: {} for q in qs},
+    )
+
+
+def _mirror_dir_result(r: _DirResult, n: int) -> _DirResult:
+    """Mirror reversed-frame hour indices back onto the original orientation."""
+    return _DirResult(
+        level_draws={n - 1 - h: v for h, v in r.level_draws.items()},
+        paired_draws={n - 1 - h: v for h, v in r.paired_draws.items()},
+        anchor_count={n - 1 - h: v for h, v in r.anchor_count.items()},
+        anchor_values={n - 1 - h: v for h, v in r.anchor_values.items()},
+        mc_vars={n - 1 - h: v for h, v in r.mc_vars.items()},
+        low_support=[(n - 1 - a, x) for a, x in r.low_support],
+        quantile_draws={
+            q: {n - 1 - h: v for h, v in hmap.items()} for q, hmap in r.quantile_draws.items()
+        },
+        paired_quantile_draws={
+            q: {n - 1 - h: v for h, v in hmap.items()}
+            for q, hmap in r.paired_quantile_draws.items()
+        },
+    )
+
+
+def _merge_dir_results(fwd: _DirResult, revr: _DirResult, n: int) -> _DirResult:
+    """Combine forward and reversed orientation results onto original hour indices."""
+    level_d = {h: list(fwd.level_draws[h]) for h in fwd.level_draws}
+    paired_d = {h: list(fwd.paired_draws[h]) for h in fwd.paired_draws}
+    anchor_v = {h: list(fwd.anchor_values[h]) for h in fwd.anchor_values}
+    mc_v = {h: list(fwd.mc_vars[h]) for h in fwd.mc_vars}
+    low_support = list(fwd.low_support)
+    q_draws = {
+        q: {h: list(vals) for h, vals in hmap.items()} for q, hmap in fwd.quantile_draws.items()
+    }
+    pq_draws = {
+        q: {h: list(vals) for h, vals in hmap.items()}
+        for q, hmap in fwd.paired_quantile_draws.items()
+    }
+    # forward already keyed by original hours; reverse keyed by reversed-frame
+    # hours, so map each reversed key r -> original hour n-1-r.
+    for hr, lvals in revr.level_draws.items():
+        level_d.setdefault(n - 1 - hr, []).extend(lvals)
+    for hr, pvals in revr.paired_draws.items():
+        paired_d.setdefault(n - 1 - hr, []).extend(pvals)
+    for hr, avals in revr.anchor_values.items():
+        anchor_v.setdefault(n - 1 - hr, []).extend(avals)
+    for hr, mvals in revr.mc_vars.items():
+        mc_v.setdefault(n - 1 - hr, []).extend(mvals)
+    for q, hmap in revr.quantile_draws.items():
+        dst = q_draws.setdefault(q, {})
+        for hr, qvals in hmap.items():
+            dst.setdefault(n - 1 - hr, []).extend(qvals)
+    for q, hmap in revr.paired_quantile_draws.items():
+        dst = pq_draws.setdefault(q, {})
+        for hr, pqvals in hmap.items():
+            dst.setdefault(n - 1 - hr, []).extend(pqvals)
+    low_support.extend((n - 1 - a, x) for a, x in revr.low_support)
+    contrib_keys = set(fwd.anchor_count) | {n - 1 - h for h in revr.anchor_count}
+    contrib = {
+        h: fwd.anchor_count.get(h, 0) + revr.anchor_count.get(n - 1 - h, 0) for h in contrib_keys
+    }
+    return _DirResult(
+        level_draws=level_d,
+        paired_draws=paired_d,
+        anchor_count=contrib,
+        anchor_values=anchor_v,
+        mc_vars=mc_v,
+        low_support=low_support,
+        quantile_draws=q_draws,
+        paired_quantile_draws=pq_draws,
+    )
+
+
+def _aggregate_quantile_map(
+    q_map: dict[float, dict[int, list[tuple[float, int]]]],
+    req_qs: tuple[float, ...],
+    n: int,
+    index: pd.DatetimeIndex,
+    aggregate_mode: str,
+    lead_tau: float,
+) -> pd.DataFrame:
+    q_cols_data: dict[str, np.ndarray] = {}
+    for q in req_qs:
+        q_arr = np.full(n, np.nan)
+        qd = q_map.get(q, {})
+        for h in range(n):
+            if h in qd and qd[h]:
+                q_arr[h] = _aggregate(qd[h], aggregate_mode, lead_tau)
+        q_cols_data[_qname(q)] = q_arr
+    return pd.DataFrame(q_cols_data, index=index)
+
+
+def _assemble_icn_result(
+    *,
+    index: pd.DatetimeIndex,
+    observed_arr: np.ndarray,
+    merged: _DirResult,
+    design: ICNDesign,
+    req_qs: tuple[float, ...] | None,
+    ext_pool: bool,
+    schema: str,
+) -> ICNResult:
+    n = len(index)
+    level_vals = np.full(n, np.nan)
+    paired_vals = np.full(n, np.nan)
+    mc_spread = np.full(n, np.nan)
+    contrib_arr = np.zeros(n, dtype=int)
+    for h in range(n):
+        if h in merged.level_draws and merged.level_draws[h]:
+            level_vals[h] = _aggregate(merged.level_draws[h], design.aggregate, design.lead_tau)
+            if h in merged.mc_vars and merged.mc_vars[h]:
+                # within-anchor resample spread, pooled over the anchors that
+                # cover the hour (their resamples are independent draws)
+                mc_spread[h] = float(np.sqrt(np.mean(merged.mc_vars[h])))
+        if h in merged.paired_draws and merged.paired_draws[h]:
+            paired_vals[h] = _aggregate(merged.paired_draws[h], design.aggregate, design.lead_tau)
+        if h in merged.anchor_count:
+            contrib_arr[h] = merged.anchor_count[h]
+
+    q_frame = (
+        _aggregate_quantile_map(
+            merged.quantile_draws, req_qs, n, index, design.aggregate, design.lead_tau
+        )
+        if req_qs is not None
+        else None
+    )
+    pq_frame = (
+        _aggregate_quantile_map(
+            merged.paired_quantile_draws, req_qs, n, index, design.aggregate, design.lead_tau
+        )
+        if req_qs is not None
+        else None
+    )
+
+    anchor_spread = _anchor_spread(merged.anchor_values, n)
+    obs_series = pd.Series(observed_arr, index=index, name="observed")
+    level = pd.Series(level_vals, index=index, name="level")
+    paired = pd.Series(paired_vals, index=index, name="paired")
+    weather_effect = pd.Series(observed_arr - level_vals, index=index, name="weather_effect")
+    spread = pd.DataFrame({"anchor": anchor_spread, "mc": mc_spread}, index=index)
+    hour_contrib = pd.Series(contrib_arr, index=index, name="hour_contrib")
+
+    diagnostics = {
+        "design": dict(design.__dict__),
+        "design_hash": _design_hash(design),
+        "n_anchors": int(np.count_nonzero(contrib_arr)),
+        "uncovered_hours": int(np.count_nonzero(contrib_arr == 0)),
+        "schema": schema,
+        "min_context": design.min_context,
+        "low_support": list(merged.low_support),
+        "external_pool": ext_pool,
+    }
+    result = ICNResult(
+        level=level,
+        paired=paired,
+        weather_effect=weather_effect,
+        spread_by_source=spread,
+        hour_contrib=hour_contrib,
+        diagnostics=diagnostics,
+        observed=obs_series,
+        quantiles=q_frame,
+        paired_quantiles=pq_frame,
+    )
+    if schema == "normet":
+        result.level = result.level.rename("normalised")
+    return result
+
+
+def _validate_quantiles_and_schema(
+    schema: str,
+    quantiles: Sequence[float] | None,
+    pipe: Any,
+    *,
+    multivariate: bool = False,
+) -> tuple[tuple[float, ...] | None, list[float], int]:
+    if schema not in ("chronos", "normet"):
+        raise ValueError(f"schema must be 'chronos' or 'normet', got {schema!r}")
+    req_qs: tuple[float, ...] | None = None
+    ask_qs: list[float] = []
+    i50_ask = 0
+    if quantiles is not None:
+        req_qs = tuple(dict.fromkeys(float(q) for q in quantiles))
+        if not req_qs:
+            raise ValueError("quantiles must not be empty")
+        for q in req_qs:
+            if not (0.0 <= q <= 1.0):
+                raise ValueError(f"Quantile must be in [0, 1]: got {q}")
+        if not multivariate and not hasattr(pipe, "forecast_quantiles_batch"):
+            raise TypeError(
+                f"pipeline {type(pipe).__name__} does not implement "
+                "forecast_quantiles_batch required for `quantiles`"
+            )
+        if 0.5 in req_qs:
+            ask_qs = list(req_qs)
+            i50_ask = ask_qs.index(0.5)
+        else:
+            ask_qs = [*req_qs, 0.5]
+            i50_ask = len(req_qs)
+    return req_qs, ask_qs, i50_ask
+
+
+def _resolve_met_cols(
+    estimator: Any,
+    df: pd.DataFrame,
+    target: str | Sequence[str],
+    met_features: list[str] | None,
+) -> tuple[list[str], list[str]]:
+    cols: list[str] = estimator._resolve_covariates(df, target)  # type: ignore[attr-defined]
+    met_cols = (
+        list(met_features)
+        if met_features is not None
+        else [
+            c
+            for c in cols
+            if c not in ("hour_sin", "hour_cos", "dow_sin", "dow_cos", "doy_sin", "doy_cos")
+            # A categorical covariate (a site or season label Chronos accepts)
+            # is not weather to resample and marginalise; the A2 check and the
+            # pool's marginalisation both assume a numeric column.
+            and pd.api.types.is_numeric_dtype(df[c])
+        ]
+    )
+    return cols, met_cols
+
+
+def _resolve_ext_pool(pool: MetPool | pd.DataFrame | None, met_cols: list[str]) -> MetPool | None:
+    if pool is None:
+        return None
+    if isinstance(pool, pd.DataFrame):
+        return MetPool.from_frame(pool, met_cols)
+    if isinstance(pool, MetPool):
+        missing = [c for c in met_cols if c not in pool.df.columns]
+        if missing:
+            raise KeyError(f"pool columns absent from MetPool: {missing}")
+        if list(pool.met_cols) != list(met_cols):
+            return MetPool(df=pool.df[met_cols].copy(), met_cols=list(met_cols))
+        return pool
+    raise TypeError(f"pool must be a MetPool or DataFrame, got {type(pool).__name__}")
+
+
+def _transform_target_values(arr: np.ndarray, log_transform: bool) -> np.ndarray:
+    if not log_transform:
+        return arr
+    finite = arr[np.isfinite(arr)]
+    if (finite < 0.0).any():
+        raise ValueError("log_transform requires non-negative target values")
+    return np.where(np.isfinite(arr), np.log1p(np.maximum(arr, 0.0)), np.nan)
+
+
+def _anchor_range(n: int, design: ICNDesign) -> range:
+    # With ``min_context`` the first anchor may use a shortened context (a
+    # 6-month record at C=2048 otherwise yields a single anchor, and a 3-month
+    # one none at all); without it the first anchor needs a full
+    # ``context_length`` of history, as before.
+    if design.min_context is None:
+        first = design.context_length
+    else:
+        first = max(1, min(design.min_context, n - 1))
+    return range(first, max(first, n - design.block_h) + 1, design.stride)
+
+
+def _sample_cf_futures(
+    hist: np.ndarray,
+    past: pd.DataFrame,
+    factual_met: pd.DataFrame,
+    future_index: pd.Index,
+    horizon: int,
+    pool: MetPool,
+    met_cols: list[str],
+    cols: list[str],
+    design: ICNDesign,
+    rng: np.random.Generator,
+    low_support: list[tuple[int, float]],
+    anchor_start: int,
+) -> list[tuple[np.ndarray, pd.DataFrame, pd.DataFrame]] | None:
+    """Apply past intervention + A2 gate and sample counterfactual futures."""
+    past_cf = past
+    if design.intervene == "past_future":
+        past_cf = past.copy()
+        if met_cols:
+            pm = pool.sample_trajectory(len(past), rng)
+            past_cf[met_cols] = pm[met_cols].to_numpy()
+
+    if design.support_min_frac > 0 and met_cols:
+        support, _ = pool.support_check(factual_met[met_cols])
+        if support < design.support_min_frac:
+            low_support.append((int(anchor_start), float(support)))
+            return None
+
+    if not met_cols:
+        return []
+
+    cf_future_mets: list[pd.DataFrame] = []
+    for _ in range(design.n_resamples):
+        if design.pool == "record_pointwise":
+            cf_future_mets.append(pool.sample_pointwise(horizon, rng))
+        elif design.pool == "record_trajectory":
+            cf_future_mets.append(pool.sample_trajectory(horizon, rng))
+        else:
+            cf_future_mets.append(pool.sample_climatology(future_index[0], horizon, rng))
+
+    cf_items: list[tuple[np.ndarray, pd.DataFrame, pd.DataFrame]] = []
+    for fm in cf_future_mets:
+        ff = factual_met.copy()
+        ff[met_cols] = fm[met_cols].to_numpy()
+        cf_items.append((hist, past_cf, ff[cols]))
+    return cf_items
+
+
+def _record_anchor_draws(
+    acc: _DirResult,
+    s: int,
+    e: int,
+    obs_seg: np.ndarray,
+    z_obs_seg: np.ndarray,
+    pred_fact: np.ndarray,
+    pred_cf: np.ndarray,
+    preds_q_cf: np.ndarray | None,
+    design: ICNDesign,
+    has_met: bool,
+    quantiles: tuple[float, ...] | None,
+    ask_qs: list[float],
+) -> None:
+    """Project factual/counterfactual anchor outputs onto linear/log level & paired draws."""
+    if design.log_transform:
+        cf_levels = np.maximum(np.expm1(pred_cf), 0.0)
+        if not has_met:
+            paired = np.where(np.isfinite(obs_seg), np.maximum(obs_seg, 0.0), np.nan)
+        else:
+            paired = np.maximum(np.expm1(z_obs_seg + (pred_cf.mean(axis=0) - pred_fact)), 0.0)
+    else:
+        cf_levels = pred_cf
+        if not has_met:
+            paired = obs_seg.copy()
+        else:
+            level_cf_mean = cf_levels.mean(axis=0)
+            # D11 paired ratio, guarded against a near-zero factual level
+            with np.errstate(divide="ignore", invalid="ignore"):
+                ratio = np.where(np.abs(pred_fact) > 1e-6, level_cf_mean / pred_fact, np.nan)
+            paired = obs_seg * ratio
+
+    for offset, h in enumerate(range(s, e)):
+        acc.level_draws.setdefault(h, []).extend((float(v), offset) for v in cf_levels[:, offset])
+        acc.paired_draws.setdefault(h, []).append((float(paired[offset]), offset))
+        acc.anchor_values.setdefault(h, []).append(float(cf_levels[:, offset].mean()))
+        acc.mc_vars.setdefault(h, []).append(float(cf_levels[:, offset].var()))
+
+    if preds_q_cf is not None and quantiles is not None:
+        for q in quantiles:
+            qi = ask_qs.index(q)
+            raw_q = preds_q_cf[:, qi, :]
+            if design.log_transform:
+                cf_q = np.maximum(np.expm1(raw_q), 0.0)
+                p_q = np.maximum(np.expm1(z_obs_seg[None, :] + (raw_q - pred_fact[None, :])), 0.0)
+            else:
+                cf_q = raw_q
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    p_q = np.where(
+                        (pred_fact[None, :] > 1e-6) & (obs_seg[None, :] >= 0.0),
+                        obs_seg[None, :] * (cf_q / pred_fact[None, :]),
+                        np.nan,
+                    )
+            qd = acc.quantile_draws[q]
+            pqd = acc.paired_quantile_draws[q]
+            for offset, h in enumerate(range(s, e)):
+                qd.setdefault(h, []).extend((float(v), offset) for v in cf_q[:, offset])
+                pqd.setdefault(h, []).extend((float(v), offset) for v in p_q[:, offset])
+
+    for h in range(s, e):
+        acc.anchor_count[h] = acc.anchor_count.get(h, 0) + 1
+
+
+def _run_univariate_batch(
+    pipeline: ICLPipeline,
+    flat_items: Sequence[tuple[np.ndarray, pd.DataFrame, pd.DataFrame]],
+    cols: list[str],
+    target: str,
+    quantiles: tuple[float, ...] | None,
+    ask_qs: list[float],
+    i50_ask: int,
+) -> tuple[np.ndarray, np.ndarray | None]:
+    preds_q: np.ndarray | None = None
+    if quantiles is not None:
+        q_pipe: Any = pipeline
+        preds_q = np.asarray(
+            q_pipe.forecast_quantiles_batch(flat_items, cols, target, ask_qs),
+            dtype=float,
+        )
+        preds_med = preds_q[:, i50_ask, :]
+    elif hasattr(pipeline, "forecast_batch"):
+        b_pipe: Any = pipeline
+        preds_med = np.asarray(b_pipe.forecast_batch(flat_items, cols, target), dtype=float)
+    else:
+        preds_med = np.stack(
+            [
+                np.asarray(pipeline.forecast(h_i, p_i, f_i, cols, target), dtype=float)
+                for h_i, p_i, f_i in flat_items
+            ]
+        )
+    return preds_med, preds_q
+
+
 def _one_direction(
     df: pd.DataFrame,
     target: str,
@@ -416,104 +1136,178 @@ def _one_direction(
     pipeline: ICLPipeline,
     met_cols: list[str],
     cols: list[str],
+    external_pool: MetPool | None = None,
+    quantiles: tuple[float, ...] | None = None,
 ) -> _DirResult:
-    """Run ICN in one orientation; return (level_draws, paired_draws, contrib).
-
-    ``level_draws[h]`` collects ``(value, lead)`` for every counterfactual level
-    point that lands on hour ``h`` (across anchors and resamples), where ``lead``
-    is the hour's distance from its anchor's start -- the quantity D4 weights by.
-    ``paired_draws`` is the analogous collection for the paired estimate.
-    ``contrib[h]`` counts anchors covering each hour.
-    """
+    """Run ICN in one orientation; return draws, counts, spreads and flags."""
     n = len(df)
     rng = np.random.default_rng(design.seed)
     target_arr = df[target].to_numpy(dtype=float)
     observed = target_arr.copy()
-    pool = MetPool(df[met_cols], met_cols)
+    work_target = _transform_target_values(target_arr, design.log_transform)
+    pool = external_pool if external_pool is not None else MetPool(df[met_cols], met_cols)
+    acc = _empty_dir_result(quantiles)
+    has_met = bool(met_cols)
 
-    level_draws: dict[int, list[tuple[float, int]]] = {}
-    paired_draws: dict[int, list[tuple[float, int]]] = {}
-    anchor_values: dict[int, list[float]] = {}
-    mc_vars: dict[int, list[float]] = {}
-    contrib: dict[int, int] = {}
-    low_support: list[tuple[int, float]] = []
+    can_batch = quantiles is not None or hasattr(pipeline, "forecast_batch")
+    est_bs = getattr(getattr(pipeline, "estimator", None), "batch_size", None)
+    base_bs = int(est_bs) if est_bs is not None else 32
+    batch_limit = (
+        max(base_bs, 1 + (max(1, design.n_resamples) if has_met else 0)) if can_batch else 1
+    )
 
-    # Where the anchors start.  With ``min_context`` the first anchor may use a
-    # shortened context (a 6-month record at C=2048 otherwise yields a single
-    # anchor, and a 3-month one none at all); without it the first anchor needs
-    # a full ``context_length`` of history, as before.
-    if design.min_context is None:
-        first = design.context_length  # unchanged behaviour: needs a full context
-    else:
-        first = max(1, min(design.min_context, n - 1))
-    anchors = range(first, max(first, n - design.block_h) + 1, design.stride)
-    for a in anchors:
+    _, ask_qs, i50_ask = _validate_quantiles_and_schema("chronos", quantiles, pipeline)
+
+    pending: list[_PendingAnchor] = []
+    pending_items = 0
+    pending_horizon: int | None = None
+
+    def _flush() -> None:
+        nonlocal pending, pending_items, pending_horizon
+        if not pending:
+            return
+        flat_items: list[tuple[np.ndarray, pd.DataFrame, pd.DataFrame]] = []
+        for entry in pending:
+            flat_items.append(entry.factual_item)
+            flat_items.extend(entry.cf_items)
+
+        preds_med, preds_q = _run_univariate_batch(
+            pipeline, flat_items, cols, target, quantiles, ask_qs, i50_ask
+        )
+
+        cursor = 0
+        for entry in pending:
+            s, e = entry.start, entry.end
+            n_cf = len(entry.cf_items)
+            pred_fact = preds_med[cursor]
+            if has_met:
+                pred_cf = preds_med[cursor + 1 : cursor + 1 + n_cf]
+                preds_q_cf = (
+                    preds_q[cursor + 1 : cursor + 1 + n_cf] if preds_q is not None else None
+                )
+            else:
+                pred_cf = np.repeat(pred_fact[None, :], design.n_resamples, axis=0)
+                preds_q_cf = (
+                    np.repeat(preds_q[cursor][None, :, :], design.n_resamples, axis=0)
+                    if preds_q is not None
+                    else None
+                )
+            _record_anchor_draws(
+                acc,
+                s,
+                e,
+                observed[s:e],
+                work_target[s:e],
+                pred_fact,
+                pred_cf,
+                preds_q_cf,
+                design,
+                has_met,
+                quantiles,
+                ask_qs,
+            )
+            cursor += 1 + n_cf
+
+        pending = []
+        pending_items = 0
+        pending_horizon = None
+
+    for a in _anchor_range(n, design):
         s = a
         e = min(a + design.block_h, n)
-        if e - s <= 0:
+        horizon = e - s
+        if horizon <= 0:
             continue
         past_end = max(s - design.gap_h, 0)
-        past = df.iloc[max(0, past_end - design.context_length) : past_end]
-        hist = target_arr[max(0, past_end - design.context_length) : past_end]
+        ctx_start = max(0, past_end - design.context_length)
+        past = df.iloc[ctx_start:past_end]
+        hist = work_target[ctx_start:past_end]
         future_index = df.index[s:e]
         factual_met = df.iloc[s:e]
 
-        # D1: "past_future" intervention also swaps the past meteorology with a
-        # pool trajectory (mirroring deweather's swap_past), keeping the observed
-        # target history. "future_only" keeps the past as observed.
-        past_cf = past
-        if design.intervene == "past_future":
-            past_cf = past.copy()
-            pm = pool.sample_trajectory(len(past), rng)
-            past_cf[met_cols] = pm[met_cols].to_numpy()
-
-        # A2 support: a block whose observed weather lies outside the pool is
-        # an extrapolation of the counterfactual, not an intervention on it.
-        if design.support_min_frac > 0:
-            support, _ = pool.support_check(factual_met[met_cols])
-            if support < design.support_min_frac:
-                low_support.append((int(s), float(support)))
-                continue
-
-        # factual forecast (observed future weather)
-        level_fact = pipeline.forecast(hist, past, factual_met[cols], cols, target)
-
-        # counterfactual: average over pool draws
-        cf_future_mets: list[pd.DataFrame] = []
-        for _ in range(design.n_resamples):
-            if design.pool == "record_pointwise":
-                cf_future_mets.append(pool.sample_pointwise(e - s, rng))
-            elif design.pool == "record_trajectory":
-                cf_future_mets.append(pool.sample_trajectory(e - s, rng))
-            else:
-                cf_future_mets.append(pool.sample_climatology(future_index[0], e - s, rng))
-        # Counterfactual future: resampled weather + the *actual* future calendar
-        # (calendar is not part of the weather pool). Build a full frame per draw so
-        # ``future_met[cols]`` (which includes calendar encoders) resolves.
-        cf_full_futures: list[pd.DataFrame] = []
-        for fm in cf_future_mets:
-            ff = factual_met.copy()
-            ff[met_cols] = fm[met_cols].to_numpy()
-            cf_full_futures.append(ff)
-        cf_levels = np.stack(
-            [pipeline.forecast(hist, past_cf, ff, cols, target) for ff in cf_full_futures]
+        cf_items = _sample_cf_futures(
+            hist,
+            past,
+            factual_met,
+            future_index,
+            horizon,
+            pool,
+            met_cols,
+            cols,
+            design,
+            rng,
+            acc.low_support,
+            s,
         )
-        level_cf_mean = cf_levels.mean(axis=0)
+        if cf_items is None:
+            continue
 
-        # D11 paired ratio, guarded against a near-zero factual level
-        with np.errstate(divide="ignore", invalid="ignore"):
-            ratio = np.where(np.abs(level_fact) > 1e-6, level_cf_mean / level_fact, np.nan)
-        paired = observed[s:e] * ratio
+        entry = _PendingAnchor(
+            start=s,
+            end=e,
+            factual_item=(hist, past, factual_met[cols]),
+            cf_items=cf_items,
+        )
+        entry_items = 1 + len(cf_items)
+        if pending and (pending_horizon != horizon or pending_items + entry_items > batch_limit):
+            _flush()
+        pending.append(entry)
+        pending_items += entry_items
+        pending_horizon = horizon
+        if not can_batch:
+            _flush()
 
-        for offset, h in enumerate(range(s, e)):
-            level_draws.setdefault(h, []).extend((float(v), offset) for v in cf_levels[:, offset])
-            paired_draws.setdefault(h, []).append((float(paired[offset]), offset))
-            anchor_values.setdefault(h, []).append(float(cf_levels[:, offset].mean()))
-            mc_vars.setdefault(h, []).append(float(cf_levels[:, offset].var()))
-        for h in range(s, e):
-            contrib[h] = contrib.get(h, 0) + 1
+    _flush()
+    return acc
 
-    return _DirResult(level_draws, paired_draws, contrib, anchor_values, mc_vars, low_support)
+
+def build_icn_draw_bank(
+    estimator: Any,
+    df: pd.DataFrame,
+    target: str,
+    design: ICNDesign | None = None,
+    pipeline: ICLPipeline | None = None,
+    met_features: list[str] | None = None,
+    schema: str = "chronos",
+    pool: MetPool | pd.DataFrame | None = None,
+    quantiles: Sequence[float] | None = None,
+) -> ICNDrawBank:
+    """Run ICN forward/reverse model passes once and return a reusable :class:`ICNDrawBank`."""
+    design = design or ICNDesign()
+    if hasattr(estimator, "_check_index"):
+        estimator._check_index(df.index)  # type: ignore[attr-defined]
+
+    cols, met_cols = _resolve_met_cols(estimator, df, target, met_features)
+    pipe = pipeline if pipeline is not None else Chronos2ICLPipeline(estimator)
+    req_qs, _, _ = _validate_quantiles_and_schema(schema, quantiles, pipe)
+    ext_pool = _resolve_ext_pool(pool, met_cols)
+
+    fwd_res: _DirResult | None = None
+    rev_res: _DirResult | None = None
+    if design.direction in ("forward", "bidirectional"):
+        fwd_res = _one_direction(
+            df, target, design, pipe, met_cols, cols, external_pool=ext_pool, quantiles=req_qs
+        )
+    if design.direction in ("reverse", "bidirectional"):
+        rev = df.iloc[::-1].copy()
+        rev.index = df.index[::-1]
+        rev_pool = ext_pool.reversed() if ext_pool is not None else None
+        rev_res = _one_direction(
+            rev, target, design, pipe, met_cols, cols, external_pool=rev_pool, quantiles=req_qs
+        )
+
+    obs_arr = df[target].to_numpy(dtype=float)
+    return ICNDrawBank(
+        index=pd.DatetimeIndex(df.index),
+        observed=obs_arr,
+        target=target,
+        design=design,
+        forward=fwd_res,
+        reverse=rev_res,
+        quantiles=req_qs,
+        external_pool=ext_pool is not None,
+        schema=schema,
+    )
 
 
 def normalise_in_context(
@@ -524,6 +1318,8 @@ def normalise_in_context(
     pipeline: ICLPipeline | None = None,
     met_features: list[str] | None = None,
     schema: str = "chronos",
+    pool: MetPool | pd.DataFrame | None = None,
+    quantiles: Sequence[float] | None = None,
 ) -> ICNResult:
     """In-context meteorological normalisation of ``target`` in ``df``.
 
@@ -547,133 +1343,449 @@ def normalise_in_context(
     schema:
         ``"chronos"`` returns the raw :class:`ICNResult`; ``"normet"`` additionally
         exposes ``level`` under the name ``normalised`` for drop-in plotting.
+    pool:
+        Optional external meteorology reservoir (:class:`MetPool` or
+        :class:`~pandas.DataFrame`) supplying counterfactual weather trajectories
+        when ``df`` itself is short or a fixed climatology baseline is desired.
+        Time-reversed automatically for ``reverse`` / ``bidirectional`` passes.
+    quantiles:
+        Optional quantile levels in ``[0, 1]`` to aggregate across counterfactual
+        draws (requires a pipeline exposing ``forecast_quantiles_batch``).
 
     Returns
     -------
     ICNResult
         See its attributes for the level, paired and uncertainty decomposition.
     """
+    return build_icn_draw_bank(
+        estimator,
+        df,
+        target,
+        design=design,
+        pipeline=pipeline,
+        met_features=met_features,
+        schema=schema,
+        pool=pool,
+        quantiles=quantiles,
+    ).aggregate()
+
+
+def _one_direction_multivariate(
+    df: pd.DataFrame,
+    targets: list[str],
+    design: ICNDesign,
+    pipeline: MultivariateICLPipeline,
+    met_cols: list[str],
+    cols: list[str],
+    external_pool: MetPool | None = None,
+    quantiles: tuple[float, ...] | None = None,
+) -> dict[str, _DirResult]:
+    """Run joint multivariate ICN in one orientation sharing counterfactual weather draws."""
+    n = len(df)
+    n_var = len(targets)
+    rng = np.random.default_rng(design.seed)
+    obs_mat = np.stack([df[t].to_numpy(dtype=float) for t in targets], axis=0)  # (V, n)
+    work_mat = np.stack(
+        [_transform_target_values(obs_mat[i], design.log_transform) for i in range(n_var)],
+        axis=0,
+    )
+    pool = external_pool if external_pool is not None else MetPool(df[met_cols], met_cols)
+    accs = {t: _empty_dir_result(quantiles) for t in targets}
+    low_support: list[tuple[int, float]] = []
+    has_met = bool(met_cols)
+
+    est_bs = getattr(getattr(pipeline, "estimator", None), "batch_size", None)
+    base_bs = int(est_bs) if est_bs is not None else 32
+    batch_limit = max(base_bs, 1 + (max(1, design.n_resamples) if has_met else 0))
+
+    _, ask_qs, i50_ask = _validate_quantiles_and_schema(
+        "chronos", quantiles, pipeline, multivariate=True
+    )
+
+    pending: list[_PendingAnchor] = []
+    pending_items = 0
+    pending_horizon: int | None = None
+
+    def _flush() -> None:
+        nonlocal pending, pending_items, pending_horizon
+        if not pending:
+            return
+        flat_items: list[tuple[np.ndarray, pd.DataFrame, pd.DataFrame]] = []
+        for entry in pending:
+            flat_items.append(entry.factual_item)
+            flat_items.extend(entry.cf_items)
+
+        preds_q: np.ndarray | None = None
+        if quantiles is not None:
+            preds_q = np.asarray(
+                pipeline.forecast_multivariate_batch(flat_items, cols, targets, ask_qs),
+                dtype=float,
+            )  # (n, V, Q, H)
+            preds_med = preds_q[:, :, i50_ask, :]  # (n, V, H)
+        else:
+            preds_med = np.asarray(
+                pipeline.forecast_multivariate_batch(flat_items, cols, targets, None),
+                dtype=float,
+            )  # (n, V, H)
+
+        cursor = 0
+        for entry in pending:
+            s, e = entry.start, entry.end
+            n_cf = len(entry.cf_items)
+            for vi, tgt in enumerate(targets):
+                pred_fact = preds_med[cursor, vi]
+                if has_met:
+                    pred_cf = preds_med[cursor + 1 : cursor + 1 + n_cf, vi]
+                    preds_q_cf = (
+                        preds_q[cursor + 1 : cursor + 1 + n_cf, vi] if preds_q is not None else None
+                    )
+                else:
+                    pred_cf = np.repeat(pred_fact[None, :], design.n_resamples, axis=0)
+                    preds_q_cf = (
+                        np.repeat(preds_q[cursor, vi][None, :, :], design.n_resamples, axis=0)
+                        if preds_q is not None
+                        else None
+                    )
+                _record_anchor_draws(
+                    accs[tgt],
+                    s,
+                    e,
+                    obs_mat[vi, s:e],
+                    work_mat[vi, s:e],
+                    pred_fact,
+                    pred_cf,
+                    preds_q_cf,
+                    design,
+                    has_met,
+                    quantiles,
+                    ask_qs,
+                )
+            cursor += 1 + n_cf
+
+        pending = []
+        pending_items = 0
+        pending_horizon = None
+
+    for a in _anchor_range(n, design):
+        s = a
+        e = min(a + design.block_h, n)
+        horizon = e - s
+        if horizon <= 0:
+            continue
+        past_end = max(s - design.gap_h, 0)
+        ctx_start = max(0, past_end - design.context_length)
+        past = df.iloc[ctx_start:past_end]
+        hist = work_mat[:, ctx_start:past_end]
+        future_index = df.index[s:e]
+        factual_met = df.iloc[s:e]
+
+        cf_items = _sample_cf_futures(
+            hist,
+            past,
+            factual_met,
+            future_index,
+            horizon,
+            pool,
+            met_cols,
+            cols,
+            design,
+            rng,
+            low_support,
+            s,
+        )
+        if cf_items is None:
+            continue
+
+        entry = _PendingAnchor(
+            start=s,
+            end=e,
+            factual_item=(hist, past, factual_met[cols]),
+            cf_items=cf_items,
+        )
+        entry_items = 1 + len(cf_items)
+        if pending and (pending_horizon != horizon or pending_items + entry_items > batch_limit):
+            _flush()
+        pending.append(entry)
+        pending_items += entry_items
+        pending_horizon = horizon
+
+    _flush()
+    for tgt in targets:
+        accs[tgt].low_support.extend(low_support)
+    return accs
+
+
+def normalise_in_context_multivariate(
+    estimator: Any,
+    df: pd.DataFrame,
+    targets: Sequence[str],
+    design: ICNDesign | None = None,
+    pipeline: MultivariateICLPipeline | None = None,
+    met_features: list[str] | None = None,
+    schema: str = "chronos",
+    pool: MetPool | pd.DataFrame | None = None,
+    quantiles: Sequence[float] | None = None,
+) -> dict[str, ICNResult]:
+    """Joint multivariate ICN over co-varying pollutants sharing weather draws."""
+    target_list = list(dict.fromkeys(str(t) for t in targets))
+    if not target_list:
+        raise ValueError("targets must contain at least one target column")
+    missing = [t for t in target_list if t not in df.columns]
+    if missing:
+        raise KeyError(f"target columns absent from frame: {missing}")
+
     design = design or ICNDesign()
-    if schema not in ("chronos", "normet"):
-        raise ValueError(f"schema must be 'chronos' or 'normet', got {schema!r}")
     if hasattr(estimator, "_check_index"):
         estimator._check_index(df.index)  # type: ignore[attr-defined]
 
-    cols = estimator._resolve_covariates(df, target)  # type: ignore[attr-defined]
-    met_cols = (
-        list(met_features)
-        if met_features is not None
-        else [
-            c
-            for c in cols
-            if c not in ("hour_sin", "hour_cos", "dow_sin", "dow_cos", "doy_sin", "doy_cos")
-            # A categorical covariate (a site or season label Chronos accepts)
-            # is not weather to resample and marginalise; the A2 check and the
-            # pool's marginalisation both assume a numeric column.
-            and pd.api.types.is_numeric_dtype(df[c])
-        ]
+    cols, met_cols = _resolve_met_cols(estimator, df, target_list, met_features)
+    pipe: MultivariateICLPipeline = (
+        pipeline if pipeline is not None else Chronos2MultivariateICLPipeline(estimator)
     )
-    pipe = pipeline if pipeline is not None else Chronos2ICLPipeline(estimator)
+    if not hasattr(pipe, "forecast_multivariate_batch"):
+        raise TypeError(
+            f"pipeline {type(pipe).__name__} does not implement forecast_multivariate_batch"
+        )
+    req_qs, _, _ = _validate_quantiles_and_schema(schema, quantiles, pipe, multivariate=True)
+    ext_pool = _resolve_ext_pool(pool, met_cols)
 
-    if design.direction == "forward":
-        fwd = _one_direction(df, target, design, pipe, met_cols, cols)
-        level_d = fwd.level_draws
-        paired_d = fwd.paired_draws
-        anchor_v = fwd.anchor_values
-        mc_v = fwd.mc_vars
-        contrib = fwd.anchor_count
-        low_support = list(fwd.low_support)
-    elif design.direction == "reverse":
+    fwd_map: dict[str, _DirResult] | None = None
+    rev_map: dict[str, _DirResult] | None = None
+    if design.direction in ("forward", "bidirectional"):
+        fwd_map = _one_direction_multivariate(
+            df, target_list, design, pipe, met_cols, cols, external_pool=ext_pool, quantiles=req_qs
+        )
+    if design.direction in ("reverse", "bidirectional"):
         rev = df.iloc[::-1].copy()
         rev.index = df.index[::-1]
-        r = _one_direction(rev, target, design, pipe, met_cols, cols)
-        # mirror reversed-frame hour indices back to the original orientation
-        n = len(df)
-        level_d = {n - 1 - h: v for h, v in r.level_draws.items()}
-        paired_d = {n - 1 - h: v for h, v in r.paired_draws.items()}
-        anchor_v = {n - 1 - h: v for h, v in r.anchor_values.items()}
-        mc_v = {n - 1 - h: v for h, v in r.mc_vars.items()}
-        contrib = {n - 1 - h: v for h, v in r.anchor_count.items()}
-        low_support = [(n - 1 - a, x) for a, x in r.low_support]
-    else:  # bidirectional
-        fwd = _one_direction(df, target, design, pipe, met_cols, cols)
-        rev = df.iloc[::-1].copy()
-        rev.index = df.index[::-1]
-        revr = _one_direction(rev, target, design, pipe, met_cols, cols)
-        n = len(df)
-        level_d = {h: list(fwd.level_draws[h]) for h in fwd.level_draws}
-        paired_d = {h: list(fwd.paired_draws[h]) for h in fwd.paired_draws}
-        anchor_v = {h: list(fwd.anchor_values[h]) for h in fwd.anchor_values}
-        mc_v = {h: list(fwd.mc_vars[h]) for h in fwd.mc_vars}
-        low_support = list(fwd.low_support)
-        # forward already keyed by original hours; reverse keyed by reversed-frame
-        # hours, so map each reversed key r -> original hour n-1-r.
-        for hr, lvals in revr.level_draws.items():
-            level_d.setdefault(n - 1 - hr, []).extend(lvals)
-        for hr, pvals in revr.paired_draws.items():
-            paired_d.setdefault(n - 1 - hr, []).extend(pvals)
-        for hr, avals in revr.anchor_values.items():
-            anchor_v.setdefault(n - 1 - hr, []).extend(avals)
-        for hr, mvals in revr.mc_vars.items():
-            mc_v.setdefault(n - 1 - hr, []).extend(mvals)
-        low_support.extend((n - 1 - a, x) for a, x in revr.low_support)
-        contrib_keys = set(fwd.anchor_count) | {n - 1 - h for h in revr.anchor_count}
-        contrib = {
-            h: fwd.anchor_count.get(h, 0) + revr.anchor_count.get(n - 1 - h, 0)
-            for h in contrib_keys
+        rev_pool = ext_pool.reversed() if ext_pool is not None else None
+        rev_map = _one_direction_multivariate(
+            rev, target_list, design, pipe, met_cols, cols, external_pool=rev_pool, quantiles=req_qs
+        )
+
+    idx = pd.DatetimeIndex(df.index)
+    out: dict[str, ICNResult] = {}
+    for tgt in target_list:
+        bank = ICNDrawBank(
+            index=idx,
+            observed=df[tgt].to_numpy(dtype=float),
+            target=tgt,
+            design=design,
+            forward=fwd_map[tgt] if fwd_map is not None else None,
+            reverse=rev_map[tgt] if rev_map is not None else None,
+            quantiles=req_qs,
+            external_pool=ext_pool is not None,
+            schema=schema,
+        )
+        out[tgt] = bank.aggregate()
+    return out
+
+
+def _one_direction_multisite(
+    site_frames: dict[str, pd.DataFrame],
+    target: str,
+    design: ICNDesign,
+    pipeline: ICLPipeline,
+    met_cols: list[str],
+    cols: list[str],
+    external_pool: MetPool | None,
+    quantiles: tuple[float, ...] | None,
+) -> dict[str, _DirResult]:
+    """Execute one orientation across sites, batching co-occurring anchors per slot."""
+    accs = {st: _empty_dir_result(quantiles) for st in site_frames}
+    has_met = bool(met_cols)
+    _, ask_qs, i50_ask = _validate_quantiles_and_schema("chronos", quantiles, pipeline)
+
+    grouped: dict[tuple[pd.Timestamp, int], list[_PreparedSiteAnchor]] = {}
+    for st, df_st in site_frames.items():
+        n = len(df_st)
+        rng = np.random.default_rng(design.seed)
+        obs_arr = df_st[target].to_numpy(dtype=float)
+        work_arr = _transform_target_values(obs_arr, design.log_transform)
+        pool = external_pool if external_pool is not None else MetPool(df_st[met_cols], met_cols)
+        for a in _anchor_range(n, design):
+            s = a
+            e = min(a + design.block_h, n)
+            horizon = e - s
+            if horizon <= 0:
+                continue
+            past_end = max(s - design.gap_h, 0)
+            ctx_start = max(0, past_end - design.context_length)
+            past = df_st.iloc[ctx_start:past_end]
+            hist = work_arr[ctx_start:past_end]
+            future_index = df_st.index[s:e]
+            factual_met = df_st.iloc[s:e]
+            cf_items = _sample_cf_futures(
+                hist,
+                past,
+                factual_met,
+                future_index,
+                horizon,
+                pool,
+                met_cols,
+                cols,
+                design,
+                rng,
+                accs[st].low_support,
+                s,
+            )
+            if cf_items is None:
+                continue
+            slot = (pd.Timestamp(df_st.index[s]), horizon)
+            grouped.setdefault(slot, []).append(
+                _PreparedSiteAnchor(
+                    site=st,
+                    start=s,
+                    end=e,
+                    obs_seg=obs_arr[s:e],
+                    z_obs_seg=work_arr[s:e],
+                    factual_item=(hist, past, factual_met[cols]),
+                    cf_items=cf_items,
+                )
+            )
+
+    for group in grouped.values():
+        fact_items = [g.factual_item for g in group]
+        fact_med, fact_q = _run_univariate_batch(
+            pipeline, fact_items, cols, target, quantiles, ask_qs, i50_ask
+        )
+
+        cf_med_by_k: list[np.ndarray] = []
+        cf_q_by_k: list[np.ndarray] = []
+        if has_met:
+            for k in range(design.n_resamples):
+                k_items = [g.cf_items[k] for g in group]
+                k_med, k_q = _run_univariate_batch(
+                    pipeline, k_items, cols, target, quantiles, ask_qs, i50_ask
+                )
+                cf_med_by_k.append(k_med)
+                if k_q is not None:
+                    cf_q_by_k.append(k_q)
+
+        for gi, g in enumerate(group):
+            pred_fact = fact_med[gi]
+            if has_met:
+                pred_cf = np.stack([m[gi] for m in cf_med_by_k], axis=0)
+                preds_q_cf = (
+                    np.stack([q_arr[gi] for q_arr in cf_q_by_k], axis=0)
+                    if fact_q is not None
+                    else None
+                )
+            else:
+                pred_cf = np.repeat(pred_fact[None, :], design.n_resamples, axis=0)
+                preds_q_cf = (
+                    np.repeat(fact_q[gi][None, :, :], design.n_resamples, axis=0)
+                    if fact_q is not None
+                    else None
+                )
+            _record_anchor_draws(
+                accs[g.site],
+                g.start,
+                g.end,
+                g.obs_seg,
+                g.z_obs_seg,
+                pred_fact,
+                pred_cf,
+                preds_q_cf,
+                design,
+                has_met,
+                quantiles,
+                ask_qs,
+            )
+
+    return accs
+
+
+def normalise_in_context_multisite(
+    estimator: Any,
+    frames: Mapping[str, pd.DataFrame],
+    target: str,
+    design: ICNDesign | None = None,
+    pipeline: ICLPipeline | None = None,
+    met_features: list[str] | None = None,
+    schema: str = "chronos",
+    pool: MetPool | pd.DataFrame | None = None,
+    quantiles: Sequence[float] | None = None,
+    cross_learning: bool = True,
+) -> dict[str, ICNResult]:
+    """Run ICN across a station network, optionally sharing cross-site context per slot."""
+    if not frames:
+        raise ValueError("frames is empty; nothing to normalise")
+    names = [str(k) for k in frames]
+    site_frames = {str(k): v for k, v in frames.items()}
+    design = design or ICNDesign()
+
+    first = site_frames[names[0]]
+    if target not in first.columns:
+        raise KeyError(f"site {names[0]!r} has no column {target!r}")
+    if hasattr(estimator, "_check_index"):
+        estimator._check_index(first.index)  # type: ignore[attr-defined]
+    cols, met_cols = _resolve_met_cols(estimator, first, target, met_features)
+
+    need_cols = list(dict.fromkeys([target, *cols, *met_cols]))
+    for name in names:
+        df_st = site_frames[name]
+        if target not in df_st.columns:
+            raise KeyError(f"site {name!r} has no column {target!r}")
+        if hasattr(estimator, "_check_index"):
+            estimator._check_index(df_st.index)  # type: ignore[attr-defined]
+        missing = [c for c in need_cols if c not in df_st.columns]
+        if missing:
+            raise KeyError(f"site {name!r} is missing columns {missing}")
+
+    if not cross_learning:
+        return {
+            name: normalise_in_context(
+                estimator,
+                site_frames[name],
+                target,
+                design=design,
+                pipeline=pipeline,
+                met_features=met_cols,
+                schema=schema,
+                pool=pool,
+                quantiles=quantiles,
+            )
+            for name in names
         }
 
-    n = len(df)
-    level_vals = np.full(n, np.nan)
-    paired_vals = np.full(n, np.nan)
-    mc_spread = np.full(n, np.nan)
-    contrib_arr = np.zeros(n, dtype=int)
-    for h in range(n):
-        if h in level_d and level_d[h]:
-            level_vals[h] = _aggregate(level_d[h], design.aggregate, design.lead_tau)
-            if h in mc_v and mc_v[h]:
-                # within-anchor resample spread, pooled over the anchors that
-                # cover the hour (their resamples are independent draws)
-                mc_spread[h] = float(np.sqrt(np.mean(mc_v[h])))
-        if h in paired_d and paired_d[h]:
-            paired_vals[h] = _aggregate(paired_d[h], design.aggregate, design.lead_tau)
-        if h in contrib:
-            contrib_arr[h] = contrib[h]
+    pipe = pipeline if pipeline is not None else Chronos2ICLPipeline(estimator, cross_learning=True)
+    req_qs, _, _ = _validate_quantiles_and_schema(schema, quantiles, pipe)
+    ext_pool = _resolve_ext_pool(pool, met_cols)
 
-    # Anchor spread: std across anchors of each anchor's mean counterfactual
-    # level for the hour.  It was the std over every draw of the hour, i.e. the
-    # same quantity as ``mc`` (resample spread) plus the anchor offset, and the
-    # two columns were reported as separate uncertainty sources.
-    anchor_spread = _anchor_spread(anchor_v, n)
+    fwd_map: dict[str, _DirResult] | None = None
+    rev_map: dict[str, _DirResult] | None = None
+    if design.direction in ("forward", "bidirectional"):
+        fwd_map = _one_direction_multisite(
+            site_frames, target, design, pipe, met_cols, cols, ext_pool, req_qs
+        )
+    if design.direction in ("reverse", "bidirectional"):
+        rev_frames: dict[str, pd.DataFrame] = {}
+        for name, df_st in site_frames.items():
+            rev = df_st.iloc[::-1].copy()
+            rev.index = df_st.index[::-1]
+            rev_frames[name] = rev
+        rev_pool = ext_pool.reversed() if ext_pool is not None else None
+        rev_map = _one_direction_multisite(
+            rev_frames, target, design, pipe, met_cols, cols, rev_pool, req_qs
+        )
 
-    index = df.index
-    level = pd.Series(level_vals, index=index, name="level")
-    paired = pd.Series(paired_vals, index=index, name="paired")
-    weather_effect = pd.Series(
-        df[target].to_numpy(dtype=float) - level_vals, index=index, name="weather_effect"
-    )
-    spread = pd.DataFrame({"anchor": anchor_spread, "mc": mc_spread}, index=index)
-    hour_contrib = pd.Series(contrib_arr, index=index, name="hour_contrib")
-
-    diagnostics = {
-        "design": design.__dict__,
-        "n_anchors": int(np.count_nonzero(contrib_arr)),
-        "uncovered_hours": int(np.count_nonzero(contrib_arr == 0)),
-        "schema": schema,
-        "min_context": design.min_context,
-        "low_support": low_support,
-    }
-    result = ICNResult(
-        level=level,
-        paired=paired,
-        weather_effect=weather_effect,
-        spread_by_source=spread,
-        hour_contrib=hour_contrib,
-        diagnostics=diagnostics,
-    )
-    if schema == "normet":
-        result.level = result.level.rename("normalised")
-    return result
+    out: dict[str, ICNResult] = {}
+    for name in names:
+        df_st = site_frames[name]
+        bank = ICNDrawBank(
+            index=pd.DatetimeIndex(df_st.index),
+            observed=df_st[target].to_numpy(dtype=float),
+            target=target,
+            design=design,
+            forward=fwd_map[name] if fwd_map is not None else None,
+            reverse=rev_map[name] if rev_map is not None else None,
+            quantiles=req_qs,
+            external_pool=ext_pool is not None,
+            schema=schema,
+        )
+        out[name] = bank.aggregate()
+    return out
 
 
 def _anchor_spread(anchor_values: dict[int, list[float]], n: int) -> np.ndarray:

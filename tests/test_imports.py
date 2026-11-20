@@ -38,6 +38,18 @@ def test_top_level_symbols_present():
         "detect_trend_breaks",
         "TrendBreaks",
         "normalise_in_context",
+        "normalise_in_context_multivariate",
+        "normalise_in_context_multisite",
+        "ICNDrawBank",
+        "build_icn_draw_bank",
+        "AdaptiveConformalCalibrator",
+        "select_donors_by_embedding",
+        "chronos_scm",
+        "chronos_anomaly_scores",
+        "chronos_attention_attribution",
+        "chronos_pdp",
+        "chronos_impute",
+        "detect_chronos_events",
     }
     missing = must_have - set(nm.__all__)
     assert not missing, f"Missing top-level exports: {sorted(missing)}"

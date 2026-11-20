@@ -24,7 +24,10 @@ from normet.foundation import (
     Chronos2Estimator,
     ICNDesign,
     MetPool,
+    build_icn_draw_bank,
     normalise_in_context,
+    normalise_in_context_multisite,
+    normalise_in_context_multivariate,
 )
 
 
@@ -343,3 +346,385 @@ def test_support_gate_is_recorded() -> None:
     res = normalise_in_context(est, df, "y", design=design, pipeline=FakeICLPipeline())
     assert res.diagnostics["low_support"] == []
     assert res.diagnostics["design"]["support_min_frac"] == 0.5
+
+
+class BatchFakeICLPipeline(FakeICLPipeline):
+    """Torch-free batched pipeline emitting deterministic quantiles around the ridge median."""
+
+    def __init__(self, spread: float = 2.0) -> None:
+        self.spread = float(spread)
+        self.batch_calls = 0
+        self.quantile_calls = 0
+
+    def forecast_batch(
+        self,
+        items: list[tuple[np.ndarray, pd.DataFrame, pd.DataFrame]],
+        cols: list[str],
+        target: str,
+    ) -> np.ndarray:
+        self.batch_calls += 1
+        return np.stack([self.forecast(h, p, f, cols, target) for h, p, f in items])
+
+    def forecast_quantiles_batch(
+        self,
+        items: list[tuple[np.ndarray, pd.DataFrame, pd.DataFrame]],
+        cols: list[str],
+        target: str,
+        quantiles: list[float],
+    ) -> np.ndarray:
+        self.quantile_calls += 1
+        med = np.stack([self.forecast(h, p, f, cols, target) for h, p, f in items])
+        return np.stack([med + self.spread * (float(q) - 0.5) for q in quantiles], axis=1)
+
+
+def test_batched_pipeline_matches_scalar_bit_for_bit() -> None:
+    df = _synthetic()
+    est = _estimator()
+    design = ICNDesign(
+        context_length=1000,
+        block_h=168,
+        stride=84,
+        direction="bidirectional",
+        n_resamples=4,
+        seed=12,
+    )
+    scalar = normalise_in_context(est, df, "y", design=design, pipeline=FakeICLPipeline())
+    bpipe = BatchFakeICLPipeline()
+    batched = normalise_in_context(est, df, "y", design=design, pipeline=bpipe)
+
+    np.testing.assert_allclose(batched.level.to_numpy(), scalar.level.to_numpy(), equal_nan=True)
+    np.testing.assert_allclose(batched.paired.to_numpy(), scalar.paired.to_numpy(), equal_nan=True)
+    np.testing.assert_allclose(
+        batched.spread_by_source.to_numpy(),
+        scalar.spread_by_source.to_numpy(),
+        equal_nan=True,
+    )
+    assert bpipe.batch_calls < batched.diagnostics["n_anchors"]
+
+
+def test_icn_design_v1_preset_and_overrides() -> None:
+    v1 = ICNDesign.v1()
+    assert v1.intervene == "future_only"
+    assert v1.pool == "record_trajectory"
+    assert v1.gap_h == 0
+    assert v1.block_h == 336
+    assert v1.stride == 168
+    assert v1.direction == "bidirectional"
+    assert v1.context_length == 2048
+    assert v1.aggregate == "trimmed"
+    assert v1.n_resamples == 5
+    short = ICNDesign.v1(min_context=336, n_resamples=3)
+    assert short.min_context == 336
+    assert short.n_resamples == 3
+
+
+def test_external_met_pool_reversed_and_support_gate() -> None:
+    df = _synthetic(n=1800)
+    est = _estimator()
+    # Narrow external pool triggers the A2 support gate on extreme factual windows
+    pool_df = df[["w"]].copy()
+    pool_df["w"] = np.clip(pool_df["w"], -0.5, 0.5)
+    pool_with_date = pool_df.reset_index().rename(columns={"index": "date"})
+    pool = MetPool.from_frame(pool_with_date, ["w"])
+
+    rev_pool = pool.reversed()
+    assert list(rev_pool.df.index) == list(pool.df.index[::-1])
+    np.testing.assert_allclose(rev_pool.df["w"].to_numpy(), pool.df["w"].to_numpy()[::-1])
+
+    design = ICNDesign(
+        context_length=800,
+        block_h=96,
+        stride=96,
+        direction="bidirectional",
+        n_resamples=3,
+        support_min_frac=0.95,
+        seed=5,
+    )
+    res = normalise_in_context(
+        est, df, "y", design=design, pipeline=BatchFakeICLPipeline(), pool=pool_with_date
+    )
+    assert res.diagnostics["external_pool"] is True
+    assert len(res.diagnostics["low_support"]) > 0
+
+
+def test_icn_quantiles_and_to_normet_frame() -> None:
+    df = _synthetic()
+    est = _estimator()
+    design = ICNDesign(context_length=1000, block_h=168, stride=168, n_resamples=3, seed=14)
+    bpipe = BatchFakeICLPipeline(spread=4.0)
+    res = normalise_in_context(
+        est,
+        df,
+        "y",
+        design=design,
+        pipeline=bpipe,
+        quantiles=(0.1, 0.5, 0.9),
+    )
+    assert bpipe.quantile_calls > 0
+    assert res.quantiles is not None
+    assert list(res.quantiles.columns) == ["q100", "q500", "q900"]
+    valid = res.quantiles.dropna()
+    assert (valid["q100"] < valid["q500"]).all()
+    assert (valid["q500"] < valid["q900"]).all()
+    np.testing.assert_allclose(valid["q500"].to_numpy(), res.level.loc[valid.index].to_numpy())
+
+    lvl_frame = res.to_normet_frame("level")
+    assert list(lvl_frame.columns) == ["observed", "normalised", "q100", "q500", "q900"]
+    assert lvl_frame.index.name == "date"
+
+    assert res.paired_quantiles is not None
+    assert list(res.paired_quantiles.columns) == ["q100", "q500", "q900"]
+    valid_pq = res.paired_quantiles.dropna()
+    assert (valid_pq["q100"] < valid_pq["q500"]).all()
+    assert (valid_pq["q500"] < valid_pq["q900"]).all()
+
+    paired_frame = res.to_normet_frame("paired")
+    assert list(paired_frame.columns) == ["observed", "normalised", "q100", "q500", "q900"]
+    np.testing.assert_allclose(
+        paired_frame["normalised"].to_numpy(), res.paired.to_numpy(), equal_nan=True
+    )
+
+    # Without quantiles, paired frame keeps concise 2-column schema
+    res_no_q = normalise_in_context(est, df, "y", design=design, pipeline=bpipe)
+    assert res_no_q.paired_quantiles is None
+    assert list(res_no_q.to_normet_frame("paired").columns) == ["observed", "normalised"]
+
+    with pytest.raises(TypeError, match="forecast_quantiles_batch"):
+        normalise_in_context(
+            est, df, "y", design=design, pipeline=FakeICLPipeline(), quantiles=(0.1, 0.5, 0.9)
+        )
+    with pytest.raises(ValueError, match="estimate"):
+        res.to_normet_frame("bogus")
+
+
+def test_log_transform_icn_additive_pairing_and_guards() -> None:
+    df = _synthetic(n=1800, seed=19)
+    # Shift values near zero so linear paired would explode or cross zero, keeping >= 0
+    df["y"] = np.maximum(df["y"] - 8.5, 0.0)
+    est = Chronos2Estimator()
+    est.fit(df[["w"]], df["y"])
+    design = ICNDesign(
+        context_length=600,
+        block_h=96,
+        stride=96,
+        direction="bidirectional",
+        n_resamples=4,
+        log_transform=True,
+        seed=21,
+    )
+    bpipe = BatchFakeICLPipeline(spread=0.4)
+    res = normalise_in_context(
+        est, df, "y", design=design, pipeline=bpipe, quantiles=(0.1, 0.5, 0.9)
+    )
+    assert (res.level.dropna() >= 0.0).all()
+    assert (res.paired.dropna() >= 0.0).all()
+    assert res.quantiles is not None and (res.quantiles.dropna().to_numpy() >= 0.0).all()
+    assert (
+        res.paired_quantiles is not None and (res.paired_quantiles.dropna().to_numpy() >= 0.0).all()
+    )
+
+    bad_df = df.copy()
+    bad_df.iloc[10, bad_df.columns.get_loc("y")] = -2.0
+    with pytest.raises(ValueError, match="non-negative"):
+        normalise_in_context(est, bad_df, "y", design=design, pipeline=bpipe)
+
+
+def test_icn_draw_bank_matches_direct_across_aggregations() -> None:
+    df = _synthetic(n=1800, seed=23)
+    est = Chronos2Estimator()
+    est.fit(df[["w"]], df["y"])
+    design = ICNDesign(
+        context_length=600,
+        block_h=96,
+        stride=48,
+        direction="bidirectional",
+        aggregate="trimmed",
+        lead_tau=0.0,
+        n_resamples=3,
+        seed=9,
+    )
+    bpipe = BatchFakeICLPipeline(spread=2.0)
+    bank = build_icn_draw_bank(
+        est, df, "y", design=design, pipeline=bpipe, quantiles=(0.1, 0.5, 0.9)
+    )
+    calls_after_build = bpipe.quantile_calls
+    assert calls_after_build > 0
+
+    # Zero extra model calls across all re-aggregation modes and orientations
+    for direction, agg, tau in (
+        ("forward", "mean", 0.0),
+        ("reverse", "median", 0.0),
+        ("bidirectional", "trimmed", 24.0),
+    ):
+        from_bank = bank.aggregate(direction=direction, aggregate=agg, lead_tau=tau)
+        assert bpipe.quantile_calls == calls_after_build
+        direct = normalise_in_context(
+            est,
+            df,
+            "y",
+            design=ICNDesign(
+                context_length=600,
+                block_h=96,
+                stride=48,
+                direction=direction,
+                aggregate=agg,
+                lead_tau=tau,
+                n_resamples=3,
+                seed=9,
+            ),
+            pipeline=BatchFakeICLPipeline(spread=2.0),
+            quantiles=(0.1, 0.5, 0.9),
+        )
+        np.testing.assert_allclose(
+            from_bank.level.to_numpy(), direct.level.to_numpy(), equal_nan=True
+        )
+        np.testing.assert_allclose(
+            from_bank.paired.to_numpy(), direct.paired.to_numpy(), equal_nan=True
+        )
+        assert from_bank.paired_quantiles is not None and direct.paired_quantiles is not None
+        np.testing.assert_allclose(
+            from_bank.paired_quantiles.to_numpy(),
+            direct.paired_quantiles.to_numpy(),
+            equal_nan=True,
+        )
+
+    fwd_only = build_icn_draw_bank(
+        est,
+        df,
+        "y",
+        design=ICNDesign(
+            context_length=600, block_h=96, stride=96, direction="forward", n_resamples=2
+        ),
+        pipeline=bpipe,
+    )
+    with pytest.raises(ValueError, match="no cached 'reverse'"):
+        fwd_only.aggregate(direction="reverse")
+
+
+def test_empty_met_cols_fast_path() -> None:
+    df = _synthetic(n=1500, seed=31)
+    est = _estimator()
+    bpipe = BatchFakeICLPipeline()
+    design = ICNDesign(
+        context_length=500, block_h=100, stride=100, direction="forward", n_resamples=5, seed=1
+    )
+    res = normalise_in_context(est, df, "y", design=design, pipeline=bpipe, met_features=[])
+    covered = np.isfinite(res.paired.to_numpy())
+    assert covered.any()
+    np.testing.assert_allclose(
+        res.paired.to_numpy()[covered], df["y"].to_numpy()[covered], atol=1e-12
+    )
+    # 10 anchors * 1 factual item (not 1 + 5) fits cleanly into a single batch
+    assert bpipe.batch_calls == 1
+
+
+def test_normalise_in_context_multivariate() -> None:
+    rng = np.random.default_rng(7)
+    n = 1556
+    idx = pd.date_range("2022-01-01", periods=n, freq="h")
+    w = rng.standard_normal(n)
+    y1 = 30.0 + 4.0 * w + 0.1 * rng.standard_normal(n)
+    y2 = 50.0 - 3.0 * w + 0.1 * rng.standard_normal(n)
+    df = pd.DataFrame({"y1": y1, "y2": y2, "w": w}, index=idx)
+
+    est = Chronos2Estimator()
+    seen_cols: list[list[str]] = []
+
+    class _FakeMultiVarPipe:
+        def forecast_multivariate_batch(
+            self,
+            items: list[tuple[np.ndarray, pd.DataFrame, pd.DataFrame]],
+            cols: list[str],
+            targets: list[str],
+            quantiles: list[float] | None = None,
+        ) -> np.ndarray:
+            seen_cols.append(list(cols))
+            batches: list[np.ndarray] = []
+            for hist, past, fut in items:
+                xp = past[cols].to_numpy(dtype=float)
+                xf = fut[cols].to_numpy(dtype=float)
+                per_var: list[np.ndarray] = []
+                for vi in range(len(targets)):
+                    yp = hist[vi].astype(float)
+                    good = np.isfinite(yp) & np.all(np.isfinite(xp), axis=1)
+                    beta = np.linalg.lstsq(
+                        np.column_stack([np.ones(good.sum()), xp[good]]), yp[good], rcond=None
+                    )[0]
+                    med = beta[0] + xf @ beta[1:]
+                    if quantiles is None:
+                        per_var.append(med)
+                    else:
+                        per_var.append(np.stack([med + 2.0 * (float(q) - 0.5) for q in quantiles]))
+                batches.append(np.stack(per_var, axis=0))
+            return np.stack(batches, axis=0)
+
+    design = ICNDesign(
+        context_length=500, block_h=96, stride=96, direction="bidirectional", n_resamples=3, seed=4
+    )
+    out = normalise_in_context_multivariate(
+        est,
+        df,
+        ["y1", "y2"],
+        design=design,
+        pipeline=_FakeMultiVarPipe(),
+        quantiles=(0.1, 0.5, 0.9),
+    )
+    assert set(out) == {"y1", "y2"}
+    assert all("y1" not in c and "y2" not in c and c == ["w"] for c in seen_cols)
+    for key in ("y1", "y2"):
+        res = out[key]
+        assert np.isfinite(res.level.to_numpy()).all()
+        assert res.quantiles is not None and res.paired_quantiles is not None
+        assert list(res.quantiles.columns) == ["q100", "q500", "q900"]
+
+
+def test_normalise_in_context_multisite_cross_learning_slot_batching() -> None:
+    df_long = _synthetic(n=1800, seed=41)
+    # 1800 - 1224 = 576 = 6 * 96 so SHORT anchors align on exact LONG anchor timestamps
+    df_short = _synthetic(n=1224, seed=42).copy()
+    df_short.index = df_long.index[-1224:]
+    frames = {"LONG": df_long, "SHORT": df_short}
+    est = Chronos2Estimator(met_covariates=["w"])
+
+    recorded_batches: list[list[tuple[np.ndarray, pd.DataFrame, pd.DataFrame]]] = []
+
+    class _RecordingSlotBatchPipe(BatchFakeICLPipeline):
+        def forecast_batch(self, items, cols, target):
+            recorded_batches.append(items)
+            # In slot batching, items within a single batch come from distinct
+            # sites in the same slot (each site's factual future is distinct or matched
+            # separately from counterfactual slots).
+            return np.stack([self.forecast(h, p, f, cols, target) for h, p, f in items])
+
+    design = ICNDesign(
+        context_length=800,
+        min_context=400,
+        block_h=96,
+        stride=96,
+        direction="forward",
+        n_resamples=2,
+        seed=8,
+    )
+    bpipe = _RecordingSlotBatchPipe()
+    res_cl = normalise_in_context_multisite(
+        est, frames, "y", design=design, pipeline=bpipe, cross_learning=True
+    )
+    assert set(res_cl) == {"LONG", "SHORT"}
+    assert np.isfinite(res_cl["LONG"].level.to_numpy()).any()
+    assert np.isfinite(res_cl["SHORT"].level.to_numpy()).any()
+
+    # Co-occurring anchor timestamps have batch size == 2 (one call per slot: 1 factual + 2 cf)
+    assert any(len(b) == 2 for b in recorded_batches)
+    # Within a batch of 2, both entries share the exact same future horizon and belong to
+    # distinct site histories rather than mixing factual + counterfactual for a single site.
+    for batch in recorded_batches:
+        if len(batch) == 2:
+            assert batch[0][1].index[0] != batch[1][1].index[0] or not np.allclose(
+                batch[0][0], batch[1][0], equal_nan=True
+            )
+
+    res_apart = normalise_in_context_multisite(
+        est, frames, "y", design=design, pipeline=FakeICLPipeline(), cross_learning=False
+    )
+    assert set(res_apart) == {"LONG", "SHORT"}
+    assert np.isfinite(res_apart["SHORT"].level.to_numpy()).any()
