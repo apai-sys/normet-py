@@ -7,6 +7,60 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ## [Unreleased]
 
 ### Added
+- **Chronos-2 core primitives and first-principles operators** (`normet.foundation`):
+  - `past_only_covariates` on `Chronos2Estimator` (constructor, `predict`,
+    `predict_quantiles*`, `counterfactual`, `finetune`, `finetune_multisite`)
+    so historical co-pollutants and activity series condition the context
+    without appearing in `future_covariates` (and are masked post-intervention
+    during counterfactual rollouts to prevent leakage).
+  - `counterfactual(..., rollout="quantile")` using Chronos-2's native
+    multi-patch forecast and 9-path quantile unrolling instead of median-only
+    feedback, plus `CounterfactualResult.to_scm_frame()`.
+  - `Chronos2Estimator.save()` / `load()` (pipeline weights or PEFT LoRA
+    adapter + `normet_estimator.json` metadata sidecar) and multi-site domain
+    adaptation via `Chronos2Estimator.finetune_multisite()`.
+  - Batched `BatchICLPipeline` execution in `Chronos2ICLPipeline` and
+    `normalise_in_context()`, `ICNDesign.v1()` frozen preset, external/reversed
+    `MetPool.from_frame()` / `.reversed()` support via `pool=`, aggregated
+    counterfactual `quantiles=` output, and `ICNResult.to_normet_frame()`.
+  - Zero-shot covariate-conditioned Synthetic Control (`nm.chronos_scm` /
+    `Chronos2Estimator.synthetic_control()`) using untreated donors and optional
+    meteorology without pre-period parameter fitting.
+  - Meteorology-conditioned probabilistic anomaly detection
+    (`nm.chronos_anomaly_scores`, `nm.detect_chronos_events` /
+    `Chronos2Estimator.anomaly_scores()`, `.detect_events()`, plus `method="chronos"`
+    in `nm.anomaly_scores` / `nm.detect_events`) scored by PIT and tail
+    surprise, supporting optional static split-conformal calibration and causal
+    `AdaptiveConformalCalibrator` (ACI).
+  - Log-space additive pairing (`ICNDesign(log_transform=True)`), empty-`met_cols`
+    identity fast path, `ICNResult.paired_quantiles`, reusable zero-inference
+    `nm.ICNDrawBank` / `nm.build_icn_draw_bank()`, joint multivariate ICN
+    (`nm.normalise_in_context_multivariate`), and cross-learning multi-site ICN
+    (`nm.normalise_in_context_multisite`).
+  - Patch-level latent trajectory inspection (`ChronosEmbedder.embed_patches()`
+    with exact context-patch special-token trimming, `.patch_regime_shifts()`,
+    `pooling="mean"|"reg"`, and joint `embed_multivariate()`), plus
+    pre-cutoff embedding donor ranking (`nm.select_donors_by_embedding()`).
+  - White-box attention attribution (`nm.chronos_attention_attribution` /
+    `Chronos2Estimator.attention_attribution()`), future-only in-context Partial
+    Dependence (`nm.chronos_pdp` / `Chronos2Estimator.pdp()`, dispatched via
+    `nm.pdp()`), and covariate-conditioned bidirectional gap imputation
+    (`nm.chronos_impute` / `Chronos2Estimator.impute()`).
+  - Single-checkpoint in-process fast path in `nm.do_all_multisite(...,
+    backend="chronos-2")` (supporting `model_config={"method": "icn", ...}` via
+    cross-learning multisite ICN without spawning duplicate worker checkpoints),
+    explicit validated `min_past` / `callbacks` on `finetune()` /
+    `finetune_multisite()`, and GUI helpers (`normet.gui._chronos.deweather`
+    `method="icn"`, `save_estimator`, `load_saved_estimator`).
+  - Full-stack Chronos-2 integration across `nm.run_scm(..., scm_backend="chronos")`,
+    `nm.do_all(..., backend="chronos-2", model_config={"method": "icn", ...})`,
+    `nm.decompose(..., backend="chronos-2", model_config={"method": "icn"}, resample_df=...)`,
+    `normet deweather --log-transform`, `normet scm --backend chronos`, and
+    MCP/agent tool `normet_start_deweather` (`Tools.start_deweather`).
+  - CLI: `normet deweather --method icn --estimate level|paired` exposes ICN-v1,
+    and `normet do-all` / `normet decompose` preserve `resolve_n_samples()`
+    defaults (`8` for `chronos-2`, `300` for AutoML) when `--n-samples` is
+    omitted.
 - **Conda recipe.** `packaging/conda/meta.yaml` packages the 0.3.0 PyPI sdist
   as a `noarch: python` conda package (core dependencies; the CLI/MCP/GUI
   entry points), with local-build, personal-channel and conda-forge steps in

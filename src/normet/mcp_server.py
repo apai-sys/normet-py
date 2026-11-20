@@ -227,6 +227,39 @@ def build_server(tools: Any = None) -> Any:
         )
 
     @tool
+    def normet_start_deweather(
+        target: str,
+        met_vars: list[str],
+        example: str | None = None,
+        data: str | None = None,
+        method: str = "icn",
+        estimate: str = "level",
+        n_samples: int | None = None,
+        context_length: int | None = None,
+        prediction_length: int | None = None,
+        log_transform: bool = False,
+        seed: int | None = None,
+        label: str = "",
+    ) -> str:
+        """Start a zero-shot Chronos-2 de-weathering job (default future-only 'icn'
+        or legacy 'deweather') conditioning on `met_vars`. Writes normalised.csv;
+        poll normet_job_status."""
+        return t.start_deweather(
+            target,
+            met_vars,
+            data=data,
+            example=example,
+            method=method,
+            estimate=estimate,
+            n_samples=n_samples,
+            context_length=context_length,
+            prediction_length=prediction_length,
+            log_transform=log_transform,
+            seed=seed,
+            label=label,
+        )
+
+    @tool
     def normet_start_scm(
         treated: str,
         cutoff: str,
@@ -243,9 +276,9 @@ def build_server(tools: Any = None) -> Any:
         (`donors`, every other unit by default) in a panel (one row per unit and date:
         date_col 'date', unit_col 'ID', outcome_col 'value' by default; the scm example
         uses unit_col='code', outcome_col='NO2_dw'), and its effect after `cutoff`
-        (YYYY-MM-DD). backend: 'scm', 'mlscm', 'abadie', 'did', 'mcnnm'. Writes
-        scm.csv; poll normet_job_status, which reads the pre-period fit and the
-        effect."""
+        (YYYY-MM-DD). backend: 'scm', 'mlscm', 'abadie', 'did', 'mcnnm', 'robust',
+        'chronos'. Writes scm.csv; poll normet_job_status, which reads the pre-period
+        fit and the effect."""
         return t.start_scm(
             treated,
             cutoff,

@@ -58,6 +58,7 @@ FIGURES: dict[str, str] = {
 _OUTPUTS = {
     "do_all": "normalised.csv",
     "decompose": "decomposition.csv",
+    "deweather": "normalised.csv",
     "scm": "scm.csv",
     "cv": "cv.csv",
 }
@@ -311,6 +312,43 @@ class Tools:
         argv += ["--out", _OUTPUTS["decompose"]]
         return self._start("decompose", argv, label)
 
+    def start_deweather(
+        self,
+        target: str,
+        met_vars: list[str],
+        data: str | None = None,
+        example: str | None = None,
+        method: str = "icn",
+        estimate: str = "level",
+        n_samples: int | None = None,
+        context_length: int | None = None,
+        prediction_length: int | None = None,
+        log_transform: bool = False,
+        seed: int | None = None,
+        label: str = "",
+    ) -> str:
+        """Zero-shot Chronos-2 normalisation / ICN-v1 (``normet deweather``)."""
+        if not met_vars:
+            raise ValueError("give the meteorological covariates (met_vars) to condition on")
+        if method not in ("deweather", "icn"):
+            raise ValueError(f"method must be 'deweather' or 'icn', got {method!r}")
+        if estimate not in ("level", "paired"):
+            raise ValueError(f"estimate must be 'level' or 'paired', got {estimate!r}")
+        argv = ["deweather", self._source(data, example)] + self._options(
+            target=target,
+            met_vars=met_vars,
+            method=method,
+            estimate=estimate,
+            n_samples=n_samples,
+            context_length=context_length,
+            prediction_length=prediction_length,
+            seed=seed,
+        )
+        if log_transform:
+            argv.append("--log-transform")
+        argv += ["--out", _OUTPUTS["deweather"]]
+        return self._start("deweather", argv, label)
+
     def start_scm(
         self,
         treated: str,
@@ -442,7 +480,7 @@ class Tools:
         """A result table read as its *kind* says: ``normalised``/``do_all``,
         ``decomposition``/``decompose``, ``scm`` (with *cutoff*) or ``cv``."""
         df = self._table(self.path(path))
-        if kind in ("normalised", "do_all"):
+        if kind in ("normalised", "do_all", "deweather"):
             return readings.normalised_reading(df)
         if kind in ("decomposition", "decompose"):
             return readings.decomposition_reading(df)

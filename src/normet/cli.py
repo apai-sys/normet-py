@@ -186,7 +186,7 @@ def _build_cli() -> Any:
             covariates=_split_csv(cfg.get("covariates")),
             variables_resample=_split_csv(cfg.get("resample_vars")),
             backend=cfg.get("backend") or "flaml",
-            n_samples=cfg.get("n_samples") or 300,
+            n_samples=int(cfg["n_samples"]) if cfg.get("n_samples") is not None else None,
             split_method=cfg.get("split_method") or "random",
             train_fraction=_cfg_float(cfg, "train_fraction", 0.75),
             seed=_cfg_int(cfg, "seed", 7_654_321),
@@ -231,7 +231,7 @@ def _build_cli() -> Any:
             target=cfg["target"],
             covariates=_split_csv(cfg.get("covariates")),
             backend=cfg.get("backend") or "flaml",
-            n_samples=cfg.get("n_samples") or 300,
+            n_samples=int(cfg["n_samples"]) if cfg.get("n_samples") is not None else None,
             seed=_cfg_int(cfg, "seed", 7_654_321),
             verbose=True,
         )
@@ -267,6 +267,25 @@ def _build_cli() -> Any:
     )
     @click.option("--context-length", "context_length", type=int, default=None)
     @click.option("--prediction-length", "prediction_length", type=int, default=None)
+    @click.option(
+        "--method",
+        type=click.Choice(["deweather", "icn"]),
+        default=None,
+        help="Normalisation mode: legacy past+future 'deweather' (default) or future-only 'icn'.",
+    )
+    @click.option(
+        "--estimate",
+        type=click.Choice(["level", "paired"]),
+        default=None,
+        help="For --method icn: output counterfactual 'level' (default) or event-preserving 'paired'.",
+    )
+    @click.option(
+        "--log-transform",
+        "log_transform",
+        is_flag=True,
+        default=False,
+        help="Run --method icn in log1p space (additive pairing, non-negative).",
+    )
     @click.option("--seed", type=int, default=None)
     @click.option("--out", "out_path", type=click.Path(path_type=Path), required=True)
     @click.option("--config", "config_path", type=click.Path(exists=True, path_type=Path))
@@ -275,15 +294,30 @@ def _build_cli() -> Any:
 
         Nothing is trained: the checkpoint conditions on the meteorology through
         its covariate channel and the weather is marginalised out by resampling,
-        as in ``normalise``. Needs the ``foundation`` extra.
+        as in ``normalise`` (or via future-only ``--method icn``). Needs the
+        ``foundation`` extra.
         """
         import numpy as np
 
-        from .foundation import Chronos2Estimator, to_regular_index
+        from .foundation import (
+            Chronos2Estimator,
+            ICNDesign,
+            add_calendar_covariates,
+            to_regular_index,
+        )
 
         cfg = _merge_cli_over_yaml(_load_yaml(opts.pop("config_path", None)), opts)
         df = _load_table(input)
 
+        method = cfg.get("method") or "deweather"
+        estimate = cfg.get("estimate") or "level"
+        log_transform = bool(cfg.get("log_transform"))
+        if method not in ("deweather", "icn"):
+            raise click.BadParameter(f"method must be 'deweather' or 'icn', got {method!r}")
+        if estimate not in ("level", "paired"):
+            raise click.BadParameter(f"estimate must be 'level' or 'paired', got {estimate!r}")
+        if log_transform and method != "icn":
+            raise click.BadParameter("--log-transform requires --method icn")
         target = cfg["target"]
         met = _split_csv(cfg.get("met_vars"))
         if not met:
@@ -355,28 +389,60 @@ def _build_cli() -> Any:
                 err=True,
             )
 
-        out = est.deweather(
-            df,
-            target,
-            met_features=met,
-            n_samples=cfg.get("n_samples") or 8,
-            quantiles=quantiles,
-            random_state=seed,
-            schema="normet",
-        )
-        out.index.name = "date"
-        # The leading context_length rows are seeded with the observed values --
-        # Chronos-2 has no history to condition on until then, so the two series
-        # coincide there by construction rather than by result.
-        seeded = min(est.context_length, len(out))
-        click.echo(
-            f"[deweather] first {seeded:,} of {len(out):,} rows are seeded with the observed "
-            f"values ({100.0 * seeded / len(out):.0f}%); the normalisation starts after them"
-        )
-        tail = out.iloc[seeded:]
-        if len(tail):
-            delta = float(np.mean(tail["normalised"] - tail["observed"]))
-            click.echo(f"[deweather] mean(normalised - observed) over the rest = {delta:+.3f}")
+        if method == "icn":
+            df_icn = add_calendar_covariates(df)
+            design_overrides: dict[str, Any] = {
+                "context_length": est.context_length,
+                "seed": seed,
+            }
+            if cfg.get("n_samples") is not None:
+                design_overrides["n_resamples"] = int(cfg["n_samples"])
+            if cfg.get("prediction_length") is not None:
+                bh = int(cfg["prediction_length"])
+                design_overrides["block_h"] = bh
+                design_overrides["stride"] = max(1, bh // 2)
+            if log_transform:
+                design_overrides["log_transform"] = True
+            design = ICNDesign.v1(**design_overrides)
+            icn_res = est.normalise_in_context(
+                df_icn,
+                target,
+                design=design,
+                met_features=met,
+                quantiles=quantiles,
+            )
+            out = icn_res.to_normet_frame(estimate=estimate)
+            uncovered = int(icn_res.diagnostics["uncovered_hours"])
+            click.echo(
+                f"[deweather] ICN-v1 ({estimate}): {len(out):,} rows, {uncovered:,} uncovered hours"
+            )
+            tail = out.dropna(subset=["normalised", "observed"])
+            if len(tail):
+                delta = float(np.mean(tail["normalised"] - tail["observed"]))
+                click.echo(f"[deweather] mean(normalised - observed) = {delta:+.3f}")
+        else:
+            out = est.deweather(
+                df,
+                target,
+                met_features=met,
+                n_samples=cfg.get("n_samples") or 8,
+                quantiles=quantiles,
+                random_state=seed,
+                schema="normet",
+            )
+            out.index.name = "date"
+            # The leading context_length rows are seeded with the observed values --
+            # Chronos-2 has no history to condition on until then, so the two series
+            # coincide there by construction rather than by result.
+            seeded = min(est.context_length, len(out))
+            click.echo(
+                f"[deweather] first {seeded:,} of {len(out):,} rows are seeded with the observed "
+                f"values ({100.0 * seeded / len(out):.0f}%); the normalisation starts after them"
+            )
+            tail = out.iloc[seeded:]
+            if len(tail):
+                delta = float(np.mean(tail["normalised"] - tail["observed"]))
+                click.echo(f"[deweather] mean(normalised - observed) over the rest = {delta:+.3f}")
         _save_table(out.reset_index(), Path(cfg["out_path"]))
         click.echo(f"[deweather] wrote {cfg['out_path']}")
 
@@ -392,7 +458,7 @@ def _build_cli() -> Any:
     @click.option(
         "--backend",
         "scm_backend",
-        type=click.Choice(["scm", "mlscm", "abadie", "did", "mcnnm"]),
+        type=click.Choice(["scm", "mlscm", "abadie", "did", "mcnnm", "robust", "chronos"]),
         default=None,
     )
     @click.option("--out", "out_path", type=click.Path(path_type=Path), required=True)

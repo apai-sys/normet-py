@@ -220,11 +220,41 @@ def test_scm_job_through_the_tools(tools, scm_panel, tmp_path):
         tools.figure(out, "other")
 
 
-def test_start_tools_check_their_arguments(tools):
+def test_start_tools_check_their_arguments(tools, tmp_path):
     with pytest.raises(ValueError, match="covariates"):
         tools.start_do_all("NO2", [], example="my1")
     with pytest.raises(ValueError, match="method"):
         tools.start_decompose("NO2", ["ws"], method="other", example="my1")
+    with pytest.raises(ValueError, match="met_vars"):
+        tools.start_deweather("NO2", [], example="my1")
+    with pytest.raises(ValueError, match="method"):
+        tools.start_deweather("NO2", ["ws"], example="my1", method="bogus")
+    with pytest.raises(ValueError, match="estimate"):
+        tools.start_deweather("NO2", ["ws"], example="my1", estimate="bogus")
+
+    # Command assembly for start_deweather without actually running chronos-2 in CI
+    tools.store.submit = lambda kind, argv, label="": {
+        "id": "job-dw",
+        "state": "queued",
+        "command": command_line(argv),
+    }
+    msg = tools.start_deweather(
+        "NO2",
+        ["ws", "temp"],
+        example="my1",
+        method="icn",
+        estimate="paired",
+        log_transform=True,
+        n_samples=3,
+    )
+    assert "job-dw" in msg and "deweather" in msg
+    assert "--method icn" in msg and "--estimate paired" in msg
+    assert "--log-transform" in msg and "--out normalised.csv" in msg
+
+    df = _normalised(24 * 40).reset_index(names="date")
+    dw_csv = tmp_path / "dw.csv"
+    df.to_csv(dw_csv, index=False)
+    assert "Means by month" in tools.read_result(str(dw_csv), "deweather")
 
 
 def test_a_run_read_drawn_and_reported(tools, synthetic_aq, tmp_path):
@@ -269,6 +299,7 @@ def test_mcp_server_lists_and_calls_tools(tools):
     assert {
         "normet_inspect_data",
         "normet_start_do_all",
+        "normet_start_deweather",
         "normet_job_status",
         "normet_figure",
     } <= names
