@@ -1,5 +1,4 @@
 .DS_Store
-.claude/
 
 # Notebook data artifacts (large CSV/netCDF inputs)
 # Keep notebooks themselves in VCS, but not the bulky data they read/write.
