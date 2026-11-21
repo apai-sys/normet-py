@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import warnings
+from collections.abc import Sequence
 
 import numpy as np
 import pandas as pd
@@ -22,6 +23,7 @@ __all__ = [
     "split_into_sets",
     "log1p_target",
     "expm1_columns",
+    "compute_duan_smearing",
 ]
 
 
@@ -33,16 +35,21 @@ def prepare_data(
     split_method: str = "random",
     train_fraction: float = 0.75,
     seed: int = 7_654_321,
+    *,
+    impute: str = "train_median",
+    max_gap: int | None = 6,
+    embargo: int = 0,
+    circular_cols: Sequence[str] | None = None,
 ) -> pd.DataFrame:
     """
     Clean, validate, and split the input DataFrame in a single pipeline.
 
     Steps:
       1) Ensure a datetime column named ``date`` is present.
-      2) Validate target and covariates.
-      3) Impute/drop missing values.
-      4) Add derived date variables (unix, julian day, weekday, hour).
-      5) Split into training/testing sets.
+      2) Validate target and covariates (and drop NA targets before splitting when ``dropna=True``).
+      3) Add derived date variables (unix, julian day, weekday, hour).
+      4) Split into training/testing sets (with optional ``embargo`` around test blocks).
+      5) Impute missing predictor values using training-set statistics only (no test leakage).
 
     Parameters
     ----------
@@ -56,18 +63,25 @@ def prepare_data(
         are added automatically by this pipeline -- don't list them here;
         see :func:`add_date_variables`.
     dropna : bool, default True
-        If True, drop rows where the target is NA. Also imputes other NAs.
-    split_method : {"random","ts","month_ts","season_ts"}, default "random"
-        Train/test split method. See :func:`split_into_sets` for the exact
-        mechanics -- in particular, "month_ts"/"season_ts" hold out a
-        contiguous block at a randomised (seeded) position within every
-        period, rather than always the trailing slice; read that
-        docstring's note for why that matters and its remaining caveats
-        before choosing them over "random".
+        If True, drop rows where the target is NA before splitting.
+    split_method : {"random","ts","month_ts","season_ts","blocked"}, default "random"
+        Train/test split method. See :func:`split_into_sets`.
     train_fraction : float, default 0.75
         Training fraction for data splitting.
     seed : int, default 7654321
         Random seed for reproducibility.
+    impute : {"train_median","median","time_interp","none"}, default "train_median"
+        Missing-value handling applied *after* splitting so test rows never leak into
+        training medians/modes.
+    max_gap : int or None, default 6
+        Maximum consecutive missing steps filled by linear temporal interpolation
+        when ``impute="time_interp"``. Larger gaps fall back to training medians.
+    embargo : int, default 0
+        Number of adjacent training rows marked ``"embargo"`` around each contiguous
+        testing block (useful for autocorrelated hourly series).
+    circular_cols : sequence of str, optional
+        Angular degree columns (e.g. ``("wd",)``) interpolated via ``sin``/``cos``
+        when ``impute="time_interp"``.
 
     Returns
     -------
@@ -77,17 +91,34 @@ def prepare_data(
           - ``value`` column (target, renamed internally)
           - covariates
           - derived date features
-          - ``set`` column indicating "training"/"testing".
+          - ``set`` column indicating "training"/"testing" (and "embargo" if ``embargo > 0``).
     """
     log.debug(
         "Preparing data with split_method=%s, train_fraction=%.3f", split_method, train_fraction
     )
+    df_out = df.pipe(process_date).pipe(check_data, covariates=covariates, target=target)
+    if dropna and "value" in df_out.columns:
+        before = len(df_out)
+        df_out = df_out.dropna(subset=["value"]).reset_index(drop=True)
+        dropped = before - len(df_out)
+        if dropped:
+            log.info("Dropped %d rows with NA in target.", dropped)
     df_out = (
-        df.pipe(process_date)
-        .pipe(check_data, covariates=covariates, target=target)
-        .pipe(impute_values, dropna=dropna)
-        .pipe(add_date_variables)
-        .pipe(split_into_sets, split_method=split_method, train_fraction=train_fraction, seed=seed)
+        df_out.pipe(add_date_variables)
+        .pipe(
+            split_into_sets,
+            split_method=split_method,
+            train_fraction=train_fraction,
+            seed=seed,
+            embargo=embargo,
+        )
+        .pipe(
+            impute_values,
+            dropna=False,
+            strategy=impute,
+            max_gap=max_gap,
+            circular_cols=circular_cols,
+        )
         .reset_index(drop=True)
     )
     log.info("Prepared data: %d rows, %d columns", len(df_out), df_out.shape[1])
@@ -234,46 +265,145 @@ def check_data(df: pd.DataFrame, covariates: list[str], target: str) -> pd.DataF
     return df_sel
 
 
-def impute_values(df: pd.DataFrame, dropna: bool) -> pd.DataFrame:
+def _fill_numeric_median(out: pd.DataFrame, col: str, ref_mask: np.ndarray) -> None:
+    """Fill remaining NA in numeric *col* using median fit on *ref_mask* rows."""
+    ref_vals = pd.to_numeric(out.loc[ref_mask, col], errors="coerce").to_numpy(dtype=float)
+    finite_ref = ref_vals[np.isfinite(ref_vals)]
+    if finite_ref.size > 0:
+        median = float(np.median(finite_ref))
+    else:
+        all_vals = pd.to_numeric(out[col], errors="coerce").to_numpy(dtype=float)
+        finite_all = all_vals[np.isfinite(all_vals)]
+        if finite_all.size == 0:
+            return
+        median = float(np.median(finite_all))
+    try:
+        out[col] = out[col].fillna(median)
+    except (TypeError, ValueError):
+        # A nullable Int64 column accepts only a whole-number fill;
+        # a 1.5 median raises "Invalid value '1.5' for dtype
+        # 'Int64'" (whether it did depended on the data). The column
+        # has to become float to carry the median.
+        out[col] = out[col].astype(float).fillna(median)
+
+
+def impute_values(
+    df: pd.DataFrame,
+    dropna: bool = True,
+    *,
+    strategy: str = "median",
+    max_gap: int | None = 6,
+    circular_cols: Sequence[str] | None = None,
+) -> pd.DataFrame:
     """
     Impute or drop missing values in predictors and target.
+
+    When a ``"set"`` column carrying ``"training"`` rows is present, summary
+    statistics (medians/modes) are estimated strictly from the training rows so
+    held-out test distributions never leak into training.
 
     Parameters
     ----------
     df : pandas.DataFrame
         Input dataset with target and features.
-    dropna : bool
+    dropna : bool, default True
         If True, drop rows with NA in target ``value``.
+    strategy : {"median", "train_median", "time_interp", "none"}, default "median"
+        - ``"median"`` / ``"train_median"``: fill numeric NAs with (training-set)
+          median and categorical NAs with (training-set) mode.
+        - ``"time_interp"``: temporally interpolate numeric predictors over short
+          gaps up to ``max_gap`` rows (using ``sin``/``cos`` interpolation for
+          ``circular_cols``), then fill any remaining gaps with training medians.
+        - ``"none"``: only drop NA targets (if ``dropna=True``); leave predictor
+          NAs intact for tree backends with native missing-value routing.
+    max_gap : int or None, default 6
+        Maximum consecutive missing steps filled by linear interpolation when
+        ``strategy="time_interp"``. ``None`` places no gap limit.
+    circular_cols : sequence of str, optional
+        Degree columns (e.g. wind direction ``"wd"``) to interpolate on the circle
+        via ``sin``/``cos`` when ``strategy="time_interp"``.
 
     Returns
     -------
     pandas.DataFrame
         Cleaned DataFrame with missing values handled.
     """
+    valid_strategies = {"median", "train_median", "time_interp", "none"}
+    if strategy not in valid_strategies:
+        raise ValueError(
+            f"Unknown `impute` strategy {strategy!r}; expected one of {sorted(valid_strategies)}."
+        )
+    if max_gap is not None and int(max_gap) < 0:
+        raise ValueError(f"`max_gap` must be non-negative or None, got {max_gap!r}.")
+
     out = df.copy()
 
-    if dropna:
+    if dropna and "value" in out.columns:
         before = len(out)
         out = out.dropna(subset=["value"]).reset_index(drop=True)
         dropped = before - len(out)
         if dropped:
             log.info("Dropped %d rows with NA in target.", dropped)
 
+    if strategy == "none" or out.empty:
+        return out
+
+    has_train = "set" in out.columns and bool((out["set"] == "training").any())
+    ref_mask = (out["set"] == "training").to_numpy() if has_train else np.ones(len(out), dtype=bool)
+    exclude_interp = {"value", "date_unix", "day_julian", "hour"}
+    circular_set = set(circular_cols or ())
+
+    if strategy == "time_interp":
+        order_idx = (
+            out["date"].sort_values(kind="stable").index if "date" in out.columns else out.index
+        )
+        limit_val = int(max_gap) if max_gap is not None else None
+        for col in out.select_dtypes(include=[np.number]).columns:
+            if not out[col].isna().any() or col in exclude_interp:
+                continue
+            if limit_val is None or limit_val > 0:
+                s_sorted = out.loc[order_idx, col].astype(float)
+                na_sorted = s_sorted.isna().to_numpy()
+                if col in circular_set:
+                    rad = np.deg2rad(s_sorted.to_numpy(dtype=float))
+                    sin_s = pd.Series(np.sin(rad), index=order_idx).interpolate(
+                        method="linear", limit=limit_val, limit_direction="both"
+                    )
+                    cos_s = pd.Series(np.cos(rad), index=order_idx).interpolate(
+                        method="linear", limit=limit_val, limit_direction="both"
+                    )
+                    sin_v = sin_s.to_numpy(dtype=float)
+                    cos_v = cos_s.to_numpy(dtype=float)
+                    ok = (
+                        na_sorted
+                        & np.isfinite(sin_v)
+                        & np.isfinite(cos_v)
+                        & (np.hypot(sin_v, cos_v) > 1e-12)
+                    )
+                    filled = s_sorted.to_numpy(dtype=float).copy()
+                    filled[ok] = np.rad2deg(np.arctan2(sin_v[ok], cos_v[ok])) % 360.0
+                    out.loc[order_idx, col] = filled
+                else:
+                    interp_s = s_sorted.interpolate(
+                        method="linear", limit=limit_val, limit_direction="both"
+                    )
+                    try:
+                        out.loc[order_idx, col] = interp_s.to_numpy()
+                    except (TypeError, ValueError):
+                        out[col] = out[col].astype(float)
+                        out.loc[order_idx, col] = interp_s.to_numpy(dtype=float)
+
     for col in out.select_dtypes(include=[np.number]).columns:
         if out[col].isna().any():
-            median = out[col].median()
-            try:
-                out[col] = out[col].fillna(median)
-            except (TypeError, ValueError):
-                # A nullable Int64 column accepts only a whole-number fill;
-                # a 1.5 median raises "Invalid value '1.5' for dtype
-                # 'Int64'" (whether it did depended on the data). The column
-                # has to become float to carry the median.
-                out[col] = out[col].astype(float).fillna(median)
+            _fill_numeric_median(out, col, ref_mask)
 
     for col in out.select_dtypes(include=["object", "category"]).columns:
+        if col in {"date", "set"}:
+            continue
         if out[col].isna().any():
-            mode_series = out[col].mode(dropna=True)
+            mode_series = out.loc[ref_mask, col].mode(dropna=True)
+            if mode_series.empty:
+                mode_series = out[col].mode(dropna=True)
             if not mode_series.empty:
                 out[col] = out[col].fillna(mode_series.iloc[0])
             else:
@@ -355,7 +485,12 @@ def _mark_random_window_training(
 
 
 def split_into_sets(
-    df: pd.DataFrame, split_method: str, train_fraction: float, seed: int
+    df: pd.DataFrame,
+    split_method: str,
+    train_fraction: float,
+    seed: int,
+    *,
+    embargo: int = 0,
 ) -> pd.DataFrame:
     """
     Split dataset into training/testing subsets.
@@ -364,7 +499,7 @@ def split_into_sets(
     ----------
     df : pandas.DataFrame
         Input dataset with ``date`` column.
-    split_method : {"random","ts","month_ts","season_ts"}
+    split_method : {"random","ts","month_ts","season_ts","blocked"}
         Splitting strategy:
           - "random": random sample by fraction.
           - "ts": sequential split by time order (single global cutoff).
@@ -378,6 +513,9 @@ def split_into_sets(
             contiguous (1 - train_fraction) block is held out as testing,
             at a random position within the season (seeded by ``seed``,
             reproducible).
+          - "blocked": partitions the sorted record into contiguous temporal
+            blocks and holds out a seeded subset of blocks as ``"testing"``
+            while assigning the rest to ``"training"``.
 
         .. note::
             Before this random-position placement, "month_ts"/"season_ts"
@@ -406,17 +544,25 @@ def split_into_sets(
         Proportion of rows per group to assign to training.
     seed : int
         Random seed for reproducibility.
+    embargo : int, default 0
+        When ``> 0``, marks up to ``embargo`` training rows immediately before and
+        after every contiguous ``"testing"`` block as ``"embargo"`` so adjacent
+        autocorrelated timestamps never straddle the train/test boundary.
 
     Returns
     -------
     pandas.DataFrame
-        Dataset with added column ``set`` ("training" or "testing").
+        Dataset with added column ``set`` ("training", "testing", or "embargo").
 
     Raises
     ------
     ValueError
-        If ``split_method`` is invalid.
+        If ``split_method`` is invalid or ``embargo < 0``.
     """
+    emb = int(embargo)
+    if emb < 0:
+        raise ValueError(f"`embargo` must be >= 0, got {embargo!r}.")
+
     out = df.sort_values("date").reset_index(drop=True)
 
     if split_method == "random":
@@ -478,8 +624,50 @@ def split_into_sets(
             _mark_random_window_training(out, grp.index, train_fraction, rng)
         out = out.drop(columns=["season", "season_year"])
 
+    elif split_method == "blocked":
+        n = len(out)
+        if n <= 1 or train_fraction >= 1.0:
+            out["set"] = "training"
+        elif train_fraction <= 0.0:
+            out["set"] = "testing"
+        else:
+            n_blocks = min(n, max(4, min(10, n // 24)))
+            blocks = np.array_split(np.arange(n, dtype=np.int64), n_blocks)
+            n_test = max(
+                1, min(len(blocks) - 1, int(round((1.0 - float(train_fraction)) * len(blocks))))
+            )
+            rng = np.random.default_rng(seed)
+            test_ids = set(rng.choice(len(blocks), size=n_test, replace=False).tolist())
+            labels = np.full(n, "training", dtype=object)
+            for bid in test_ids:
+                labels[blocks[bid]] = "testing"
+            out["set"] = labels
+
     else:
         raise ValueError(f"Unknown split_method '{split_method}'.")
+
+    if emb > 0 and len(out) > 0:
+        labels = out["set"].to_numpy(dtype=object).copy()
+        n = len(labels)
+        is_test = labels == "testing"
+        i = 0
+        while i < n:
+            if not is_test[i]:
+                i += 1
+                continue
+            start = i
+            while i < n and is_test[i]:
+                i += 1
+            stop = i
+            for k in range(max(0, start - emb), start):
+                if labels[k] == "training":
+                    labels[k] = "embargo"
+            for k in range(stop, min(n, stop + emb)):
+                if labels[k] == "training":
+                    labels[k] = "embargo"
+        if not np.any(labels == "training"):
+            raise ValueError(f"`embargo={emb}` excludes all training rows across {n} samples.")
+        out["set"] = labels
 
     return out
 
@@ -550,3 +738,41 @@ def expm1_columns(df: pd.DataFrame) -> pd.DataFrame:
     if len(numeric):
         out[numeric] = np.expm1(out[numeric].to_numpy(dtype=float))
     return out
+
+
+def compute_duan_smearing(
+    y_true_log: np.ndarray | pd.Series,
+    y_pred_log: np.ndarray | pd.Series,
+) -> float:
+    """Compute Duan's (1983) nonparametric smearing factor on the log scale.
+
+    For a model fitted on ``z = log1p(y)`` returning ``z_hat = E[z | X]`` with
+    log-scale residual ``r = z - z_hat``, back-transforming by ``expm1(z_hat)``
+    alone estimates the conditional geometric mean shifted by ``-1`` rather
+    than ``E[y | X]``. Multiplying ``exp(z_hat)`` by the empirical smearing
+    factor ``phi = mean(exp(r))`` corrects the log-normal/skewed retransformation
+    bias without assuming Gaussian residuals: ``E[y | X] ≈ phi * exp(z_hat) - 1``.
+
+    Parameters
+    ----------
+    y_true_log : array-like or Series
+        Observed target values on the ``log1p`` scale.
+    y_pred_log : array-like or Series
+        Model predictions on the ``log1p`` scale (same length as ``y_true_log``).
+
+    Returns
+    -------
+    float
+        Duan smearing multiplier ``>= 0`` (defaults to ``1.0`` when no finite pairs exist).
+    """
+    y_t = np.asarray(y_true_log, dtype=float).reshape(-1)
+    y_p = np.asarray(y_pred_log, dtype=float).reshape(-1)
+    if y_t.shape != y_p.shape:
+        raise ValueError(
+            f"`y_true_log` and `y_pred_log` must have matching length ({y_t.size} vs {y_p.size})."
+        )
+    mask = np.isfinite(y_t) & np.isfinite(y_p)
+    if not np.any(mask):
+        return 1.0
+    resid = np.clip(y_t[mask] - y_p[mask], -50.0, 50.0)
+    return float(np.mean(np.exp(resid)))

@@ -2,7 +2,7 @@
 
 from ._config import DEFAULT_SEED, available_cores, default_workers, resolve_config
 from .cache import config_hash, dataframe_hash, make_memory
-from .cv import cv_score, time_series_cv
+from .cv import blocked_time_cv, cv_score, time_series_cv
 from .featureeng import (
     LagDiagnostics,
     add_lag_features,
@@ -16,6 +16,7 @@ from .metrics import modStats
 from .prepare import (
     add_date_variables,
     check_data,
+    compute_duan_smearing,
     impute_values,
     prepare_data,
     process_date,
@@ -33,6 +34,7 @@ __all__ = [
     "process_date",
     "check_data",
     "impute_values",
+    "compute_duan_smearing",
     "add_date_variables",
     "split_into_sets",
     "modStats",
@@ -44,6 +46,7 @@ __all__ = [
     "cyclical_encode",
     "wind_to_uv",
     "time_series_cv",
+    "blocked_time_cv",
     "cv_score",
     "make_memory",
     "dataframe_hash",

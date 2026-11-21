@@ -27,6 +27,8 @@ __all__ = [
 _DEFAULT_CONFIG: dict[str, Any] = {
     "n_trials": 50,
     "cv_folds": 5,
+    "cv_strategy": "random",
+    "cv_embargo": 0,
     "nrounds": 1000,
     "early_stopping_rounds": 20,
     "learning_rate_min": 0.01,
@@ -105,14 +107,14 @@ class LgbModel:
             # regardless of the order the caller passed them in.
             X = X.reindex(columns=self.feature_names)
         X_arr = np.asarray(X, dtype=float)
-        non_finite = ~np.isfinite(X_arr)
-        if np.any(non_finite):
+        inf_mask = np.isinf(X_arr)
+        if np.any(inf_mask):
             X_arr = X_arr.copy()
-            X_arr[non_finite] = 0.0
+            X_arr[inf_mask] = np.nan
         return X_arr
 
     def predict(self, X: np.ndarray | pd.DataFrame, num_threads: int | None = None) -> np.ndarray:
-        """Predict on ``X``, treating non-finite inputs as 0.
+        """Predict on ``X``, converting ``±inf`` to ``NaN`` for native missing routing.
 
         ``num_threads`` overrides LightGBM's OpenMP default for this call (its
         prediction is memory-bound: 300 resamples of the bundled MY1 record
@@ -276,6 +278,8 @@ def train_lgb(
 
         - ``n_trials`` : int (default 50)
         - ``cv_folds`` : int (default 5)
+        - ``cv_strategy`` : {"random", "blocked"} (default "random")
+        - ``cv_embargo`` : int (default 0, rows purged around validation blocks when ``cv_strategy="blocked"``)
         - ``nrounds`` : int (default 1000)
         - ``early_stopping_rounds`` : int (default 20)
         - ``num_leaves_min`` / ``num_leaves_max`` : int | None (auto-inferred)
@@ -314,11 +318,12 @@ def train_lgb(
         raise ValueError(f"Columns not found in df: {sorted(missing)}")
 
     if "set" in df.columns:
-        df_train = df.loc[df["set"] == "training", [target] + covariates]
-        if df_train.empty:
-            df_train = df[[target] + covariates]
+        df_sub = df.loc[df["set"] == "training"]
+        if df_sub.empty:
+            df_sub = df
     else:
-        df_train = df[[target] + covariates]
+        df_sub = df
+    df_train = df_sub[[target] + covariates]
 
     if df_train[covariates].shape[1] == 0:
         raise ValueError("No predictor columns available after preprocessing.")
@@ -329,6 +334,13 @@ def train_lgb(
     cfg = dict(_DEFAULT_CONFIG)
     if model_config:
         cfg.update(model_config)
+
+    cv_strategy = str(cfg.get("cv_strategy", "random")).lower()
+    if cv_strategy not in ("random", "blocked"):
+        raise ValueError(
+            f"Unknown LightGBM `cv_strategy` {cv_strategy!r}; expected 'random' or 'blocked'."
+        )
+    cv_embargo = int(cfg.get("cv_embargo", 0))
 
     leaves_min, leaves_max = _infer_num_leaves_range(n, cfg)
     min_data_low, min_data_high = _infer_min_data_in_leaf_range(n)
@@ -341,21 +353,36 @@ def train_lgb(
 
     if np.any(np.isnan(y_vec)):
         raise ValueError("Target column contains NA values.")
-    non_finite = ~np.isfinite(x_mat)
-    if np.any(non_finite):
+    inf_mask = np.isinf(x_mat)
+    if np.any(inf_mask):
         x_mat = x_mat.copy()
-        x_mat[non_finite] = 0.0
+        x_mat[inf_mask] = np.nan
 
     dtrain = lgb.Dataset(x_mat, label=y_vec)
+
+    cv_folds_list: list[tuple[np.ndarray, np.ndarray]] | None = None
+    if cv_strategy == "blocked":
+        from ..utils.cv import blocked_time_cv
+
+        if "date" in df_sub.columns and pd.api.types.is_datetime64_any_dtype(df_sub["date"]):
+            fold_frame = pd.DataFrame({"date": df_sub["date"].to_numpy()})
+        elif isinstance(df_sub.index, pd.DatetimeIndex):
+            fold_frame = pd.DataFrame({"date": df_sub.index.to_numpy()})
+        else:
+            fold_frame = pd.DataFrame({"date": pd.date_range("2000-01-01", periods=n, freq="h")})
+        cv_folds_list = list(
+            blocked_time_cv(fold_frame, n_splits=int(cfg["cv_folds"]), embargo=cv_embargo)
+        )
 
     best_score = float("inf")
     best_params: dict[str, Any] | None = None
     best_nrounds = cfg["nrounds"]
 
     (log.info if verbose else log.debug)(
-        "LightGBM random search: %d trials, %d-fold CV, %d predictors, %d rows",
+        "LightGBM random search: %d trials, %d-fold %s CV, %d predictors, %d rows",
         cfg["n_trials"],
         cfg["cv_folds"],
+        cv_strategy,
         n_feat,
         n,
     )
@@ -380,14 +407,18 @@ def train_lgb(
         }
 
         params["early_stopping_rounds"] = cfg["early_stopping_rounds"]
-        cv_results = lgb.cv(
-            params=params,
-            train_set=dtrain,
-            num_boost_round=cfg["nrounds"],
-            nfold=cfg["cv_folds"],
-            stratified=False,
-            seed=seed,
-        )
+        cv_kwargs: dict[str, Any] = {
+            "params": params,
+            "train_set": dtrain,
+            "num_boost_round": cfg["nrounds"],
+            "stratified": False,
+            "seed": seed,
+        }
+        if cv_folds_list is not None:
+            cv_kwargs["folds"] = cv_folds_list
+        else:
+            cv_kwargs["nfold"] = cfg["cv_folds"]
+        cv_results = lgb.cv(**cv_kwargs)
 
         # Locate the metric column regardless of prefix ("rmse-mean" / "valid rmse-mean")
         mean_key = next((k for k in cv_results if k.endswith("rmse-mean")), None)
