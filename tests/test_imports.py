@@ -64,6 +64,14 @@ def test_top_level_symbols_present():
         "cross_fit_decompose",
         "compare_attributions",
         "plot_shapley_interactions",
+        "scm_ascm",
+        "sdid",
+        "conformal_inference",
+        "HonestDiDResult",
+        "honest_did_bounds",
+        "screen_donors",
+        "donut_hole_sensitivity",
+        "plot_honest_did",
     }
     missing = must_have - set(nm.__all__)
     assert not missing, f"Missing top-level exports: {sorted(missing)}"

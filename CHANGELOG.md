@@ -7,6 +7,30 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ## [Unreleased]
 
 ### Added
+- **Causal inference & counterfactual scientific upgrade (`normet.causal`, `normet.counterfactual`, `normet.plotting`)**:
+  - Correctness & identification fixes: cutoff-split pre/post interpolation and
+    `max_gap` in `prepare_panel`, pre-cutoff truncation (`< cutoff_date`) in
+    `placebo_in_time`, optional `max_pre_mspe_ratio` screening in
+    `placebo_in_space`, zero-LAPACK Newey–West HAC standard errors in
+    `pre_trend_test`, pivotal test inversion in `effect_bands_space`, exact
+    subsampling rescaling / donor-cloned replacement bootstrap and true
+    moving-block pre-period resampling in `uncertainty_bands`, and $G$-tuple
+    cross-unit permutation tests with not-yet-treated donor support and
+    dynamic event-study tables in `run_scm_staggered`.
+  - Econometric estimators & finite-sample inference: leak-free Ben-Michael et al.
+    (2021) Ridge ASCM (`nm.scm_ascm`, `scm_backend="ascm"`), Synthetic
+    Difference-in-Differences (`nm.sdid`, `scm_backend="sdid"`), demeaned and
+    Elastic-Net options in `scm_abadie`, contiguous block-CV default in
+    `scm_mcnnm`, circular shift option in `conformal_effect_interval`, full
+    refitting Chernozhukov–Wüthrich–Zhu (2021) `nm.conformal_inference`, and
+    Rambachan–Roth (2023) `nm.honest_did_bounds` + `nm.plot_honest_did`.
+  - Atmospheric domain & probabilistic enhancements: donut-hole and
+    Lagrangian transport spillover screening (`nm.screen_donors`,
+    `nm.donut_hole_sensitivity`), intercept + AR(1) residuals + full posterior
+    predictive intervals + ArviZ convergence diagnostics in `nm.bayesian_scm`,
+    and held-out validation, time-blocked `alpha_ridge="auto"` CV, optional
+    meteorological covariates, HAC SE, and moving-block bootstrap uncertainty
+    in `nm.HarmonicCounterfactual`.
 - **Scientific attribution & decomposition upgrade (`normet.analysis.decomposition`,
   `normet.analysis.normalise`, `normet.backends.lgb_backend`, `normet.plotting`)**:
   - Zero-resampling single-pass fast path (`variables_resample=[]`) in `normalise`

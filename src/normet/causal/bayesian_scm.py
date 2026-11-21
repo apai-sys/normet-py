@@ -87,6 +87,10 @@ def bayesian_scm(
     *,
     dirichlet_alpha: float = 1.0,
     sigma_prior: float = 1.0,
+    include_intercept: bool = False,
+    intercept_prior: float | None = None,
+    ar_order: int = 0,
+    predictive_band: bool = True,
     draws: int = 1000,
     tune: int = 1000,
     chains: int = 2,
@@ -97,28 +101,44 @@ def bayesian_scm(
     progressbar: bool = False,
 ) -> dict[str, Any]:
     """
-    Bayesian simplex SCM with Dirichlet prior + Normal likelihood.
+    Bayesian simplex SCM with Dirichlet prior, optional intercept, AR(1) likelihood,
+    posterior predictive bands, and MCMC convergence diagnostics.
 
     Model
     -----
     ::
 
-        w ~ Dirichlet(alpha · 1_J)
+        w ~ Dirichlet(alpha * 1_J)
         sigma ~ HalfNormal(sigma_prior)
-        y_pre = X_pre @ w + epsilon,  epsilon ~ Normal(0, sigma)
+        intercept ~ Normal(0, intercept_prior)   [when include_intercept=True]
+        mu = [intercept +] X_pre @ w
+        y_pre ~ Normal(mu, sigma)  or  stationary AR(1)(mu, rho, sigma)
 
-    The fitted posterior over ``w`` is propagated through the full panel
-    (pre + post) to produce a credible band on the synthetic series.
+    By default (``predictive_band=True``), credible bands incorporate both
+    posterior parameter uncertainty (``w``, ``intercept``) and observation noise
+    (``sigma``, plus ``rho`` when ``ar_order=1``); parameter-mean-only bands
+    are also retained in ``synthetic_mean_low`` / ``synthetic_mean_high``.
 
     Parameters
     ----------
     df, date_col, unit_col, outcome_col, treated_unit, cutoff_date, donors :
-        Same as :func:`normet.causal.scm.scm_abadie`.
+        Same as :func:`normet.causal.variants.scm_abadie`.
     dirichlet_alpha : float, default 1.0
         Symmetric Dirichlet concentration. ``<1`` favours sparse weights;
         ``>1`` favours diffuse weights.
     sigma_prior : float, default 1.0
-        HalfNormal scale for the noise standard deviation.
+        HalfNormal scale for the observation noise standard deviation.
+    include_intercept : bool, default False
+        Add an unconstrained additive offset parameter to handle level
+        differences between the treated unit and donors.
+    intercept_prior : float, optional
+        Prior SD for ``intercept`` (defaults to ``max(2 * std(y_pre), 1.0)``).
+    ar_order : {0, 1}, default 0
+        Residual temporal dependence: ``0`` for i.i.d. Normal, ``1`` for
+        stationary AR(1) residuals with uniform ``rho in (-0.99, 0.99)``.
+    predictive_band : bool, default True
+        Use full posterior predictive draws (parameter + innovation noise) for
+        ``synthetic_low``/``synthetic_high`` and ``effect_low``/``effect_high``.
     draws, tune, chains, target_accept, n_cores, seed :
         Forwarded to :func:`pymc.sample`.
     ci_level : float, default 0.95
@@ -129,20 +149,14 @@ def bayesian_scm(
     Returns
     -------
     dict
-        A dictionary with the structure::
-
-            {
-                "synthetic": DataFrame[observed, synthetic_mean, synthetic_low,
-                                       synthetic_high, effect_mean, effect_low,
-                                       effect_high],
-                "weights": Series(mean weights),
-                "weights_summary": DataFrame[mean, ci_low, ci_high],
-                "posterior_samples": ndarray (n_samples, J),
-                "idata": arviz.InferenceData,
-            }
+        ``{"synthetic": DataFrame, "weights": Series, "weights_summary": DataFrame,
+        "posterior_samples": ndarray, "idata": InferenceData,
+        "diagnostics": dict}``.
     """
     if treated_unit is None:
         raise ValueError("`treated_unit` is required.")
+    if int(ar_order) not in (0, 1):
+        raise ValueError(f"ar_order must be 0 or 1, got {ar_order}")
 
     panel, donors = _pivot_panel(df, date_col, unit_col, outcome_col, treated_unit, donors)
 
@@ -169,11 +183,18 @@ def bayesian_scm(
     X_pre = pre[donors].to_numpy(dtype=float)
     y_pre = pre[treated_unit].to_numpy(dtype=float)
     J = len(donors)
+    int_prior_eff = (
+        float(intercept_prior)
+        if intercept_prior is not None
+        else max(float(np.std(y_pre, ddof=1)) * 2.0, 1.0)
+    )
 
     log.info(
-        "Fitting Bayesian SCM | T_pre=%d | J=%d | draws=%d × chains=%d",
+        "Fitting Bayesian SCM | T_pre=%d | J=%d | ar=%d | intercept=%s | draws=%d × chains=%d",
         X_pre.shape[0],
         J,
+        int(ar_order),
+        include_intercept,
         draws,
         chains,
     )
@@ -181,8 +202,29 @@ def bayesian_scm(
     with pm.Model() as model:
         w = pm.Dirichlet("w", a=np_module.full(J, float(dirichlet_alpha)))
         sigma = pm.HalfNormal("sigma", sigma=float(sigma_prior))
-        mu = pm.math.dot(X_pre, w)
-        pm.Normal("y_obs", mu=mu, sigma=sigma, observed=y_pre)
+        if include_intercept:
+            intercept = pm.Normal("intercept", mu=0.0, sigma=int_prior_eff)
+            mu = intercept + pm.math.dot(X_pre, w)
+        else:
+            mu = pm.math.dot(X_pre, w)
+
+        if int(ar_order) == 0:
+            pm.Normal("y_obs", mu=mu, sigma=sigma, observed=y_pre)
+        else:
+            rho = pm.Uniform("rho", lower=-0.99, upper=0.99)
+            pm.Normal(
+                "y_obs_0",
+                mu=mu[0],
+                sigma=sigma / pm.math.sqrt(1.0 - rho**2),
+                observed=y_pre[0],
+            )
+            pm.Normal(
+                "y_obs_rest",
+                mu=mu[1:] + rho * (y_pre[:-1] - mu[:-1]),
+                sigma=sigma,
+                observed=y_pre[1:],
+            )
+
     idata = _sample(
         pm,
         model,
@@ -196,22 +238,96 @@ def bayesian_scm(
     )
 
     posterior = idata.posterior["w"].stack(sample=("chain", "draw")).transpose("sample", ...).values
+    sigma_s = idata.posterior["sigma"].stack(sample=("chain", "draw")).values.astype(float)
     w_mean = posterior.mean(axis=0)
     alpha = (1.0 - float(ci_level)) / 2.0
 
     X_full = panel[donors].to_numpy(dtype=float)
-    # (n_samples, T)
-    synth_samples = posterior @ X_full.T
+    mean_samples = posterior @ X_full.T
+    if include_intercept:
+        int_s = idata.posterior["intercept"].stack(sample=("chain", "draw")).values.astype(float)
+        mean_samples = mean_samples + int_s[:, None]
+    else:
+        int_s = None
 
-    syn_mean = synth_samples.mean(axis=0)
-    syn_lo = np.nanquantile(synth_samples, alpha, axis=0)
-    syn_hi = np.nanquantile(synth_samples, 1.0 - alpha, axis=0)
+    syn_mean_lo = np.nanquantile(mean_samples, alpha, axis=0)
+    syn_mean_hi = np.nanquantile(mean_samples, 1.0 - alpha, axis=0)
 
     obs = panel[treated_unit].to_numpy(dtype=float)
-    eff_samples = obs[np.newaxis, :] - synth_samples
-    eff_mean = eff_samples.mean(axis=0)
+    rng = np.random.default_rng(int(seed) + 1)
+
+    if int(ar_order) == 0:
+        eps = rng.normal(0.0, sigma_s[:, None], size=mean_samples.shape)
+        pred_samples = mean_samples + eps
+        rho_s = None
+    else:
+        rho_s = idata.posterior["rho"].stack(sample=("chain", "draw")).values.astype(float)
+        n_s, n_t = mean_samples.shape
+        eps = np.empty((n_s, n_t), dtype=float)
+        eps[:, 0] = rng.normal(0.0, sigma_s / np.sqrt(1.0 - rho_s**2))
+        for t_idx in range(1, n_t):
+            eps[:, t_idx] = rho_s * eps[:, t_idx - 1] + rng.normal(0.0, sigma_s)
+        pred_samples = mean_samples + eps
+
+    band_samples = pred_samples if predictive_band else mean_samples
+
+    syn_mean = mean_samples.mean(axis=0)
+    syn_lo = np.nanquantile(band_samples, alpha, axis=0)
+    syn_hi = np.nanquantile(band_samples, 1.0 - alpha, axis=0)
+
+    eff_mean = obs - syn_mean
+    eff_samples = obs[np.newaxis, :] - band_samples
     eff_lo = np.nanquantile(eff_samples, alpha, axis=0)
     eff_hi = np.nanquantile(eff_samples, 1.0 - alpha, axis=0)
+
+    # MCMC convergence diagnostics via arviz.
+    max_r_hat = float("nan")
+    min_ess_bulk = float("nan")
+    min_ess_tail = float("nan")
+    n_divergences = 0
+    try:
+        az = require("arviz", hint="pip install arviz")
+        diag_vars = ["w", "sigma"]
+        if include_intercept:
+            diag_vars.append("intercept")
+        if int(ar_order) == 1:
+            diag_vars.append("rho")
+        summ = az.summary(idata, var_names=diag_vars)
+        if "r_hat" in summ.columns and summ["r_hat"].notna().any():
+            max_r_hat = float(summ["r_hat"].max())
+        if "ess_bulk" in summ.columns and summ["ess_bulk"].notna().any():
+            min_ess_bulk = float(summ["ess_bulk"].min())
+        if "ess_tail" in summ.columns and summ["ess_tail"].notna().any():
+            min_ess_tail = float(summ["ess_tail"].min())
+        if hasattr(idata, "sample_stats") and "diverging" in idata.sample_stats:
+            n_divergences = int(np.asarray(idata.sample_stats["diverging"]).sum())
+    except Exception as e:
+        log.debug("Could not compute ArviZ MCMC diagnostics: %s", e)
+
+    converged = bool((np.isnan(max_r_hat) or max_r_hat <= 1.05) and n_divergences == 0)
+    if (not np.isnan(max_r_hat) and max_r_hat > 1.05) or n_divergences > 0:
+        log.warning(
+            "Bayesian SCM convergence warning | max_r_hat=%.3f | min_ess_bulk=%.1f | divergences=%d",
+            max_r_hat,
+            min_ess_bulk,
+            n_divergences,
+        )
+
+    mcmc_diag: dict[str, Any] = {
+        "max_r_hat": max_r_hat,
+        "min_ess_bulk": min_ess_bulk,
+        "min_ess_tail": min_ess_tail,
+        "n_divergences": n_divergences,
+        "converged": converged,
+        "ar_order": int(ar_order),
+        "include_intercept": bool(include_intercept),
+        "predictive_band": bool(predictive_band),
+        "sigma_mean": float(np.mean(sigma_s)),
+    }
+    if int_s is not None:
+        mcmc_diag["intercept_mean"] = float(np.mean(int_s))
+    if rho_s is not None:
+        mcmc_diag["rho_mean"] = float(np.mean(rho_s))
 
     out_df = pd.DataFrame(
         {
@@ -219,16 +335,16 @@ def bayesian_scm(
             "synthetic": syn_mean,
             "synthetic_low": syn_lo,
             "synthetic_high": syn_hi,
+            "synthetic_mean_low": syn_mean_lo,
+            "synthetic_mean_high": syn_mean_hi,
             "effect": eff_mean,
             "effect_low": eff_lo,
             "effect_high": eff_hi,
         },
         index=panel.index,
     )
+    out_df.attrs["mcmc_diagnostics"] = mcmc_diag
 
-    # Equal-tailed credible interval on the weights, computed from the posterior
-    # samples with numpy for stability across arviz versions (consistent with
-    # the synthetic/effect bands above).
     w_lo = np.nanquantile(posterior, alpha, axis=0)
     w_hi = np.nanquantile(posterior, 1.0 - alpha, axis=0)
     weights_summary = pd.DataFrame(
@@ -242,4 +358,5 @@ def bayesian_scm(
         "weights_summary": weights_summary,
         "posterior_samples": posterior,
         "idata": idata,
+        "diagnostics": mcmc_diag,
     }
