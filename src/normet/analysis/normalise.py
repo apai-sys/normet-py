@@ -7,6 +7,7 @@ Provides :func:`normalise` (resample-and-predict) and :func:`normalise_auto`
 
 from __future__ import annotations
 
+import numbers
 import zlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -135,12 +136,21 @@ class NormaliseConfig:
     untouched.
     """
     stratify_by: str | Sequence[str] | None = None
-    """Optional stratum column(s) (e.g. ``"month"``, ``"season"``, or
-    ``"traj_cluster"``) constraining each target row to resample only from
-    pool rows sharing the same stratum. Eliminates physically impossible
+    """Optional stratum column(s) (e.g. ``"month"``, ``"season"``, ``"hour"``,
+    ``"weekday"``, or ``"traj_cluster"``) constraining each target row to resample
+    only from pool rows sharing the same stratum. Eliminates physically impossible
     cross-season or cross-regime combinations when separating local weather
-    from long-range transport. ``"month"`` and ``"season"`` can be derived
-    automatically from ``"date"`` if not already present as columns.
+    from long-range transport. ``"month"``, ``"season"``, ``"hour"``, and
+    ``"weekday"`` can be derived automatically from ``"date"`` if not already
+    present as columns.
+    """
+    conditional_k: int | None = None
+    """Optional positive integer ``k`` for kNN on-manifold conditional resampling.
+    When given, resampled covariates for each row are drawn uniformly from the
+    ``k`` nearest neighbours in its pool with respect to the currently fixed
+    numerical covariates (standardised via pool mean/std). Combines naturally
+    with ``stratify_by`` to search nearest neighbours within the same stratum.
+    Not available on the chronos-2 backend.
     """
 
 
@@ -282,9 +292,10 @@ def _extract_strata(frame: pd.DataFrame, strat_cols: tuple[str, ...], *, label: 
     parts: list[np.ndarray] = []
     dates_s: pd.Series | None = None
     for col in strat_cols:
+        vals: np.ndarray
         if col in frame.columns:
             vals = frame[col].astype(object).to_numpy()
-        elif col in ("month", "season"):
+        elif col in ("month", "season", "hour", "weekday"):
             if dates_s is None:
                 if "date" in frame.columns:
                     dates_s = pd.to_datetime(frame["date"], errors="coerce")
@@ -297,9 +308,16 @@ def _extract_strata(frame: pd.DataFrame, strat_cols: tuple[str, ...], *, label: 
             if dates_s.isna().any():
                 raise ConfigError(f"{label} contains missing dates needed for stratify_by={col!r}.")
             if col == "month":
-                vals = dates_s.dt.month.to_numpy()
+                vals = np.asarray(dates_s.dt.month.to_numpy(), dtype=object)
+            elif col == "season":
+                vals = np.asarray(
+                    ((dates_s.dt.month.to_numpy() % 12) // 3).astype(int), dtype=object
+                )
+            elif col == "hour":
+                vals = np.asarray(dates_s.dt.hour.to_numpy(), dtype=object)
             else:
-                vals = ((dates_s.dt.month.to_numpy() % 12) // 3).astype(int)
+                # Match add_date_variables() 1..7 weekday encoding
+                vals = np.asarray(dates_s.dt.dayofweek.to_numpy() + 1, dtype=object)
         else:
             raise ConfigError(
                 f"stratify_by column {col!r} not found in {label} "
@@ -366,12 +384,98 @@ def _draw_rows_stratified(
     return out
 
 
+def _standardize_for_knn(
+    df: pd.DataFrame, pool: pd.DataFrame, cond_cols: Sequence[str]
+) -> tuple[np.ndarray, np.ndarray]:
+    """Z-score fixed numeric columns using the pool's mean and standard deviation."""
+    cols = list(cond_cols)
+    x_pool = pool[cols].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=np.float64)
+    x_df = df[cols].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=np.float64)
+    mu = np.nanmean(x_pool, axis=0)
+    mu = np.where(np.isfinite(mu), mu, 0.0)
+    sd = np.nanstd(x_pool, axis=0)
+    sd = np.where(np.isfinite(sd) & (sd > 1e-12), sd, 1.0)
+    z_pool = np.where(np.isfinite(x_pool), (x_pool - mu) / sd, 0.0)
+    z_df = np.where(np.isfinite(x_df), (x_df - mu) / sd, 0.0)
+    return z_df, z_pool
+
+
+def _build_knn_indices(
+    df: pd.DataFrame,
+    pool: pd.DataFrame,
+    cond_cols: Sequence[str],
+    k: int,
+    *,
+    df_strata: np.ndarray | None = None,
+    pool_strata: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray | None]:
+    """Precompute ``(n_rows, k_eff)`` pool neighbour indices for on-manifold draws."""
+    from scipy.spatial import cKDTree
+
+    n_rows = len(df)
+    n_pool = len(pool)
+    if n_pool == 0:
+        raise DataError("Resample pool has no rows for conditional_k matching.")
+    k_target = max(1, int(k))
+    z_df, z_pool = _standardize_for_knn(df, pool, cond_cols)
+
+    if df_strata is not None and pool_strata is not None:
+        width = min(k_target, n_pool)
+        out = np.zeros((n_rows, width), dtype=np.int64)
+        counts = np.full(n_rows, width, dtype=np.int64)
+        need_counts = False
+        pool_idx_map: dict[str, np.ndarray] = {
+            str(key): np.flatnonzero(pool_strata == key) for key in sorted(set(pool_strata))
+        }
+        full_tree: cKDTree | None = None
+        for key in sorted(set(df_strata)):
+            pos = np.flatnonzero(df_strata == key)
+            cand = pool_idx_map.get(str(key))
+            if cand is None or cand.size == 0:
+                if full_tree is None:
+                    full_tree = cKDTree(z_pool)
+                k_eff = min(width, n_pool)
+                _, loc = full_tree.query(z_df[pos], k=k_eff)
+                mapped = np.asarray(loc, dtype=np.int64).reshape(len(pos), k_eff)
+            else:
+                tree = cKDTree(z_pool[cand])
+                k_eff = min(width, cand.size)
+                _, loc = tree.query(z_df[pos], k=k_eff)
+                loc_2d = np.asarray(loc, dtype=np.int64).reshape(len(pos), k_eff)
+                mapped = cand[loc_2d]
+            out[pos, :k_eff] = mapped
+            if k_eff < width:
+                counts[pos] = k_eff
+                need_counts = True
+        return out, (counts if need_counts else None)
+
+    k_eff = min(k_target, n_pool)
+    tree = cKDTree(z_pool)
+    _, loc = tree.query(z_df, k=k_eff)
+    return np.asarray(loc, dtype=np.int64).reshape(n_rows, k_eff), None
+
+
+def _draw_rows_knn(
+    stream: int,
+    seed: int,
+    nbr_idx: np.ndarray,
+    valid_counts: np.ndarray | None = None,
+) -> np.ndarray:
+    """Uniformly pick one of each target row's precomputed k nearest pool neighbours."""
+    rng = np.random.default_rng(seed if stream == 0 else [seed, stream])
+    n_rows = nbr_idx.shape[0]
+    high: Any = valid_counts if valid_counts is not None else nbr_idx.shape[1]
+    pick = rng.integers(0, high, size=n_rows)
+    return nbr_idx[np.arange(n_rows), pick]
+
+
 def _stacked_columns(
     df: pd.DataFrame,
     draws: Sequence[tuple[int, list[str], np.ndarray, np.ndarray | None]],
     seeds: Sequence[int] | np.ndarray,
     replace: bool,
     df_strata: np.ndarray | None = None,
+    knn_map: Mapping[int, tuple[np.ndarray, np.ndarray | None]] | None = None,
 ) -> dict[str, np.ndarray]:
     """Columns of ``len(seeds)`` resampled copies of ``df``, stacked copy after copy.
 
@@ -381,9 +485,12 @@ def _stacked_columns(
     n_rows = len(df)
     drawn: dict[str, np.ndarray] = {}
     for stream, cols, values, p_strata in draws:
+        knn_spec = knn_map.get(stream) if knn_map is not None else None
         idx = np.empty((len(seeds), n_rows), dtype=np.int64)
         for i, s in enumerate(seeds):
-            if df_strata is not None and p_strata is not None:
+            if knn_spec is not None:
+                idx[i] = _draw_rows_knn(stream, int(s), knn_spec[0], knn_spec[1])
+            elif df_strata is not None and p_strata is not None:
                 idx[i] = _draw_rows_stratified(stream, int(s), df_strata, p_strata, replace)
             else:
                 idx[i] = _draw_rows(stream, int(s), len(values), n_rows, replace)
@@ -405,6 +512,7 @@ def generate_resampled(
     *,
     df_strata: np.ndarray | None = None,
     pool_strata_map: Mapping[int, np.ndarray] | None = None,
+    knn_map: Mapping[int, tuple[np.ndarray, np.ndarray | None]] | None = None,
 ) -> pd.DataFrame:
     """Generate a resampled copy of the dataset.
 
@@ -449,7 +557,10 @@ def generate_resampled(
         # here for stream 0, so a ``normalise(..., memory_save=True)`` and a
         # default call with the same seed resampled differently.
         p_strata = pool_strata_map.get(stream) if pool_strata_map is not None else None
-        if df_strata is not None and p_strata is not None:
+        knn_spec = knn_map.get(stream) if knn_map is not None else None
+        if knn_spec is not None:
+            idx = _draw_rows_knn(stream, seed, knn_spec[0], knn_spec[1])
+        elif df_strata is not None and p_strata is not None:
             idx = _draw_rows_stratified(stream, seed, df_strata, p_strata, replace)
         else:
             idx = _draw_rows(stream, seed, len(pool), len(df), replace)
@@ -535,6 +646,14 @@ def normalise(
     _cfg = _resolve_normalise_config(config=config, **kwargs)
     if _cfg.resample_pools is not None and not isinstance(_cfg.resample_pools, Mapping):
         raise ConfigError("`resample_pools` must be a mapping of name -> DataFrame.")
+    if _cfg.conditional_k is not None:
+        cond_k: object = _cfg.conditional_k
+        if isinstance(cond_k, bool) or not isinstance(cond_k, numbers.Integral):
+            raise ConfigError(
+                f"`conditional_k` must be a positive integer or None, got {cond_k!r}."
+            )
+        if int(cond_k) < 1:
+            raise ConfigError(f"`conditional_k` must be at least 1, got {cond_k!r}.")
 
     required_features: set[str] | None = None
     if _cfg.covariates is None:
@@ -653,6 +772,7 @@ def normalise(
         dependency_versions(),
         *([pool_keys] if pool_keys else []),
         *([list(strat_cols), strata_key] if strat_cols else []),
+        *([("conditional_k", int(_cfg.conditional_k))] if _cfg.conditional_k is not None else []),
         sorted(_cfg.covariates),
         sorted(_cfg.variables_resample) if _cfg.variables_resample is not None else None,
         _cfg.n_samples,
@@ -757,10 +877,71 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
         for stream, cols, pool in draws
     ]
 
+    knn_map: dict[int, tuple[np.ndarray, np.ndarray | None]] = {}
+    if _cfg.conditional_k is not None and variables_resample:
+        cond_cols = [
+            c
+            for c in _cfg.covariates
+            if c not in variables_resample
+            and c not in time_vars
+            and c in df.columns
+            and pd.api.types.is_numeric_dtype(df[c])
+        ]
+        if cond_cols:
+            for stream, _cols, pool in draws:
+                p_cond = [
+                    c
+                    for c in cond_cols
+                    if c in pool.columns and pd.api.types.is_numeric_dtype(pool[c])
+                ]
+                if p_cond:
+                    knn_map[stream] = _build_knn_indices(
+                        df,
+                        pool,
+                        p_cond,
+                        int(_cfg.conditional_k),
+                        df_strata=df_strata,
+                        pool_strata=pool_strata_map.get(stream),
+                    )
+
     n_cores_eff = resolve_workers(_cfg.n_cores)
 
     rng = np.random.default_rng(_cfg.seed)
     random_seeds = rng.choice(1_000_000, size=_cfg.n_samples, replace=False)
+
+    if not variables_resample:
+        preds = ml_predict(model, df, num_threads=n_cores_eff)
+        df_one = pd.DataFrame(
+            {
+                "date": df["date"].to_numpy(),
+                "observed": df["value"].to_numpy(),
+                "normalised": preds,
+            }
+        )
+        gb_one = df_one.groupby("date", as_index=True)
+        if _cfg.aggregate:
+            df_out = gb_one[["observed", "normalised"]].mean()
+            if _cfg.return_quantiles:
+                q_arr = sorted({float(q) for q in _cfg.return_quantiles})
+                q_df = gb_one["normalised"].quantile(np.asarray(q_arr)).unstack(level=-1)
+                q_df.columns = pd.Index([_format_quantile_name(float(q)) for q in q_df.columns])
+                df_out = df_out.join(q_df, how="left")
+        else:
+            observed = gb_one[["observed"]].mean()
+            vals = gb_one["normalised"].mean().to_numpy()
+            sorted_seeds = sorted(int(s) for s in random_seeds)
+            wide = pd.DataFrame(
+                {s: vals for s in sorted_seeds},
+                index=observed.index,
+            )
+            wide.columns = pd.Index(sorted_seeds, name="seed")
+            df_out = pd.concat([observed, wide], axis=1)
+        (log.info if _cfg.verbose else log.debug)(
+            "Finished normalisation (no resampled variables; single pass)."
+        )
+        if _cfg.log_transform:
+            df_out = expm1_columns(df_out)
+        return df_out
 
     # Resolve the effective batch size. None -> auto-derive from the data
     # footprint (normet-R's heuristic: as many resampled copies of `df` as fit
@@ -808,6 +989,7 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
                 resample_pools=_cfg.resample_pools,
                 df_strata=df_strata,
                 pool_strata_map=pool_strata_map,
+                knn_map=knn_map or None,
             )
             # One predict thread per worker: this path already runs
             # ``n_cores_eff`` of these at once, and a LightGBM call sized from
@@ -856,7 +1038,12 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
 
             # Build prediction DataFrame without materialising the full n_samples × n_rows frame
             df_batch_dict = _stacked_columns(
-                df, draw_arrays, batch_seeds, _cfg.replace, df_strata=df_strata
+                df,
+                draw_arrays,
+                batch_seeds,
+                _cfg.replace,
+                df_strata=df_strata,
+                knn_map=knn_map or None,
             )
             df_batch = pd.DataFrame(df_batch_dict)
 
@@ -956,7 +1143,14 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
 
         # All draws at once with numpy (fast PRNG, per-seed reproducibility).
         df_all = pd.DataFrame(
-            _stacked_columns(df, draw_arrays, random_seeds, _cfg.replace, df_strata=df_strata)
+            _stacked_columns(
+                df,
+                draw_arrays,
+                random_seeds,
+                _cfg.replace,
+                df_strata=df_strata,
+                knn_map=knn_map or None,
+            )
         )
         df_all["seed"] = np.repeat(random_seeds, n_rows)
 
