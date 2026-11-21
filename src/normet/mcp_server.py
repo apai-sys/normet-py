@@ -239,6 +239,7 @@ def build_server(tools: Any = None) -> Any:
         prediction_length: int | None = None,
         log_transform: bool = False,
         seed: int | None = None,
+        model_path: str | None = None,
         label: str = "",
     ) -> str:
         """Start a zero-shot Chronos-2 de-weathering job (default future-only 'icn'
@@ -256,6 +257,7 @@ def build_server(tools: Any = None) -> Any:
             prediction_length=prediction_length,
             log_transform=log_transform,
             seed=seed,
+            model_path=model_path,
             label=label,
         )
 
@@ -270,6 +272,7 @@ def build_server(tools: Any = None) -> Any:
         unit_col: str | None = None,
         outcome_col: str | None = None,
         backend: str | None = None,
+        model_path: str | None = None,
         label: str = "",
     ) -> str:
         """Start a job: a synthetic control of the `treated` unit from the donor pool
@@ -289,6 +292,7 @@ def build_server(tools: Any = None) -> Any:
             unit_col=unit_col,
             outcome_col=outcome_col,
             backend=backend,
+            model_path=model_path,
             label=label,
         )
 
@@ -314,6 +318,106 @@ def build_server(tools: Any = None) -> Any:
             n_splits=n_splits,
             gap=gap,
             backend=backend,
+            label=label,
+        )
+
+    @tool
+    def normet_start_impute(
+        target: str,
+        met_vars: list[str] | None = None,
+        example: str | None = None,
+        data: str | None = None,
+        direction: str = "bidirectional",
+        max_gap: int | None = None,
+        calibrate: bool = False,
+        context_length: int | None = None,
+        prediction_length: int | None = None,
+        model_path: str | None = None,
+        label: str = "",
+    ) -> str:
+        """Start a Chronos-2 covariate-conditioned gap imputation job. Writes
+        imputed.csv; poll normet_job_status."""
+        return t.start_impute(
+            target,
+            met_vars=met_vars,
+            data=data,
+            example=example,
+            direction=direction,
+            max_gap=max_gap,
+            calibrate=calibrate,
+            context_length=context_length,
+            prediction_length=prediction_length,
+            model_path=model_path,
+            label=label,
+        )
+
+    @tool
+    def normet_start_backtest(
+        target: str,
+        met_vars: list[str] | None = None,
+        example: str | None = None,
+        data: str | None = None,
+        horizon: int | None = None,
+        stride: int | None = None,
+        calibrate: bool = False,
+        calibration_frac: float | None = None,
+        context_length: int | None = None,
+        prediction_length: int | None = None,
+        model_path: str | None = None,
+        label: str = "",
+    ) -> str:
+        """Start a Chronos-2 rolling probabilistic backtest job (CRPS, pinball,
+        PIT, empirical coverage by lead). Writes backtest.csv; poll
+        normet_job_status."""
+        return t.start_backtest(
+            target,
+            met_vars=met_vars,
+            data=data,
+            example=example,
+            horizon=horizon,
+            stride=stride,
+            calibrate=calibrate,
+            calibration_frac=calibration_frac,
+            context_length=context_length,
+            prediction_length=prediction_length,
+            model_path=model_path,
+            label=label,
+        )
+
+    @tool
+    def normet_start_events(
+        value_col: str,
+        method: str = "iqr",
+        covariates: list[str] | None = None,
+        example: str | None = None,
+        data: str | None = None,
+        alpha: float | None = None,
+        k: float | None = None,
+        min_length: int | None = None,
+        direction: str | None = None,
+        adaptive: bool = False,
+        context_length: int | None = None,
+        prediction_length: int | None = None,
+        model_path: str | None = None,
+        label: str = "",
+    ) -> str:
+        """Start an anomaly/event detection job (method 'iqr', 'isolation',
+        'stl_residual', or conditional Chronos-2 'chronos' with optional ACI
+        `adaptive=True`). Writes events.csv; poll normet_job_status."""
+        return t.start_events(
+            value_col,
+            method=method,
+            covariates=covariates,
+            data=data,
+            example=example,
+            alpha=alpha,
+            k=k,
+            min_length=min_length,
+            direction=direction,
+            adaptive=adaptive,
+            context_length=context_length,
+            prediction_length=prediction_length,
+            model_path=model_path,
             label=label,
         )
 
@@ -345,8 +449,8 @@ def build_server(tools: Any = None) -> Any:
     @tool
     def normet_read_result(path: str, kind: str, cutoff: str | None = None) -> str:
         """A result table read as `kind` says: 'normalised' (observed and normalised
-        columns), 'decomposition', 'scm' (with the `cutoff` it was run with) or
-        'cv'."""
+        columns), 'decomposition', 'scm' (with the `cutoff` it was run with),
+        'cv', 'impute', 'backtest', or 'events'."""
         return t.read_result(path, kind, cutoff=cutoff)
 
     @tool

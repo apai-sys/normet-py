@@ -117,6 +117,33 @@ def _auto_plot(run: NormetRun) -> Any:
 
                     fig = scm_dashboard(res, cutoff_date=str(cutoff), title=kind or "SCM")
 
+        # Imputation (check before broad decomposition match on `observed`)
+        elif {"observed", "imputed", "is_imputed"} <= set(res.columns):
+            from .plotting import plot_imputation
+
+            fig = plot_imputation(res, title=kind or "imputation")
+
+        # Partial dependence
+        elif {"variable", "value", "pdp_mean"} <= set(res.columns):
+            from .plotting import pdp_grid
+
+            fig = pdp_grid(res, title=kind or "partial dependence")
+
+        # Rolling probabilistic backtest profile by lead
+        elif {"lead", "crps"} <= set(res.columns):
+            bt = res.sort_values("lead")
+            fig, ax = plt.subplots(figsize=(7.5, 3.0), layout="constrained")
+            ax.plot(
+                bt["lead"], bt["crps"], color=S.COMPONENT, lw=1.4, marker="o", ms=3, label="CRPS"
+            )
+            if "mae" in bt.columns:
+                ax.plot(bt["lead"], bt["mae"], color=S.OBSERVED, lw=1.1, ls="--", label="MAE")
+            ax.set_xlabel("Lead step")
+            ax.set_ylabel("Score")
+            ax.set_title(kind or "Chronos-2 backtest by lead")
+            S.grid(ax)
+            S.legend(ax, loc="best")
+
         # decomposition (has many feature columns + observed)
         elif (
             "observed" in res.columns

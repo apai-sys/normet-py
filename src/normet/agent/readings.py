@@ -570,3 +570,128 @@ def trend_breaks_reading(res: Any, name: str = "series") -> str:
         # the notes say where the search wanted to cut and why it was refused
     lines += ["", *res.notes]
     return "\n".join(lines)
+
+
+def imputation_reading(df: pd.DataFrame) -> str:
+    """Chronos-2 gap imputation summary: imputed span count, filled fraction, and band width."""
+    for col in ("observed", "imputed", "is_imputed"):
+        if col not in df.columns:
+            raise ValueError(f"imputation table missing required column {col!r}")
+
+    total = len(df)
+    mask = df["is_imputed"].fillna(False).to_numpy(dtype=bool)
+    n_imp = int(mask.sum())
+    pct = 100.0 * n_imp / total if total else 0.0
+
+    # Contiguous gap runs
+    span_lengths: list[int] = []
+    run = 0
+    for flag in mask:
+        if flag:
+            run += 1
+        elif run:
+            span_lengths.append(run)
+            run = 0
+    if run:
+        span_lengths.append(run)
+
+    imp_vals = pd.to_numeric(df["imputed"], errors="coerce")
+    remaining_nan = int(imp_vals.isna().sum())
+    rows: list[list[Any]] = [
+        ["rows", f"{total:,}"],
+        ["imputed rows", f"{n_imp:,} ({num(pct, 3)} %)"],
+        ["imputed spans", len(span_lengths)],
+        ["longest span", max(span_lengths) if span_lengths else 0],
+        ["remaining NaNs", remaining_nan],
+    ]
+    if n_imp > 0:
+        filled = imp_vals[mask]
+        if filled.notna().any():
+            rows.append(["imputed mean", num(filled.mean(), 4)])
+        if "lower" in df.columns and "upper" in df.columns:
+            lo = pd.to_numeric(df.loc[mask, "lower"], errors="coerce")
+            hi = pd.to_numeric(df.loc[mask, "upper"], errors="coerce")
+            widths = (hi - lo).dropna()
+            if not widths.empty:
+                rows.append(["mean interval width", num(widths.mean(), 4)])
+    return "\n".join(["Imputation result (chronos_impute):", "", table(["", "value"], rows)])
+
+
+def backtest_reading(df: pd.DataFrame) -> str:
+    """Rolling probabilistic Chronos-2 backtest summary by lead step."""
+    for col in ("lead", "crps"):
+        if col not in df.columns:
+            raise ValueError(f"backtest table missing required column {col!r}")
+    if df.empty:
+        return "Backtest result: empty table."
+
+    bt = df.sort_values("lead").reset_index(drop=True)
+    summary_rows: list[list[Any]] = [
+        ["lead range", f"{int(bt['lead'].min())}–{int(bt['lead'].max())} ({len(bt)} steps)"],
+        ["mean CRPS", num(bt["crps"].mean(), 4)],
+    ]
+    for col, label in (
+        ("crps_skill", "mean CRPS skill"),
+        ("pinball_50", "mean pinball (q50)"),
+        ("mae", "mean MAE"),
+        ("rmse", "mean RMSE"),
+        ("bias", "mean bias"),
+        ("pit_ks_stat", "mean PIT KS"),
+        ("coverage_50", "mean cov50"),
+        ("coverage_80", "mean cov80"),
+        ("coverage_90", "mean cov90"),
+    ):
+        if col in bt.columns and bt[col].notna().any():
+            val = float(bt[col].mean())
+            summary_rows.append(
+                [label, f"{num(100.0 * val, 3)} %" if col.startswith("coverage_") else num(val, 4)]
+            )
+
+    # Sample up to 8 evenly spaced leads (always keeping first and last).
+    n = len(bt)
+    if n <= 8:
+        sample = bt
+    else:
+        idxs = sorted({int(round(i * (n - 1) / 7.0)) for i in range(8)} | {0, n - 1})
+        sample = bt.iloc[idxs]
+
+    cols = [
+        c
+        for c in ("lead", "crps", "crps_skill", "mae", "rmse", "coverage_80", "pit_ks_stat")
+        if c in bt.columns
+    ]
+    tbl_rows = [[row[c] for c in cols] for _, row in sample.iterrows()]
+    lines = [
+        "Rolling probabilistic backtest (chronos_backtest):",
+        "",
+        table(["metric", "value"], summary_rows),
+        "",
+        table(cols, tbl_rows),
+    ]
+    return "\n".join(lines)
+
+
+def events_reading(df: pd.DataFrame) -> str:
+    """Detected anomalous episodes summary (Chronos-2 conditional or classical)."""
+    if df.empty:
+        return "Events: 0 anomalous episodes detected."
+
+    total_steps = int(df["n"].sum()) if "n" in df.columns else len(df)
+    top = df.head(10)
+    chronos_cols = ["start", "end", "n", "direction", "max_surprise", "mean_residual"]
+    classic_cols = ["start", "end", "n", "max_score", "mean_score"]
+    cols = [c for c in chronos_cols if c in df.columns]
+    if "max_surprise" not in df.columns:
+        cols = [c for c in classic_cols if c in df.columns]
+    if not cols:
+        cols = list(df.columns[:6])
+
+    rows = [
+        [str(row[c])[:16] if c in ("start", "end") else row[c] for c in cols]
+        for _, row in top.iterrows()
+    ]
+    header_line = f"Detected events: {len(df):,} episode(s) covering {total_steps:,} step(s)"
+    if len(df) > len(top):
+        header_line += f" (showing top {len(top)})"
+    header_line += ":"
+    return "\n".join([header_line, "", table(cols, rows)])

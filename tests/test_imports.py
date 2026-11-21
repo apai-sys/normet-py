@@ -9,6 +9,8 @@ def test_top_level_symbols_present():
         "normalise",
         "rolling",
         "pdp",
+        "plot_attention_attribution",
+        "plot_imputation",
         "decompose",
         "scm",
         "mlscm",
