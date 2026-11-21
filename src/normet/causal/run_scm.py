@@ -193,14 +193,24 @@ def run_scm(
         est = kw.pop("estimator", None)
         if est is None:
             mc = dict(kw.pop("model_config", None) or {})
+            model_path = mc.pop("model_path", kw.pop("model_path", None))
             for k in ("device", "context_length", "prediction_length"):
                 if k in kw and kw[k] is not None:
                     mc[k] = kw.pop(k)
                 else:
                     kw.pop(k, None)
-            est = Chronos2Estimator(**mc)
+            if model_path is not None:
+                est = Chronos2Estimator.load(model_path, device=mc.get("device"))
+            else:
+                est = Chronos2Estimator(**mc)
         else:
-            for k in ("model_config", "device", "context_length", "prediction_length"):
+            for k in (
+                "model_config",
+                "model_path",
+                "device",
+                "context_length",
+                "prediction_length",
+            ):
                 kw.pop(k, None)
         log.info(
             "Running synthetic control | scm_backend=%s | treated=%s | donors=%d | cutoff=%s",

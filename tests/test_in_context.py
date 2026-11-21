@@ -25,6 +25,7 @@ from normet.foundation import (
     ICNDesign,
     MetPool,
     build_icn_draw_bank,
+    decompose_icn_uncertainty,
     normalise_in_context,
     normalise_in_context_multisite,
     normalise_in_context_multivariate,
@@ -728,3 +729,45 @@ def test_normalise_in_context_multisite_cross_learning_slot_batching() -> None:
     )
     assert set(res_apart) == {"LONG", "SHORT"}
     assert np.isfinite(res_apart["SHORT"].level.to_numpy()).any()
+
+
+def test_icn_draw_bank_decompose_uncertainty_exact_identity():
+    """Zero-inference Law of Total Variance splits weather vs anchor spread exactly."""
+    from normet.analysis.uncertainty import UncDecomposition
+
+    df = _synthetic(n=1200, seed=41)
+    est = _estimator()
+    design = ICNDesign(
+        context_length=256,
+        block_h=48,
+        stride=24,
+        direction="bidirectional",
+        n_resamples=4,
+        seed=9,
+    )
+    bank = build_icn_draw_bank(est, df, "y", design=design, pipeline=FakeICLPipeline())
+    unc = bank.decompose_uncertainty()
+    assert isinstance(unc, UncDecomposition)
+    assert len(unc.frame()) == len(df)
+    summary = unc.summary()
+    assert list(summary["source"]) == ["weather", "model", "interaction", "total"]
+
+    unc_fn = decompose_icn_uncertainty(bank)
+    np.testing.assert_allclose(unc.var_total, unc_fn.var_total, equal_nan=True)
+
+    # Exact identity: var_weather + var_model + var_interaction == var_total == total pooled variance
+    _, merged = bank._merged_dir(None)
+    finite = np.isfinite(unc.var_total)
+    assert finite.any()
+    np.testing.assert_allclose(
+        unc.var_weather[finite] + unc.var_model[finite] + unc.var_interaction[finite],
+        unc.var_total[finite],
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    assert (unc.var_interaction[finite] == 0.0).all()
+    assert np.nanmedian(unc.var_weather[finite]) > 0.0
+    assert np.nanmedian(unc.var_model[finite]) > 0.0
+    for h in np.flatnonzero(finite):
+        pooled = np.asarray([v for v, _ in merged.level_draws[int(h)]], dtype=float)
+        assert unc.var_total[int(h)] == pytest.approx(float(np.var(pooled)), rel=1e-12, abs=1e-12)

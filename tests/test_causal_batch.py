@@ -131,3 +131,55 @@ def test_worker_count_is_clamped_to_at_least_one():
     )
 
     assert set(out["site"]) == set(UNITS)
+
+
+def test_scm_all_chronos_single_checkpoint_in_process(monkeypatch):
+    """scm_all(..., scm_backend='chronos') loads one checkpoint and avoids joblib processes."""
+    import joblib
+
+    import normet.foundation.estimator as est_mod
+
+    levels = [0.1, 0.5, 0.9]
+    load_count = 0
+
+    class _FakePipe:
+        quantiles = levels
+
+        def predict(self, inputs, prediction_length, **kwargs):
+            out = []
+            for item in inputs:
+                hist = np.asarray(item["target"], dtype=float)
+                med = np.full(prediction_length, float(np.nanmedian(hist)))
+                out.append(np.stack([med - 1.0, med, med + 1.0])[None, ...])
+            return out
+
+    def _fake_load(name, dev, auto):
+        nonlocal load_count
+        load_count += 1
+        return _FakePipe(), dev or "cpu"
+
+    monkeypatch.setattr(est_mod, "_load_pipeline_on", _fake_load)
+    monkeypatch.setattr(est_mod, "resolve_device", lambda req=None: req or "cpu")
+    monkeypatch.setattr(
+        joblib,
+        "Parallel",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("chronos scm_all should run in-process without joblib")
+        ),
+    )
+
+    out = scm_all(
+        _panel(),
+        date_col="date",
+        outcome_col="no2",
+        unit_col="site",
+        donors=None,
+        cutoff_date=CUTOFF,
+        scm_backend="chronos",
+        context_length=15,
+        prediction_length=8,
+        validation_steps=5,
+        device="cpu",
+    )
+    assert load_count == 1
+    assert set(out["site"]) == set(UNITS)

@@ -25,10 +25,12 @@ from normet.foundation import (
     AdaptiveConformalCalibrator,
     Chronos2Estimator,
     ChronosEmbedder,
+    CovariateSensitivityCallback,
     InsufficientContextError,
     calibrate_quantiles,
     chronos_anomaly_scores,
     chronos_attention_attribution,
+    chronos_backtest,
     chronos_impute,
     chronos_pdp,
     chronos_scm,
@@ -397,6 +399,13 @@ def test_chronos_scm_monthly_panel_and_guards() -> None:
     res = chronos_scm(est, panel, treated_unit="MY1", cutoff_date=cutoff)
     assert len(res.counterfactual_p50) == 20
     assert res.summary["validation_hours"] == 12
+
+    # Shared estimator carrying unrelated past_only_covariates still runs pure panel SCM
+    est_po, _ = _stub_estimator(
+        context_length=24, prediction_length=12, past_only_covariates=["co"]
+    )
+    res_po = chronos_scm(est_po, panel, treated_unit="MY1", cutoff_date=cutoff)
+    assert len(res_po.counterfactual_p50) == 20
 
     with pytest.raises(ValueError, match="Treated unit"):
         chronos_scm(est, panel, treated_unit="MISSING", cutoff_date=cutoff)
@@ -899,3 +908,204 @@ def test_finetune_forwards_min_past_and_callbacks_and_validates(monkeypatch, tmp
     )
     assert recorded[0]["min_past"] == 24
     assert recorded[0]["callbacks"] == [cb]
+
+
+def test_chronos_backtest_metrics_and_calibration_closure() -> None:
+    rng = np.random.default_rng(77)
+    n = 280
+    idx = pd.date_range("2024-01-01", periods=n, freq="h")
+    ws = 2.0 + np.abs(rng.normal(2.0, 0.8, n))
+    # Inject heavy additive residuals (~std 3.0) while stub emits tiny spread (0.2) -> under-dispersed!
+    y = 30.0 - 2.0 * ws + rng.normal(0.0, 3.0, n)
+    df = pd.DataFrame({"value": y, "ws": ws}, index=idx)
+
+    n_calls = 0
+
+    class _CountingPipe:
+        quantiles = list(LEVELS)
+
+        def predict(self, inputs, prediction_length, **kwargs):
+            nonlocal n_calls
+            n_calls += len(inputs)
+            out = []
+            for item in inputs:
+                w = np.asarray(item["future_covariates"]["ws"], dtype=float)
+                med = 30.0 - 2.0 * w
+                # Narrow spread 0.2 against N(0, 3) noise
+                block = np.vstack([med + 2.0 * 0.2 * (q - 0.5) for q in LEVELS])
+                out.append(block[None, ...])
+            return out
+
+    est = Chronos2Estimator(context_length=48, prediction_length=16, device="cpu")
+    est._pipeline = _CountingPipe()
+    est._quantiles = np.asarray(LEVELS, dtype=float)
+
+    bt = est.backtest(df, "value", covariates=["ws"], calibrate=True, calibration_frac=0.5)
+    assert set(bt) == {
+        "predictions",
+        "by_lead",
+        "summary",
+        "calibration",
+        "calibrated_summary",
+        "holdout_uncalibrated_summary",
+    }
+    assert bt["calibration"] is not None
+    assert {"anchor_idx", "anchor", "date", "lead", "observed", "q10", "q50", "q90", "pit"} <= set(
+        bt["predictions"].columns
+    )
+    assert len(bt["by_lead"]) == 16
+    assert 0.0 <= bt["summary"]["pit_ks_stat"] <= 1.0
+    assert bt["summary"]["crps"] < bt["summary"]["crps_reference"]
+    # Prefix calibration hits cache (zero extra calls beyond initial active blocks!)
+    n_active_blocks = len(range(48, n, 16))
+    assert n_calls == n_active_blocks
+    # Calibrated holdout widens under-dispersed intervals toward nominal 80% / 90%
+    assert (
+        bt["calibrated_summary"]["coverage_80"] > bt["holdout_uncalibrated_summary"]["coverage_80"]
+    )
+    assert (
+        bt["calibrated_summary"]["coverage_90"] > bt["holdout_uncalibrated_summary"]["coverage_90"]
+    )
+    assert nm.chronos_backtest is chronos_backtest
+
+
+def test_chronos_impute_with_calibration() -> None:
+    rng = np.random.default_rng(88)
+    n = 260
+    idx = pd.date_range("2024-01-01", periods=n, freq="h")
+    ws = 2.0 + np.abs(rng.normal(2.0, 0.7, n))
+    y = 25.0 + 2.0 * ws + rng.normal(0.0, 2.5, n)
+    df = pd.DataFrame({"value": y.copy(), "ws": ws}, index=idx)
+    est, _ = _stub_estimator(
+        context_length=32,
+        prediction_length=8,
+        spread=0.2,
+        slope_fn=lambda hist, pc, fc: 25.0 + 2.0 * np.asarray(fc["ws"], dtype=float),
+    )
+    bt = est.backtest(df.iloc[:160], "value", covariates=["ws"], calibrate=True)
+    df_gap = df.copy()
+    df_gap.iloc[180:192, df_gap.columns.get_loc("value")] = np.nan
+
+    raw = est.impute(df_gap, "value", covariates=["ws"], quantiles=(0.1, 0.5, 0.9))
+    cal = est.impute(
+        df_gap,
+        "value",
+        covariates=["ws"],
+        quantiles=(0.1, 0.5, 0.9),
+        calibration=bt["calibration"],
+    )
+    np.testing.assert_allclose(raw["imputed"], cal["imputed"], equal_nan=True)
+    raw_width = (raw.loc[raw["is_imputed"], "upper"] - raw.loc[raw["is_imputed"], "lower"]).mean()
+    cal_width = (cal.loc[cal["is_imputed"], "upper"] - cal.loc[cal["is_imputed"], "lower"]).mean()
+    assert cal_width > raw_width
+
+
+def test_counterfactual_multivariate_quantile_and_median_rollout() -> None:
+    rng = np.random.default_rng(19)
+    n = 180
+    idx = pd.date_range("2024-01-01", periods=n, freq="h")
+    ws = 3.0 + np.abs(rng.normal(1.0, 0.4, n))
+    co = 0.5 + 0.05 * rng.standard_normal(n)
+    pm25 = 40.0 - 3.0 * ws + 2.0 * co
+    no2 = 60.0 - 4.0 * ws + 5.0 * co
+    df = pd.DataFrame({"pm25": pm25, "no2": no2, "ws": ws, "co": co}, index=idx)
+    interv = idx[120]
+    df.loc[df.index >= interv, "pm25"] -= 8.0
+    df.loc[df.index >= interv, "no2"] -= 12.0
+    df.loc[df.index >= interv, "co"] = 9999.0
+
+    recorded_items: list[dict[str, Any]] = []
+
+    class _MultiPipe:
+        quantiles = list(LEVELS)
+
+        def predict(self, inputs, prediction_length, **kwargs):
+            out = []
+            for item in inputs:
+                recorded_items.append(item)
+                tgt = np.asarray(item["target"], dtype=float)
+                assert tgt.ndim == 2 and tgt.shape[0] == 2
+                w = np.asarray(item["future_covariates"]["ws"], dtype=float)
+                m1 = 41.0 - 3.0 * w
+                m2 = 62.5 - 4.0 * w
+                b1 = np.vstack([m1 + 2.0 * (q - 0.5) for q in LEVELS])
+                b2 = np.vstack([m2 + 2.0 * (q - 0.5) for q in LEVELS])
+                out.append(np.stack([b1, b2], axis=0))
+            return out
+
+    est = Chronos2Estimator(
+        context_length=48, prediction_length=24, device="cpu", past_only_covariates=["co"]
+    )
+    est._pipeline = _MultiPipe()
+    est._quantiles = np.asarray(LEVELS, dtype=float)
+
+    res_q = est.counterfactual_multivariate(
+        df, ["pm25", "no2"], interv, features=["ws"], validation_hours=24, rollout="quantile"
+    )
+    assert set(res_q) == {"pm25", "no2"}
+    assert res_q["pm25"].summary["multivariate_targets"] == ["pm25", "no2"]
+    assert res_q["no2"].summary["net_impact"] < -8.0
+    assert list(res_q["no2"].to_scm_frame().columns) == [
+        "observed",
+        "synthetic",
+        "effect",
+        "lower",
+        "upper",
+    ]
+    assert "co" not in recorded_items[-1]["future_covariates"]
+
+    recorded_items.clear()
+    res_m = est.counterfactual_multivariate(
+        df, ["pm25", "no2"], interv, features=["ws"], validation_hours=24, rollout="median"
+    )
+    assert len(res_m["pm25"].counterfactual_p50) == 60
+    assert np.nanmax(recorded_items[-1]["past_covariates"]["co"]) < 100.0
+
+
+def test_covariate_sensitivity_callback_detects_collapse_and_stops(caplog) -> None:
+    df = _hourly_frame(120, seed=11)
+    est_good, _ = _stub_estimator(
+        context_length=32,
+        prediction_length=12,
+        slope_fn=lambda hist, pc, fc: 30.0 - 4.0 * np.asarray(fc["ws"], dtype=float),
+    )
+    est_bad, _ = _stub_estimator(
+        context_length=32,
+        prediction_length=12,
+        slope_fn=lambda hist, pc, fc: np.full(len(fc["ws"]), 30.0, dtype=float),
+    )
+
+    cb = CovariateSensitivityCallback(
+        df,
+        "value",
+        anchor=df.index[80],
+        horizon=12,
+        met_features=["ws"],
+        context_length=32,
+        prediction_length=12,
+        use_calendar=False,
+        eval_steps=5,
+        min_pct_shift=2.0,
+        patience=2,
+        stop_on_collapse=True,
+    )
+    state = types.SimpleNamespace(global_step=3)
+    control = types.SimpleNamespace(should_training_stop=False)
+    cb.on_step_end(None, state, control, model=est_good._pipeline)
+    assert len(cb.history) == 0
+
+    state.global_step = 5
+    cb.on_step_end(None, state, control, model=est_good._pipeline)
+    assert len(cb.history) == 1 and cb.history[0]["pct_of_prediction"] > 5.0
+    assert control.should_training_stop is False
+
+    with caplog.at_level("WARNING"):
+        state.global_step = 10
+        cb.on_step_end(None, state, control, model=est_bad._pipeline)
+        assert control.should_training_stop is False  # streak 1/2
+        state.global_step = 15
+        cb.on_step_end(None, state, control, model=est_bad._pipeline)
+        assert control.should_training_stop is True  # streak 2/2 triggers early stop
+    assert "covariate sensitivity dropped" in caplog.text
+    assert cb.on_train_end(None, state, control) is control
+    assert nm.CovariateSensitivityCallback is CovariateSensitivityCallback

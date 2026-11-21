@@ -381,3 +381,68 @@ def test_do_all_multisite_chronos_single_checkpoint_deweather_and_icn(monkeypatc
     assert set(icn_out["site"]) == {"A", "B"}
     assert {"observed", "normalised", "q100", "q500", "q900"} <= set(icn_out.columns)
     assert icn_models["A"] is icn_models["B"]
+
+
+def test_decompose_multisite_chronos_single_checkpoint(monkeypatch):
+    """decompose_multisite(..., backend='chronos-2') loads once and avoids joblib processes."""
+    import joblib
+    import numpy as np
+
+    import normet.foundation.estimator as est_mod
+
+    levels = [0.1, 0.5, 0.9]
+    load_count = 0
+
+    class _FakePipe:
+        quantiles = levels
+
+        def predict(self, inputs, prediction_length, **kwargs):
+            out = []
+            for item in inputs:
+                w = np.asarray(item["future_covariates"]["ws"], dtype=float)
+                med = 20.0 + 2.0 * w
+                out.append(np.stack([med - 1.0, med, med + 1.0])[None, ...])
+            return out
+
+    def _fake_load(name, dev, auto):
+        nonlocal load_count
+        load_count += 1
+        return _FakePipe(), dev or "cpu"
+
+    monkeypatch.setattr(est_mod, "_load_pipeline_on", _fake_load)
+    monkeypatch.setattr(est_mod, "resolve_device", lambda req=None: req or "cpu")
+    monkeypatch.setattr(
+        joblib,
+        "Parallel",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("chronos-2 decompose_multisite should not spawn joblib")
+        ),
+    )
+
+    dates = pd.date_range("2024-01-01", periods=96, freq="h")
+    ws = np.linspace(1.0, 5.0, 96)
+    df = pd.concat(
+        [
+            pd.DataFrame({"date": dates, "site": s, "PM2.5": 20.0 + 2.0 * ws, "ws": ws})
+            for s in ("A", "B")
+        ],
+        ignore_index=True,
+    )
+    out = decompose_multisite(
+        df,
+        site_col="site",
+        target="PM2.5",
+        method="meteorology",
+        covariates=["ws"],
+        backend="chronos-2",
+        model_config={
+            "method": "icn",
+            "context_length": 24,
+            "prediction_length": 12,
+            "device": "cpu",
+        },
+        n_samples=2,
+    )
+    assert load_count == 1
+    assert set(out["site"]) == {"A", "B"}
+    assert {"date", "site", "observed", "emi_total", "met_total", "ws"} <= set(out.columns)

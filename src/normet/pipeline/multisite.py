@@ -429,6 +429,75 @@ def do_all_multisite(
     return (df_norm, models) if return_models else df_norm
 
 
+def _decompose_multisite_chronos(
+    df: pd.DataFrame,
+    site_col: str,
+    target: str,
+    *,
+    method: str,
+    covariates: list[str] | None,
+    decompose_kwargs: dict[str, Any],
+) -> pd.DataFrame:
+    """Single-checkpoint in-process fast path for ``decompose_multisite(..., backend="chronos-2")``."""
+    from ..analysis.decomposition import decompose
+    from ..foundation import Chronos2Estimator
+
+    if site_col not in df.columns:
+        raise ValueError(f"`site_col` '{site_col}' not in df.")
+
+    sites = list(pd.unique(df[site_col]))
+    if not sites:
+        return pd.DataFrame()
+
+    kw = dict(decompose_kwargs)
+    kw.setdefault("n_cores", 1)
+    model_arg = kw.pop("model", None)
+    if model_arg is None:
+        mc = dict(kw.get("model_config") or {})
+        model_path = mc.pop("model_path", None)
+        for non_ctor in ("method", "estimate", "icn_design", "pool", "cross_learning", "estimator"):
+            mc.pop(non_ctor, None)
+        estimator = (
+            Chronos2Estimator.load(model_path, device=mc.get("device"))
+            if model_path is not None
+            else Chronos2Estimator(**mc)
+        )
+    else:
+        estimator = model_arg
+
+    if getattr(estimator, "_pipeline", None) is None:
+        estimator._load_pipeline()
+
+    pieces: list[pd.DataFrame] = []
+    for site_value in sites:
+        sub = df[df[site_col] == site_value]
+        if sub.empty:
+            continue
+        try:
+            res = decompose(
+                method=method,
+                df=sub.drop(columns=[site_col]),
+                target=target,
+                covariates=covariates,
+                backend=CHRONOS_BACKEND,
+                model=estimator,
+                **kw,
+            )
+            if len(res) == 0:
+                continue
+            out = res.copy()
+            if isinstance(out.index, pd.DatetimeIndex):
+                out = out.reset_index().rename(columns={out.index.name or "index": "date"})
+            out[site_col] = site_value
+            pieces.append(out)
+        except Exception as exc:
+            log.warning("Site %s failed: %s", site_value, exc)
+
+    if not pieces:
+        raise RuntimeError("All per-site runs failed.")
+    return pd.concat(pieces, ignore_index=True)
+
+
 def decompose_multisite(
     df: pd.DataFrame,
     site_col: str,
@@ -456,7 +525,8 @@ def decompose_multisite(
     covariates : list of str, optional
         Features used for training and decomposition.
     backend : str
-        Model training backend.
+        Model training backend. On ``chronos-2``, loads one checkpoint in-process
+        and reuses it across sites instead of spawning worker processes.
     n_cores : int, optional
         Number of parallel workers. With more than one site each site's
         decomposition runs its normalisation calls single-threaded, so the
@@ -469,6 +539,16 @@ def decompose_multisite(
     pandas.DataFrame
         Decomposition results for all sites, concatenated.
     """
+    if str(backend).lower() == CHRONOS_BACKEND:
+        return _decompose_multisite_chronos(
+            df,
+            site_col,
+            target,
+            method=method,
+            covariates=covariates,
+            decompose_kwargs=decompose_kwargs,
+        )
+
     from ..analysis.decomposition import decompose
 
     if site_col in df.columns and df[site_col].nunique() > 1:

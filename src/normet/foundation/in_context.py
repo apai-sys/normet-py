@@ -46,6 +46,7 @@ __all__ = [
     "Chronos2ICLPipeline",
     "Chronos2MultivariateICLPipeline",
     "build_icn_draw_bank",
+    "decompose_icn_uncertainty",
     "normalise_in_context",
     "normalise_in_context_multivariate",
     "normalise_in_context_multisite",
@@ -468,6 +469,24 @@ class ICNDrawBank:
     external_pool: bool = False
     schema: str = "chronos"
 
+    def _merged_dir(self, direction: str | None) -> tuple[str, _DirResult]:
+        """Resolve and mirror/merge directional cached draws."""
+        dir_eff = direction if direction is not None else self.design.direction
+        if dir_eff not in ("forward", "reverse", "bidirectional"):
+            raise ValueError(f"direction must be forward|reverse|bidirectional, got {dir_eff!r}")
+        n = len(self.index)
+        if dir_eff == "forward":
+            if self.forward is None:
+                raise ValueError("ICNDrawBank has no cached 'forward' pass")
+            return dir_eff, self.forward
+        if dir_eff == "reverse":
+            if self.reverse is None:
+                raise ValueError("ICNDrawBank has no cached 'reverse' pass")
+            return dir_eff, _mirror_dir_result(self.reverse, n)
+        if self.forward is None or self.reverse is None:
+            raise ValueError("ICNDrawBank requires both forward and reverse passes")
+        return dir_eff, _merge_dir_results(self.forward, self.reverse, n)
+
     def aggregate(
         self,
         *,
@@ -477,31 +496,15 @@ class ICNDrawBank:
         schema: str | None = None,
     ) -> ICNResult:
         """Materialise an :class:`ICNResult` from cached draws under updated aggregation."""
-        dir_eff = direction if direction is not None else self.design.direction
         agg_eff = aggregate if aggregate is not None else self.design.aggregate
         tau_eff = float(lead_tau) if lead_tau is not None else self.design.lead_tau
         schema_eff = schema if schema is not None else self.schema
-        if dir_eff not in ("forward", "reverse", "bidirectional"):
-            raise ValueError(f"direction must be forward|reverse|bidirectional, got {dir_eff!r}")
         if agg_eff not in ("mean", "median", "trimmed", "quantile_mean"):
             raise ValueError(f"aggregate must be mean|median|trimmed, got {agg_eff!r}")
         if schema_eff not in ("chronos", "normet"):
             raise ValueError(f"schema must be 'chronos' or 'normet', got {schema_eff!r}")
 
-        n = len(self.index)
-        if dir_eff == "forward":
-            if self.forward is None:
-                raise ValueError("ICNDrawBank has no cached 'forward' pass")
-            merged = self.forward
-        elif dir_eff == "reverse":
-            if self.reverse is None:
-                raise ValueError("ICNDrawBank has no cached 'reverse' pass")
-            merged = _mirror_dir_result(self.reverse, n)
-        else:
-            if self.forward is None or self.reverse is None:
-                raise ValueError("ICNDrawBank requires both forward and reverse passes")
-            merged = _merge_dir_results(self.forward, self.reverse, n)
-
+        dir_eff, merged = self._merged_dir(direction)
         eff_design = replace(self.design, direction=dir_eff, aggregate=agg_eff, lead_tau=tau_eff)
         return _assemble_icn_result(
             index=self.index,
@@ -512,6 +515,73 @@ class ICNDrawBank:
             ext_pool=self.external_pool,
             schema=schema_eff,
         )
+
+    def decompose_uncertainty(self, *, direction: str | None = None) -> Any:
+        """Partition cached ICN variance into weather and anchor sources (:func:`decompose_icn_uncertainty`)."""
+        return decompose_icn_uncertainty(self, direction=direction)
+
+
+def decompose_icn_uncertainty(bank: ICNDrawBank, *, direction: str | None = None) -> Any:
+    """Zero-inference Law-of-Total-Variance decomposition over cached :class:`ICNDrawBank` draws.
+
+    Separates the counterfactual predictive spread at each timestamp into:
+
+    - ``var_weather``: mean within-anchor meteorological resampling variance;
+    - ``var_model``: across-anchor context-origin variance (of each anchor's conditional mean);
+    - ``var_interaction``: identically zero (nested independent resamples per anchor).
+
+    Satisfies ``var_weather + var_model + var_interaction == var_total`` identically and
+    returns an :class:`~normet.analysis.uncertainty.UncDecomposition` ready for ``.summary()``,
+    ``.frame()``, and ``.plot()``.
+    """
+    from ..analysis.uncertainty import UncDecomposition
+
+    _, merged = bank._merged_dir(direction)
+    n = len(bank.index)
+    var_weather = np.full(n, np.nan, dtype=float)
+    var_model = np.full(n, np.nan, dtype=float)
+    var_interaction = np.full(n, np.nan, dtype=float)
+    var_total = np.full(n, np.nan, dtype=float)
+    max_anchors = 0
+
+    for h in range(n):
+        a_vals = merged.anchor_values.get(h)
+        w_vals = merged.mc_vars.get(h)
+        if not a_vals or not w_vals:
+            continue
+        a_arr = np.asarray(a_vals, dtype=float)
+        w_arr = np.asarray(w_vals, dtype=float)
+        finite = np.isfinite(a_arr) & np.isfinite(w_arr)
+        if not finite.any():
+            continue
+        af = a_arr[finite]
+        wf = w_arr[finite]
+        max_anchors = max(max_anchors, int(af.size))
+        vw = float(np.mean(wf))
+        vm = float(np.var(af))
+        var_weather[h] = vw
+        var_model[h] = vm
+        var_interaction[h] = 0.0
+        var_total[h] = vw + vm
+
+    return UncDecomposition(
+        var_weather=var_weather,
+        var_model=var_model,
+        var_interaction=var_interaction,
+        var_total=var_total,
+        index=bank.index,
+        target=bank.target,
+        n_models=max(1, max_anchors),
+        n_weather_draws=int(bank.design.n_resamples),
+        seed=int(bank.design.seed),
+        notes=[
+            "Computed from cached ICNDrawBank draws via the exact Law of Total Variance "
+            "(zero extra model forward passes).",
+            "`model` measures across-anchor context-origin variance; `weather` measures "
+            "mean within-anchor meteorological resampling variance.",
+            "`interaction` is identically zero because each anchor draws nested resamples.",
+        ],
+    )
 
 
 # --------------------------------------------------------------------------- #

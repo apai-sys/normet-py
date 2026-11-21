@@ -16,6 +16,11 @@ causal and atmospheric workflows:
   predictive quantile intervals.
 - :func:`chronos_impute` — covariate-conditioned bidirectional gap imputation
   with native predictive uncertainty bounds.
+- :func:`chronos_backtest` — rolling multi-horizon probabilistic verification
+  (CRPS, pinball loss, PIT uniformity, interval coverage) with causal
+  prefix-to-holdout conformal calibration.
+- :class:`CovariateSensitivityCallback` — HuggingFace ``TrainerCallback``
+  monitoring meteorological sensitivity during Chronos-2 fine-tuning.
 """
 
 from __future__ import annotations
@@ -32,6 +37,7 @@ from .calibration import (
     AdaptiveConformalCalibrator,
     CalibratedEstimator,
     QuantileCalibration,
+    calibrate_quantiles,
 )
 from .chronos import ChronosEmbedder, _to_numpy_f32
 from .estimator import (
@@ -51,6 +57,8 @@ __all__ = [
     "chronos_attention_attribution",
     "chronos_pdp",
     "chronos_impute",
+    "chronos_backtest",
+    "CovariateSensitivityCallback",
 ]
 
 
@@ -254,7 +262,7 @@ def chronos_scm(
         validation_hours=val_steps,
         max_horizon=max_horizon,
         calibrated=calibrated,
-        past_only_covariates=past_only_cols or None,
+        past_only_covariates=past_only_cols,
         rollout=rollout,
     )
     res.summary.update(
@@ -1079,7 +1087,7 @@ def _find_nan_runs(values: np.ndarray) -> list[tuple[int, int]]:
 
 
 def chronos_impute(
-    estimator: Chronos2Estimator,
+    estimator: Any,
     df: pd.DataFrame,
     target: str,
     *,
@@ -1088,13 +1096,17 @@ def chronos_impute(
     direction: str = "bidirectional",
     quantiles: Sequence[float] = (0.1, 0.5, 0.9),
     max_gap: int | None = None,
+    calibration: QuantileCalibration | CalibratedEstimator | None = None,
 ) -> pd.DataFrame:
     """Impute contiguous ``NaN`` gaps in ``target`` conditioned on meteorology.
 
     Rolls forward and/or backward across each missing span using observed context
     outside the gap and observed covariates across the gap, then smoothly blends
     both passes weighted by proximity to each gap boundary (``bidirectional``), or
-    falls back cleanly to whichever direction has sufficient context.
+    falls back cleanly to whichever direction has sufficient context. Optionally
+    applies a :class:`QuantileCalibration` fit (or unwraps a
+    :class:`CalibratedEstimator`) to rescale the prediction interval bounds while
+    keeping the median imputation unchanged.
     """
     if target not in df.columns:
         raise KeyError(f"target column absent from frame: {target!r}")
@@ -1105,13 +1117,14 @@ def chronos_impute(
     if max_gap is not None and int(max_gap) < 1:
         raise ValueError(f"max_gap must be >= 1, got {max_gap}")
 
-    estimator._check_index(df.index)
+    base, cal = _resolve_cal_and_base(estimator, calibration)
+    base._check_index(df.index)
     cols = (
         list(covariates)
         if covariates is not None
-        else estimator._resolve_covariates(df, target, exclude=past_only_covariates or ())
+        else base._resolve_covariates(df, target, exclude=past_only_covariates or ())
     )
-    past_only_cols = estimator._resolve_past_only_covariates(df, target, cols, past_only_covariates)
+    past_only_cols = base._resolve_past_only_covariates(df, target, cols, past_only_covariates)
 
     obs = df[target].to_numpy(dtype=float)
     n = len(obs)
@@ -1135,8 +1148,8 @@ def chronos_impute(
             columns=out_cols,
         )
 
-    ctx = int(estimator.context_length)
-    step = int(estimator.prediction_length)
+    ctx = int(base.context_length)
+    step = int(base.prediction_length)
     q_indices: list[tuple[int, int, int]] = []
 
     def _roll_gap(
@@ -1146,7 +1159,7 @@ def chronos_impute(
             return None
         ctx_start = max(0, s - ctx)
         init_hist = target_arr[ctx_start:s]
-        if estimator._context_coverage(init_hist) < estimator.min_context_coverage:
+        if base._context_coverage(init_hist) < base.min_context_coverage:
             return None
 
         hist = init_hist.astype(np.float32, copy=True)
@@ -1160,18 +1173,21 @@ def chronos_impute(
             nxt = min(cur + step, e)
             fut_df = frame.iloc[cur:nxt]
             if past_only_cols:
-                block = estimator._forecast_block(
+                block = base._forecast_block(
                     hist, past_df, fut_df, cols, past_only_cols=past_only_cols
                 )
             else:
-                block = estimator._forecast_block(hist, past_df, fut_df, cols)
+                block = base._forecast_block(hist, past_df, fut_df, cols)
+            block_arr = np.asarray(block, dtype=float)
+            if cal is not None:
+                block_arr = cal.rescale_block(block_arr, base._q_index)
             if not q_indices:
-                q_indices.append(_resolve_q_triple(estimator, quantiles))
+                q_indices.append(_resolve_q_triple(base, quantiles))
             qi_lo, qi_mid, qi_hi = q_indices[0]
-            med_c = np.asarray(block[qi_mid], dtype=float)
+            med_c = np.asarray(block_arr[qi_mid], dtype=float)
             med_chunks.append(med_c)
-            lo_chunks.append(np.asarray(block[qi_lo], dtype=float))
-            hi_chunks.append(np.asarray(block[qi_hi], dtype=float))
+            lo_chunks.append(np.asarray(block_arr[qi_lo], dtype=float))
+            hi_chunks.append(np.asarray(block_arr[qi_hi], dtype=float))
             hist = np.concatenate([hist, med_c.astype(np.float32)])[-ctx:]
             past_df = pd.concat([past_df, fut_df]).iloc[-ctx:]
             cur = nxt
@@ -1232,3 +1248,543 @@ def chronos_impute(
         index=df.index,
         columns=out_cols,
     )
+
+
+def _outward_monotone(q_vals: np.ndarray, q_levels: np.ndarray) -> np.ndarray:
+    """Enforce non-crossing outward from the median for partial-band calibration."""
+    qv = np.asarray(q_vals, dtype=float).copy()
+    mid = int(np.argmin(np.abs(q_levels - 0.5)))
+    qv[: mid + 1] = np.minimum.accumulate(qv[: mid + 1][::-1])[::-1]
+    qv[mid:] = np.maximum.accumulate(qv[mid:])
+    return qv
+
+
+def _summary_from_rows(
+    y: np.ndarray,
+    q_mat: np.ndarray,
+    pits: np.ndarray,
+    q_levels: np.ndarray,
+    intervals: tuple[float, ...],
+    crps_fn: Any,
+    crps_obs_fn: Any,
+    pinball_fn: Any,
+) -> dict[str, Any]:
+    """Compute probabilistic verification metrics for one set of backtest rows."""
+    from ..exceptions import DataError
+
+    mid_i = int(np.argmin(np.abs(q_levels - 0.5)))
+    finite = np.isfinite(y) & np.isfinite(q_mat).all(axis=1)
+    if not finite.any():
+        raise DataError("No finite forecast-observation pairs in chronos_backtest")
+
+    yf = y[finite]
+    qf = q_mat[finite]
+    med = qf[:, mid_i]
+    pf = pits[finite & np.isfinite(pits)]
+
+    crps_val = float(crps_fn(qf, yf, quantiles=list(q_levels)))
+    crps_ref = float(crps_obs_fn(med, yf))
+    pinball_50 = float(pinball_fn(med, yf, float(q_levels[mid_i])))
+    err = med - yf
+    mae = float(np.mean(np.abs(err)))
+    rmse = float(np.sqrt(np.mean(err * err)))
+    bias = float(np.mean(err))
+    ss_res = float(np.sum(err * err))
+    ss_tot = float(np.sum((yf - np.mean(yf)) ** 2))
+    r2 = float(1.0 - ss_res / ss_tot) if ss_tot > 0.0 else float("nan")
+    crps_skill = float(1.0 - crps_val / crps_ref) if crps_ref > 0.0 else float("nan")
+
+    if pf.size > 0:
+        ps = np.sort(pf)
+        m = ps.size
+        ks = float(
+            max(
+                float(np.max(np.abs(np.arange(1, m + 1) / m - ps))),
+                float(np.max(np.abs(np.arange(0, m) / m - ps))),
+            )
+        )
+        pit_mean = float(np.mean(pf))
+        pit_std = float(np.std(pf))
+    else:
+        ks = float("nan")
+        pit_mean = float("nan")
+        pit_std = float("nan")
+
+    out: dict[str, Any] = {
+        "n_obs": int(yf.size),
+        "crps": crps_val,
+        "crps_reference": crps_ref,
+        "crps_skill": crps_skill,
+        "pinball_50": pinball_50,
+        "mae": mae,
+        "rmse": rmse,
+        "bias": bias,
+        "r2": r2,
+        "pit_mean": pit_mean,
+        "pit_std": pit_std,
+        "pit_ks_stat": ks,
+    }
+    for iv in intervals:
+        lo_lvl = 0.5 * (1.0 - iv)
+        hi_lvl = 1.0 - lo_lvl
+        lo_vals = np.array([float(np.interp(lo_lvl, q_levels, row)) for row in qf], dtype=float)
+        hi_vals = np.array([float(np.interp(hi_lvl, q_levels, row)) for row in qf], dtype=float)
+        key = f"coverage_{int(round(100.0 * iv))}"
+        out[key] = float(np.mean((yf >= lo_vals) & (yf <= hi_vals)))
+    return out
+
+
+def chronos_backtest(
+    estimator: Any,
+    df: pd.DataFrame,
+    target: str,
+    *,
+    covariates: Sequence[str] | None = None,
+    past_only_covariates: Sequence[str] | None = None,
+    horizon: int | None = None,
+    stride: int | None = None,
+    quantiles: Sequence[float] | None = None,
+    intervals: Sequence[float] = (0.5, 0.8, 0.9),
+    calibrate: bool = False,
+    calibration_frac: float = 0.5,
+) -> dict[str, Any]:
+    """Rolling multi-horizon probabilistic verification and conformal calibration closure.
+
+    Evaluates ``estimator`` over rolling forecast origins across ``df`` conditioned on
+    observed covariates, scoring exact Continuous Ranked Probability Score (CRPS),
+    pinball loss, PIT uniformity, and empirical coverage overall and by forecast lead.
+    When ``calibrate=True``, fits split-conformal :class:`QuantileCalibration` on
+    the earlier block prefix (reusing cached forecasts when ``stride == horizon``)
+    and scores the held-out suffix both before and after calibration.
+    """
+    from ..analysis.verification import crps_from_quantiles, crps_observed, pinball_loss
+
+    if target not in df.columns:
+        raise KeyError(f"target column absent from frame: {target!r}")
+    if not (0.0 < float(calibration_frac) < 1.0):
+        raise ValueError(f"calibration_frac must be in (0, 1), got {calibration_frac}")
+    iv_tuple = tuple(sorted({float(iv) for iv in intervals}))
+    if not iv_tuple or any(not (0.0 < iv < 1.0) for iv in iv_tuple):
+        raise ValueError(f"intervals must be non-empty values in (0, 1), got {intervals!r}")
+
+    base, existing_cal = _resolve_cal_and_base(estimator, None)
+    base._check_index(df.index)
+
+    h = int(horizon or base.prediction_length)
+    step = int(stride) if stride is not None else h
+    if h < 1:
+        raise ValueError(f"horizon must be >= 1, got {h}")
+    if step < 1:
+        raise ValueError(f"stride must be >= 1, got {step}")
+
+    cols = (
+        list(covariates)
+        if covariates is not None
+        else base._resolve_covariates(df, target, exclude=past_only_covariates or ())
+    )
+    past_only_cols = base._resolve_past_only_covariates(df, target, cols, past_only_covariates)
+
+    n = len(df)
+    spans = [(s, min(s + h, n)) for s in range(int(base.context_length), n, step)]
+    if not spans:
+        raise InsufficientContextError(
+            f"need more than context_length ({base.context_length}) rows for chronos_backtest, got {n}"
+        )
+
+    obs = df[target].to_numpy(dtype=float)
+    obs_f32 = obs.astype(np.float32)
+    skipped = base._blocks_without_context(obs, spans, "backtest")
+    active = [sp for sp in spans if sp not in skipped]
+
+    raw_by_span: dict[tuple[int, int], np.ndarray] = {}
+    by_len: dict[int, list[tuple[int, int]]] = {}
+    for s, e in active:
+        by_len.setdefault(e - s, []).append((s, e))
+
+    for block_len, group in by_len.items():
+        items = [
+            (
+                obs_f32[max(0, s - int(base.context_length)) : s],
+                df.iloc[max(0, s - int(base.context_length)) : s],
+                df.iloc[s:e],
+            )
+            for s, e in group
+        ]
+        if past_only_cols:
+            blocks = base._forecast_blocks(items, cols, block_len, past_only_cols=past_only_cols)
+        else:
+            blocks = base._forecast_blocks(items, cols, block_len)
+        for sp, raw_block in zip(group, blocks, strict=True):
+            raw_by_span[sp] = np.asarray(raw_block, dtype=float)
+
+    native_levels = np.asarray(base.quantile_levels, dtype=float)
+    if quantiles is None:
+        q_indices = list(range(len(native_levels)))
+    else:
+        q_indices = sorted({int(base._q_index(float(q))) for q in quantiles})
+        if len(q_indices) < 2:
+            raise ValueError("quantiles must map to at least 2 distinct quantile levels")
+    q_levels = np.asarray([float(native_levels[i]) for i in q_indices], dtype=float)
+    mid_local = int(np.argmin(np.abs(q_levels - 0.5)))
+
+    def _score_subset(
+        subset_spans: Sequence[tuple[int, int]],
+        cal_obj: QuantileCalibration | None,
+    ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
+        pred_rows: list[dict[str, Any]] = []
+        q_rows: list[np.ndarray] = []
+        y_rows: list[float] = []
+        pits: list[float] = []
+        leads: list[int] = []
+
+        for anchor_idx, (s, e) in enumerate(subset_spans):
+            blk = raw_by_span[(s, e)]
+            if cal_obj is not None:
+                blk = cal_obj.rescale_block(blk, base._q_index)
+            q_sub = blk[q_indices]  # (len(q_levels), block_len)
+            anchor_ts = df.index[s]
+            for offset in range(e - s):
+                t_idx = s + offset
+                y_val = float(obs[t_idx])
+                qv_raw = q_sub[:, offset]
+                qv = (
+                    _outward_monotone(qv_raw, q_levels)
+                    if (cal_obj is not None and np.all(np.isfinite(qv_raw)))
+                    else np.asarray(qv_raw, dtype=float)
+                )
+                p = (
+                    _empirical_pit(y_val, qv, q_levels)
+                    if (np.isfinite(y_val) and np.all(np.isfinite(qv)))
+                    else float("nan")
+                )
+                lo80 = (
+                    float(np.interp(0.1, q_levels, qv)) if np.all(np.isfinite(qv)) else float("nan")
+                )
+                hi80 = (
+                    float(np.interp(0.9, q_levels, qv)) if np.all(np.isfinite(qv)) else float("nan")
+                )
+                row_d: dict[str, Any] = {
+                    "anchor_idx": anchor_idx,
+                    "anchor": anchor_ts,
+                    "date": df.index[t_idx],
+                    "lead": offset + 1,
+                    "observed": y_val,
+                    "q10": lo80,
+                    "q50": float(qv[mid_local]),
+                    "q90": hi80,
+                    "pit": p,
+                }
+                pred_rows.append(row_d)
+                q_rows.append(qv)
+                y_rows.append(y_val)
+                pits.append(p)
+                leads.append(offset + 1)
+
+        preds_df = pd.DataFrame(
+            pred_rows,
+            columns=[
+                "anchor_idx",
+                "anchor",
+                "date",
+                "lead",
+                "observed",
+                "q10",
+                "q50",
+                "q90",
+                "pit",
+            ],
+        )
+        y_arr = np.asarray(y_rows, dtype=float)
+        q_mat = np.vstack(q_rows)
+        pit_arr = np.asarray(pits, dtype=float)
+        lead_arr = np.asarray(leads, dtype=int)
+
+        summary = _summary_from_rows(
+            y_arr,
+            q_mat,
+            pit_arr,
+            q_levels,
+            iv_tuple,
+            crps_from_quantiles,
+            crps_observed,
+            pinball_loss,
+        )
+
+        lead_summaries: list[dict[str, Any]] = []
+        for ld in sorted(set(leads)):
+            sel = lead_arr == ld
+            row_sum = _summary_from_rows(
+                y_arr[sel],
+                q_mat[sel],
+                pit_arr[sel],
+                q_levels,
+                iv_tuple,
+                crps_from_quantiles,
+                crps_observed,
+                pinball_loss,
+            )
+            row_sum["lead"] = int(ld)
+            lead_summaries.append(row_sum)
+        by_lead_df = pd.DataFrame(lead_summaries)
+        lead_cols = ["lead"] + [c for c in by_lead_df.columns if c != "lead"]
+        by_lead_df = by_lead_df[lead_cols]
+        return preds_df, by_lead_df, summary
+
+    preds_df, by_lead_df, summary = _score_subset(active, existing_cal)
+
+    fitted_cal: QuantileCalibration | None = existing_cal
+    cal_summary: dict[str, Any] | None = None
+    holdout_raw_summary: dict[str, Any] | None = None
+
+    if calibrate:
+        if len(active) < 2:
+            raise ValueError("calibrate=True requires at least 2 active backtest blocks")
+        n_cal = max(1, min(len(active) - 1, int(round(len(active) * float(calibration_frac)))))
+        cached_blocks = {
+            (pd.Timestamp(df.index[s]), e - s): raw_by_span[(s, e)] for s, e in active[:n_cal]
+        }
+
+        class _CachedQuantileEstimator:
+            def __init__(self) -> None:
+                self.prediction_length = h
+                self.context_length = int(base.context_length)
+
+            def predict_quantiles(
+                self,
+                frame: pd.DataFrame,
+                tgt: str,
+                anchor: pd.Timestamp | str,
+                horizon: int | None = None,
+                quantiles: Sequence[float] = (0.1, 0.5, 0.9),
+                covariates: Sequence[str] | None = None,
+            ) -> pd.DataFrame:
+                ts = pd.Timestamp(anchor)
+                hor = int(horizon or h)
+                blk = cached_blocks.get((ts, hor))
+                if blk is not None:
+                    fut_idx = frame.loc[frame.index >= ts].iloc[:hor].index
+                    return pd.DataFrame(
+                        {f"q{q}": blk[base._q_index(float(q))] for q in quantiles},
+                        index=fut_idx,
+                    )
+                return base.predict_quantiles(
+                    frame,
+                    tgt,
+                    ts,
+                    horizon=hor,
+                    quantiles=quantiles,
+                    covariates=covariates,
+                    past_only_covariates=past_only_cols or None,
+                )
+
+        cand_levels: set[float] = {0.5, 0.05, 0.95}
+        for q in q_levels:
+            qf = float(f"{float(q):.6g}")
+            if abs(float(native_levels[base._q_index(qf)]) - 0.5) > 1e-6:
+                cand_levels.add(qf)
+                cand_levels.add(float(f"{1.0 - qf:.6g}"))
+        for iv in iv_tuple:
+            hi_iv = float(f"{0.5 + 0.5 * iv:.6g}")
+            if abs(float(native_levels[base._q_index(hi_iv)]) - 0.5) > 1e-6:
+                cand_levels.add(hi_iv)
+                cand_levels.add(float(f"{1.0 - hi_iv:.6g}"))
+        cal_qs = sorted(q for q in cand_levels if 0.0 < q < 1.0)
+
+        cal_anchor = df.index[active[n_cal][0]]
+        cal_res = calibrate_quantiles(
+            _CachedQuantileEstimator(),
+            df,
+            target,
+            cal_anchor,
+            quantiles=cal_qs,
+            n_blocks=n_cal,
+            covariates=cols,
+        )
+        fitted_cal = cal_res.calibration
+        holdout_spans = active[n_cal:]
+        _, _, holdout_raw_summary = _score_subset(holdout_spans, None)
+        _, _, cal_summary = _score_subset(holdout_spans, fitted_cal)
+
+    return {
+        "predictions": preds_df,
+        "by_lead": by_lead_df,
+        "summary": summary,
+        "calibration": fitted_cal,
+        "calibrated_summary": cal_summary,
+        "holdout_uncalibrated_summary": holdout_raw_summary,
+    }
+
+
+class CovariateSensitivityCallback:
+    """Trainer callback monitoring meteorological sensitivity during Chronos-2 fine-tuning.
+
+    Periodically evaluates :func:`normet.foundation.estimator.covariate_sensitivity` on a
+    held-out context window so fine-tuning can detect (and optionally early-stop) if
+    the adapted weights collapse toward pure target autoregression. Compatible with
+    HuggingFace ``Trainer(callbacks=[...])`` while requiring zero ``torch`` or
+    ``transformers`` imports at module import time.
+    """
+
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        target: str,
+        anchor: pd.Timestamp | str,
+        *,
+        horizon: int | None = None,
+        met_features: Sequence[str] | None = None,
+        context_length: int = 2048,
+        prediction_length: int = 168,
+        use_calendar: bool = True,
+        past_only_covariates: Sequence[str] | None = None,
+        eval_steps: int = 50,
+        min_pct_shift: float = 1.0,
+        patience: int = 1,
+        stop_on_collapse: bool = False,
+        random_state: int = 0,
+    ) -> None:
+        if int(eval_steps) < 1:
+            raise ValueError(f"eval_steps must be >= 1, got {eval_steps}")
+        if float(min_pct_shift) < 0.0:
+            raise ValueError(f"min_pct_shift must be >= 0, got {min_pct_shift}")
+        if int(patience) < 1:
+            raise ValueError(f"patience must be >= 1, got {patience}")
+        if target not in df.columns:
+            raise KeyError(f"target column absent from frame: {target!r}")
+
+        self.df = df
+        self.target = target
+        self.anchor = pd.Timestamp(anchor)
+        self.horizon = int(horizon or prediction_length)
+        self.met_features = list(met_features) if met_features is not None else None
+        self.context_length = int(context_length)
+        self.prediction_length = int(prediction_length)
+        self.use_calendar = bool(use_calendar)
+        self.past_only_covariates = (
+            list(past_only_covariates) if past_only_covariates is not None else None
+        )
+        self.eval_steps = int(eval_steps)
+        self.min_pct_shift = float(min_pct_shift)
+        self.patience = int(patience)
+        self.stop_on_collapse = bool(stop_on_collapse)
+        self.random_state = int(random_state)
+        self.history: list[dict[str, float]] = []
+        self._below_count = 0
+
+    def _evaluate_model(self, model: Any, step: int) -> dict[str, float]:
+        probe = Chronos2Estimator(
+            context_length=self.context_length,
+            prediction_length=self.prediction_length,
+            met_covariates=self.met_features,
+            use_calendar=self.use_calendar,
+            device="cpu",
+            past_only_covariates=self.past_only_covariates,
+        )
+        if hasattr(model, "predict"):
+            probe._pipeline = model
+            if hasattr(model, "quantiles"):
+                probe._quantiles = np.asarray(model.quantiles, dtype=float)
+            shift = probe.covariate_sensitivity(
+                self.df,
+                self.target,
+                self.anchor,
+                horizon=self.horizon,
+                met_features=self.met_features,
+                random_state=self.random_state,
+            )
+        else:
+            from chronos.chronos2 import Chronos2Pipeline
+
+            was_training = bool(getattr(model, "training", False))
+            if hasattr(model, "eval"):
+                model.eval()
+            try:
+                probe._pipeline = Chronos2Pipeline(model=model)
+                probe._quantiles = np.asarray(probe._pipeline.quantiles, dtype=float)
+                shift = probe.covariate_sensitivity(
+                    self.df,
+                    self.target,
+                    self.anchor,
+                    horizon=self.horizon,
+                    met_features=self.met_features,
+                    random_state=self.random_state,
+                )
+            finally:
+                if was_training and hasattr(model, "train"):
+                    model.train()
+
+        entry: dict[str, float] = {"step": float(step), **{k: float(v) for k, v in shift.items()}}
+        self.history.append(entry)
+        return entry
+
+    def on_step_end(
+        self, args: Any, state: Any, control: Any, model: Any = None, **kwargs: Any
+    ) -> Any:
+        step = int(getattr(state, "global_step", 0))
+        if step <= 0 or step % self.eval_steps != 0 or model is None:
+            return control
+
+        entry = self._evaluate_model(model, step)
+        pct = entry["pct_of_prediction"]
+        if pct < self.min_pct_shift:
+            self._below_count += 1
+            log.warning(
+                "Chronos-2 fine-tuning step %d: covariate sensitivity dropped to %.2f%% "
+                "(threshold %.2f%%; streak %d/%d).",
+                step,
+                pct,
+                self.min_pct_shift,
+                self._below_count,
+                self.patience,
+            )
+            if self.stop_on_collapse and self._below_count >= self.patience:
+                control.should_training_stop = True
+        else:
+            self._below_count = 0
+        return control
+
+    # Explicit HuggingFace TrainerCallback lifecycle no-ops for CallbackHandler parity.
+    def on_init_end(self, args: Any, state: Any, control: Any, **kwargs: Any) -> Any:
+        return control
+
+    def on_train_begin(self, args: Any, state: Any, control: Any, **kwargs: Any) -> Any:
+        return control
+
+    def on_train_end(self, args: Any, state: Any, control: Any, **kwargs: Any) -> Any:
+        return control
+
+    def on_epoch_begin(self, args: Any, state: Any, control: Any, **kwargs: Any) -> Any:
+        return control
+
+    def on_epoch_end(self, args: Any, state: Any, control: Any, **kwargs: Any) -> Any:
+        return control
+
+    def on_step_begin(self, args: Any, state: Any, control: Any, **kwargs: Any) -> Any:
+        return control
+
+    def on_pre_optimizer_step(self, args: Any, state: Any, control: Any, **kwargs: Any) -> Any:
+        return control
+
+    def on_optimizer_step(self, args: Any, state: Any, control: Any, **kwargs: Any) -> Any:
+        return control
+
+    def on_substep_end(self, args: Any, state: Any, control: Any, **kwargs: Any) -> Any:
+        return control
+
+    def on_evaluate(self, args: Any, state: Any, control: Any, **kwargs: Any) -> Any:
+        return control
+
+    def on_predict(self, args: Any, state: Any, control: Any, **kwargs: Any) -> Any:
+        return control
+
+    def on_save(self, args: Any, state: Any, control: Any, **kwargs: Any) -> Any:
+        return control
+
+    def on_log(self, args: Any, state: Any, control: Any, **kwargs: Any) -> Any:
+        return control
+
+    def on_prediction_step(self, args: Any, state: Any, control: Any, **kwargs: Any) -> Any:
+        return control
+
+    def on_push_begin(self, args: Any, state: Any, control: Any, **kwargs: Any) -> Any:
+        return control

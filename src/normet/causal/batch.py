@@ -13,6 +13,7 @@ import pandas as pd
 from ..utils._config import dispatch_batch_size, resolve_workers
 from ..utils._time import to_datetime_coerced
 from ..utils.logging import get_logger
+from .placebo import _resolve_chronos_scm_kwargs
 from .run_scm import run_scm
 
 log = get_logger(__name__)
@@ -76,6 +77,7 @@ def scm_all(
     units = sorted(pd.unique(df[unit_col]))
     n_cores_eff = resolve_workers(n_cores)
 
+    is_chronos, run_kw = _resolve_chronos_scm_kwargs(scm_backend, kwargs)
     ml_backend_for_log = kwargs.get("backend") if scm_backend == "mlscm" else None
     log.info(
         "scm_all: scm_backend=%s | ml_backend=%s | cutoff=%s | units=%d | n_cores=%d",
@@ -98,7 +100,7 @@ def scm_all(
                 donors=donors_u,
                 cutoff_date=cutoff_date,
                 scm_backend=scm_backend,
-                **kwargs,  # may include backend="flaml" if mlscm
+                **run_kw,  # may include backend="flaml" if mlscm
             )
             out = syn.copy()
             out[unit_col] = code
@@ -108,12 +110,15 @@ def scm_all(
             log.warning("%s failed for unit %s: %s", scm_backend, code, e)
             return None
 
-    # joblib is ~100 ms of `import normet`; the parallel branches pay it.
-    from joblib import Parallel, delayed
+    if is_chronos:
+        pieces = [_one(code) for code in units]
+    else:
+        # joblib is ~100 ms of `import normet`; the parallel branches pay it.
+        from joblib import Parallel, delayed
 
-    pieces = Parallel(n_jobs=n_cores_eff, batch_size=dispatch_batch_size(len(units), n_cores_eff))(
-        delayed(_one)(code) for code in units
-    )
+        pieces = Parallel(
+            n_jobs=n_cores_eff, batch_size=dispatch_batch_size(len(units), n_cores_eff)
+        )(delayed(_one)(code) for code in units)
     pieces = [p for p in pieces if p is not None]
     if not pieces:
         raise RuntimeError("All synthetic-control runs failed.")
@@ -276,6 +281,7 @@ def run_scm_staggered(
             f"{[(u, str(pd.to_datetime(c).date())) for u, c in pairs if u in no_post]}"
         )
 
+    is_chronos, run_kw = _resolve_chronos_scm_kwargs(scm_backend, kwargs)
     n_cores_eff = resolve_workers(n_cores)
     log.info(
         "run_scm_staggered: scm_backend=%s | treated=%d | donors=%d | post_agg=%s | n_cores=%d",
@@ -305,7 +311,7 @@ def run_scm_staggered(
                 cutoff_date=cutoff,
                 donors=pool,
                 scm_backend=scm_backend,
-                **kwargs,
+                **run_kw,
             )
         except Exception as e:
             log.warning(
@@ -325,20 +331,26 @@ def run_scm_staggered(
             pre_r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
         return (unit, cutoff, stat, pre_r2, n_pre, n_post)
 
-    from joblib import Parallel, delayed
-
-    # One pool for the real runs and for every donor taking every treated
-    # unit's role — the cross-unit reference, and the material of each unit's
-    # own placebo-in-space test.
-    jobs = [delayed(_one)(u, c.strftime("%Y-%m-%d"), donor_pool, "real") for u, c in pairs]
-    jobs += [
-        delayed(_one)(u, c.strftime("%Y-%m-%d"), [x for x in donor_pool if x != u], "placebo")
+    task_specs: list[tuple[str, str, list[str], str]] = [
+        (u, c.strftime("%Y-%m-%d"), donor_pool, "real") for u, c in pairs
+    ] + [
+        (u, c.strftime("%Y-%m-%d"), [x for x in donor_pool if x != u], "placebo")
         for u in donor_pool
         for _, c in pairs
     ]
-    results = Parallel(n_jobs=n_cores_eff, batch_size=dispatch_batch_size(len(jobs), n_cores_eff))(
-        jobs
-    )
+
+    if is_chronos:
+        results = [_one(u, c_str, pool, kind) for u, c_str, pool, kind in task_specs]
+    else:
+        from joblib import Parallel, delayed
+
+        # One pool for the real runs and for every donor taking every treated
+        # unit's role — the cross-unit reference, and the material of each unit's
+        # own placebo-in-space test.
+        jobs = [delayed(_one)(u, c_str, pool, kind) for u, c_str, pool, kind in task_specs]
+        results = Parallel(
+            n_jobs=n_cores_eff, batch_size=dispatch_batch_size(len(jobs), n_cores_eff)
+        )(jobs)
 
     real: dict[str, tuple[float, float]] = {}
     placebo: dict[tuple[str, str], float] = {}

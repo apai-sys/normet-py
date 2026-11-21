@@ -1970,6 +1970,228 @@ class Chronos2Estimator:
             calibration=calibration,
         )
 
+    def counterfactual_multivariate(
+        self,
+        df: pd.DataFrame,
+        targets: Sequence[str],
+        intervention_date: str | pd.Timestamp,
+        features: Sequence[str] | None = None,
+        quantiles: Sequence[float] = (0.1, 0.5, 0.9),
+        validation_hours: int = 720,
+        max_horizon: int | None = None,
+        *,
+        past_only_covariates: Sequence[str] | None = None,
+        rollout: str = "quantile",
+    ) -> dict[str, CounterfactualResult]:
+        """Joint multivariate counterfactual BAU projection across correlated species.
+
+        Stacks ``targets`` as a 2-D ``(n_variates, T)`` history so Chronos-2
+        attends across species via group self-attention while projecting across
+        ``intervention_date`` conditioned on shared weather and optional
+        pre-cutoff ``past_only_covariates``. Returns one :class:`CounterfactualResult`
+        per target.
+        """
+        target_list = list(targets)
+        if len(target_list) < 2:
+            raise ValueError(
+                "counterfactual_multivariate needs at least two targets; "
+                "use counterfactual() for a single series"
+            )
+        missing = [t for t in target_list if t not in df.columns]
+        if missing:
+            raise KeyError(f"target columns absent from frame: {missing}")
+        if rollout not in ("median", "quantile"):
+            raise ValueError(f"rollout must be 'median' or 'quantile', got {rollout!r}")
+        self._check_index(df.index)
+        interv = pd.to_datetime(intervention_date)
+        qs = tuple(sorted(float(q) for q in quantiles))
+        if len(qs) < 3 or 0.5 not in qs:
+            raise ValueError(
+                "`quantiles` must name at least three levels with the median 0.5 "
+                f"among them, e.g. (0.1, 0.5, 0.9); got {tuple(quantiles)!r}."
+            )
+
+        cols = (
+            list(features)
+            if features is not None
+            else self._resolve_covariates(df, target_list, exclude=past_only_covariates or ())
+        )
+        past_only_cols = self._resolve_past_only_covariates(
+            df, target_list, cols, past_only_covariates
+        )
+
+        pre = df.loc[df.index < interv]
+        post = df.loc[df.index >= interv]
+        if post.empty:
+            raise ValueError("no post-intervention data after intervention_date")
+        if len(pre) < self.context_length + validation_hours:
+            raise ValueError(
+                f"need at least {self.context_length + validation_hours} pre-intervention hours, got {len(pre)}"
+            )
+        if max_horizon is not None:
+            post = post.iloc[: int(max_horizon)]
+
+        val = pre.iloc[-validation_hours:]
+        val_ctx = pre.iloc[:-validation_hours]
+        i50 = self._q_index(0.5)
+        if rollout == "quantile":
+            val_p50_list = self._project_native_multivariate(
+                val_ctx, val, target_list, cols, past_only_cols, {0.5: i50}
+            )
+        else:
+            val_p50_list = self._roll_forward_multivariate(
+                val_ctx, val, target_list, cols, {0.5: i50}, past_only_cols=past_only_cols
+            )
+
+        i_q = {q: self._q_index(q) for q in qs}
+        if rollout == "quantile":
+            proj_list = self._project_native_multivariate(
+                pre, post, target_list, cols, past_only_cols, i_q
+            )
+        else:
+            proj_list = self._roll_forward_multivariate(
+                pre, post, target_list, cols, i_q, past_only_cols=past_only_cols
+            )
+
+        results: dict[str, CounterfactualResult] = {}
+        for idx_t, tgt in enumerate(target_list):
+            val_obs = val[tgt].to_numpy(dtype=float)
+            ok = np.isfinite(val_obs)
+            val_p50 = val_p50_list[idx_t][0.5]
+            bias_pct = (
+                float(
+                    100.0
+                    * np.mean(val_p50[ok] - val_obs[ok])
+                    / max(abs(np.mean(val_obs[ok])), 1e-6)
+                )
+                if ok.any()
+                else float("nan")
+            )
+
+            proj = proj_list[idx_t]
+            p50 = pd.Series(proj[0.5], index=post.index)
+            p10 = pd.Series(proj[qs[0]], index=post.index)
+            p90 = pd.Series(proj[qs[-1]], index=post.index)
+            obs_post = post[tgt]
+            impact = obs_post - p50
+            impact_pct = 100.0 * impact / p50.where(p50.abs() > 1e-6)
+
+            mean_obs = float(np.nanmean(obs_post))
+            mean_bau = float(np.nanmean(p50))
+            outside = float(np.nanmean((obs_post < p10) | (obs_post > p90)))
+            summary = {
+                "intervention_date": str(interv),
+                "post_intervention_hours": int(len(post)),
+                "mean_observed": round(mean_obs, 3),
+                "mean_counterfactual_bau": round(mean_bau, 3),
+                "net_impact": round(mean_obs - mean_bau, 3),
+                "net_impact_pct": round(
+                    100.0 * (mean_obs - mean_bau) / max(abs(mean_bau), 1e-6), 3
+                ),
+                "pre_intervention_bias_pct": round(bias_pct, 3),
+                "fraction_outside_interval": round(outside, 3),
+                "validation_hours": int(validation_hours),
+                "rollout": rollout,
+                "multivariate_targets": list(target_list),
+            }
+            results[tgt] = CounterfactualResult(
+                observed=df[tgt],
+                counterfactual_p50=p50,
+                counterfactual_p10=p10,
+                counterfactual_p90=p90,
+                absolute_impact_p50=impact,
+                relative_impact_pct_p50=impact_pct,
+                pre_intervention_bias_pct=bias_pct,
+                summary=summary,
+            )
+        return results
+
+    def _project_native_multivariate(
+        self,
+        context: pd.DataFrame,
+        horizon_frame: pd.DataFrame,
+        targets: Sequence[str],
+        cols: Sequence[str],
+        past_only_cols: Sequence[str],
+        q_index: dict[float, int],
+    ) -> list[dict[float, np.ndarray]]:
+        """Joint native multi-patch / quantile-unrolled projection for several targets."""
+        self._check_index(context.index)
+        self._check_index(horizon_frame.index)
+        past = context.iloc[-self.context_length :]
+        stacked = np.stack([past[t].to_numpy(dtype=np.float32) for t in targets])
+        for row in stacked:
+            self._check_context(row)
+        item = self._make_input(stacked, past, horizon_frame, cols, past_only_cols=past_only_cols)
+        raw = self._predict_raw([item], len(horizon_frame), limit_prediction_length=False)
+        if len(raw) != 1:
+            raise RuntimeError(f"pipeline returned {len(raw)} forecasts for 1 input")
+        block = np.asarray(raw[0], dtype=float)
+        if block.shape[0] != len(targets):
+            raise RuntimeError(
+                f"pipeline returned {block.shape[0]} variates for {len(targets)} targets"
+            )
+        return [{q: block[i, qi].copy() for q, qi in q_index.items()} for i in range(len(targets))]
+
+    def _roll_forward_multivariate(
+        self,
+        context: pd.DataFrame,
+        horizon_frame: pd.DataFrame,
+        targets: Sequence[str],
+        cols: Sequence[str],
+        q_index: dict[float, int],
+        past_only_cols: Sequence[str] = (),
+    ) -> list[dict[float, np.ndarray]]:
+        """Block-by-block joint rollout feeding multi-target medians back together."""
+        self._check_index(context.index)
+        self._check_index(horizon_frame.index)
+        hist = np.stack([context[t].to_numpy(dtype=np.float32) for t in targets])
+        all_cov_cols = [*cols, *past_only_cols]
+        cov_hist = context[all_cov_cols].copy()
+        for c in past_only_cols:
+            if not _is_categorical(cov_hist[c]):
+                cov_hist[c] = cov_hist[c].astype(np.float32)
+        out = [{q: np.zeros(len(horizon_frame)) for q in q_index} for _ in targets]
+
+        step = self.prediction_length
+        i50 = self._q_index(0.5)
+        for s in range(0, len(horizon_frame), step):
+            e = min(s + step, len(horizon_frame))
+            future = horizon_frame.iloc[s:e]
+            past_cov = cov_hist.iloc[-self.context_length :]
+            sub_hist = hist[:, -self.context_length :]
+            for row in sub_hist:
+                self._check_context(row)
+            item = self._make_input(sub_hist, past_cov, future, cols, past_only_cols=past_only_cols)
+            raw = self._predict_raw([item], len(future))
+            if len(raw) != 1:
+                raise RuntimeError(f"pipeline returned {len(raw)} forecasts for 1 input")
+            block = np.asarray(raw[0], dtype=float)
+            if block.shape[0] != len(targets):
+                raise RuntimeError(
+                    f"pipeline returned {block.shape[0]} variates for {len(targets)} targets"
+                )
+            for i in range(len(targets)):
+                for q, qi in q_index.items():
+                    out[i][q][s:e] = block[i, qi]
+            step_med = np.asarray(block[:, i50, :], dtype=np.float32)
+            hist = np.concatenate([hist, step_med], axis=1)
+            if past_only_cols:
+                step_cov = pd.DataFrame(index=future.index)
+                for c in cols:
+                    step_cov[c] = future[c]
+                for c in past_only_cols:
+                    if _is_categorical(cov_hist[c]):
+                        step_cov[c] = pd.Series(
+                            [None] * len(future), index=future.index, dtype=object
+                        )
+                    else:
+                        step_cov[c] = np.full(len(future), np.nan, dtype=np.float32)
+                cov_hist = pd.concat([cov_hist, step_cov[all_cov_cols]])
+            else:
+                cov_hist = pd.concat([cov_hist, future[list(cols)]])
+        return out
+
     def _project_native(
         self,
         context: pd.DataFrame,
@@ -2240,6 +2462,7 @@ class Chronos2Estimator:
         direction: str = "bidirectional",
         quantiles: Sequence[float] = (0.1, 0.5, 0.9),
         max_gap: int | None = None,
+        calibration: QuantileCalibration | Any | None = None,
     ) -> pd.DataFrame:
         """Covariate-conditioned bidirectional gap imputation (:func:`chronos_impute`)."""
         from .operators import chronos_impute as _impute
@@ -2253,4 +2476,36 @@ class Chronos2Estimator:
             direction=direction,
             quantiles=quantiles,
             max_gap=max_gap,
+            calibration=calibration,
+        )
+
+    def backtest(
+        self,
+        df: pd.DataFrame,
+        target: str,
+        *,
+        covariates: Sequence[str] | None = None,
+        past_only_covariates: Sequence[str] | None = None,
+        horizon: int | None = None,
+        stride: int | None = None,
+        quantiles: Sequence[float] | None = None,
+        intervals: Sequence[float] = (0.5, 0.8, 0.9),
+        calibrate: bool = False,
+        calibration_frac: float = 0.5,
+    ) -> dict[str, Any]:
+        """Rolling probabilistic verification and calibration (:func:`chronos_backtest`)."""
+        from .operators import chronos_backtest as _bt
+
+        return _bt(
+            self,
+            df,
+            target,
+            covariates=covariates,
+            past_only_covariates=past_only_covariates,
+            horizon=horizon,
+            stride=stride,
+            quantiles=quantiles,
+            intervals=intervals,
+            calibrate=calibrate,
+            calibration_frac=calibration_frac,
         )

@@ -47,8 +47,11 @@ def test_top_level_symbols_present():
         "chronos_scm",
         "chronos_anomaly_scores",
         "chronos_attention_attribution",
+        "chronos_backtest",
         "chronos_pdp",
         "chronos_impute",
+        "CovariateSensitivityCallback",
+        "decompose_icn_uncertainty",
         "detect_chronos_events",
     }
     missing = must_have - set(nm.__all__)
@@ -77,7 +80,7 @@ def test_imports_without_the_heavy_optional_extras():
     script = textwrap.dedent("""
         import sys
 
-        BLOCKED = ("torch", "chronos", "PySide6")
+        BLOCKED = ("torch", "chronos", "transformers", "PySide6")
 
         class Blocker:
             def find_module(self, name, path=None):

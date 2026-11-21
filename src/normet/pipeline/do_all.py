@@ -101,6 +101,7 @@ def _do_all_zero_shot(
 
     mc = dict(cfg.model_config or {})
     model_path = mc.pop("model_path", None)
+    estimator_arg = mc.pop("estimator", None)
     method = str(mc.pop("method", "deweather")).lower()
     estimate = str(mc.pop("estimate", "level")).lower()
     icn_design = mc.pop("icn_design", None)
@@ -136,7 +137,13 @@ def _do_all_zero_shot(
         df_prep = log1p_target(df_prep)
     indexed = to_indexed_frame(df_prep)
 
-    if model_path is not None:
+    if estimator_arg is not None:
+        estimator = estimator_arg
+        if estimator.met_covariates is None:
+            estimator.met_covariates = list(met)
+        if getattr(estimator, "_pipeline", None) is None:
+            estimator._load_pipeline()
+    elif model_path is not None:
         estimator = Chronos2Estimator.load(model_path, device=mc.get("device"))
         if estimator.met_covariates is None:
             estimator.met_covariates = list(met)
@@ -490,6 +497,8 @@ def do_all_unc(
     observed_ref: pd.Series | None = None
 
     t0 = time.time()
+    shared_chronos: object | None = None
+    is_chronos = _cfg.backend == CHRONOS_BACKEND
     for i, s in enumerate(seeds, start=1):
         (log.info if _cfg.verbose else log.debug)(
             "do_all_unc: running model %d/%d (seed=%d) %s",
@@ -499,6 +508,10 @@ def do_all_unc(
             _progress_str(i, _cfg.n_models, t0),
         )
 
+        mc_i = _cfg.model_config
+        if is_chronos and shared_chronos is not None:
+            mc_i = {**(mc_i or {}), "estimator": shared_chronos}
+
         out_i, model_i, df_prep_i = do_all(
             df=df,
             target=_cfg.target,
@@ -507,7 +520,7 @@ def do_all_unc(
             variables_resample=_cfg.variables_resample,
             split_method=_cfg.split_method,
             train_fraction=_cfg.train_fraction,
-            model_config=_cfg.model_config,
+            model_config=mc_i,
             n_samples=_cfg.n_samples,
             seed=int(s),
             n_cores=_cfg.n_cores,
@@ -516,12 +529,28 @@ def do_all_unc(
             aggregate=True,
             log_transform=_cfg.log_transform,
         )
+        if is_chronos and shared_chronos is None:
+            shared_chronos = model_i
 
         if observed_ref is None:
             observed_ref = out_i["observed"].copy()
 
         col = f"normalised_{s}"
         series_list.append(out_i[["normalised"]].rename(columns={"normalised": col}))
+
+        if is_chronos:
+            stats_list.append(
+                pd.DataFrame(
+                    [
+                        {
+                            "seed": int(s),
+                            "backend": CHRONOS_BACKEND,
+                            "n_samples": _cfg.n_samples,
+                        }
+                    ]
+                )
+            )
+            continue
 
         try:
             stats_i = modStats(df=df_prep_i, model=model_i, subset=None, statistic=None)
