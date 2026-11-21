@@ -26,8 +26,11 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
+import tempfile
 import threading
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 from PySide6.QtCore import QDate, Qt
@@ -58,7 +61,16 @@ from normet import style as S
 from normet.io.trajectory import _missing_gdas1_files, _naive_utc
 
 from ._clock import TaskClock
-from ._widgets import CanvasTab, NoWheelSpinBox, SmoothProgress, hint_label, run_button, wrap_row
+from ._widgets import (
+    CanvasTab,
+    NoWheelComboBox,
+    NoWheelDoubleSpinBox,
+    NoWheelSpinBox,
+    SmoothProgress,
+    hint_label,
+    run_button,
+    wrap_row,
+)
 from .workers import TaskRunner
 
 log = logging.getLogger(__name__)
@@ -101,7 +113,9 @@ class SourceRegionTable(QTableWidget):
         for idx in sorted({i.row() for i in self.selectedIndexes()}, reverse=True):
             self.removeRow(idx)
 
-    def regions(self) -> dict[str, tuple[float, float, float, float]]:
+    def regions(
+        self, *, allow_dateline_wrap: bool = False
+    ) -> dict[str, tuple[float, float, float, float]]:
         """The boxes by name. A row left as added (no name, zeros) is skipped; any
         other row that is not a box raises ``ValueError`` naming it."""
         out: dict[str, tuple[float, float, float, float]] = {}
@@ -118,7 +132,14 @@ class SourceRegionTable(QTableWidget):
                 raise ValueError(
                     f"{where}: lon_min, lat_min, lon_max and lat_max must be numbers."
                 ) from None
-            if not (lon0 < lon1 and lat0 < lat1):
+            if not (lat0 < lat1):
+                raise ValueError(
+                    f"{where}: lon_min must be less than lon_max, and lat_min than lat_max."
+                )
+            if allow_dateline_wrap:
+                if lon0 == lon1:
+                    raise ValueError(f"{where}: lon_min and lon_max cannot be equal.")
+            elif not (lon0 < lon1):
                 raise ValueError(
                     f"{where}: lon_min must be less than lon_max, and lat_min than lat_max."
                 )
@@ -250,6 +271,8 @@ class TrajectoryWindow(QMainWindow):
         self._main = parent
         self.features: pd.DataFrame | None = None
         self._tdump_paths: list[str] = []
+        self._last_tdump_paths: list[str] = []
+        self._work_dirs: list[Path] = []
         self._gdas_paths: list[str] = []
         #: Set to stop the HYSPLIT run in progress (Cancel, or closing the window).
         self._hysplit_stop: threading.Event | None = None
@@ -350,7 +373,42 @@ class TrajectoryWindow(QMainWindow):
         min_row.addStretch(1)
         tv.addWidget(wrap_row(min_row))
 
-        # ---- Source regions (shared by build + run)
+        phys_form = QFormLayout()
+        self.blh_coupled_check = QCheckBox("BLH-coupled footprint")
+        self.blh_coupled_check.setChecked(True)
+        self.blh_coupled_check.setToolTip(
+            "Gate exposure by boundary-layer height (or 1500 m fallback when BLH is absent)\n"
+            "and scale sensitivity as 1000 / max(BLH, 100 m)."
+        )
+        phys_form.addRow(self.blh_coupled_check)
+        self.decay_spin = NoWheelSpinBox()
+        self.decay_spin.setRange(0, 720)
+        self.decay_spin.setValue(0)
+        self.decay_spin.setSpecialValueText("off")
+        self.decay_spin.setSuffix(" h")
+        self.decay_spin.setToolTip(
+            "Optional first-order chemical/deposition decay lifetime (e-folding hours)."
+        )
+        phys_form.addRow("Decay lifetime", self.decay_spin)
+        self.scav_spin = NoWheelDoubleSpinBox()
+        self.scav_spin.setRange(0.0, 2.0)
+        self.scav_spin.setSingleStep(0.05)
+        self.scav_spin.setValue(0.0)
+        self.scav_spin.setSpecialValueText("off")
+        self.scav_spin.setSuffix(" /mm")
+        self.scav_spin.setToolTip(
+            "Causal wet-scavenging coefficient applied to downstream rainfall strictly\n"
+            "between each upstream point and the receptor."
+        )
+        phys_form.addRow("Wet scavenging", self.scav_spin)
+        self.horizons_check = QCheckBox("Multi-scale horizons (0–12 / 12–36 / 36–72 h)")
+        self.horizons_check.setToolTip(
+            "Also emit separate near/regional/long-range horizon slices."
+        )
+        phys_form.addRow(self.horizons_check)
+        tv.addLayout(phys_form)
+
+        # ---- Source regions (shared by build + run + analysis)
         region_box = QGroupBox("Source regions (optional)")
         rv2 = QVBoxLayout(region_box)
         self.region_table = SourceRegionTable()
@@ -364,6 +422,8 @@ class TrajectoryWindow(QMainWindow):
         rbtn_row.addWidget(b_radd)
         rbtn_row.addWidget(b_rdel)
         rv2.addLayout(rbtn_row)
+        self.dateline_check = QCheckBox("Allow dateline wrap (lon_min > lon_max)")
+        rv2.addWidget(self.dateline_check)
         self.region_file_table = RegionFileTable()
         self.region_file_table.setMaximumHeight(90)
         rv2.addWidget(self.region_file_table)
@@ -474,6 +534,17 @@ class TrajectoryWindow(QMainWindow):
         self.height_spin.setValue(500)
         self.height_spin.setSuffix(" m agl")
         rf.addRow("Height", self.height_spin)
+        self.heights_edit = QLineEdit()
+        self.heights_edit.setPlaceholderText("e.g. 100, 500, 1000 — blank uses Height")
+        self.heights_edit.setToolTip(
+            "Optional comma-separated start heights (m AGL) run together in one CONTROL pass."
+        )
+        rf.addRow("Multi-heights", self.heights_edit)
+        self.workers_spin = NoWheelSpinBox()
+        self.workers_spin.setRange(1, 16)
+        self.workers_spin.setValue(1)
+        self.workers_spin.setToolTip("Parallel worker count for HYSPLIT runs across timestamps.")
+        rf.addRow("Workers", self.workers_spin)
         self.hours_back_spin = NoWheelSpinBox()
         self.hours_back_spin.setRange(1, 240)
         self.hours_back_spin.setValue(72)
@@ -540,7 +611,57 @@ class TrajectoryWindow(QMainWindow):
         self.run_btn.clicked.connect(self._run_hysplit)
         rf.addRow(self.run_btn)
 
-        self._run_buttons = [self.build_btn, self.gdas_btn, self.met_files_btn, self.run_btn]
+        # ---- Analysis page (WPSCF/WCWT, clustering, source footprint inversion)
+        an_box = QGroupBox("Receptor & source attribution")
+        af = QFormLayout(an_box)
+        self.receptor_source_combo = NoWheelComboBox()
+        self.receptor_source_combo.addItems(
+            ["auto (de-weathered if run)", "observed (main target)", "de-weathered (normalised)"]
+        )
+        af.addRow("Target series", self.receptor_source_combo)
+        self.receptor_method = NoWheelComboBox()
+        self.receptor_method.addItems(["wcwt", "wpscf"])
+        af.addRow("Receptor method", self.receptor_method)
+        self.grid_res_spin = NoWheelDoubleSpinBox()
+        self.grid_res_spin.setRange(0.1, 5.0)
+        self.grid_res_spin.setSingleStep(0.1)
+        self.grid_res_spin.setValue(0.5)
+        self.grid_res_spin.setSuffix(" °")
+        af.addRow("Grid resolution", self.grid_res_spin)
+        self.receptor_btn = run_button(
+            "▶  Run WPSCF / WCWT map",
+            "Map target (or de-weathered) concentrations along BLH-weighted trajectories.",
+        )
+        self.receptor_btn.clicked.connect(self._run_receptor_grid)
+        af.addRow(self.receptor_btn)
+        self.cluster_k_spin = NoWheelSpinBox()
+        self.cluster_k_spin.setRange(0, 12)
+        self.cluster_k_spin.setValue(0)
+        self.cluster_k_spin.setSpecialValueText("auto")
+        self.cluster_k_spin.setToolTip("Cluster count k (0 = automatic TSV elbow selection).")
+        af.addRow("Clusters (k)", self.cluster_k_spin)
+        self.cluster_btn = run_button(
+            "▶  Cluster trajectories",
+            "Group back-trajectories in tangent-plane space and plot centroids.",
+        )
+        self.cluster_btn.clicked.connect(self._run_clusters)
+        af.addRow(self.cluster_btn)
+        self.inv_btn = run_button(
+            "▶  Invert source footprints",
+            "Fit non-negative regularized linear inversion from region footprints to target.",
+        )
+        self.inv_btn.clicked.connect(self._run_inversion)
+        af.addRow(self.inv_btn)
+
+        self._run_buttons = [
+            self.build_btn,
+            self.gdas_btn,
+            self.met_files_btn,
+            self.run_btn,
+            self.receptor_btn,
+            self.cluster_btn,
+            self.inv_btn,
+        ]
 
         # A page per step, as the main window's (._pages.StepPanel): as wide as its
         # widest page needs, and the optional HYSPLIT run out of the way.
@@ -550,6 +671,7 @@ class TrajectoryWindow(QMainWindow):
             [
                 ("Trajectories", (tdump_box, region_box, build_box)),
                 ("HYSPLIT", (run_box,)),
+                ("Analysis", (an_box,)),
             ]
         )
         return self.panel
@@ -582,7 +704,19 @@ class TrajectoryWindow(QMainWindow):
         self.tab_features = CanvasTab(
             "Build trajectory features (left) to preview the transport\ndescriptors here."
         )
+        self.tab_receptor = CanvasTab(
+            "Run WPSCF / WCWT map (Analysis page) to map regional source probabilities."
+        )
+        self.tab_clusters = CanvasTab(
+            "Cluster trajectories (Analysis page) to inspect air-mass pathways."
+        )
+        self.tab_inversion = CanvasTab(
+            "Invert source footprints (Analysis page) to estimate region contributions."
+        )
         self.tabs.addTab(self.tab_features, "Features")
+        self.tabs.addTab(self.tab_receptor, "Receptor Map")
+        self.tabs.addTab(self.tab_clusters, "Clusters")
+        self.tabs.addTab(self.tab_inversion, "Footprint Inversion")
         return self.tabs
 
     # ---------------------------------------------------------------- data
@@ -678,7 +812,9 @@ class TrajectoryWindow(QMainWindow):
         a multi-region file keeps its own per-feature names, prefixed with
         the row's name so several loaded files can't collide.
         """
-        regions: dict = dict(self.region_table.regions())
+        regions: dict = dict(
+            self.region_table.regions(allow_dateline_wrap=self.dateline_check.isChecked())
+        )
         if self.region_file_table.rowCount():
             from normet import load_source_regions
 
@@ -691,12 +827,32 @@ class TrajectoryWindow(QMainWindow):
                         regions[f"{name}_{feat_name}"] = geom
         return regions or None
 
+    def _physics_kwargs(self) -> dict[str, Any]:
+        """Current Layer-1 physical weighting & horizon options."""
+        decay_v = self.decay_spin.value()
+        scav_v = float(self.scav_spin.value())
+        return {
+            "blh_coupled": self.blh_coupled_check.isChecked(),
+            "decay_hours": float(decay_v) if decay_v > 0 else None,
+            "scavenging_coeff": scav_v if scav_v > 0.0 else None,
+            "horizons_h": ((0, 12), (12, 36), (36, 72))
+            if self.horizons_check.isChecked()
+            else None,
+        }
+
+    def _active_tdumps(self) -> list[str]:
+        return list(self._tdump_paths) or list(self._last_tdump_paths)
+
     # ----------------------------------------------------------------- sync
     def _sync_enabled(self) -> None:
         busy = self.runner.busy
         self.build_btn.setEnabled(not busy and bool(self._tdump_paths))
         self.gdas_btn.setEnabled(not busy)
         self.run_btn.setEnabled(not busy and bool(self.hysplit_exec_edit.text().strip()))
+        has_tdumps = bool(self._active_tdumps())
+        self.receptor_btn.setEnabled(not busy and has_tdumps)
+        self.cluster_btn.setEnabled(not busy and has_tdumps)
+        self.inv_btn.setEnabled(not busy and has_tdumps)
         has_features = self.features is not None
         self.save_btn.setEnabled(has_features)
         self.send_btn.setEnabled(has_features and self._main is not None)
@@ -743,6 +899,7 @@ class TrajectoryWindow(QMainWindow):
         if not ok:
             return
         self._pending_site = self.build_site_edit.text().strip()
+        phys = self._physics_kwargs()
         self.runner.submit(
             "build trajectory features",
             build_trajectory_features,
@@ -752,6 +909,7 @@ class TrajectoryWindow(QMainWindow):
             source_regions=regions,
             prefix=self.prefix_edit.text() or "traj_",
             min_hours=self.build_min_spin.value() if self.build_min_check.isChecked() else None,
+            **phys,
         )
 
     def _regions_or_warn(self) -> tuple[bool, dict | None]:
@@ -792,7 +950,9 @@ class TrajectoryWindow(QMainWindow):
         import matplotlib.pyplot as plt
 
         plot_cols = [
-            c for c in result.columns if c.endswith(("dist_km", "speed_kmh", "inflow_deg"))
+            c
+            for c in result.columns
+            if c.endswith(("dist_km", "speed_kmh", "straightness", "inflow_deg"))
         ]
         n = max(1, len(plot_cols))
         fig, axes = plt.subplots(n, 1, figsize=(8, 1.5 * n + 0.4), sharex=True, squeeze=False)
@@ -966,10 +1126,24 @@ class TrajectoryWindow(QMainWindow):
         from normet import run_back_trajectories
 
         height_m = float(self.height_spin.value())
+        heights_text = self.heights_edit.text().strip()
+        heights_m: list[float] | None = None
+        if heights_text:
+            try:
+                heights_m = [float(x.strip()) for x in heights_text.split(",") if x.strip()]
+                if not heights_m or any(h <= 0.0 for h in heights_m):
+                    raise ValueError("Heights must be positive numbers.")
+            except ValueError as exc:
+                self.notices.notify("bad-heights", f"Multi-heights: {exc}", kind="warn")
+                return
+        n_workers = self.workers_spin.value()
+        phys = self._physics_kwargs()
         prefix = self.prefix_edit.text() or "traj_"
         diagnostics = [name for name, cb in self.diag_checks.items() if cb.isChecked()]
         min_hours = hours_back if self.run_min_check.isChecked() else None
         stop = threading.Event()
+        run_work = Path(tempfile.mkdtemp(prefix="nm_traj_gui_"))
+        self._work_dirs.append(run_work)
 
         def job() -> pd.DataFrame:
             frames = []
@@ -983,17 +1157,22 @@ class TrajectoryWindow(QMainWindow):
                     met_files=met_files,
                     hysplit_exec=exe,
                     height_m=height_m,
+                    heights_m=heights_m,
                     hours_back=hours_back,
+                    work_dir=run_work,
                     diagnostics=diagnostics,
                     source_regions=source_regions,
                     prefix=prefix,
                     min_hours=min_hours,
+                    n_workers=n_workers,
                     stop=stop,
+                    **phys,
                 )
                 if res is not None and not res.empty:
                     res = res.copy()
                     res.insert(0, "site", name)
                     frames.append(res)
+            self._last_tdump_paths = sorted(str(p) for p in run_work.glob("tdump_*"))
             if not frames:
                 return pd.DataFrame()
             return pd.concat(frames) if len(frames) > 1 else frames[0]
@@ -1006,10 +1185,245 @@ class TrajectoryWindow(QMainWindow):
         ):
             self._hysplit_stop = stop
 
+    # -------------------------------------------------------- Layer-2 analyses
+    def _analysis_target_series(self) -> tuple[pd.Series, str] | None:
+        main = self._main
+        if main is None:
+            return None
+        mode = self.receptor_source_combo.currentText()
+        norm_df = getattr(main, "results", {}).get("normalise")
+        use_norm = mode.startswith("de-weathered") or (
+            mode.startswith("auto")
+            and isinstance(norm_df, pd.DataFrame)
+            and "normalised" in norm_df.columns
+        )
+        if use_norm and isinstance(norm_df, pd.DataFrame) and "normalised" in norm_df.columns:
+            s = pd.to_numeric(norm_df["normalised"], errors="coerce").dropna()
+            label = "de-weathered normalised"
+        elif getattr(main, "df_raw", None) is not None and hasattr(main, "target_combo"):
+            df_raw = main.df_raw
+            tgt = main.target_combo.currentText()
+            if tgt not in df_raw.columns or "date" not in df_raw.columns:
+                return None
+            idx = pd.to_datetime(df_raw["date"], errors="coerce")
+            s = pd.Series(
+                pd.to_numeric(df_raw[tgt], errors="coerce").to_numpy(), index=idx, name=tgt
+            )
+            s = s[s.index.notna()].dropna()
+            label = tgt
+        else:
+            return None
+
+        if s.empty:
+            return None
+        if hasattr(main, "_zone"):
+            from normet.io.tables import clock_to_utc
+
+            s.index = pd.DatetimeIndex(clock_to_utc(s.index.to_series(), main._zone()))
+        return s.sort_index(), label
+
+    def _run_receptor_grid(self) -> None:
+        tdumps = self._active_tdumps()
+        if not tdumps:
+            self.notices.notify("no-tdump", "Add tdump files or run HYSPLIT first.")
+            return
+        tgt_info = self._analysis_target_series()
+        if tgt_info is None:
+            self.notices.notify(
+                "no-target-series",
+                "Load data (or run normalisation) in the main window first.",
+            )
+            return
+        ok, regions = self._regions_or_warn()
+        if not ok:
+            return
+
+        series, tgt_label = tgt_info
+        method = self.receptor_method.currentText()
+        grid_res = float(self.grid_res_spin.value())
+        min_h = self.build_min_spin.value() if self.build_min_check.isChecked() else None
+        phys = self._physics_kwargs()
+        phys.pop("horizons_h", None)
+
+        def job():
+            from normet import gridded_receptor_model, read_trajectory_endpoints
+
+            ep = read_trajectory_endpoints(tdumps, min_hours=min_h)
+            return gridded_receptor_model(
+                ep,
+                series,
+                method=method,
+                grid_res=grid_res,
+                **phys,
+            )
+
+        self._pending_analysis_ctx = (regions, tgt_label)
+        self.runner.submit(
+            f"receptor map ({method.upper()})", job, self._receptor_grid_done, self._show_error
+        )
+
+    def _receptor_grid_done(self, grid: Any) -> None:
+        from normet import plot_receptor_grid
+
+        regions, tgt_label = getattr(self, "_pending_analysis_ctx", (None, ""))
+        fig = plot_receptor_grid(
+            grid,
+            regions=regions,
+            title=f"{grid.method.upper()} ({tgt_label}) — {grid.n_matched_trajectories} trajectories",
+        )
+        df_cells = grid.to_dataframe().head(12)
+        rows = [
+            [
+                f"{r['lat']:.2f}",
+                f"{r['lon']:.2f}",
+                f"{r['weighted']:.2f}",
+                f"{r['exposure']:.1f}",
+                int(r["count"]),
+            ]
+            for _, r in df_cells.iterrows()
+        ]
+        self.tab_receptor.show_result(
+            fig,
+            verdict=(
+                "ok",
+                f"{grid.method.upper()} mapped {grid.n_matched_trajectories} trajectories onto {len(grid.to_dataframe())} grid cells.",
+            ),
+            header=["Lat", "Lon", "Weighted", "Exposure", "Trajs"],
+            rows=rows,
+        )
+        self.tabs.setCurrentWidget(self.tab_receptor)
+        self.statusBar().showMessage(f"{grid.method.upper()} receptor map done.")
+
+    def _run_clusters(self) -> None:
+        tdumps = self._active_tdumps()
+        if not tdumps:
+            self.notices.notify("no-tdump", "Add tdump files or run HYSPLIT first.")
+            return
+        k_val = self.cluster_k_spin.value()
+        n_clusters = int(k_val) if k_val >= 2 else None
+        min_h = self.build_min_spin.value() if self.build_min_check.isChecked() else None
+        tgt_info = self._analysis_target_series()
+        series = tgt_info[0] if tgt_info is not None else None
+
+        def job():
+            from normet import cluster_trajectories, read_trajectory_endpoints
+
+            ep = read_trajectory_endpoints(tdumps, min_hours=min_h)
+            return cluster_trajectories(ep, n_clusters=n_clusters, series=series)
+
+        self.runner.submit("cluster trajectories", job, self._clusters_done, self._show_error)
+
+    def _clusters_done(self, res: Any) -> None:
+        from normet import plot_trajectory_clusters
+
+        fig = plot_trajectory_clusters(res)
+        header = ["Cluster", "Trajectories", "Share", "Dist (km)", "Inflow (°)"]
+        has_t = "target_mean" in res.summary.columns
+        if has_t:
+            header.append("Target mean")
+        rows = []
+        for _, r in res.summary.iterrows():
+            row = [
+                f"C{int(r['cluster'])}",
+                int(r["n_trajectories"]),
+                f"{100.0 * r['freq']:.1f}%",
+                f"{r['mean_dist_km']:.1f}",
+                f"{r['mean_inflow_deg']:.0f}°",
+            ]
+            if has_t:
+                row.append(f"{r['target_mean']:.2f}" if pd.notna(r["target_mean"]) else "—")
+            rows.append(row)
+        self.tab_clusters.show_result(
+            fig,
+            verdict=(
+                "ok",
+                f"Grouped {int(res.summary['n_trajectories'].sum())} trajectories into {res.n_clusters} air-mass clusters.",
+            ),
+            header=header,
+            rows=rows,
+        )
+        self.tabs.setCurrentWidget(self.tab_clusters)
+        self.statusBar().showMessage(f"Trajectory clustering done (k={res.n_clusters}).")
+
+    def _run_inversion(self) -> None:
+        tdumps = self._active_tdumps()
+        if not tdumps:
+            self.notices.notify("no-tdump", "Add tdump files or run HYSPLIT first.")
+            return
+        tgt_info = self._analysis_target_series()
+        if tgt_info is None:
+            self.notices.notify(
+                "no-target-series",
+                "Load data (or run normalisation) in the main window first.",
+            )
+            return
+        ok, regions = self._regions_or_warn()
+        if not ok:
+            return
+        if not regions:
+            self.notices.notify(
+                "no-regions",
+                "Define at least one source region for footprint inversion.",
+                kind="warn",
+            )
+            return
+
+        series, tgt_label = tgt_info
+        min_h = self.build_min_spin.value() if self.build_min_check.isChecked() else None
+        phys = self._physics_kwargs()
+        phys.pop("horizons_h", None)
+
+        def job():
+            from normet import (
+                build_footprint_matrix,
+                invert_source_footprints,
+                read_trajectory_endpoints,
+            )
+
+            ep = read_trajectory_endpoints(tdumps, min_hours=min_h)
+            fp = build_footprint_matrix(ep, regions, **phys)
+            return invert_source_footprints(fp, series)
+
+        self._pending_inv_label = tgt_label
+        self.runner.submit("invert source footprints", job, self._inversion_done, self._show_error)
+
+    def _inversion_done(self, inv: Any) -> None:
+        from normet import plot_footprint_inversion
+
+        tgt_label = getattr(self, "_pending_inv_label", "")
+        fig = plot_footprint_inversion(inv, title=f"Source footprint inversion ({tgt_label})")
+        rows = [
+            [
+                str(r["region"]),
+                f"{r['beta']:.3f}",
+                f"[{r['beta_ci_low']:.3f}, {r['beta_ci_high']:.3f}]"
+                if pd.notna(r["beta_ci_low"])
+                else "—",
+                f"{r['mean_contribution']:.2f}",
+                f"{100.0 * r['share_of_transport']:.1f}%"
+                if pd.notna(r["share_of_transport"])
+                else "—",
+            ]
+            for _, r in inv.regions.sort_values("mean_contribution", ascending=False).iterrows()
+        ]
+        self.tab_inversion.show_result(
+            fig,
+            verdict=(
+                "ok",
+                f"Background={inv.intercept:.2f}, R²={inv.r2:.3f}, RMSE={inv.rmse:.2f} (n={inv.n_obs}).",
+            ),
+            header=["Region", "Beta", "95% CI", "Mean contrib", "Transport share"],
+            rows=rows,
+        )
+        self.tabs.setCurrentWidget(self.tab_inversion)
+        self.statusBar().showMessage("Footprint inversion done.")
+
     def closeEvent(self, event) -> None:  # noqa: N802
         if self._hysplit_stop is not None:
             self._hysplit_stop.set()
         # A stopped run ends within a fraction of a second; give it the time, so its
         # thread is not destroyed while it runs.
         self.runner.shutdown(wait_ms=5000)
+        for wd in getattr(self, "_work_dirs", []):
+            shutil.rmtree(wd, ignore_errors=True)
         super().closeEvent(event)

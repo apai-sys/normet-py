@@ -7,6 +7,32 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ## [Unreleased]
 
 ### Added
+- **Cross-regional transport physics & Lagrangian receptor attribution**
+  (`normet.io.trajectory`, `normet.analysis.transport`, `normet.analysis.normalise`,
+  `normet.plotting`):
+  - BLH-coupled endpoint weights (`nm.trajectory_endpoint_weights`:
+    boundary-layer gating, inverse mixing-depth sensitivity `1000 / max(BLH, min_blh_m)`,
+    exponential chemical decay, and strictly causal downstream wet scavenging),
+    continuous vector inflow (`inflow_sin/cos`, `mean_bearing_sin/cos`,
+    `straightness`), `blh_contact_frac`, time-integrated `rain_mm`, physical
+    per-region `traj_footprint_*` exposure, optional `horizons_h` bands, and
+    multi-height / `n_workers` parallel HYSPLIT execution in
+    `run_back_trajectories()`.
+  - Quality-control column classification (`nm.is_trajectory_qc_column` /
+    `TRAJ_QC_SUFFIXES`) so Transport Studio auto-ticks physical descriptors
+    without ticking `traj_n_endpoints` / `traj_age_max_h` as predictors.
+  - Stratified conditional resampling (`stratify_by=` in `NormaliseConfig` /
+    `DecomposeConfig` / `normalise` / `decom_met`) to eliminate cross-season or
+    cross-regime OOD extrapolation across local weather and transport pools.
+  - Physical BLH-weighted gridded receptor models (`nm.wpscf`, `nm.wcwt`,
+    `nm.gridded_receptor_model`), regularized non-negative source footprint
+    inversion with moving-block bootstrap CIs and sliding-window intensity tracking
+    (`nm.build_footprint_matrix`, `nm.invert_source_footprints`), Ward & angular
+    trajectory clustering with TSV elbow selection (`nm.cluster_trajectories`),
+    and SCM donor spillover / upwind coupling screening
+    (`nm.screen_donor_transport`).
+  - Transport visualisations (`nm.plot_receptor_grid`, `nm.plot_trajectory_clusters`,
+    `nm.plot_footprint_inversion`) and Transport Studio `Analysis` workflow tabs.
 - **Conda recipe.** `packaging/conda/meta.yaml` packages the 0.3.0 PyPI sdist
   as a `noarch: python` conda package (core dependencies; the CLI/MCP/GUI
   entry points), with local-build, personal-channel and conda-forge steps in

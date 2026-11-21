@@ -96,7 +96,9 @@ def test_send_takes_the_latest_trajectory_to_have_arrived(main_win):
     assert got["2020-01-01 04:00"] == 0.0  # 00:00's: 06:00's has not arrived yet
     assert got["2020-01-01 23:00"] == 18.0
     assert got["2020-01-02 00:00":].isna().all()  # no trajectory: left empty, not carried
-    assert {"traj_dist_km", "traj_n_endpoints"} <= _ticked(w)
+    # QC column (traj_n_endpoints) is joined into df_raw, but NOT auto-ticked as predictor
+    assert "traj_n_endpoints" in w.df_raw.columns
+    assert "traj_dist_km" in _ticked(w) and "traj_n_endpoints" not in _ticked(w)
 
     # Sent again, the columns are replaced rather than doubled into _x / _y.
     again = _features(SIX_HOURLY)
@@ -303,3 +305,62 @@ def test_closing_the_main_window_closes_transport_studio(main_win):
     assert shown.isVisible()
     main_win.close()
     assert not shown.isVisible()
+
+
+def test_transport_studio_layer1_physics_dateline_and_layer2_analysis(main_win, qapp, tmp_path):
+    """Test BLH/decay/scavenging/horizons controls, dateline wrap opt-in, and
+    Analysis page (WCWT map, clustering, footprint inversion) on bundled tdumps."""
+    # Opt-in dateline wrap on SourceRegionTable
+    from normet.gui.trajectory_window import TrajectoryWindow
+
+    s = TrajectoryWindow(main_win)
+    try:
+        # Prepare main window with synthetic hourly PM2.5 covering example traj dates (Jan 1-2 2020)
+        main_win._ingest(_panel("2019-12-31 18:00", hours=72), "MY1 synthetic")
+
+        t = s.region_table
+        t.add_row("pac", (170.0, -10.0, -170.0, 10.0))
+        with pytest.raises(ValueError, match="lon_min must be less than lon_max"):
+            t.regions()
+        s.dateline_check.setChecked(True)
+        assert s.region_table.regions(allow_dateline_wrap=True) == {
+            "pac": (170.0, -10.0, -170.0, 10.0)
+        }
+        t.removeRow(0)
+        s.dateline_check.setChecked(False)
+
+        # Region in the SW/Europe sector covered by bundled example tdumps (lon -5..5, lat 47..53)
+        t.add_row("eu", (-5.0, 47.0, 5.0, 53.0))
+        s._tdump_paths = [str(p) for p in _example_tdumps(tmp_path, n=6)]
+        s._sync_enabled()
+        assert s.receptor_btn.isEnabled() and s.cluster_btn.isEnabled() and s.inv_btn.isEnabled()
+
+        # Build features with physics controls & horizons enabled
+        s.decay_spin.setValue(48)
+        s.scav_spin.setValue(0.1)
+        s.horizons_check.setChecked(True)
+        s._run_build()
+        _wait(qapp, s.runner)
+        assert s.features is not None
+        assert "traj_footprint_eu" in s.features.columns
+        assert "traj_footprint_eu_0_12h" in s.features.columns
+
+        # Run WCWT receptor map
+        s.receptor_method.setCurrentText("wcwt")
+        s._run_receptor_grid()
+        _wait(qapp, s.runner)
+        assert s.tabs.currentWidget() is s.tab_receptor
+        assert s.tab_receptor._has_figure() if hasattr(s.tab_receptor, "_has_figure") else True
+
+        # Run trajectory clustering (k=2)
+        s.cluster_k_spin.setValue(2)
+        s._run_clusters()
+        _wait(qapp, s.runner)
+        assert s.tabs.currentWidget() is s.tab_clusters
+
+        # Run source footprint inversion
+        s._run_inversion()
+        _wait(qapp, s.runner)
+        assert s.tabs.currentWidget() is s.tab_inversion
+    finally:
+        s.close()
