@@ -40,6 +40,8 @@ def prepare_data(
     max_gap: int | None = 6,
     embargo: int = 0,
     circular_cols: Sequence[str] | None = None,
+    deduplicate: str | None = None,
+    strict_covariates: bool = False,
 ) -> pd.DataFrame:
     """
     Clean, validate, and split the input DataFrame in a single pipeline.
@@ -47,9 +49,10 @@ def prepare_data(
     Steps:
       1) Ensure a datetime column named ``date`` is present.
       2) Validate target and covariates (and drop NA targets before splitting when ``dropna=True``).
-      3) Add derived date variables (unix, julian day, weekday, hour).
-      4) Split into training/testing sets (with optional ``embargo`` around test blocks).
-      5) Impute missing predictor values (see ``impute``; ``"train_median"``
+      3) Optionally deduplicate repeated timestamps before date feature generation.
+      4) Add date variables (unix, julian day, weekday, hour).
+      5) Split into training/testing sets (with optional ``embargo`` around test blocks).
+      6) Impute missing predictor values (see ``impute``; ``"train_median"``
          restricts the statistics to the training rows).
 
     Parameters
@@ -87,6 +90,14 @@ def prepare_data(
     circular_cols : sequence of str, optional
         Angular degree columns (e.g. ``("wd",)``) interpolated via ``sin``/``cos``
         when ``impute="time_interp"``.
+    deduplicate : {"mean", "first", "last", "raise"} or None, default None
+        How to handle duplicate timestamps in ``date`` after dropping NA targets.
+        ``None`` preserves duplicate rows and emits a warning; ``"raise"``
+        raises ``ValueError``; ``"first"``/``"last"`` keeps one row; ``"mean"``
+        averages numeric columns and keeps first non-numeric values per timestamp.
+    strict_covariates : bool, default False
+        If True, raise ``ValueError`` when any non-builtin covariate in
+        ``covariates`` is missing from ``df``.
 
     Returns
     -------
@@ -98,16 +109,43 @@ def prepare_data(
           - derived date features
           - ``set`` column indicating "training"/"testing" (and "embargo" if ``embargo > 0``).
     """
+    valid_dedup = {None, "mean", "first", "last", "raise"}
+    if deduplicate not in valid_dedup:
+        raise ValueError(
+            f"Unknown `deduplicate` mode {deduplicate!r}; expected None or 'mean'/'first'/'last'/'raise'."
+        )
     log.debug(
         "Preparing data with split_method=%s, train_fraction=%.3f", split_method, train_fraction
     )
-    df_out = df.pipe(process_date).pipe(check_data, covariates=covariates, target=target)
+    df_out = df.pipe(process_date).pipe(
+        check_data, covariates=covariates, target=target, strict_covariates=strict_covariates
+    )
     if dropna and "value" in df_out.columns:
         before = len(df_out)
         df_out = df_out.dropna(subset=["value"]).reset_index(drop=True)
         dropped = before - len(df_out)
         if dropped:
             log.info("Dropped %d rows with NA in target.", dropped)
+    if not df_out.empty and df_out["date"].duplicated().any():
+        n_dup = int(df_out["date"].duplicated().sum())
+        if deduplicate == "raise":
+            raise ValueError(f"Found {n_dup} duplicate timestamp(s) in `date`.")
+        if deduplicate == "first":
+            df_out = df_out.drop_duplicates(subset=["date"], keep="first").reset_index(drop=True)
+        elif deduplicate == "last":
+            df_out = df_out.drop_duplicates(subset=["date"], keep="last").reset_index(drop=True)
+        elif deduplicate == "mean":
+            orig_cols = list(df_out.columns)
+            num_cols = [c for c in df_out.select_dtypes(include=[np.number]).columns if c != "date"]
+            other_cols = [c for c in orig_cols if c not in num_cols and c != "date"]
+            agg_spec: dict[str, str] = {c: "mean" for c in num_cols}
+            agg_spec.update({c: "first" for c in other_cols})
+            df_out = df_out.groupby("date", as_index=False, sort=True).agg(agg_spec)[orig_cols]
+        else:
+            log.warning(
+                "Detected %d duplicate timestamp(s) in `date`; consider passing `deduplicate='mean'`.",
+                n_dup,
+            )
     df_out = (
         df_out.pipe(add_date_variables)
         .pipe(
@@ -220,7 +258,13 @@ def process_date(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def check_data(df: pd.DataFrame, covariates: list[str], target: str) -> pd.DataFrame:
+def check_data(
+    df: pd.DataFrame,
+    covariates: list[str],
+    target: str,
+    *,
+    strict_covariates: bool = False,
+) -> pd.DataFrame:
     """
     Validate target column and restrict DataFrame to relevant variables.
 
@@ -232,6 +276,9 @@ def check_data(df: pd.DataFrame, covariates: list[str], target: str) -> pd.DataF
         Requested predictor columns.
     target : str
         Target variable name.
+    strict_covariates : bool, default False
+        If True, raise ``ValueError`` if any non-builtin covariate in
+        ``covariates`` is absent from ``df.columns``.
 
     Returns
     -------
@@ -241,10 +288,17 @@ def check_data(df: pd.DataFrame, covariates: list[str], target: str) -> pd.DataF
     Raises
     ------
     ValueError
-        If target missing, or ``date`` not datetime, or has NA.
+        If target missing, or ``date`` not datetime, or has NA, or (when
+        ``strict_covariates=True``) requested external covariates are missing.
     """
     if target not in df.columns:
         raise ValueError(f"The target variable `{target}` is not in the DataFrame columns.")
+
+    if strict_covariates:
+        builtin_time = {"date_unix", "day_julian", "weekday", "hour"}
+        missing_cov = [c for c in covariates if c not in builtin_time and c not in df.columns]
+        if missing_cov:
+            raise ValueError(f"Requested covariate(s) not found in DataFrame: {missing_cov}")
 
     # Excludes "date"/target here (added back once below) so a caller who
     # accidentally includes either in `covariates` doesn't end up with
@@ -268,6 +322,77 @@ def check_data(df: pd.DataFrame, covariates: list[str], target: str) -> pd.DataF
         raise ValueError("`date` must not contain missing (NA) values.")
 
     return df_sel
+
+
+def _eligible_interior_gap_mask(is_na: np.ndarray, max_gap: int | None) -> np.ndarray:
+    """Mark interior NA runs flanked by valid values with length <= ``max_gap``."""
+    n = len(is_na)
+    elig = np.zeros(n, dtype=bool)
+    i = 0
+    while i < n:
+        if not is_na[i]:
+            i += 1
+            continue
+        start = i
+        while i < n and is_na[i]:
+            i += 1
+        stop = i
+        run_len = stop - start
+        if start > 0 and stop < n and (max_gap is None or run_len <= max_gap):
+            elig[start:stop] = True
+    return elig
+
+
+def _interp_segment_1d(vals: np.ndarray, *, max_gap: int | None, is_circular: bool) -> np.ndarray:
+    """Interpolate strictly interior short gaps inside one contiguous split slice."""
+    out_vals = vals.astype(float, copy=True)
+    is_na = ~np.isfinite(out_vals)
+    elig = _eligible_interior_gap_mask(is_na, max_gap)
+    if not np.any(elig):
+        return out_vals
+    if is_circular:
+        rad = np.deg2rad(out_vals)
+        sin_raw = (
+            pd.Series(np.sin(rad))
+            .interpolate(method="linear", limit_area="inside")
+            .to_numpy(dtype=float)
+        )
+        cos_raw = (
+            pd.Series(np.cos(rad))
+            .interpolate(method="linear", limit_area="inside")
+            .to_numpy(dtype=float)
+        )
+        ok = (
+            elig
+            & np.isfinite(sin_raw)
+            & np.isfinite(cos_raw)
+            & (np.hypot(sin_raw, cos_raw) > 1e-12)
+        )
+        out_vals[ok] = np.rad2deg(np.arctan2(sin_raw[ok], cos_raw[ok])) % 360.0
+    else:
+        lin_raw = (
+            pd.Series(out_vals)
+            .interpolate(method="linear", limit_area="inside")
+            .to_numpy(dtype=float)
+        )
+        out_vals[elig] = lin_raw[elig]
+    return out_vals
+
+
+def _contiguous_runs(mask: np.ndarray) -> list[tuple[int, int]]:
+    """Return maximal contiguous ``[start, stop)`` intervals where *mask* is True."""
+    runs: list[tuple[int, int]] = []
+    n = len(mask)
+    i = 0
+    while i < n:
+        if not mask[i]:
+            i += 1
+            continue
+        start = i
+        while i < n and mask[i]:
+            i += 1
+        runs.append((start, i))
+    return runs
 
 
 def _fill_numeric_median(out: pd.DataFrame, col: str, ref_mask: np.ndarray) -> None:
@@ -370,40 +495,30 @@ def impute_values(
             out["date"].sort_values(kind="stable").index if "date" in out.columns else out.index
         )
         limit_val = int(max_gap) if max_gap is not None else None
-        for col in out.select_dtypes(include=[np.number]).columns:
-            if not out[col].isna().any() or col in exclude_interp:
-                continue
-            if limit_val is None or limit_val > 0:
-                s_sorted = out.loc[order_idx, col].astype(float)
-                na_sorted = s_sorted.isna().to_numpy()
-                if col in circular_set:
-                    rad = np.deg2rad(s_sorted.to_numpy(dtype=float))
-                    sin_s = pd.Series(np.sin(rad), index=order_idx).interpolate(
-                        method="linear", limit=limit_val, limit_direction="both"
-                    )
-                    cos_s = pd.Series(np.cos(rad), index=order_idx).interpolate(
-                        method="linear", limit=limit_val, limit_direction="both"
-                    )
-                    sin_v = sin_s.to_numpy(dtype=float)
-                    cos_v = cos_s.to_numpy(dtype=float)
-                    ok = (
-                        na_sorted
-                        & np.isfinite(sin_v)
-                        & np.isfinite(cos_v)
-                        & (np.hypot(sin_v, cos_v) > 1e-12)
-                    )
-                    filled = s_sorted.to_numpy(dtype=float).copy()
-                    filled[ok] = np.rad2deg(np.arctan2(sin_v[ok], cos_v[ok])) % 360.0
-                    out.loc[order_idx, col] = filled
-                else:
-                    interp_s = s_sorted.interpolate(
-                        method="linear", limit=limit_val, limit_direction="both"
-                    )
-                    try:
-                        out.loc[order_idx, col] = interp_s.to_numpy()
-                    except (TypeError, ValueError):
-                        out[col] = out[col].astype(float)
-                        out.loc[order_idx, col] = interp_s.to_numpy(dtype=float)
+        if limit_val is None or limit_val > 0:
+            if "set" in out.columns:
+                split_series = out.loc[order_idx, "set"].astype(str).to_numpy()
+                segments: list[tuple[int, int]] = []
+                for split_label in dict.fromkeys(split_series):
+                    segments.extend(_contiguous_runs(split_series == split_label))
+            else:
+                segments = [(0, len(order_idx))]
+
+            for col in out.select_dtypes(include=[np.number]).columns:
+                if not out[col].isna().any() or col in exclude_interp:
+                    continue
+                vals = out.loc[order_idx, col].astype(float).to_numpy(copy=True)
+                is_circ = col in circular_set
+                for start, stop in segments:
+                    if stop - start >= 3:
+                        vals[start:stop] = _interp_segment_1d(
+                            vals[start:stop], max_gap=limit_val, is_circular=is_circ
+                        )
+                try:
+                    out.loc[order_idx, col] = vals
+                except (TypeError, ValueError):
+                    out[col] = out[col].astype(float)
+                    out.loc[order_idx, col] = vals
 
     for col in out.select_dtypes(include=[np.number]).columns:
         if out[col].isna().any():
@@ -458,19 +573,20 @@ def add_date_variables(df: pd.DataFrame) -> pd.DataFrame:
         Copy of dataset with added time-derived variables.
     """
     out = df.copy()
-    dt = pd.DatetimeIndex(out["date"])
-    if dt.tz is not None:
-        dt = dt.tz_convert("UTC").tz_localize(None)
+    dt_local = pd.DatetimeIndex(out["date"])
+    dt_utc = dt_local.tz_convert("UTC").tz_localize(None) if dt_local.tz is not None else dt_local
 
     # astype("int64") counts in the index's own resolution, not nanoseconds:
     # pandas >= 2.0 keeps a series' unit (datetime64[s]/[ms]/[us], e.g. from
     # Parquet) through ``DatetimeIndex``, so without the explicit ns conversion
     # ``date_unix`` came out in seconds/ms/us -- 1.7e9 -> 1.7 for a s-resolution
     # column -- and the trend feature silently lost its scale.
-    out["date_unix"] = dt.as_unit("ns").astype("int64").to_numpy() // 10**9
-    out["day_julian"] = dt.dayofyear.to_numpy()
-    out["weekday"] = pd.Categorical(dt.weekday + 1)
-    out["hour"] = dt.hour.to_numpy()
+    # Calendar features (day_julian, weekday, hour) reflect local civil time,
+    # while date_unix records absolute UTC epoch seconds.
+    out["date_unix"] = dt_utc.as_unit("ns").astype("int64").to_numpy() // 10**9
+    out["day_julian"] = dt_local.dayofyear.to_numpy()
+    out["weekday"] = pd.Categorical(dt_local.weekday + 1)
+    out["hour"] = dt_local.hour.to_numpy()
     return out
 
 

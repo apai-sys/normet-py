@@ -9,7 +9,7 @@ These utilities operate on tidy long DataFrames with a ``date`` column
 from __future__ import annotations
 
 import warnings
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -22,13 +22,23 @@ from .logging import get_logger
 log = get_logger(__name__)
 
 __all__ = [
+    "DEFAULT_MET_BOUNDS",
     "add_lag_features",
     "add_rolling_features",
+    "add_met_physics_features",
     "analyze_lag",
     "cyclical_encode",
+    "screen_aq_data",
     "wind_to_uv",
     "LagDiagnostics",
 ]
+
+DEFAULT_MET_BOUNDS: dict[str, tuple[float | None, float | None]] = {
+    "wd": (0.0, 360.0),
+    "ws": (0.0, 100.0),
+    "rh": (0.0, 100.0),
+    "blh": (0.0, 10_000.0),
+}
 
 
 def _ensure_sorted_by_date(df: pd.DataFrame, date_col: str = "date") -> pd.DataFrame:
@@ -51,9 +61,10 @@ def add_lag_features(
     group_col: str | None = None,
     date_col: str = "date",
     suffix: str = "_lag",
+    freq: str | None = None,
 ) -> pd.DataFrame:
     """
-    Add lagged copies of ``cols`` shifted by each value in ``lags`` (rows).
+    Add lagged copies of ``cols`` shifted by each value in ``lags``.
 
     Parameters
     ----------
@@ -62,13 +73,18 @@ def add_lag_features(
     cols : sequence of str
         Columns to lag.
     lags : sequence of int
-        Positive integers; ``lag=1`` looks one row back.
+        Positive integers; ``lag=1`` looks one row (or one ``freq`` step when
+        ``freq`` is set) back.
     group_col : str, optional
         If provided, lags are computed within each group (e.g., per station).
     date_col : str, default "date"
         Datetime column used to sort before lagging.
     suffix : str, default "_lag"
         New columns are named ``f"{col}{suffix}{k}"``.
+    freq : str, optional
+        When set (e.g. ``"h"`` or ``"D"``), shifts along a uniform calendar grid
+        ``pd.date_range(min, max, freq=freq)`` instead of physical row positions
+        so missing timestamps emit ``NaN`` rather than shifting across gaps.
 
     Returns
     -------
@@ -89,12 +105,36 @@ def add_lag_features(
         raise ValueError(f"`lags` must be whole numbers of rows; got {fractional}.")
 
     out = _ensure_sorted_by_date(df, date_col=date_col)
-    grouped = out.groupby(group_col, sort=False) if group_col else None
+    if freq is None:
+        grouped = out.groupby(group_col, sort=False) if group_col else None
+        for c in cols:
+            for k in lags:
+                name = f"{c}{suffix}{int(k)}"
+                out[name] = (
+                    grouped[c].shift(int(k)) if grouped is not None else out[c].shift(int(k))
+                )
+        return out
 
-    for c in cols:
-        for k in lags:
-            name = f"{c}{suffix}{int(k)}"
-            out[name] = grouped[c].shift(int(k)) if grouped is not None else out[c].shift(int(k))
+    col_list = list(dict.fromkeys(cols))
+    slices = [sub for _, sub in out.groupby(group_col, sort=False)] if group_col else [out]
+    for k in lags:
+        for c in col_list:
+            out[f"{c}{suffix}{int(k)}"] = np.nan
+
+    for sub in slices:
+        if sub.empty:
+            continue
+        if sub[date_col].duplicated().any():
+            raise ValueError(
+                f"Duplicate timestamps in `{date_col}` cannot be uniquely aligned to `freq={freq!r}`."
+            )
+        orig_dates = pd.Index(sub[date_col])
+        full_idx = pd.date_range(orig_dates.min(), orig_dates.max(), freq=freq)
+        grid = sub.set_index(date_col)[col_list].reindex(full_idx)
+        for c in col_list:
+            for k in lags:
+                vals = grid[c].shift(int(k)).reindex(orig_dates).to_numpy()
+                out.loc[sub.index, f"{c}{suffix}{int(k)}"] = vals
     return out
 
 
@@ -109,6 +149,7 @@ def add_rolling_features(
     date_col: str = "date",
     suffix: str = "_roll",
     causal: bool = True,
+    freq: str | None = None,
 ) -> pd.DataFrame:
     """
     Add rolling-window statistics for ``cols``.
@@ -119,7 +160,7 @@ def add_rolling_features(
     cols : sequence of str
         Columns to roll over.
     windows : sequence of int
-        Window sizes in rows.
+        Window sizes in rows (or ``freq`` steps when ``freq`` is set).
     aggs : sequence of {"mean","std","min","max","median","sum"}, default ("mean",)
     min_periods : int, optional
         Forwarded to pandas rolling; defaults to the window size.
@@ -133,6 +174,9 @@ def add_rolling_features(
         If True, use trailing windows (no look-ahead). If False, the window is
         centered (``center=True``) — only appropriate for diagnostics, not
         for predictors used in forecasting tasks.
+    freq : str, optional
+        When set (e.g. ``"h"``), reindexes each series onto a uniform calendar
+        grid before rolling so missing intervals are preserved as ``NaN``.
 
     Returns
     -------
@@ -153,23 +197,51 @@ def add_rolling_features(
         raise ValueError("`windows` must contain positive integers.")
 
     out = _ensure_sorted_by_date(df, date_col=date_col)
-    grouped = out.groupby(group_col, sort=False) if group_col else None
-
-    for c in cols:
-        for w in windows:
-            w_int = int(w)
-            mp = w_int if min_periods is None else int(min_periods)
-            if grouped is not None:
-                r = grouped[c].rolling(window=w_int, min_periods=mp, center=not causal)
-            else:
-                r = out[c].rolling(window=w_int, min_periods=mp, center=not causal)  # type: ignore[assignment]
-            for agg in aggs:
-                name = f"{c}{suffix}{w_int}_{agg}"
-                vals = getattr(r, agg)()
-                # When grouped, rolling returns a multi-index Series; align back.
+    if freq is None:
+        grouped = out.groupby(group_col, sort=False) if group_col else None
+        for c in cols:
+            for w in windows:
+                w_int = int(w)
+                mp = w_int if min_periods is None else int(min_periods)
                 if grouped is not None:
-                    vals = vals.reset_index(level=0, drop=True).sort_index()
-                out[name] = vals.to_numpy() if hasattr(vals, "to_numpy") else np.asarray(vals)
+                    r = grouped[c].rolling(window=w_int, min_periods=mp, center=not causal)
+                else:
+                    r = out[c].rolling(window=w_int, min_periods=mp, center=not causal)  # type: ignore[assignment]
+                for agg in aggs:
+                    name = f"{c}{suffix}{w_int}_{agg}"
+                    vals = getattr(r, agg)()
+                    # When grouped, rolling returns a multi-index Series; align back.
+                    if grouped is not None:
+                        vals = vals.reset_index(level=0, drop=True).sort_index()
+                    out[name] = vals.to_numpy() if hasattr(vals, "to_numpy") else np.asarray(vals)
+        return out
+
+    col_list = list(dict.fromkeys(cols))
+    slices = [sub for _, sub in out.groupby(group_col, sort=False)] if group_col else [out]
+    for c in col_list:
+        for w in windows:
+            for agg in aggs:
+                out[f"{c}{suffix}{int(w)}_{agg}"] = np.nan
+
+    for sub in slices:
+        if sub.empty:
+            continue
+        if sub[date_col].duplicated().any():
+            raise ValueError(
+                f"Duplicate timestamps in `{date_col}` cannot be uniquely aligned to `freq={freq!r}`."
+            )
+        orig_dates = pd.Index(sub[date_col])
+        full_idx = pd.date_range(orig_dates.min(), orig_dates.max(), freq=freq)
+        grid = sub.set_index(date_col)[col_list].reindex(full_idx)
+        for c in col_list:
+            for w in windows:
+                w_int = int(w)
+                mp = w_int if min_periods is None else int(min_periods)
+                roll = grid[c].rolling(window=w_int, min_periods=mp, center=not causal)
+                for agg in aggs:
+                    name = f"{c}{suffix}{w_int}_{agg}"
+                    vals = getattr(roll, agg)().reindex(orig_dates).to_numpy()
+                    out.loc[sub.index, name] = vals
     return out
 
 
@@ -217,6 +289,243 @@ def cyclical_encode(
     if drop:
         out = out.drop(columns=[col])
     return out
+
+
+def _magnus_es(temp_c: np.ndarray) -> np.ndarray:
+    """Saturation vapour pressure (kPa) via the Magnus formula for T in Celsius."""
+    denom = temp_c + 237.3
+    safe_denom = np.where(denom > 1.0, denom, np.nan)
+    with np.errstate(over="ignore", invalid="ignore"):
+        return 0.6108 * np.exp((17.27 * temp_c) / safe_denom)
+
+
+def add_met_physics_features(
+    df: pd.DataFrame,
+    *,
+    ws_col: str | None = "ws",
+    wd_col: str | None = "wd",
+    blh_col: str | None = "blh",
+    temp_col: str | None = "t2m",
+    rh_col: str | None = "rh",
+    dewpoint_col: str | None = "d2m",
+    temp_unit: str = "auto",
+) -> pd.DataFrame:
+    """Derive physically meaningful boundary-layer and thermodynamic meteorological features.
+
+    Adds whichever columns can be computed from available inputs without mutating *df*:
+      - ``u_wind``, ``v_wind`` from ``ws_col`` & ``wd_col`` via :func:`wind_to_uv`
+      - ``ventilation_coef = ws * blh`` from ``ws_col`` & ``blh_col``
+      - ``vpd`` (vapour pressure deficit, kPa) and ``dewpoint_depression`` (deg C),
+        plus ``rh_derived`` (%) when ``dewpoint_col`` is present without ``rh_col``.
+    """
+    if temp_unit not in ("auto", "C", "K"):
+        raise ValueError(f"`temp_unit` must be 'auto', 'C', or 'K', got {temp_unit!r}.")
+
+    out = df.copy()
+    if ws_col and wd_col and ws_col in out.columns and wd_col in out.columns:
+        u_arr, v_arr = wind_to_uv(
+            pd.to_numeric(out[ws_col], errors="coerce"),
+            pd.to_numeric(out[wd_col], errors="coerce"),
+            convention="meteorological",
+        )
+        out["u_wind"] = u_arr
+        out["v_wind"] = v_arr
+
+    if ws_col and blh_col and ws_col in out.columns and blh_col in out.columns:
+        out["ventilation_coef"] = pd.to_numeric(out[ws_col], errors="coerce") * pd.to_numeric(
+            out[blh_col], errors="coerce"
+        )
+
+    if temp_col and temp_col in out.columns:
+        t_raw = pd.to_numeric(out[temp_col], errors="coerce").to_numpy(dtype=float)
+        fin_t = t_raw[np.isfinite(t_raw)]
+        is_k = (temp_unit == "K") or (
+            temp_unit == "auto" and fin_t.size > 0 and float(np.median(fin_t)) > 150.0
+        )
+        t_c = t_raw - 273.15 if is_k else t_raw
+        es_t = _magnus_es(t_c)
+
+        has_rh = bool(rh_col and rh_col in out.columns)
+        has_td = bool(dewpoint_col and dewpoint_col in out.columns)
+
+        if has_rh:
+            assert rh_col is not None
+            rh_vals = np.clip(
+                pd.to_numeric(out[rh_col], errors="coerce").to_numpy(dtype=float), 0.0, 100.0
+            )
+            out["vpd"] = np.maximum(0.0, es_t * (1.0 - rh_vals / 100.0))
+            if not has_td:
+                rh_pos = np.clip(rh_vals, 1e-3, 100.0)
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    gamma = np.log(rh_pos / 100.0) + (17.27 * t_c) / np.where(
+                        t_c + 237.3 > 1.0, t_c + 237.3, np.nan
+                    )
+                    td_est = (237.3 * gamma) / np.where(
+                        np.abs(17.27 - gamma) > 1e-6, 17.27 - gamma, np.nan
+                    )
+                out["dewpoint_depression"] = np.maximum(0.0, t_c - td_est)
+
+        if has_td:
+            assert dewpoint_col is not None
+            td_raw = pd.to_numeric(out[dewpoint_col], errors="coerce").to_numpy(dtype=float)
+            fin_td = td_raw[np.isfinite(td_raw)]
+            is_td_k = (temp_unit == "K") or (
+                temp_unit == "auto" and fin_td.size > 0 and float(np.median(fin_td)) > 150.0
+            )
+            td_c = td_raw - 273.15 if is_td_k else td_raw
+            out["dewpoint_depression"] = t_c - td_c
+            es_td = _magnus_es(td_c)
+            if not has_rh:
+                out["vpd"] = np.maximum(0.0, es_t - es_td)
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    out["rh_derived"] = 100.0 * np.clip(es_td / np.maximum(es_t, 1e-12), 0.0, 1.0)
+
+    return out
+
+
+def screen_aq_data(
+    df: pd.DataFrame,
+    target: str,
+    *,
+    date_col: str = "date",
+    min_value: float | None = 0.0,
+    max_value: float | None = None,
+    negative_action: str = "nan",
+    flatline_window: int | None = 6,
+    bounds: Mapping[str, tuple[float | None, float | None]] | None = None,
+    iqr_multiplier: float | None = None,
+    return_flags: bool = False,
+) -> pd.DataFrame | tuple[pd.DataFrame, pd.DataFrame]:
+    """Screen air-quality observations and meteorology for QA/QC anomalies.
+
+    Detects values below ``min_value`` (negatives / below zero), above
+    ``max_value``, constant sensor plateaus (flatlines of length >=
+    ``flatline_window``), robust Tukey IQR outliers, and out-of-range
+    meteorological bounds.
+
+    Returns ``cleaned_df`` (or ``(cleaned_df, flags_df)`` when ``return_flags=True``)
+    without mutating the input DataFrame.
+    """
+    if target not in df.columns:
+        raise ValueError(f"Target column '{target}' not found in DataFrame.")
+    if negative_action not in ("nan", "clip", "drop", "keep"):
+        raise ValueError(
+            f"`negative_action` must be 'nan', 'clip', 'drop', or 'keep', got {negative_action!r}."
+        )
+    if flatline_window is not None and (
+        isinstance(flatline_window, bool) or int(flatline_window) < 2
+    ):
+        raise ValueError(
+            f"`flatline_window` must be an integer >= 2 or None, got {flatline_window!r}."
+        )
+    if iqr_multiplier is not None and float(iqr_multiplier) <= 0.0:
+        raise ValueError(f"`iqr_multiplier` must be positive or None, got {iqr_multiplier!r}.")
+
+    out = df.copy()
+    n = len(out)
+    orig_index = out.index
+
+    if n == 0:
+        flags_empty = pd.DataFrame(
+            columns=[
+                "flag_negative",
+                "flag_above_max",
+                "flag_flatline",
+                "flag_iqr_outlier",
+                "flag_met_bounds",
+                "flag_any",
+            ],
+            index=orig_index,
+        )
+        return (out, flags_empty) if return_flags else out
+
+    if date_col in out.columns and pd.api.types.is_datetime64_any_dtype(out[date_col]):
+        order = np.argsort(out[date_col].to_numpy(), kind="stable")
+    elif isinstance(out.index, pd.DatetimeIndex):
+        order = np.argsort(out.index.to_numpy(), kind="stable")
+    else:
+        order = np.arange(n, dtype=np.int64)
+
+    vals = pd.to_numeric(out[target], errors="coerce").to_numpy(dtype=float)
+    fin = np.isfinite(vals)
+    flag_neg = (vals < float(min_value)) & fin if min_value is not None else np.zeros(n, dtype=bool)
+    flag_max = (vals > float(max_value)) & fin if max_value is not None else np.zeros(n, dtype=bool)
+
+    flag_flat = np.zeros(n, dtype=bool)
+    if flatline_window is not None and n >= int(flatline_window):
+        w_min = int(flatline_window)
+        v_ord = vals[order]
+        f_ord = np.isfinite(v_ord)
+        flat_ord = np.zeros(n, dtype=bool)
+        i = 0
+        while i < n:
+            if not f_ord[i]:
+                i += 1
+                continue
+            j = i + 1
+            while j < n and f_ord[j] and abs(v_ord[j] - v_ord[i]) <= 1e-12:
+                j += 1
+            if j - i >= w_min:
+                flat_ord[i:j] = True
+            i = j
+        flag_flat[order] = flat_ord
+
+    flag_iqr = np.zeros(n, dtype=bool)
+    if iqr_multiplier is not None:
+        m = float(iqr_multiplier)
+        base_valid = fin & (~flag_neg) & (~flag_max)
+        v_base = vals[base_valid]
+        if v_base.size >= 4:
+            q1, q3 = np.nanpercentile(v_base, [25.0, 75.0])
+            iqr = float(q3 - q1)
+            if iqr > 0.0:
+                lo_t, hi_t = float(q1) - m * iqr, float(q3) + m * iqr
+                flag_iqr = fin & ((vals < lo_t) | (vals > hi_t))
+
+    flag_bounds = np.zeros(n, dtype=bool)
+    if bounds:
+        for col, (lo_b, hi_b) in bounds.items():
+            if col not in out.columns:
+                continue
+            c_vals = pd.to_numeric(out[col], errors="coerce").to_numpy(dtype=float)
+            c_fin = np.isfinite(c_vals)
+            bad = np.zeros(n, dtype=bool)
+            if lo_b is not None:
+                bad |= c_fin & (c_vals < float(lo_b))
+            if hi_b is not None:
+                bad |= c_fin & (c_vals > float(hi_b))
+            if np.any(bad):
+                c_vals_clean = c_vals.copy()
+                c_vals_clean[bad] = np.nan
+                out[col] = c_vals_clean
+                flag_bounds |= bad
+
+    # Update target column according to flags
+    t_clean = vals.copy()
+    bad_target_other = flag_max | flag_flat | flag_iqr
+    t_clean[bad_target_other] = np.nan
+    if negative_action == "nan":
+        t_clean[flag_neg] = np.nan
+    elif negative_action == "clip" and min_value is not None:
+        t_clean[flag_neg] = float(min_value)
+    out[target] = t_clean
+
+    if negative_action == "drop" and np.any(flag_neg):
+        out = out.loc[~flag_neg].copy()
+
+    flag_any = flag_neg | flag_max | flag_flat | flag_iqr | flag_bounds
+    flags_df = pd.DataFrame(
+        {
+            "flag_negative": flag_neg,
+            "flag_above_max": flag_max,
+            "flag_flatline": flag_flat,
+            "flag_iqr_outlier": flag_iqr,
+            "flag_met_bounds": flag_bounds,
+            "flag_any": flag_any,
+        },
+        index=orig_index,
+    )
+    return (out, flags_df) if return_flags else out
 
 
 def wind_to_uv(
@@ -398,33 +707,72 @@ def _ccf_at_lags(driver: pd.Series, target: pd.Series, lags: Sequence[int]) -> n
     return np.asarray(vals, dtype=float)
 
 
+def _pairwise_acf_pacf(y: pd.Series, nlags: int) -> tuple[np.ndarray, np.ndarray]:
+    """Gap-preserving ACF and Yule-Walker PACF when missing steps remain on a grid."""
+    arr = y.to_numpy(dtype=float)
+    acf = np.full(nlags + 1, np.nan, dtype=float)
+    acf[0] = 1.0
+    for k in range(1, nlags + 1):
+        a = arr[:-k]
+        b = arr[k:]
+        m = np.isfinite(a) & np.isfinite(b)
+        if int(m.sum()) < 3:
+            continue
+        sa = float(np.std(a[m]))
+        sb = float(np.std(b[m]))
+        if sa > 1e-12 and sb > 1e-12:
+            acf[k] = float(np.corrcoef(a[m], b[m])[0, 1])
+
+    pacf_lags = min(nlags, max(1, int(np.isfinite(arr).sum()) // 2 - 1))
+    pacf = np.full(pacf_lags + 1, np.nan, dtype=float)
+    pacf[0] = 1.0
+    for k in range(1, pacf_lags + 1):
+        sub_r = acf[: k + 1]
+        if not np.all(np.isfinite(sub_r)):
+            break
+        mat = np.empty((k, k), dtype=float)
+        for i in range(k):
+            for j in range(k):
+                mat[i, j] = sub_r[abs(i - j)]
+        try:
+            phi = np.linalg.solve(mat + 1e-12 * np.eye(k), sub_r[1:])
+            pacf[k] = float(np.clip(phi[-1], -1.0, 1.0))
+        except np.linalg.LinAlgError:
+            break
+    return acf, pacf
+
+
 def _prewhiten(
     driver: pd.Series, target: pd.Series, max_ar: int
 ) -> tuple[pd.Series, pd.Series, int]:
-    """Box-Jenkins pre-whitening.
-
-    Fit an AR(p) to the driver (p chosen by AIC up to ``max_ar``), take its
-    innovations as the white driver, then filter the (centred) target with the
-    same AR polynomial. Returns ``(driver_white, target_filtered, p)`` aligned
-    on a common index.
-    """
+    """Box-Jenkins pre-whitening preserving true grid index positions across gaps."""
     ar_model = require("statsmodels.tsa.ar_model", hint="pip install statsmodels")
-    # AutoReg warns when the index is not a supported (datetime/period) index; we
-    # only need residuals here, not forecasts, so the warning is noise. The index
-    # is preserved (not reset) so the filtered driver stays aligned with target.
-    d = driver.dropna()
-    # No `old_names=`: statsmodels 0.15 removed it (TypeError), and before that
-    # its default was already False, which is what this used to pass.
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        sel = ar_model.ar_select_order(d, maxlag=max(1, int(max_ar)), ic="aic")
-        p = max(sel.ar_lags) if sel.ar_lags else 1
-        res = ar_model.AutoReg(d, lags=p).fit()
-    phi = np.asarray(res.params[1 : p + 1], dtype=float)  # skip the constant
+    if driver.notna().all():
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            sel = ar_model.ar_select_order(driver, maxlag=max(1, int(max_ar)), ic="aic")
+            p = max(sel.ar_lags) if sel.ar_lags else 1
+            res = ar_model.AutoReg(driver, lags=p).fit()
+        phi = np.asarray(res.params[1 : p + 1], dtype=float)
+        driver_white = res.resid
+    else:
+        d_fit = (
+            driver.interpolate(method="linear", limit_area="inside").dropna().reset_index(drop=True)
+        )
+        eff_max = min(max(1, int(max_ar)), max(1, len(d_fit) // 3))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            sel = ar_model.ar_select_order(d_fit, maxlag=eff_max, ic="aic")
+            p = max(sel.ar_lags) if sel.ar_lags else 1
+            res = ar_model.AutoReg(d_fit, lags=p).fit()
+        phi = np.asarray(res.params[1 : p + 1], dtype=float)
+        dc = driver - driver.mean()
+        driver_white = dc.copy()
+        for i in range(1, p + 1):
+            driver_white = driver_white - phi[i - 1] * dc.shift(i)
+        driver_white = driver_white.iloc[p:]
 
-    driver_white = res.resid  # AR innovations of the driver (index p..end of d)
-
-    # Apply the same AR polynomial (1 - phi(B)) to the centred target.
+    # Apply the same AR polynomial (1 - phi(B)) to the centred target on un-compressed grid steps.
     yc = target - target.mean()
     y_f = yc.copy()
     for i in range(1, p + 1):
@@ -445,6 +793,7 @@ def analyze_lag(
     prewhiten: bool = True,
     max_ar: int = 24,
     alpha: float = 0.05,
+    freq: str | None = None,
 ) -> LagDiagnostics:
     """Diagnose the lag structure of a target and its lead-lag with a driver.
 
@@ -454,10 +803,6 @@ def analyze_lag(
     driver lags. By default the CCF is computed on *pre-whitened* series so that
     shared seasonality / autocorrelation does not produce spurious peaks
     (Box-Jenkins pre-whitening).
-
-    The series is sorted by ``date_col`` and assumed to be regularly spaced;
-    non-finite values are dropped pairwise. For multi-site panels, call this
-    once per site (pass a single-site slice).
 
     Parameters
     ----------
@@ -469,7 +814,8 @@ def analyze_lag(
         Driver column (e.g. a meteorological variable). If omitted, only ACF
         and PACF of the target are returned.
     max_lag : int, default 48
-        Maximum lag (rows) for ACF/PACF and the positive/negative CCF range.
+        Maximum lag (rows, or ``freq`` steps when ``freq`` is set) for
+        ACF/PACF and the positive/negative CCF range.
     date_col : str, default "date"
         Datetime column used to sort before the analysis.
     prewhiten : bool, default True
@@ -479,6 +825,9 @@ def analyze_lag(
         Maximum AR order considered for the pre-whitening filter (AIC-selected).
     alpha : float, default 0.05
         Two-sided significance level for the white-noise bands.
+    freq : str, optional
+        Regular frequency (e.g. ``"h"``) to reindex timestamps onto before
+        computing ACF/PACF/CCF so gaps keep their true temporal spacing.
 
     Returns
     -------
@@ -486,23 +835,27 @@ def analyze_lag(
         Tables of ACF/PACF/CCF plus the suggested lags. ``CCF`` lag ``k > 0``
         means the driver leads the target by ``k`` rows, matching the sign of
         ``add_lag_features(..., lags=[k])``.
-
-    Notes
-    -----
-    The bands are per-lag white-noise thresholds. ``2 * max_lag + 1`` lags
-    are tested, so a few exceed the band by chance alone even for unrelated
-    white series (about 3 of 50 at ``alpha=0.05``). ``driver_lags`` is a
-    candidate list: the peak, and a lag that repeats at other sites or
-    periods, are the ones to keep. Pre-whitening removes the driver's
-    short-memory autocorrelation; a strong seasonal cycle an AR(p) filter
-    cannot represent may leave small periodic side lobes, so read candidate
-    lags against the ACF/PACF panels too.
     """
     if max_lag < 1:
         raise ValueError("`max_lag` must be >= 1.")
     stattools = require("statsmodels.tsa.stattools", hint="pip install statsmodels")
 
-    y = _clean_target(df, target, date_col=date_col)
+    work = df
+    if freq is not None:
+        sorted_df = _ensure_sorted_by_date(df, date_col=date_col)
+        if sorted_df[date_col].duplicated().any():
+            raise ValueError(
+                f"Duplicate timestamps in `{date_col}` cannot be uniquely aligned to `freq={freq!r}`."
+            )
+        full_idx = pd.date_range(sorted_df[date_col].min(), sorted_df[date_col].max(), freq=freq)
+        work = (
+            sorted_df.set_index(date_col)
+            .reindex(full_idx)
+            .reset_index()
+            .rename(columns={"index": date_col})
+        )
+
+    y = _clean_target(work, target, date_col=date_col)
     n_target = int(y.notna().sum())
     if n_target < 3:
         # acf/pacf below divide by a zero deviation and return warnings, not
@@ -510,9 +863,13 @@ def analyze_lag(
         raise ValueError(f"`{target}` has {n_target} finite observation(s); at least 3 are needed.")
     z = _z_value(alpha)
 
-    nlags = min(int(max_lag), max(1, len(y.dropna()) - 2))
-    acf_vals = stattools.acf(y, nlags=nlags, missing="drop", fft=True)
-    pacf_vals = stattools.pacf(y.dropna(), nlags=min(nlags, len(y.dropna()) // 2 - 1))
+    if freq is not None and y.isna().any():
+        nlags = min(int(max_lag), max(1, len(y) - 2))
+        acf_vals, pacf_vals = _pairwise_acf_pacf(y, nlags)
+    else:
+        nlags = min(int(max_lag), max(1, len(y.dropna()) - 2))
+        acf_vals = stattools.acf(y, nlags=nlags, missing="drop", fft=True)
+        pacf_vals = stattools.pacf(y.dropna(), nlags=min(nlags, len(y.dropna()) // 2 - 1))
 
     acf_df = pd.DataFrame({"lag": np.arange(len(acf_vals)), "value": acf_vals})
     pacf_df = pd.DataFrame({"lag": np.arange(len(pacf_vals)), "value": pacf_vals})
@@ -537,7 +894,7 @@ def analyze_lag(
             target_ar_lags=target_ar_lags,
         )
 
-    x = _clean_target(df, driver, date_col=date_col)
+    x = _clean_target(work, driver, date_col=date_col)
     prewhitened = bool(prewhiten)
     if prewhitened:
         try:
