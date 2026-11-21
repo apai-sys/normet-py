@@ -244,17 +244,27 @@ def _log_run(**kw) -> pd.DataFrame:
 
 
 def test_log_transform_inverts_point_and_quantiles():
-    """The log path = the linear path run on the same log-space frame, with
-    every column inverted: observed, normalised and the quantiles."""
+    """Verify arithmetic (default) vs geometric log1p inversion and quantile equivariance."""
     df_orig, _ = _log_frame()
     lin = _log_run(return_quantiles=[0.1, 0.5, 0.9])
-    log = _log_run(log_transform=True, return_quantiles=[0.1, 0.5, 0.9])
-    assert np.allclose(np.expm1(lin["normalised"]), log["normalised"])
+    log_arith = _log_run(log_transform=True, return_quantiles=[0.1, 0.5, 0.9])
+    log_geom = _log_run(
+        log_transform=True, back_transform="geometric", return_quantiles=[0.1, 0.5, 0.9]
+    )
+    wide = _log_run(aggregate=False)
+    seed_cols = [c for c in wide.columns if c != "observed"]
+    expected_arith = np.clip(np.expm1(wide[seed_cols].to_numpy(float)), 0.0, None).mean(axis=1)
+
+    assert np.allclose(log_geom["normalised"], np.expm1(lin["normalised"]))
+    assert np.allclose(log_arith["normalised"], expected_arith)
+    assert np.all(log_arith["normalised"] > log_geom["normalised"])
     for q in ("q100", "q500", "q900"):
-        assert np.allclose(np.expm1(lin[q]), log[q])
+        assert np.allclose(np.expm1(lin[q]), log_arith[q])
+        assert np.allclose(np.expm1(lin[q]), log_geom[q])
     # observed comes back in the original units the user gave
-    assert np.allclose(log["observed"], df_orig["value"])
-    assert (log["normalised"] >= 0).all()
+    assert np.allclose(log_arith["observed"], df_orig["value"])
+    assert (log_arith["normalised"] >= 0).all()
+    assert (log_geom["normalised"] >= 0).all()
 
 
 def test_log_transform_default_is_bit_identical():
