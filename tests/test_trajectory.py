@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 
 import numpy as np
 import pandas as pd
@@ -652,3 +653,170 @@ def test_join_uses_each_sites_own_release_interval():
     panel = pd.DataFrame({"date": pd.date_range("2020-01-01", periods=8, freq="h"), "site": "B"})
     out = tj.join_trajectory_features(panel, feat)
     assert out["v"].tolist() == [10.0] * 6 + [11.0] * 2
+
+
+# --------------------------------------------------- Layer-1 physics & multi-height
+
+
+def test_endpoint_weights_blh_decay_and_causal_scavenging():
+    """Verify BLH decoupling, 1/BLH dilution, decay, and causal rainfall ordering."""
+    # Trajectory ordered arbitrarily (shuffled rows) to prove alignment back to input order.
+    traj = pd.DataFrame(
+        {
+            "age_h": [-2.0, 0.0, -3.0, -1.0],
+            "lat": [51.0, 51.5, 50.8, 51.2],
+            "lon": [-2.5, -0.1, -3.2, -1.2],
+            "height": [200.0, 50.0, 2000.0, 250.0],  # -3h is 2000m > BLH=800 -> decoupled
+            "blh": [500.0, 600.0, 800.0, 1000.0],
+            "rainfall": [10.0, 0.0, 5.0, 0.0],  # heavy rain at -2h; zero between -2h and 0
+        }
+    )
+    w = tj.trajectory_endpoint_weights(traj, decay_hours=10.0, scavenging_coeff=0.2)
+    # Row 1 (age 0) excluded -> 0; Row 2 (age -3, height 2000 > 800) decoupled -> 0.
+    assert w[1] == 0.0
+    assert w[2] == 0.0
+    # Row 3 (age -1, height 250 <= BLH 1000, rain downstream=0): dt=1 * (1000/1000) * exp(-1/10)
+    assert w[3] == pytest.approx(np.exp(-0.1))
+    # Row 0 (age -2, BLH 500, rain strictly AFTER -2h is only age -1's rainfall=0):
+    assert w[0] == pytest.approx(2.0 * np.exp(-0.2))
+
+    # Now put rain strictly downstream at age -1h: age -2h is attenuated, age -1h is NOT.
+    traj_down = traj.copy()
+    traj_down.loc[3, "rainfall"] = 4.0  # downstream of -2h, at -1h
+    w_down = tj.trajectory_endpoint_weights(traj_down, decay_hours=10.0, scavenging_coeff=0.2)
+    assert w_down[3] == pytest.approx(w[3])  # age -1 not attenuated by rain at -1 itself
+    assert w_down[0] == pytest.approx(w[0] * np.exp(-0.2 * 4.0))
+
+    # Fallback when blh column absent (like bundled MY1 tdumps)
+    no_blh = traj.drop(columns=["blh"])
+    w_fb = tj.trajectory_endpoint_weights(no_blh, fallback_height_m=1500.0)
+    assert w_fb[1] == 0.0 and w_fb[2] == 0.0
+    assert w_fb[0] == 1.0 and w_fb[3] == 1.0
+
+
+def test_trajectory_features_physical_columns_and_horizons(tmp_path):
+    df = tj.read_trajectory_tdump(_write(tmp_path))
+    box = {"sw_box": (-3.0, 50.5, -1.5, 51.5)}
+    f = tj.trajectory_features(df, source_regions=box, horizons_h=((0, 1), (1, 2)))
+
+    assert {"traj_inflow_sin", "traj_inflow_cos", "traj_straightness"} <= set(f)
+    assert {"traj_mean_bearing_sin", "traj_mean_bearing_cos", "traj_blh_contact_frac"} <= set(f)
+    assert f["traj_inflow_sin"] ** 2 + f["traj_inflow_cos"] ** 2 == pytest.approx(1.0)
+    assert f["traj_mean_bearing_sin"] ** 2 + f["traj_mean_bearing_cos"] ** 2 == pytest.approx(1.0)
+    assert 0.0 <= f["traj_straightness"] <= 1.0
+    assert f["traj_rain_mm"] == pytest.approx(1.5)
+    assert f["traj_blh_contact_frac"] == pytest.approx(1.0)
+    # Footprint matches 1-km-BLH equivalent weight inside (-3..-1.5, 50.5..51.5) -> origin at -2h (BLH 500)
+    assert f["traj_footprint_sw_box"] == pytest.approx(2.0)
+
+    # Horizon slices conserve path length
+    assert f["traj_pathlen_km_0_1h"] + f["traj_pathlen_km_1_2h"] == pytest.approx(
+        f["traj_pathlen_km"]
+    )
+    assert f["traj_footprint_sw_box_0_1h"] == 0.0
+    assert f["traj_footprint_sw_box_1_2h"] == pytest.approx(2.0)
+
+    # QC classifier covers plain & multi-height suffixed QC columns
+    assert tj.is_trajectory_qc_column("traj_n_endpoints")
+    assert tj.is_trajectory_qc_column("traj_age_max_h_500m")
+    assert not tj.is_trajectory_qc_column("traj_dist_km")
+    assert not tj.is_trajectory_qc_column("traj_footprint_sw_box")
+
+
+def test_read_trajectory_endpoints_and_parallel_multi_height_hysplit(tmp_path):
+    (tmp_path / "tdump_a").write_text(_tdump_text([(51.5, -0.1, 100.0), (51.5, -0.1, 500.0)]))
+    ep = tj.read_trajectory_endpoints(str(tmp_path / "tdump_*"), site="MY1")
+    assert len(ep) == 6
+    assert set(ep["start_height"]) == {100.0, 500.0}
+    assert (ep["site"] == "MY1").all()
+    assert tj.read_trajectory_endpoints(str(tmp_path / "tdump_*"), min_hours=24).empty
+
+    # Multi-height + parallel execution (n_workers=2)
+    exe = tmp_path / "exec" / "hyts_std"
+    exe.parent.mkdir()
+    exe.write_text(
+        f"""#!{sys.executable}
+from datetime import datetime, timedelta
+from pathlib import Path
+
+lines = Path("CONTROL").read_text().splitlines()
+parts = [int(x) for x in lines[0].split()[:4]]
+yr = 2000 + parts[0] if parts[0] < 70 else 1900 + parts[0]
+t0 = datetime(yr, parts[1], parts[2], parts[3])
+n_h = int(lines[1])
+starts = [[float(v) for v in lines[2 + i].split()[:3]] for i in range(n_h)]
+out_name = lines[-1].strip()
+out = [
+    "     1     1",
+    f"    GDAS    {{parts[0]:2d}}    {{parts[1]:2d}}     {{parts[2]:d}}     {{parts[3]:d}}     0",
+    f"     {{n_h}} BACKWARD OMEGA",
+]
+for la, lo, hh in starts:
+    out.append(
+        f"     1    {{parts[0]:2d}}    {{parts[1]:2d}}    {{parts[2]:2d}}    {{parts[3]:2d}}"
+        f"   {{la:.3f}}   {{lo:.3f}}    {{hh:.1f}}"
+    )
+out.append("     5 PRESSURE RAINFALL MIXDEPTH RELHUMID AIR_TEMP")
+deltas = [
+    (0.0, 51.520, -0.130, 0.0, 995.0, 0.0, 800.0, 70.0, 285.0),
+    (-1.0, 51.300, -1.200, 200.0, 980.0, 0.5, 600.0, 75.0, 283.0),
+    (-2.0, 51.000, -2.500, 400.0, 970.0, 1.0, 500.0, 80.0, 281.0),
+]
+for tid, (_, _, h0) in enumerate(starts, start=1):
+    for age_h, la, lo, dh, pres, rain, blh, rh, tmp in deltas:
+        ts = t0 + timedelta(hours=int(age_h))
+        yy = ts.year % 100
+        out.append(
+            f"     {{tid}}     1    {{yy:2d}}    {{ts.month:2d}}    {{ts.day:2d}}    {{ts.hour:2d}}"
+            f"     0     0.0    {{age_h:4.1f}}   {{la:.3f}}   {{lo:.3f}}    {{h0 + dh:.1f}}"
+            f"    {{pres:.1f}}    {{rain:.1f}}   {{blh:.1f}}     {{rh:.1f}}    {{tmp:.1f}}"
+        )
+Path(out_name).write_text("\\n".join(out) + "\\n")
+"""
+    )
+    exe.chmod(0o755)
+    mets = []
+    for n in MET[:3]:
+        (tmp_path / n).write_text("")
+        mets.append(str(tmp_path / n))
+    work = tmp_path / "par_work"
+    times = [
+        pd.Timestamp("2020-01-03 06:00"),
+        pd.Timestamp("2020-01-10 06:00"),
+        pd.Timestamp("2020-01-16 12:00"),
+    ]
+    out = tj.run_back_trajectories(
+        times,
+        51.5,
+        -0.13,
+        met_files=mets,
+        hysplit_exec=exe,
+        heights_m=(100.0, 500.0),
+        work_dir=work,
+        n_workers=2,
+        source_regions={"sw": (-3.0, 50.5, -1.5, 51.5)},
+    )
+    assert len(out) == 3
+    assert "traj_footprint_sw_100m" in out.columns
+    assert "traj_footprint_sw_500m" in out.columns
+    ctl_lines = (
+        (work / "CONTROL_tdump_2020010306").read_text()
+        if (work / "CONTROL_tdump_2020010306").exists()
+        else ""
+    )
+    # Temporary .run_* dirs were cleaned up and tdump_* moved cleanly into work_dir
+    assert not list(work.glob(".run_*"))
+    assert len(list(work.glob("tdump_*"))) == 3
+    assert ctl_lines == ""  # isolated per worker subdir
+    ctrl = tj._control_text(
+        times[0],
+        51.5,
+        -0.13,
+        (100.0, 500.0),
+        72,
+        mets[:1],
+        "tdump_x",
+        top_of_model=10000.0,
+        vert_motion=0,
+    )
+    assert ctrl.splitlines()[1:4] == ["2", "51.5000 -0.1300 100.0", "51.5000 -0.1300 500.0"]

@@ -17,11 +17,15 @@ from .tables import (
 )
 from .trajectory import (
     ALL_DIAGNOSTICS,
+    TRAJ_QC_SUFFIXES,
     build_trajectory_features,
+    is_trajectory_qc_column,
     join_trajectory_features,
     load_source_regions,
+    read_trajectory_endpoints,
     read_trajectory_tdump,
     run_back_trajectories,
+    trajectory_endpoint_weights,
     trajectory_features,
 )
 from .ukaq import UKAQ_SOURCES, fetch_ukaq_measurements, list_ukaq_stations
@@ -48,11 +52,15 @@ __all__ = [
     "fetch_ukaq_measurements",
     "list_ukaq_stations",
     "read_trajectory_tdump",
+    "read_trajectory_endpoints",
+    "trajectory_endpoint_weights",
     "trajectory_features",
     "build_trajectory_features",
     "join_trajectory_features",
     "run_back_trajectories",
     "load_source_regions",
+    "is_trajectory_qc_column",
+    "TRAJ_QC_SUFFIXES",
     "ALL_DIAGNOSTICS",
     "ARL_GDAS1_BASE_URL",
     "gdas1_filenames",
