@@ -190,6 +190,27 @@ def load_saved_estimator(path: str | Path, device: str | None = None) -> Any:
     return Chronos2Estimator.load(path, device=device)
 
 
+def load_saved_session(
+    df_raw: pd.DataFrame,
+    target: str,
+    covariates: list[str],
+    path: str | Path,
+    device: str | None = None,
+) -> tuple[pd.DataFrame, Any]:
+    """Prepare *df_raw* and reload a saved Chronos-2 checkpoint/LoRA folder."""
+    from normet import prepare_data
+
+    from ._constants import TIME_VARS
+
+    df_prep = prepare_data(df_raw, target, covariates, split_method="random")
+    estimator = load_saved_estimator(path, device=device)
+    if not getattr(estimator, "met_covariates", None):
+        estimator.met_covariates = [c for c in covariates if c not in TIME_VARS]
+    indexed = to_indexed_frame(df_prep)
+    estimator._check_index(indexed.index)
+    return df_prep, estimator
+
+
 def verdict_for(shift: dict[str, float]) -> tuple[str, str]:
     """Traffic-light verdict from the covariate-sensitivity numbers."""
     pct = shift["pct_of_prediction"]

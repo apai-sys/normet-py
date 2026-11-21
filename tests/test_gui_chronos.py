@@ -78,7 +78,7 @@ def test_step3_on_chronos(chronos_win, qapp, monkeypatch):
     assert not w.decom_method.model().item(0).isEnabled()  # emission: not on chronos-2
     assert w.decom_samples.value() == 8  # a forward pass per sample, not a tree call
     assert w.decom_button.isEnabled()
-    assert not w.roll_button.isEnabled() and not w.pdp_button.isEnabled()
+    assert not w.roll_button.isEnabled() and w.pdp_button.isEnabled()
 
     seen = {}
 
@@ -314,3 +314,132 @@ def test_chronos_gui_helpers_icn_and_save_load(monkeypatch, tmp_path):
     monkeypatch.setattr(est_mod, "_load_pipeline_on", lambda name, dev, auto: (est._pipeline, dev))
     reloaded = _chronos.load_saved_estimator(saved, device="cpu")
     assert reloaded.context_length == 24
+
+
+def test_chronos_gui_pdp_normalise_icn_checkpoint_and_scm_backend(
+    chronos_win, qapp, monkeypatch, tmp_path
+):
+    """Verify Phase 5 GUI wiring: PDP on chronos-2, Normalise ICN options,
+    checkpoint save/load buttons, and SCM Studio chronos backend."""
+    import normet
+    from normet.gui import _chronos
+    from normet.gui._lists import _fill_checklist
+
+    w = chronos_win
+
+    # 1. PDP on chronos-2 filters out TIME_VARS and requests native anchors
+    _fill_checklist(w.pdp_vars, ["t2m", "blh", "hour"], {"t2m", "hour"})
+    _fill_checklist(w.norm_vars, ["t2m", "blh", "u10", "v10", "hour"], {"t2m", "blh", "u10", "v10"})
+    seen_pdp = {}
+
+    def _fake_pdp(df_prep, model, *, var_list, grid_points, target="value", n_anchors=6, **kw):
+        seen_pdp.update(
+            var_list=var_list, grid_points=grid_points, target=target, n_anchors=n_anchors
+        )
+        return pd.DataFrame(
+            {
+                "variable": ["t2m"] * 3,
+                "value": [0.0, 5.0, 10.0],
+                "pdp_mean": [12.0, 10.0, 9.0],
+                "pdp_lower": [10.0, 8.0, 7.0],
+                "pdp_upper": [14.0, 12.0, 11.0],
+            }
+        )
+
+    monkeypatch.setattr(normet, "pdp", _fake_pdp)
+    w._run_pdp()
+    _wait(qapp, w.runner)
+    assert seen_pdp["var_list"] == ["t2m"]
+    assert seen_pdp["target"] == "value" and seen_pdp["n_anchors"] == 6
+    assert "pdp" in w.results
+
+    # 2. Normalise ICN controls: hidden on flaml, visible on chronos-2, forwards options
+    assert not w._chronos_norm_box.isHidden()
+    assert w.chronos_norm_method.currentText() == "deweather"
+    assert not w.chronos_norm_estimate.isEnabled()
+    w.chronos_norm_method.setCurrentText("icn")
+    assert w.chronos_norm_estimate.isEnabled() and w.chronos_norm_log.isEnabled()
+    w.chronos_norm_estimate.setCurrentText("paired")
+    w.chronos_norm_log.setChecked(True)
+
+    seen_norm = {}
+
+    def _fake_dw(est, df_prep, met, with_q, n_samp, **kw):
+        seen_norm.update(met=met, with_q=with_q, n_samp=n_samp, **kw)
+        idx = pd.date_range("2024-01-01", periods=10, freq="h")
+        return pd.DataFrame({"observed": np.ones(10), "normalised": np.ones(10) * 2.0}, index=idx)
+
+    monkeypatch.setattr(_chronos, "deweather", _fake_dw)
+    w._run_normalise()
+    _wait(qapp, w.runner)
+    assert seen_norm["method"] == "icn"
+    assert seen_norm["estimate"] == "paired"
+    assert seen_norm["log_transform"] is True
+
+    # Reset back to default deweather, switch backend away & back -> box toggles cleanly
+    w.chronos_norm_method.setCurrentText("deweather")
+    w.backend_combo.setCurrentText("flaml")
+    assert w._chronos_norm_box.isHidden()
+    w.backend_combo.setCurrentText("chronos-2")
+    assert not w._chronos_norm_box.isHidden()
+
+    # 3. Checkpoint save & load buttons inside _ft_box
+    assert w.ft_save_button.isEnabled() and w.ft_load_button.isEnabled()
+    save_dir = tmp_path / "gui_ckpt"
+    monkeypatch.setattr(_chronos, "save_estimator", lambda est, p: save_dir)
+    w._save_chronos_checkpoint(str(save_dir))
+    _wait(qapp, w.runner)
+    assert str(save_dir) in w.statusBar().currentMessage()
+
+    reloaded = _Estimator()
+    monkeypatch.setattr(
+        _chronos,
+        "load_saved_session",
+        lambda df_raw, tgt, feats, folder, dev: (w.df_prep, reloaded),
+    )
+    monkeypatch.setattr(
+        _chronos,
+        "sensitivity",
+        lambda *a: {"mean_abs_shift": 1.0, "max_abs_shift": 2.0, "pct_of_prediction": 9.0},
+    )
+    w._load_chronos_checkpoint(str(save_dir))
+    _wait(qapp, w.runner)
+    assert w.model is reloaded
+
+    # 4. SCM Studio `chronos` backend option & fit dispatch
+    w.open_scm_example()
+    s = w._scm_window
+    assert s.backend_combo.findText("chronos") >= 0
+    monkeypatch.setattr(_chronos, "chronos_availability", lambda: (False, "missing foundation"))
+    # Re-create an SCMWindow under chronos unavailable -> item must be disabled
+    from normet.gui.scm_window import SCMWindow
+
+    s_disabled = SCMWindow()
+    try:
+        idx_c = s_disabled.backend_combo.findText("chronos")
+        assert idx_c >= 0 and not s_disabled.backend_combo.model().item(idx_c).isEnabled()
+    finally:
+        s_disabled.close()
+
+    import normet.causal as causal_mod
+
+    seen_scm = {}
+
+    def _fake_run_scm(*a, **kw):
+        seen_scm.update(kw)
+        dates = pd.date_range("2015-01-04", periods=30, freq="W")
+        return pd.DataFrame(
+            {
+                "observed": np.ones(30) * 10.0,
+                "synthetic": np.ones(30) * 10.0,
+                "effect": np.zeros(30),
+            },
+            index=dates,
+        )
+
+    monkeypatch.setattr(causal_mod, "run_scm", _fake_run_scm)
+    s.backend_combo.setCurrentText("chronos")
+    s._run_fit()
+    _wait(qapp, s.runner)
+    assert seen_scm.get("scm_backend") == "chronos"
+    s.close()

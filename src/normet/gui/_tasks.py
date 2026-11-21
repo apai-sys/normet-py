@@ -30,6 +30,18 @@ class TaskMixin(QMainWindow):
                 "Not available for chronos-2 — its check is the quantile backtest on the Model tab."
             )
         self.ft_button.setEnabled(not busy and has_model and self._is_chronos())
+        self.ft_save_button.setEnabled(not busy and has_model and self._is_chronos())
+        self.ft_save_button.setToolTip(
+            "Save the current Chronos-2 checkpoint or LoRA adapter to a folder."
+            if (has_model and self._is_chronos())
+            else "Load or fine-tune Chronos-2 first."
+        )
+        self.ft_load_button.setEnabled(not busy and has_data and self._is_chronos())
+        self.ft_load_button.setToolTip(
+            "Load a previously saved Chronos-2 checkpoint or LoRA adapter folder."
+            if has_data
+            else "Open or load data first."
+        )
         for b in (self.norm_button, self.decom_button, self.roll_button, self.pdp_button):
             b.setEnabled(not busy and has_model)
         if not has_model:
@@ -37,14 +49,17 @@ class TaskMixin(QMainWindow):
             for b in (self.norm_button, self.decom_button, self.roll_button, self.pdp_button):
                 b.setToolTip(tip)
         elif self._is_chronos():
-            # Rolling and PDP call ml_predict() on a fitted scikit-learn-style
-            # estimator. Chronos-2 forecasts autoregressively from a context
-            # window instead, so there is nothing for them to call. The
-            # meteorological decomposition has its own zero-shot path.
-            tip = "Not available for chronos-2 — use flaml or lightgbm for this step."
-            for b in (self.roll_button, self.pdp_button):
-                b.setEnabled(False)
-                b.setToolTip(tip)
+            # Rolling calls ml_predict() over a trained tabular estimator.
+            # Chronos-2 has its own zero-shot path for normalisation,
+            # meteorological decomposition, and covariate PDP (with quantile bands).
+            self.roll_button.setEnabled(False)
+            self.roll_button.setToolTip(
+                "Not available for chronos-2 — use flaml or lightgbm for this step."
+            )
+            self.pdp_button.setToolTip(
+                "Compute Chronos-2 covariate partial dependence (with native quantile "
+                "bands) across meteorological variables."
+            )
         self.ms_button.setEnabled(not busy and has_model and has_y_inf)
         self.ms_button.setToolTip(
             self._ms_button_tip

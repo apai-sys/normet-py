@@ -45,13 +45,25 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
     `Chronos2Estimator.attention_attribution()`), future-only in-context Partial
     Dependence (`nm.chronos_pdp` / `Chronos2Estimator.pdp()`, dispatched via
     `nm.pdp()`), and covariate-conditioned bidirectional gap imputation
-    (`nm.chronos_impute` / `Chronos2Estimator.impute()`).
-  - Single-checkpoint in-process fast path in `nm.do_all_multisite(...,
-    backend="chronos-2")` (supporting `model_config={"method": "icn", ...}` via
-    cross-learning multisite ICN without spawning duplicate worker checkpoints),
-    explicit validated `min_past` / `callbacks` on `finetune()` /
-    `finetune_multisite()`, and GUI helpers (`normet.gui._chronos.deweather`
-    `method="icn"`, `save_estimator`, `load_saved_estimator`).
+    (`nm.chronos_impute` / `Chronos2Estimator.impute()` with optional
+    conformal `calibration=`).
+  - Rolling probabilistic verification and causal calibration closure
+    (`nm.chronos_backtest` / `Chronos2Estimator.backtest()` scoring CRPS,
+    pinball loss, PIT uniformity, and coverage by lead with optional prefix
+    conformal calibration), zero-inference ICN variance partitioning
+    (`nm.decompose_icn_uncertainty` / `ICNDrawBank.decompose_uncertainty()`),
+    joint multivariate counterfactual BAU projections
+    (`Chronos2Estimator.counterfactual_multivariate()`), and
+    `nm.CovariateSensitivityCallback` to guard fine-tuning against covariate
+    collapse.
+  - Single-checkpoint in-process fast paths across `nm.do_all_multisite`,
+    `nm.decompose_multisite`, `nm.do_all_unc(..., backend="chronos-2")`,
+    `nm.placebo_in_space`, `nm.placebo_in_time`, `nm.scm_all`, and
+    `nm.run_scm_staggered(..., scm_backend="chronos")` (eliminating duplicate
+    per-worker checkpoint loads), explicit validated `min_past` / `callbacks` on
+    `finetune()` / `finetune_multisite()`, and GUI helpers
+    (`normet.gui._chronos.deweather` `method="icn"`, `save_estimator`,
+    `load_saved_estimator`).
   - Full-stack Chronos-2 integration across `nm.run_scm(..., scm_backend="chronos")`,
     `nm.do_all(..., backend="chronos-2", model_config={"method": "icn", ...})`,
     `nm.decompose(..., backend="chronos-2", model_config={"method": "icn"}, resample_df=...)`,
@@ -61,6 +73,18 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
     and `normet do-all` / `normet decompose` preserve `resolve_n_samples()`
     defaults (`8` for `chronos-2`, `300` for AutoML) when `--n-samples` is
     omitted.
+  - Plotting, reporting, CLI, Agent/MCP, and GUI closure:
+    `nm.pdp_grid()` renders native `[pdp_lower, pdp_upper]` quantile envelopes
+    (with `pdp_mean ± pdp_std` fallback); added `nm.plot_attention_attribution()`
+    and `nm.plot_imputation()`; `report._auto_plot()` automatically renders
+    imputation, PDP, and backtest lead profiles; added `normet impute`,
+    `normet backtest`, `normet events`, and `--model-path` on `deweather` /
+    `scm`; added `Tools.start_impute`, `Tools.start_backtest`,
+    `Tools.start_events`, their readings and `imputation` figure, plus MCP
+    tools `normet_start_impute`, `normet_start_backtest`, `normet_start_events`;
+    wired Chronos-2 PDP, Normalise ICN options (`deweather|icn`,
+    `level|paired`, `log1p`), checkpoint Save/Load, and SCM Studio `chronos`
+    backend in the desktop GUI.
 - **Conda recipe.** `packaging/conda/meta.yaml` packages the 0.3.0 PyPI sdist
   as a `noarch: python` conda package (core dependencies; the CLI/MCP/GUI
   entry points), with local-build, personal-channel and conda-forge steps in

@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QVBoxLayout,
+    QWidget,
 )
 
 from ._constants import MET_DEFAULTS, TIME_VARS
@@ -82,6 +83,32 @@ class AnalysePanelMixin(QMainWindow):
         self.norm_quantiles = QCheckBox("5–95 % quantile band")
         self.norm_quantiles.setToolTip("Also return the Monte-Carlo quantiles and shade the band.")
         nf.addRow(self.norm_quantiles)
+        self._chronos_norm_box = QWidget()
+        cn_form = QFormLayout(self._chronos_norm_box)
+        cn_form.setContentsMargins(0, 0, 0, 0)
+        cn_form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.chronos_norm_method = NoWheelComboBox()
+        self.chronos_norm_method.addItems(["deweather", "icn"])
+        self.chronos_norm_method.setToolTip(
+            "deweather: legacy Chronos-2 context+future covariate resampling.\n"
+            "icn: future-only In-Context Normalisation (ICN-v1, no target leakage)."
+        )
+        self.chronos_norm_method.currentTextChanged.connect(self._chronos_norm_method_changed)
+        cn_form.addRow("Chronos mode", self.chronos_norm_method)
+        self.chronos_norm_estimate = NoWheelComboBox()
+        self.chronos_norm_estimate.addItems(["level", "paired"])
+        self.chronos_norm_estimate.setToolTip(
+            "For ICN-v1: counterfactual 'level' or event-preserving 'paired'."
+        )
+        cn_form.addRow("ICN estimate", self.chronos_norm_estimate)
+        self.chronos_norm_log = QCheckBox("Log-space (log1p)")
+        self.chronos_norm_log.setToolTip(
+            "For ICN-v1: run in log1p space (additive pairing, non-negative)."
+        )
+        cn_form.addRow(self.chronos_norm_log)
+        self._chronos_norm_method_changed(self.chronos_norm_method.currentText())
+        self._chronos_norm_box.setVisible(False)
+        nf.addRow(self._chronos_norm_box)
         self.norm_button = run_button(
             "▶  Run normalisation",
             "Remove the meteorological signal from the target\n(counterfactual under average meteorology).",
@@ -90,6 +117,11 @@ class AnalysePanelMixin(QMainWindow):
         self.norm_button.setShortcut("Ctrl+1")
         nf.addRow(self.norm_button)
         return box
+
+    def _chronos_norm_method_changed(self, method: str) -> None:
+        is_icn = method == "icn"
+        self.chronos_norm_estimate.setEnabled(is_icn)
+        self.chronos_norm_log.setEnabled(is_icn)
 
     def _build_decompose_box(self) -> QGroupBox:
         """Step 3: emission or meteorology, attribution and groups."""

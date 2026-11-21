@@ -283,6 +283,12 @@ _KNOWN: dict[str, tuple[str, str, str, str]] = {
         "from normet.gui._chronos import finetune",
         "The GUI's own helper around Chronos2Estimator.finetune.",
     ),
+    "normet.gui._chronos.load_saved_session": (
+        "Load saved Chronos-2",
+        "df_prep, model",
+        "from normet.gui._chronos import load_saved_session",
+        "The GUI's own helper around Chronos2Estimator.load.",
+    ),
     "normet.gui._multiscale.compute_multiscale": (
         "Multi-scale decomposition",
         "multiscale",
