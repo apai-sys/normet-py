@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import warnings
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,7 @@ from ..utils import progress
 from ..utils._config import DEFAULT_SEED
 from ..utils._lazy import require
 from ..utils.logging import get_logger
+from ._shared import resolve_sample_weight
 
 log = get_logger(__name__)
 
@@ -33,7 +35,89 @@ _DEFAULT_CONFIG: dict[str, Any] = {
     "early_stopping_rounds": 20,
     "learning_rate_min": 0.01,
     "learning_rate_max": 0.3,
+    "objective": "regression",
+    "metric": None,
+    "alpha": None,
+    "tweedie_variance_power": None,
+    "deterministic": False,
 }
+
+_KNOWN_CONFIG_KEYS: frozenset[str] = frozenset(
+    set(_DEFAULT_CONFIG) | {"num_leaves_min", "num_leaves_max"}
+)
+
+_OBJECTIVE_DEFAULT_METRIC: dict[str, str] = {
+    "regression": "rmse",
+    "l2": "rmse",
+    "l1": "l1",
+    "mae": "l1",
+    "huber": "huber",
+    "fair": "fair",
+    "tweedie": "tweedie",
+    "poisson": "poisson",
+    "quantile": "quantile",
+}
+
+_METRIC_ALIASES: dict[str, tuple[str, ...]] = {
+    "rmse": ("rmse", "l2"),
+    "l2": ("l2", "rmse"),
+    "l1": ("l1", "mae"),
+    "mae": ("l1", "mae"),
+    "huber": ("huber",),
+    "fair": ("fair",),
+    "tweedie": ("tweedie",),
+    "poisson": ("poisson",),
+    "quantile": ("quantile",),
+}
+
+
+def _is_categorical_series(s: pd.Series) -> bool:
+    """True for Categorical, object, or string series handled natively by LightGBM."""
+    return bool(
+        isinstance(s.dtype, pd.CategoricalDtype)
+        or pd.api.types.is_object_dtype(s.dtype)
+        or pd.api.types.is_string_dtype(s.dtype)
+    )
+
+
+def _encode_frame_for_lgb(
+    X: pd.DataFrame,
+    feature_names: list[str],
+    category_levels: Mapping[str, list[Any]],
+) -> np.ndarray:
+    """Convert feature DataFrame to float64 matrix, mapping categories and ±inf -> NaN."""
+    cols: list[np.ndarray] = []
+    for col in feature_names:
+        s = X[col]
+        levels = category_levels.get(col)
+        if levels is not None:
+            level_map = {lvl: float(i) for i, lvl in enumerate(levels)}
+            arr = (
+                pd.Series(s, copy=False)
+                .astype(object)
+                .map(level_map)
+                .to_numpy(dtype=float, na_value=np.nan)
+            )
+            if levels and not np.isfinite(arr).all():
+                str_map = {str(lvl): float(i) for i, lvl in enumerate(levels)}
+                need = (~np.isfinite(arr)) & s.notna().to_numpy()
+                if np.any(need):
+                    mapped_str = (
+                        pd.Series(s.iloc[need] if hasattr(s, "iloc") else s[need], copy=False)
+                        .astype(str)
+                        .map(str_map)
+                        .to_numpy(dtype=float, na_value=np.nan)
+                    )
+                    arr = arr.copy()
+                    arr[need] = mapped_str
+        else:
+            arr = pd.to_numeric(s, errors="coerce").to_numpy(dtype=float)
+            inf_mask = np.isinf(arr)
+            if np.any(inf_mask):
+                arr = arr.copy()
+                arr[inf_mask] = np.nan
+        cols.append(arr)
+    return np.column_stack(cols) if cols else np.empty((len(X), 0), dtype=float)
 
 
 def _import_lightgbm() -> Any:
@@ -79,12 +163,29 @@ class LgbModel:
         predict time.
     """
 
-    __slots__ = ("_booster", "backend", "feature_names", "native_nan")
+    __slots__ = (
+        "_booster",
+        "backend",
+        "feature_names",
+        "categorical_features",
+        "category_levels",
+        "native_nan",
+    )
 
-    def __init__(self, booster: Any, feature_names: list[str], native_nan: bool = False) -> None:
+    def __init__(
+        self,
+        booster: Any,
+        feature_names: list[str],
+        *,
+        categorical_features: list[str] | None = None,
+        category_levels: Mapping[str, list[Any]] | None = None,
+        native_nan: bool = False,
+    ) -> None:
         self._booster = booster
         self.backend = "lightgbm"
         self.feature_names = list(feature_names)
+        self.categorical_features = list(categorical_features or ())
+        self.category_levels = {str(k): list(v) for k, v in (category_levels or {}).items()}
         # Models pickled before the option existed have no slot value; the
         # default keeps them predict-time compatible with their training.
         self.native_nan = bool(native_nan)
@@ -103,6 +204,10 @@ class LgbModel:
                 for k, v in src.items():
                     if k in type(self).__slots__:
                         object.__setattr__(self, k, v)
+        if not hasattr(self, "categorical_features"):
+            object.__setattr__(self, "categorical_features", [])
+        if not hasattr(self, "category_levels"):
+            object.__setattr__(self, "category_levels", {})
         if not hasattr(self, "native_nan"):
             object.__setattr__(self, "native_nan", False)
 
@@ -115,8 +220,12 @@ class LgbModel:
         if isinstance(X, pd.DataFrame):
             # Booster.predict is positional: realign columns to training order
             # regardless of the order the caller passed them in.
-            X = X.reindex(columns=self.feature_names)
-        X_arr = np.asarray(X, dtype=float)
+            X_re = X.reindex(columns=self.feature_names)
+            if self.category_levels:
+                return _encode_frame_for_lgb(X_re, self.feature_names, self.category_levels)
+            X_arr = np.asarray(X_re, dtype=float)
+        else:
+            X_arr = np.asarray(X, dtype=float)
         if self.native_nan:
             # LightGBM routes NaN down its learned default direction; ±inf is
             # not a valid LightGBM input, so map it onto the same channel.
@@ -278,6 +387,7 @@ def train_lgb(
     verbose: bool = False,
     n_cores: int | None = None,
     native_nan: bool = False,
+    sample_weight: str | np.ndarray | pd.Series | None = None,
 ) -> LgbModel:
     """Train a LightGBM model with random hyperparameter search + CV.
 
@@ -352,10 +462,13 @@ def train_lgb(
         raise ValueError(f"Columns not found in df: {sorted(missing)}")
 
     if "set" in df.columns:
-        df_sub = df.loc[df["set"] == "training"]
+        train_mask = (df["set"] == "training").to_numpy()
+        df_sub = df.loc[train_mask]
         if df_sub.empty:
+            train_mask = np.ones(len(df), dtype=bool)
             df_sub = df
     else:
+        train_mask = np.ones(len(df), dtype=bool)
         df_sub = df
     df_train = df_sub[[target] + covariates]
 
@@ -367,6 +480,12 @@ def train_lgb(
 
     cfg = dict(_DEFAULT_CONFIG)
     if model_config:
+        unknown_keys = set(model_config) - _KNOWN_CONFIG_KEYS
+        if unknown_keys:
+            log.warning(
+                "LightGBM backend ignoring unsupported model_config key(s): %s",
+                ", ".join(sorted(unknown_keys)),
+            )
         cfg.update(model_config)
     # model_config is the only route through build_model/train_model, so it
     # also wins over the direct argument when both are given.
@@ -379,15 +498,61 @@ def train_lgb(
         )
     cv_embargo = int(cfg.get("cv_embargo", 0))
 
+    obj_req = str(cfg.get("objective", "regression")).lower()
+    if obj_req not in _OBJECTIVE_DEFAULT_METRIC:
+        raise ValueError(
+            f"Unsupported LightGBM `objective` {obj_req!r}; expected one of {sorted(_OBJECTIVE_DEFAULT_METRIC)}."
+        )
+    lgb_objective = "l1" if obj_req == "mae" else obj_req
+    eval_metric = (
+        str(cfg["metric"]).lower() if cfg.get("metric") else _OBJECTIVE_DEFAULT_METRIC[obj_req]
+    )
+
+    alpha_val = cfg.get("alpha")
+    if lgb_objective == "quantile" and alpha_val is None:
+        alpha_val = 0.5
+    if alpha_val is not None:
+        alpha_f = float(alpha_val)
+        if lgb_objective == "quantile" and not (0.0 < alpha_f < 1.0):
+            raise ValueError(f"Quantile `alpha` must be in (0, 1), got {alpha_f!r}.")
+        if lgb_objective == "huber" and alpha_f <= 0.0:
+            raise ValueError(f"Huber `alpha` must be > 0, got {alpha_f!r}.")
+
+    tweedie_p = cfg.get("tweedie_variance_power")
+    if tweedie_p is not None and not (1.0 < float(tweedie_p) < 2.0):
+        raise ValueError(f"`tweedie_variance_power` must be in (1, 2), got {tweedie_p!r}.")
+    is_deterministic = bool(cfg.get("deterministic", False))
+
+    weights_vec = resolve_sample_weight(sample_weight, df, df_sub, train_mask)
+
     leaves_min, leaves_max = _infer_num_leaves_range(n, cfg)
     min_data_low, min_data_high = _infer_min_data_in_leaf_range(n)
 
     rng = np.random.default_rng(seed)
     lgb = _import_lightgbm()
 
-    x_mat = np.asarray(df_train[covariates], dtype=float)
-    y_vec = np.asarray(df_train[target], dtype=float)
+    cat_cols: list[str] = []
+    cat_levels: dict[str, list[Any]] = {}
+    for col in covariates:
+        s_col = df_train[col]
+        if _is_categorical_series(s_col):
+            cat_cols.append(col)
+            if isinstance(s_col.dtype, pd.CategoricalDtype):
+                cat_levels[col] = list(s_col.cat.categories)
+            else:
+                uniq = sorted({v for v in s_col.dropna().tolist()}, key=str)
+                cat_levels[col] = uniq
 
+    if cat_cols:
+        x_mat = _encode_frame_for_lgb(df_train[covariates], covariates, cat_levels)
+    else:
+        x_mat = np.asarray(df_train[covariates], dtype=float)
+        inf_mask = np.isinf(x_mat)
+        if np.any(inf_mask):
+            x_mat = x_mat.copy()
+            x_mat[inf_mask] = np.nan
+
+    y_vec = pd.to_numeric(df_train[target], errors="coerce").to_numpy(dtype=float)
     if np.any(np.isnan(y_vec)):
         raise ValueError("Target column contains NA values.")
     if native_nan:
@@ -402,7 +567,17 @@ def train_lgb(
             x_mat = x_mat.copy()
             x_mat[non_finite] = 0.0
 
-    dtrain = lgb.Dataset(x_mat, label=y_vec)
+    cat_indices = [covariates.index(c) for c in cat_cols]
+    ds_kwargs: dict[str, Any] = {
+        "label": y_vec,
+        "feature_name": list(covariates),
+        "free_raw_data": False,
+    }
+    if weights_vec is not None:
+        ds_kwargs["weight"] = weights_vec
+    if cat_indices:
+        ds_kwargs["categorical_feature"] = cat_indices
+    dtrain = lgb.Dataset(x_mat, **ds_kwargs)
 
     cv_folds_list: list[tuple[np.ndarray, np.ndarray]] | None = None
     if cv_strategy == "blocked":
@@ -423,23 +598,31 @@ def train_lgb(
     best_nrounds = cfg["nrounds"]
 
     (log.info if verbose else log.debug)(
-        "LightGBM random search: %d trials, %d-fold %s CV, %d predictors, %d rows",
+        "LightGBM random search: %d trials, %d-fold %s CV, objective=%s, %d predictors (%d cat), %d rows",
         cfg["n_trials"],
         cfg["cv_folds"],
         cv_strategy,
+        lgb_objective,
         n_feat,
+        len(cat_cols),
         n,
     )
 
+    alias_targets = _METRIC_ALIASES.get(eval_metric, (eval_metric,))
     for i in range(1, cfg["n_trials"] + 1):
         progress.report(i - 1, cfg["n_trials"])
+        trial_seed = int(seed) + i * 31
         params: dict[str, Any] = {
-            "objective": "regression",
-            "metric": "rmse",
+            "objective": lgb_objective,
+            "metric": eval_metric,
             "verbosity": -1,
             "feature_pre_filter": False,
             "num_threads": n_cores if n_cores is not None else 0,
             "device_type": "cpu",
+            "seed": trial_seed,
+            "bagging_seed": trial_seed + 1,
+            "feature_fraction_seed": trial_seed + 2,
+            "data_random_seed": int(seed),
             "num_leaves": int(rng.integers(leaves_min, leaves_max + 1)),
             "learning_rate": float(rng.uniform(cfg["learning_rate_min"], cfg["learning_rate_max"])),
             "min_data_in_leaf": int(rng.integers(min_data_low, min_data_high + 1)),
@@ -449,6 +632,13 @@ def train_lgb(
             "lambda_l1": 0.0 if rng.uniform() < 0.5 else 10.0 ** float(rng.uniform(-3, 1)),
             "lambda_l2": 0.0 if rng.uniform() < 0.5 else 10.0 ** float(rng.uniform(-3, 1)),
         }
+        if alpha_val is not None and lgb_objective in ("quantile", "huber"):
+            params["alpha"] = float(alpha_val)
+        if tweedie_p is not None and lgb_objective == "tweedie":
+            params["tweedie_variance_power"] = float(tweedie_p)
+        if is_deterministic:
+            params["deterministic"] = True
+            params["force_col_wise"] = True
 
         params["early_stopping_rounds"] = cfg["early_stopping_rounds"]
         cv_kwargs: dict[str, Any] = {
@@ -464,13 +654,17 @@ def train_lgb(
             cv_kwargs["nfold"] = cfg["cv_folds"]
         cv_results = lgb.cv(**cv_kwargs)
 
-        # Locate the metric column regardless of prefix ("rmse-mean" / "valid rmse-mean")
-        mean_key = next((k for k in cv_results if k.endswith("rmse-mean")), None)
+        mean_key = next(
+            (k for k in cv_results if any(k.endswith(f"{tok}-mean") for tok in alias_targets)),
+            None,
+        )
         if mean_key is None:
-            raise KeyError(f"Expected 'rmse-mean' in CV results, got keys: {list(cv_results)}")
-        rmse_vals = cv_results[mean_key]
-        best_idx = int(np.argmin(rmse_vals))
-        score = float(rmse_vals[best_idx])
+            mean_key = next((k for k in cv_results if k.endswith("-mean")), None)
+        if mean_key is None:
+            raise KeyError(f"Expected '*-mean' in CV results, got keys: {list(cv_results)}")
+        metric_vals = cv_results[mean_key]
+        best_idx = int(np.argmin(metric_vals))
+        score = float(metric_vals[best_idx])
         best_iter = best_idx + 1
 
         if score < best_score:
@@ -478,9 +672,10 @@ def train_lgb(
             best_params = params
             best_nrounds = best_iter
             (log.info if verbose else log.debug)(
-                "  Trial %d/%d: best RMSE = %.4f (leaves=%d, lr=%.3f, rounds=%d)",
+                "  Trial %d/%d: best %s = %.4f (leaves=%d, lr=%.3f, rounds=%d)",
                 i,
                 cfg["n_trials"],
+                eval_metric,
                 score,
                 params["num_leaves"],
                 params["learning_rate"],
@@ -488,9 +683,10 @@ def train_lgb(
             )
         elif verbose and i % 10 == 0:
             log.info(
-                "  Trial %d/%d: RMSE = %.4f (best = %.4f)",
+                "  Trial %d/%d: %s = %.4f (best = %.4f)",
                 i,
                 cfg["n_trials"],
+                eval_metric,
                 score,
                 best_score,
             )
@@ -511,7 +707,13 @@ def train_lgb(
         num_boost_round=best_nrounds,
     )
 
-    return LgbModel(booster, covariates, native_nan=native_nan)
+    return LgbModel(
+        booster,
+        covariates,
+        categorical_features=cat_cols,
+        category_levels=cat_levels,
+        native_nan=native_nan,
+    )
 
 
 class _LgbBackend:
@@ -530,6 +732,7 @@ class _LgbBackend:
         verbose: bool = False,
         n_cores: int | None = None,
         native_nan: bool = False,
+        sample_weight: str | np.ndarray | pd.Series | None = None,
     ) -> LgbModel:
         return train_lgb(
             df,
@@ -541,6 +744,7 @@ class _LgbBackend:
             verbose=verbose,
             n_cores=n_cores,
             native_nan=native_nan,
+            sample_weight=sample_weight,
         )
 
     def save(
