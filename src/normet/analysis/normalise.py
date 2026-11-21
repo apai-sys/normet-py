@@ -134,6 +134,14 @@ class NormaliseConfig:
     with the input the user gave. False, the default, leaves the result
     untouched.
     """
+    stratify_by: str | Sequence[str] | None = None
+    """Optional stratum column(s) (e.g. ``"month"``, ``"season"``, or
+    ``"traj_cluster"``) constraining each target row to resample only from
+    pool rows sharing the same stratum. Eliminates physically impossible
+    cross-season or cross-regime combinations when separating local weather
+    from long-range transport. ``"month"`` and ``"season"`` can be derived
+    automatically from ``"date"`` if not already present as columns.
+    """
 
 
 def _resolve_normalise_config(
@@ -244,6 +252,55 @@ def _split_across_pools(
     return ([(0, base, resample_df)] if base else []) + extra
 
 
+def _parse_stratify_by(stratify_by: str | Sequence[str] | None) -> tuple[str, ...]:
+    """Normalise ``stratify_by`` config into a tuple of column names."""
+    if stratify_by is None:
+        return ()
+    if isinstance(stratify_by, str):
+        s = stratify_by.strip()
+        return (s,) if s else ()
+    cols = tuple(str(c).strip() for c in stratify_by if str(c).strip())
+    return cols
+
+
+def _extract_strata(frame: pd.DataFrame, strat_cols: tuple[str, ...], *, label: str) -> np.ndarray:
+    """Extract per-row stratum labels from *frame*, deriving ``month``/``season`` if needed."""
+    parts: list[np.ndarray] = []
+    dates_s: pd.Series | None = None
+    for col in strat_cols:
+        if col in frame.columns:
+            vals = frame[col].astype(object).to_numpy()
+        elif col in ("month", "season"):
+            if dates_s is None:
+                if "date" in frame.columns:
+                    dates_s = pd.to_datetime(frame["date"], errors="coerce")
+                elif isinstance(frame.index, pd.DatetimeIndex):
+                    dates_s = pd.Series(frame.index, index=frame.index)
+                else:
+                    raise ConfigError(
+                        f"stratify_by column {col!r} requires a 'date' column or DatetimeIndex in {label}."
+                    )
+            if dates_s.isna().any():
+                raise ConfigError(f"{label} contains missing dates needed for stratify_by={col!r}.")
+            if col == "month":
+                vals = dates_s.dt.month.to_numpy()
+            else:
+                vals = ((dates_s.dt.month.to_numpy() % 12) // 3).astype(int)
+        else:
+            raise ConfigError(
+                f"stratify_by column {col!r} not found in {label} "
+                f"(available: {list(frame.columns)[:8]})."
+            )
+        parts.append(vals)
+
+    if len(parts) == 1:
+        return np.asarray([str(v) for v in parts[0]], dtype=object)
+    return np.asarray(
+        ["\x1f".join(str(p[i]) for p in parts) for i in range(len(frame))],
+        dtype=object,
+    )
+
+
 def _draw_rows(stream: int, seed: int, n_pool: int, n_rows: int, replace: bool) -> np.ndarray:
     """Row indices into one pool for one Monte Carlo draw.
 
@@ -258,23 +315,64 @@ def _draw_rows(stream: int, seed: int, n_pool: int, n_rows: int, replace: bool) 
     return rng.choice(n_pool, size=n_rows, replace=replace)
 
 
+def _draw_rows_stratified(
+    stream: int,
+    seed: int,
+    df_strata: np.ndarray,
+    pool_strata: np.ndarray,
+    replace: bool,
+) -> np.ndarray:
+    """Draw pool row indices matching each target row's stratum deterministically."""
+    rng = np.random.default_rng(seed if stream == 0 else [seed, stream])
+    n_rows = len(df_strata)
+    n_pool = len(pool_strata)
+    out = np.empty(n_rows, dtype=np.int64)
+
+    pool_idx: dict[str, np.ndarray] = {}
+    for key in sorted(set(pool_strata)):
+        pool_idx[key] = np.flatnonzero(pool_strata == key)
+
+    full_pool = np.arange(n_pool, dtype=np.int64)
+    missing_keys: list[str] = []
+    for key in sorted(set(df_strata)):
+        pos = np.flatnonzero(df_strata == key)
+        candidates = pool_idx.get(key)
+        if candidates is None or candidates.size == 0:
+            missing_keys.append(str(key))
+            candidates = full_pool
+        use_replace = replace or len(pos) > len(candidates)
+        out[pos] = rng.choice(candidates, size=len(pos), replace=use_replace)
+
+    if missing_keys and stream in (0, 1):
+        log.warning(
+            "stratify_by: %d stratum value(s) absent from pool (%s); fell back to full pool.",
+            len(missing_keys),
+            ", ".join(missing_keys[:4]),
+        )
+    return out
+
+
 def _stacked_columns(
     df: pd.DataFrame,
-    draws: Sequence[tuple[int, list[str], np.ndarray]],
+    draws: Sequence[tuple[int, list[str], np.ndarray, np.ndarray | None]],
     seeds: Sequence[int] | np.ndarray,
     replace: bool,
+    df_strata: np.ndarray | None = None,
 ) -> dict[str, np.ndarray]:
     """Columns of ``len(seeds)`` resampled copies of ``df``, stacked copy after copy.
 
-    ``draws`` holds ``(stream, columns, values)`` with ``values`` the pool's
-    ``columns`` as one array, so each copy takes whole pool rows.
+    ``draws`` holds ``(stream, columns, values, pool_strata)`` with ``values``
+    the pool's ``columns`` as one array, so each copy takes whole pool rows.
     """
     n_rows = len(df)
     drawn: dict[str, np.ndarray] = {}
-    for stream, cols, values in draws:
+    for stream, cols, values, p_strata in draws:
         idx = np.empty((len(seeds), n_rows), dtype=np.int64)
         for i, s in enumerate(seeds):
-            idx[i] = _draw_rows(stream, int(s), len(values), n_rows, replace)
+            if df_strata is not None and p_strata is not None:
+                idx[i] = _draw_rows_stratified(stream, int(s), df_strata, p_strata, replace)
+            else:
+                idx[i] = _draw_rows(stream, int(s), len(values), n_rows, replace)
         picked = values[idx.ravel()]
         for j, c in enumerate(cols):
             drawn[c] = picked[:, j]
@@ -290,6 +388,9 @@ def generate_resampled(
     seed: int,
     resample_df: pd.DataFrame,
     resample_pools: Mapping[str, pd.DataFrame] | None = None,
+    *,
+    df_strata: np.ndarray | None = None,
+    pool_strata_map: Mapping[int, np.ndarray] | None = None,
 ) -> pd.DataFrame:
     """Generate a resampled copy of the dataset.
 
@@ -333,7 +434,11 @@ def generate_resampled(
         # pandas' ``sample(random_state=seed)`` used the legacy RandomState
         # here for stream 0, so a ``normalise(..., memory_save=True)`` and a
         # default call with the same seed resampled differently.
-        idx = _draw_rows(stream, seed, len(pool), len(df), replace)
+        p_strata = pool_strata_map.get(stream) if pool_strata_map is not None else None
+        if df_strata is not None and p_strata is not None:
+            idx = _draw_rows_stratified(stream, seed, df_strata, p_strata, replace)
+        else:
+            idx = _draw_rows(stream, seed, len(pool), len(df), replace)
         out.loc[:, cols] = pool[cols].to_numpy()[idx]
     out.loc[:, "seed"] = seed
     return out
@@ -487,31 +592,28 @@ def normalise(
     # reach the same set by different routes -- notably decompose(), whose
     # resample list is a shrinking sublist of a feature-importance or permutation
     # order -- otherwise recompute every single time.
+    strat_cols = _parse_stratify_by(_cfg.stratify_by)
     key_cols = sorted(set(_cfg.covariates) | {"value", "date"})
-    df_keyed = process_date(df.copy()).pipe(check_data, _cfg.covariates, "value")
+    df_dated_key = process_date(df.copy())
+    df_keyed = check_data(df_dated_key, _cfg.covariates, "value")
     resample_pool = df_keyed if _cfg.resample_df is None else _cfg.resample_df
-    # ``conditional_on`` picks rows by the filter column's own values, and a
-    # caller's ``resample_df`` may carry that column without it being a
-    # resampled variable ("season", a wind sector). Left out of the pool hash,
-    # two pools that differed only in it shared a cache entry, so the second
-    # call returned the first one's draws -- of the other pool's row set.
     resample_key_cols = sorted(
         c
-        for c in set(_cfg.variables_resample or key_cols) | set(_cfg.conditional_on or {})
+        for c in set(_cfg.variables_resample or key_cols)
+        | set(_cfg.conditional_on or {})
+        | set(strat_cols)
         if c in resample_pool.columns
     )
-    # Extra pools join the key only when given, so keys of runs without them --
-    # and the caches already on disk -- are unchanged. A pool serves whichever
-    # of its columns are in ``variables_resample``; hash those as well as the
-    # covariates. ``variables_resample`` is not validated against
-    # ``covariates``, and a served column left out of the hash made two
-    # different pools share one cache entry.
-    pool_key_cols = set(_cfg.covariates) | set(_cfg.variables_resample or ())
+    pool_key_cols = set(_cfg.covariates) | set(_cfg.variables_resample or ()) | set(strat_cols)
     pool_keys = [
         (str(name), dataframe_hash(pool[sorted(c for c in pool.columns if c in pool_key_cols)]))
         for name, pool in sorted((_cfg.resample_pools or {}).items(), key=lambda kv: str(kv[0]))
         if isinstance(pool, pd.DataFrame)
     ]
+    strata_key: Any = None
+    if strat_cols:
+        strata_arr = _extract_strata(df_dated_key, strat_cols, label="df")
+        strata_key = dataframe_hash(pd.DataFrame({"_s": strata_arr}), include_index=False)
     conditional_key = (
         {
             str(col): _condition_key(cond)
@@ -524,6 +626,7 @@ def normalise(
         package_version(),
         dependency_versions(),
         *([pool_keys] if pool_keys else []),
+        *([list(strat_cols), strata_key] if strat_cols else []),
         sorted(_cfg.covariates),
         sorted(_cfg.variables_resample) if _cfg.variables_resample is not None else None,
         _cfg.n_samples,
@@ -558,11 +661,15 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
     # narrowing: normalise() always resolves _cfg.covariates (auto-detecting
     # from `model` or raising ConfigError) before calling this helper.
     assert _cfg.covariates is not None
-    df = process_date(df).pipe(check_data, _cfg.covariates, "value")
+    df_dated = process_date(df)
+    strat_cols = _parse_stratify_by(_cfg.stratify_by)
+    df_strata = _extract_strata(df_dated, strat_cols, label="df") if strat_cols else None
+    df = check_data(df_dated, _cfg.covariates, "value")
     if "date" not in df.columns:
         raise DataError("`df` must contain a 'date' column.")
 
     resample_df = df if _cfg.resample_df is None else _cfg.resample_df
+    base_strata_source = df_dated if _cfg.resample_df is None else resample_df
     time_vars = {"date_unix", "day_julian", "weekday", "hour"}
     variables_resample = (
         _cfg.variables_resample
@@ -573,6 +680,10 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
     if _cfg.conditional_on:
         before = len(resample_df)
         resample_df = _apply_conditional_filter(resample_df, _cfg.conditional_on)
+        if _cfg.resample_df is None:
+            base_strata_source = base_strata_source.loc[resample_df.index]
+        else:
+            base_strata_source = resample_df
         if resample_df.empty:
             raise DataError(
                 f"`conditional_on` filter left no rows in the resample pool (was {before}). "
@@ -596,8 +707,23 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
     missing = [c for c in base_cols if c not in resample_df.columns]
     if missing:
         raise DataError(f"`resample_df` is missing columns required for resampling: {missing}")
+
+    pool_strata_map: dict[int, np.ndarray] = {}
+    if strat_cols:
+        base_s = _extract_strata(base_strata_source, strat_cols, label="resample_df")
+        pool_strata_map[0] = base_s
+        for name, pool in (_cfg.resample_pools or {}).items():
+            if isinstance(pool, pd.DataFrame):
+                stream_id = zlib.crc32(str(name).encode("utf-8")) or 1
+                pool_strata_map[stream_id] = _extract_strata(
+                    pool, strat_cols, label=f"resample_pools[{name!r}]"
+                )
+
     # Each pool's served columns as one array, built once for every draw.
-    draw_arrays = [(stream, cols, pool[cols].to_numpy()) for stream, cols, pool in draws]
+    draw_arrays = [
+        (stream, cols, pool[cols].to_numpy(), pool_strata_map.get(stream))
+        for stream, cols, pool in draws
+    ]
 
     n_cores_eff = resolve_workers(_cfg.n_cores)
 
@@ -648,6 +774,8 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
                 int(seed_i),
                 resample_df,
                 resample_pools=_cfg.resample_pools,
+                df_strata=df_strata,
+                pool_strata_map=pool_strata_map,
             )
             # One predict thread per worker: this path already runs
             # ``n_cores_eff`` of these at once, and a LightGBM call sized from
@@ -695,7 +823,9 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
             b_size = len(batch_seeds)
 
             # Build prediction DataFrame without materialising the full n_samples × n_rows frame
-            df_batch_dict = _stacked_columns(df, draw_arrays, batch_seeds, _cfg.replace)
+            df_batch_dict = _stacked_columns(
+                df, draw_arrays, batch_seeds, _cfg.replace, df_strata=df_strata
+            )
             df_batch = pd.DataFrame(df_batch_dict)
 
             # The batch path has no per-seed worker pool, so n_cores sizes the
@@ -793,7 +923,9 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
         n_rows = len(df)
 
         # All draws at once with numpy (fast PRNG, per-seed reproducibility).
-        df_all = pd.DataFrame(_stacked_columns(df, draw_arrays, random_seeds, _cfg.replace))
+        df_all = pd.DataFrame(
+            _stacked_columns(df, draw_arrays, random_seeds, _cfg.replace, df_strata=df_strata)
+        )
         df_all["seed"] = np.repeat(random_seeds, n_rows)
 
         # Like the batch path, this path has no pool of its own: n_cores sizes
