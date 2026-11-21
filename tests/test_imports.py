@@ -80,6 +80,19 @@ def test_top_level_symbols_present():
         "diagnose_normalisation",
         "support_audit",
         "ale",
+        "screen_aq_data",
+        "add_met_physics_features",
+        "model_feature_names",
+        "permutation_importance",
+        "exceedance_stats",
+        "compare_models",
+        "load_model_metadata",
+        "fair_crps_from_samples",
+        "crps_skill_score",
+        "interval_score",
+        "interval_coverage",
+        "pit_diagnostics",
+        "calibration_curve",
     }
     missing = must_have - set(nm.__all__)
     assert not missing, f"Missing top-level exports: {sorted(missing)}"
