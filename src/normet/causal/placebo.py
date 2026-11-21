@@ -34,6 +34,7 @@ def placebo_in_space(
     donors: list[str] | None = None,
     scm_backend: str = "scm",
     post_agg: str = "mean",  # {'mean','sum'}
+    max_pre_mspe_ratio: float | None = None,
     n_cores: int | None = None,
     **kwargs: Any,
 ) -> dict:
@@ -46,10 +47,17 @@ def placebo_in_space(
     resulting placebo effects form the reference distribution the true effect is
     ranked against for the permutation ``p_value``.
 
+    Optionally pass ``max_pre_mspe_ratio`` (Abadie et al. 2010) to discard poor
+    pre-period placebo fits whose ``pre_mspe / treated_pre_mspe`` exceeds the
+    threshold; when supplied, ``dropped_placebos`` and ``pre_mspe_ratios`` are
+    also included in the returned dict.
+
     Each donor's placebo run is independent of the others, so they are
     dispatched in parallel via :mod:`joblib` (see ``n_cores``), the same
     pattern used by :func:`placebo_in_time` and :func:`normet.causal.batch.scm_all`.
     """
+    if max_pre_mspe_ratio is not None and float(max_pre_mspe_ratio) <= 0.0:
+        raise ValueError(f"max_pre_mspe_ratio must be positive, got {max_pre_mspe_ratio}")
     cutoff_ts = pd.to_datetime(cutoff_date)
 
     post_agg = (post_agg or "mean").lower()
@@ -91,7 +99,16 @@ def placebo_in_space(
             index=df_true.index,
             columns=["p10", "p90", "p2_5", "p97_5", "mean", "std", "band_low_1sd", "band_high_1sd"],
         )
-        return {"treated": df_true, "placebos": {}, "p_value": float("nan"), "ref_band": empty_band}
+        res_empty: dict[str, Any] = {
+            "treated": df_true,
+            "placebos": {},
+            "p_value": float("nan"),
+            "ref_band": empty_band,
+        }
+        if max_pre_mspe_ratio is not None:
+            res_empty["dropped_placebos"] = []
+            res_empty["pre_mspe_ratios"] = pd.Series(dtype=float, name="pre_mspe_ratio")
+        return res_empty
 
     # Run placebos in parallel — each donor-as-treated run is independent.
     n_cores_eff = _eff_cores(n_cores)
@@ -131,13 +148,62 @@ def placebo_in_space(
         u: eff for r in results if r is not None for u, eff in [r]
     }
 
+    dropped_placebos: list[str] = []
+    pre_mspe_ratios: dict[str, float] = {}
+    if max_pre_mspe_ratio is not None and placebo_effects:
+        pre_mask = df_true.index.to_series() < cutoff_ts
+        tr_pre = df_true.loc[pre_mask, "effect"].to_numpy(dtype=float)
+        tr_pre = tr_pre[np.isfinite(tr_pre)]
+        treated_mspe = float(np.mean(tr_pre**2)) if tr_pre.size else float("nan")
+        if np.isfinite(treated_mspe):
+            kept_effects: dict[str, pd.DataFrame] = {}
+            thr = float(max_pre_mspe_ratio)
+            for u, eff_df in placebo_effects.items():
+                u_pre = eff_df.reindex(df_true.index).loc[pre_mask, u].to_numpy(dtype=float)
+                u_pre = u_pre[np.isfinite(u_pre)]
+                u_mspe = float(np.mean(u_pre**2)) if u_pre.size else float("nan")
+                if not np.isfinite(u_mspe):
+                    ratio = float("nan")
+                elif treated_mspe > 0.0:
+                    ratio = u_mspe / treated_mspe
+                else:
+                    ratio = 0.0 if u_mspe == 0.0 else float("inf")
+                pre_mspe_ratios[u] = ratio
+                if np.isfinite(ratio) and ratio <= thr:
+                    kept_effects[u] = eff_df
+                else:
+                    dropped_placebos.append(u)
+            if dropped_placebos:
+                log.info(
+                    "placebo_in_space: dropped %d/%d donor(s) exceeding max_pre_mspe_ratio=%.3g: %s",
+                    len(dropped_placebos),
+                    len(placebo_effects),
+                    thr,
+                    dropped_placebos,
+                )
+            placebo_effects = kept_effects
+        else:
+            log.warning(
+                "placebo_in_space: treated pre-period MSPE unavailable; skipping max_pre_mspe_ratio screen."
+            )
+            pre_mspe_ratios = {u: float("nan") for u in placebo_effects}
+
     if not placebo_effects:
-        log.warning("All placebo runs failed.")
+        log.warning("All placebo runs failed or were screened out.")
         empty_band = pd.DataFrame(
             index=df_true.index,
             columns=["p10", "p90", "p2_5", "p97_5", "mean", "std", "band_low_1sd", "band_high_1sd"],
         )
-        return {"treated": df_true, "placebos": {}, "p_value": float("nan"), "ref_band": empty_band}
+        res_none: dict[str, Any] = {
+            "treated": df_true,
+            "placebos": {},
+            "p_value": float("nan"),
+            "ref_band": empty_band,
+        }
+        if max_pre_mspe_ratio is not None:
+            res_none["dropped_placebos"] = dropped_placebos
+            res_none["pre_mspe_ratios"] = pd.Series(pre_mspe_ratios, name="pre_mspe_ratio")
+        return res_none
 
     placebo_mat = pd.concat(placebo_effects.values(), axis=1).reindex(df_true.index)
 
@@ -178,12 +244,16 @@ def placebo_in_space(
                 int(finite.sum()) + 1
             )
 
-    return {
+    res_out: dict[str, Any] = {
         "treated": df_true,
         "placebos": placebo_effects,
         "p_value": float(p_value),
         "ref_band": ref_band,
     }
+    if max_pre_mspe_ratio is not None:
+        res_out["dropped_placebos"] = dropped_placebos
+        res_out["pre_mspe_ratios"] = pd.Series(pre_mspe_ratios, name="pre_mspe_ratio")
+    return res_out
 
 
 def placebo_in_time(
@@ -267,12 +337,17 @@ def placebo_in_time(
             "placebo_stats": pd.Series(dtype=float),
         }
 
+    # Strictly truncate to the pre-intervention period before passing data into
+    # any placebo cutoff so full-panel estimators (mcnnm, robust, sdid, ascm)
+    # cannot leak post-intervention outcomes back into fake pre-cutoff tests.
+    d_pre = d.loc[d[date_col] < cutoff_dt].copy()
+
     def _one_placebo(
         pc_date: pd.Timestamp,
     ) -> tuple[pd.Timestamp, pd.DataFrame, float] | None:
         try:
             syn_pc = run_scm(
-                df=d,
+                df=d_pre,
                 date_col=date_col,
                 unit_col=unit_col,
                 outcome_col=outcome_col,

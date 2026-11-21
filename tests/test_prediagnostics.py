@@ -172,7 +172,7 @@ def test_pre_trend_slope_p_matches_the_textbook_ols_t_test():
         index=idx,
     )
 
-    pt = pre_trend_test(frame, idx[n].strftime("%Y-%m-%d"))
+    pt = pre_trend_test(frame, idx[n].strftime("%Y-%m-%d"), se_type="ols")
     ref_slope, _, _, ref_pvalue, _ = stats.linregress(t, err)
 
     assert pt.slope == pytest.approx(ref_slope, rel=1e-12)
