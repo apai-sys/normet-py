@@ -47,7 +47,7 @@ def run_scm(
         Treatment cutoff in "YYYY-MM-DD" (flexible parsing accepted).
     donors : List[str] | None
         Donor pool. If None, use all units except the treated unit.
-    scm_backend : {"scm","mlscm","abadie","did","mcnnm","robust"}
+    scm_backend : {"scm","ascm","sdid","mlscm","abadie","did","mcnnm","robust"}
         Which synthetic-control backend to use.
     **kwargs
         Forwarded to the selected backend function.
@@ -148,13 +148,17 @@ def run_scm(
                 **kw,  # model_config, seed, etc.
             )
 
-    # Newer variants (Abadie classic / DiD baseline / MC-NNM / Robust SCM): same signature.
-    if scm_backend in {"abadie", "did", "mcnnm", "robust"}:
+    # Standard panel backends (ASCM / SDID / Abadie / DiD / MC-NNM / Robust SCM): same signature.
+    if scm_backend in {"ascm", "sdid", "abadie", "did", "mcnnm", "robust"}:
+        from ..causal.ascm import scm_ascm
+        from ..causal.sdid import sdid
         from ..causal.variants import did_baseline, scm_abadie, scm_mcnnm, scm_robust
 
         fn = cast(
             "Callable[..., Any]",
             {
+                "ascm": scm_ascm,
+                "sdid": sdid,
                 "abadie": scm_abadie,
                 "did": did_baseline,
                 "mcnnm": scm_mcnnm,
