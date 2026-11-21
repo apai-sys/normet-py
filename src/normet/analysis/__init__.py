@@ -14,9 +14,16 @@ from .decomposition import (
     shapley_interactions,
     suggest_met_groups,
 )
+from .diagnostics import NormalisationDiagnostics, diagnose_normalisation, support_audit
 from .events import anomaly_scores, detect_events
-from .normalise import NormaliseConfig, normalise, normalise_auto
-from .pdp import pdp
+from .normalise import (
+    CrossFitNormaliseResult,
+    NormaliseConfig,
+    crossfit_normalise,
+    normalise,
+    normalise_auto,
+)
+from .pdp import ale, pdp
 from .rolling import RollingConfig, rolling, window_columns
 from .transport import (
     FootprintInversionResult,
@@ -58,9 +65,14 @@ __all__ = [
     "MET_PHYSICAL_GROUPS",
     "ShapleyInteractionResult",
     "NormaliseConfig",
+    "CrossFitNormaliseResult",
     "RollingConfig",
     "normalise",
     "normalise_auto",
+    "crossfit_normalise",
+    "NormalisationDiagnostics",
+    "diagnose_normalisation",
+    "support_audit",
     "decom_emi",
     "decom_emi_shapley",
     "decom_met",
@@ -71,6 +83,7 @@ __all__ = [
     "cross_fit_decompose",
     "compare_attributions",
     "pdp",
+    "ale",
     "rolling",
     "window_columns",
     "detect_events",

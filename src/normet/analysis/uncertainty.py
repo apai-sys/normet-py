@@ -41,6 +41,7 @@ as one ``do_all_unc`` run -- so the attribution costs no extra fits.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -53,7 +54,7 @@ from ..model.train import train_model
 from ..style import styled
 from ..utils._config import DEFAULT_SEED
 from ..utils.logging import get_logger
-from ..utils.prepare import prepare_data
+from ..utils.prepare import log1p_target, prepare_data
 from .normalise import normalise
 
 log = get_logger(__name__)
@@ -96,31 +97,104 @@ class UncDecomposition:
     def pct_interaction(self) -> np.ndarray:
         return self._pct(self.var_interaction)
 
-    def _pct(self, part: np.ndarray) -> np.ndarray:
+    def _pct(self, part: np.ndarray, total: np.ndarray | None = None) -> np.ndarray:
+        denom = self.var_total if total is None else total
         with np.errstate(divide="ignore", invalid="ignore"):
-            p = np.where(
-                self.var_total > 0, part / np.where(self.var_total > 0, self.var_total, 1.0), np.nan
-            )
+            p = np.where(denom > 0, part / np.where(denom > 0, denom, 1.0), np.nan)
         return p
 
-    def frame(self) -> pd.DataFrame:
-        """The per-date rows as a DataFrame, report-ready and directly plottable."""
-        df = pd.DataFrame(
-            {
-                "var_weather": self.var_weather,
-                "var_model": self.var_model,
-                "var_interaction": self.var_interaction,
-                "var_total": self.var_total,
-                "pct_weather": self.pct_weather,
-                "pct_model": self.pct_model,
-                "pct_interaction": self.pct_interaction,
-            },
-            index=self.index,
-        )
+    def _ems_components(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Unbiased two-way random-effects ANOVA variance components at estimator scale.
+
+        Separates finite-``n_samples`` Monte Carlo resampling noise (``sigma_W^2 / J``)
+        and residual interaction variance (``sigma_I^2 / J``) from the unbiased
+        between-model variance component (``sigma_M^2``).
+        """
+        n_m = int(self.n_models)
+        n_j = int(self.n_weather_draws)
+        if n_m >= 2 and n_j >= 2:
+            ms_inter = (n_m * n_j / ((n_m - 1) * (n_j - 1))) * self.var_interaction
+            ms_model = (n_m * n_j / (n_m - 1)) * self.var_model
+            ms_weather = (n_m * n_j / (n_j - 1)) * self.var_weather
+            sigma2_inter = np.maximum(ms_inter, 0.0)
+            sigma2_model = np.maximum((ms_model - ms_inter) / n_j, 0.0)
+            sigma2_weather = np.maximum((ms_weather - ms_inter) / n_m, 0.0)
+            return sigma2_weather / n_j, sigma2_model, sigma2_inter / n_j
+        return self.var_weather / max(n_j, 1), self.var_model, self.var_interaction / max(n_j, 1)
+
+    @property
+    def var_weather_mc(self) -> np.ndarray:
+        return self._ems_components()[0]
+
+    @property
+    def var_model_est(self) -> np.ndarray:
+        return self._ems_components()[1]
+
+    @property
+    def var_interaction_mc(self) -> np.ndarray:
+        return self._ems_components()[2]
+
+    @property
+    def var_estimator_total(self) -> np.ndarray:
+        vw, vm, vi = self._ems_components()
+        return vw + vm + vi
+
+    @property
+    def pct_weather_mc(self) -> np.ndarray:
+        return self._pct(self.var_weather_mc, self.var_estimator_total)
+
+    @property
+    def pct_model_est(self) -> np.ndarray:
+        return self._pct(self.var_model_est, self.var_estimator_total)
+
+    @property
+    def pct_interaction_mc(self) -> np.ndarray:
+        return self._pct(self.var_interaction_mc, self.var_estimator_total)
+
+    def frame(self, *, scale: str = "draw") -> pd.DataFrame:
+        """The per-date rows as a DataFrame, report-ready and directly plottable.
+
+        Parameters
+        ----------
+        scale : {"draw", "estimator"}, default "draw"
+            - ``"draw"``: two-way variance across single weather draws and model seeds.
+            - ``"estimator"``: unbiased EMS variance components for the de-weathered
+              mean estimator (dividing meteorological draw variance by ``n_weather_draws``).
+        """
+        if scale not in ("draw", "estimator"):
+            raise ValueError(f"`scale` must be 'draw' or 'estimator', got {scale!r}.")
+        if scale == "estimator":
+            vw, vm, vi = self._ems_components()
+            vt = vw + vm + vi
+            df = pd.DataFrame(
+                {
+                    "var_weather_mc": vw,
+                    "var_model_est": vm,
+                    "var_interaction_mc": vi,
+                    "var_estimator_total": vt,
+                    "pct_weather_mc": self._pct(vw, vt),
+                    "pct_model_est": self._pct(vm, vt),
+                    "pct_interaction_mc": self._pct(vi, vt),
+                },
+                index=self.index,
+            )
+        else:
+            df = pd.DataFrame(
+                {
+                    "var_weather": self.var_weather,
+                    "var_model": self.var_model,
+                    "var_interaction": self.var_interaction,
+                    "var_total": self.var_total,
+                    "pct_weather": self.pct_weather,
+                    "pct_model": self.pct_model,
+                    "pct_interaction": self.pct_interaction,
+                },
+                index=self.index,
+            )
         df.index.name = "date"
         return df
 
-    def summary(self) -> pd.DataFrame:
+    def summary(self, *, scale: str = "draw") -> pd.DataFrame:
         """The per-source median variance and its median share of the total.
 
         The shares are the headline of a policy evaluation ("of the band, this
@@ -129,16 +203,28 @@ class UncDecomposition:
         re-weight the attribution. ``interaction`` is the residual the other
         two do not explain, reported like the others so its size is visible.
         """
+        if scale not in ("draw", "estimator"):
+            raise ValueError(f"`scale` must be 'draw' or 'estimator', got {scale!r}.")
 
         def med(a: np.ndarray) -> float:
             return float(np.nanmedian(a))
 
-        rows = [
-            ("weather", med(self.var_weather), med(self.pct_weather)),
-            ("model", med(self.var_model), med(self.pct_model)),
-            ("interaction", med(self.var_interaction), med(self.pct_interaction)),
-            ("total", med(self.var_total), 1.0),
-        ]
+        if scale == "estimator":
+            vw, vm, vi = self._ems_components()
+            vt = vw + vm + vi
+            rows = [
+                ("weather_mc", med(vw), med(self._pct(vw, vt))),
+                ("model", med(vm), med(self._pct(vm, vt))),
+                ("interaction_mc", med(vi), med(self._pct(vi, vt))),
+                ("total", med(vt), 1.0),
+            ]
+        else:
+            rows = [
+                ("weather", med(self.var_weather), med(self.pct_weather)),
+                ("model", med(self.var_model), med(self.pct_model)),
+                ("interaction", med(self.var_interaction), med(self.pct_interaction)),
+                ("total", med(self.var_total), 1.0),
+            ]
         return pd.DataFrame(rows, columns=["source", "var_median", "pct_median"])
 
     @styled
@@ -148,6 +234,7 @@ class UncDecomposition:
         title: str | None = None,
         ylabel: str = "Variance (target units**2)",
         ax: Any | None = None,
+        scale: str = "draw",
     ) -> Any:
         """The stacked per-date variance bands (weather, model, interaction).
 
@@ -157,16 +244,25 @@ class UncDecomposition:
         figure is the policy-evaluation deliverable: which band dominates the
         total, date by date and in the median.
         """
+        if scale not in ("draw", "estimator"):
+            raise ValueError(f"`scale` must be 'draw' or 'estimator', got {scale!r}.")
         import matplotlib.pyplot as plt
 
         if ax is None:
             _, ax = plt.subplots(figsize=(8, 3), layout="constrained")
         idx = self.index
-        Y = np.vstack([self.var_weather, self.var_model, self.var_interaction])
-        labels = ["weather", "model", "interaction"]
+        if scale == "estimator":
+            vw, vm, vi = self._ems_components()
+            vt = vw + vm + vi
+            Y = np.vstack([vw, vm, vi])
+            labels = ["weather_mc", "model", "interaction_mc"]
+        else:
+            vt = self.var_total
+            Y = np.vstack([self.var_weather, self.var_model, self.var_interaction])
+            labels = ["weather", "model", "interaction"]
         colours = [S.PALETTE[0], S.PALETTE[1], S.PALETTE[3]]
         ax.stackplot(idx, Y, labels=labels, colors=colours, alpha=0.85, lw=0)
-        S.line(ax, idx, self.var_total, color=S.INK, emphasis=False, lw=0.8, label="total")
+        S.line(ax, idx, vt, color=S.INK, emphasis=False, lw=0.8, label="total")
         ax.set_title(title or "Uncertainty: where the spread comes from")
         ax.set_ylabel(ylabel)
         if isinstance(idx, pd.DatetimeIndex):
@@ -197,6 +293,16 @@ def _met_matrix(
     resample_df: pd.DataFrame | None,
     n_samples: int,
     seed: int,
+    *,
+    n_cores: int | None = None,
+    log_transform: bool = False,
+    back_transform: str = "arithmetic",
+    stratify_by: str | Sequence[str] | None = None,
+    conditional_k: int | None = None,
+    conditional_on: Mapping[str, Any] | None = None,
+    resample_pools: Mapping[str, pd.DataFrame] | None = None,
+    sampling: str = "iid",
+    block_hours: int | None = None,
 ) -> np.ndarray:
     """One timestamp-independent set of ``n_samples`` met draws for the record.
 
@@ -216,8 +322,16 @@ def _met_matrix(
         n_samples=n_samples,
         aggregate=False,
         seed=seed,
-        n_cores=1,
+        n_cores=n_cores,
         verbose=False,
+        log_transform=log_transform,
+        back_transform=back_transform,
+        stratify_by=stratify_by,
+        conditional_k=conditional_k,
+        conditional_on=conditional_on,
+        resample_pools=resample_pools,
+        sampling=sampling,
+        block_hours=block_hours,
     )
     draw_cols = [c for c in res.columns if c != "observed"]
     return res[draw_cols].to_numpy(dtype=float).T  # (n_samples, n_dates)
@@ -263,6 +377,16 @@ def decompose_uncertainty(
     n_cores: int | None = None,
     resample_df: pd.DataFrame | None = None,
     verbose: bool = False,
+    log_transform: bool = False,
+    back_transform: str = "arithmetic",
+    stratify_by: str | Sequence[str] | None = None,
+    conditional_k: int | None = None,
+    conditional_on: Mapping[str, Any] | None = None,
+    resample_pools: Mapping[str, pd.DataFrame] | None = None,
+    sampling: str = "iid",
+    block_hours: int | None = None,
+    impute: str = "train_median",
+    embargo: int = 0,
 ) -> UncDecomposition:
     """Attribute a de-weathered estimate's total spread to weather and model form.
 
@@ -309,6 +433,11 @@ def decompose_uncertainty(
         decomposition is reproducible under ``seed``.
     n_cores, resample_df, verbose :
         Forwarded to :func:`normalise` / :func:`train_model`.
+    log_transform, back_transform, stratify_by, conditional_k, conditional_on, resample_pools, sampling, block_hours :
+        Forwarded to :func:`normalise` (and :func:`log1p_target` on ``df_prep``
+        when ``log_transform=True``).
+    impute, embargo :
+        Forwarded to :func:`prepare_data`.
 
     Returns
     -------
@@ -344,7 +473,11 @@ def decompose_uncertainty(
         split_method=split_method,
         train_fraction=train_fraction,
         seed=seed,
+        impute=impute,
+        embargo=embargo,
     )
+    if log_transform:
+        df_prep = log1p_target(df_prep)
     member_rng = np.random.default_rng([seed, 1])
     member_seeds = [int(s) for s in member_rng.choice(1_000_000, size=n_models, replace=False)]
     log.info(
@@ -377,6 +510,15 @@ def decompose_uncertainty(
             resample_df,
             n_samples,
             seed,
+            n_cores=n_cores,
+            log_transform=log_transform,
+            back_transform=back_transform,
+            stratify_by=stratify_by,
+            conditional_k=conditional_k,
+            conditional_on=conditional_on,
+            resample_pools=resample_pools,
+            sampling=sampling,
+            block_hours=block_hours,
         )
         (log.info if verbose else log.debug)("member %d/%d done", i + 1, n_models)
 
@@ -389,6 +531,8 @@ def decompose_uncertainty(
         "All members share the same n_samples met resamples (common random numbers), "
         "so the total per-date variance equals the three summands exactly, to floating "
         "point.",
+        "Call frame(scale='estimator') / summary(scale='estimator') for the unbiased "
+        "EMS estimator-scale attribution dividing single-draw weather variance by n_samples.",
     ]
     return UncDecomposition(
         var_weather=var_weather,
