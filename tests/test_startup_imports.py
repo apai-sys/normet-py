@@ -103,3 +103,8 @@ def test_the_layout_the_window_opens_in_does_not_load_the_modelling_stack():
         f"print([m for m in {_HEAVY!r} if m in sys.modules])\n"
     )
     assert _run(code) == "[]"
+
+
+def test_importing_normet_does_not_load_scipy():
+    """scipy is a hard dependency but costs ~0.8 s to import: load it on first use."""
+    assert _run("import sys, normet; print('scipy' in sys.modules)") == "False"
