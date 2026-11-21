@@ -55,6 +55,15 @@ def test_top_level_symbols_present():
         "plot_receptor_grid",
         "plot_trajectory_clusters",
         "plot_footprint_inversion",
+        "MET_PHYSICAL_GROUPS",
+        "ShapleyInteractionResult",
+        "suggest_met_groups",
+        "shapley_interactions",
+        "decom_emi_shapley",
+        "decom_met_treeshap",
+        "cross_fit_decompose",
+        "compare_attributions",
+        "plot_shapley_interactions",
     }
     missing = must_have - set(nm.__all__)
     assert not missing, f"Missing top-level exports: {sorted(missing)}"

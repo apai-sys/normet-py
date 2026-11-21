@@ -7,6 +7,25 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ## [Unreleased]
 
 ### Added
+- **Scientific attribution & decomposition upgrade (`normet.analysis.decomposition`,
+  `normet.analysis.normalise`, `normet.backends.lgb_backend`, `normet.plotting`)**:
+  - Zero-resampling single-pass fast path (`variables_resample=[]`) in `normalise`
+    and `Chronos2Estimator.deweather`; explicit residual separation
+    (`include_diagnostics=True`: `predicted`, `met_explained`, `residual`);
+    calendar-aware `stratify_by` + `exact_base=True` in `decom_emi`; forwarded
+    `n_cores` in `decom_met`, Chronos-2 `stratify_by`/`conditional_k` rejection,
+    multi-anchor sensitivity ranking, and diverging/double-count-free
+    `decomposition_stack()`.
+  - Second-order Shapley interaction analysis (`nm.shapley_interactions`,
+    `ShapleyInteractionResult`, `nm.plot_shapley_interactions`), order-independent
+    calendar Shapley (`nm.decom_emi_shapley`), atmospheric-physics group builder
+    (`nm.suggest_met_groups`, `MET_PHYSICAL_GROUPS`), paired MC/permutation
+    standard errors (`return_uncertainty=True`), and multiplicative LMDI log-scale
+    closure (`scale="multiplicative"`).
+  - Out-of-fold temporally blocked decomposition (`nm.cross_fit_decompose` with
+    `embargo_hours`), kNN on-manifold conditional resampling (`conditional_k`),
+    path-dependent TreeSHAP (`nm.decom_met_treeshap` + `LgbModel.predict_contrib`),
+    and interventional-vs-conditional comparison (`nm.compare_attributions`).
 - **Cross-regional transport physics & Lagrangian receptor attribution**
   (`normet.io.trajectory`, `normet.analysis.transport`, `normet.analysis.normalise`,
   `normet.plotting`):

@@ -35,9 +35,9 @@ MCP server for AI assistants and a desktop app build on the same API.
 |---|---|
 | `nm.prepare_data` | Imputation, date-feature engineering, train/test splitting |
 | `nm.train_model` / `nm.build_model` | AutoML via FLAML or tuned LightGBM |
-| `nm.normalise` | Monte Carlo meteorological normalisation (deweathering, with optional `stratify_by` conditional resampling) |
+| `nm.normalise` | Monte Carlo meteorological normalisation (deweathering, with optional `stratify_by` and `conditional_k` on-manifold resampling) |
 | `nm.wpscf` / `nm.wcwt` / `nm.invert_source_footprints` / `nm.cluster_trajectories` / `nm.screen_donor_transport` | Physical BLH-coupled Lagrangian receptor mapping, regularized source-footprint inversion, TSV trajectory clustering, and SCM spillover screening |
-| `nm.decompose` | Split time series into emission-driven and met-driven components |
+| `nm.decompose` / `nm.decom_emi_shapley` / `nm.shapley_interactions` / `nm.cross_fit_decompose` / `nm.decom_met_treeshap` | Emission, meteorological, order-independent time-Shapley, 2nd-order Shapley interaction, multiplicative LMDI, temporally blocked cross-fitted, and TreeSHAP decompositions (`suggest_met_groups`, `compare_attributions`) |
 | `nm.rolling` | Rolling-window normalisation for trend analysis |
 | `nm.run_scm` / `nm.scm` | Synthetic Control Method with selectable backends: `scm` (default, ridge-augmented), `abadie` (classic simplex), `did`, `mcnnm` (nuclear-norm matrix completion), `robust` and `mlscm`; several treated units each with its own cutoff via `nm.run_scm_staggered` (staggered adoption: per-unit effects and placebo p-values, plus the pooled mean and median, with the cross-unit permutation test on the mean — rolling-out schemes such as the UK ULEZ expansion) |
 | `nm.mlscm` | ML-augmented SCM (**experimental** — see [Synthetic control](https://github.com/apai-sys/normet-py/blob/main/docs/guide/examples_scm_guide.md)) |
@@ -54,7 +54,7 @@ MCP server for AI assistants and a desktop app build on the same API.
 | `nm.crps_from_quantiles` / `nm.crps_from_samples` / `nm.pinball_loss` / `nm.crps_observed` | Probabilistic skill scores (Gneiting & Raftery 2005): CRPS for quantile and ensemble forecasts, the pinball loss, and a point forecast's CRPS reference |
 | `nm.decompose_uncertainty` | Attribute a de-weathered estimate's total spread to its source — weather (met resampling) vs model form vs their interaction — via an additive per-date variance decomposition |
 | `nm.detect_events` / `nm.anomaly_scores` | Event detection on normalised residuals |
-| `nm.normalise_plot` / `nm.decomposition_stack` / `nm.scm_dashboard` / `nm.plot_receptor_grid` / `nm.plot_trajectory_clusters` / `nm.plot_footprint_inversion` | Plotting helpers for normalisation, decomposition, SCM, and back-trajectory receptor / inversion / cluster results |
+| `nm.normalise_plot` / `nm.decomposition_stack` / `nm.plot_shapley_interactions` / `nm.scm_dashboard` / `nm.plot_receptor_grid` / `nm.plot_trajectory_clusters` / `nm.plot_footprint_inversion` | Plotting helpers for normalisation, diverging decomposition stacks, Shapley interactions, SCM, and back-trajectory receptor / inversion / cluster results |
 | `nm.bayesian_scm` / `nm.plot_bayesian_scm` | Bayesian (PyMC) posterior SCM with credible bands — **optional**, needs `normet[bayes]` |
 | `nm.scm_diagnostics` / `nm.pre_trend_test` / `nm.plot_event_study` / `nm.loo_weight_stability` / `nm.conformal_effect_interval` | SCM fit diagnostics, pre-period parallel-trends test and its event-study figure, donor-weight stability, conformal intervals |
 | `nm.donor_spatial_summary` / `nm.spatial_summary` | Where the donor pool sits around the treated unit: per-donor distance, compass bearing and sector, the pool's centroid offset and sector coverage (a reading, not a fit input) |
