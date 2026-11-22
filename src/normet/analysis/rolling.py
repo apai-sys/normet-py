@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import re
 import time
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -21,8 +23,8 @@ from ..utils import progress
 from ..utils._config import DEFAULT_SEED, resolve_config, resolve_workers
 from ..utils.features import extract_features
 from ..utils.logging import _progress_str, get_logger
-from ..utils.prepare import add_date_variables, process_date
-from .normalise import normalise
+from ..utils.prepare import add_date_variables, log1p_target, process_date
+from .normalise import _is_time_feature, normalise
 
 log = get_logger(__name__)
 
@@ -59,6 +61,20 @@ class RollingConfig:
     n_cores: int | None = None
     memory_save: bool = False
     verbose: bool = False
+    log_transform: bool = False
+    back_transform: str = "geometric"
+    smearing_factor: float | None = None
+    stratify_by: str | Sequence[str] | None = None
+    conditional_k: int | None = None
+    conditional_on: Mapping[str, Any] | None = None
+    resample_pools: Mapping[str, pd.DataFrame] | None = None
+    sampling: str = "iid"
+    block_hours: int | None = None
+    cache: str | Path | None = None
+    paired: bool | str = False
+    include_summary: bool = False
+    refit_per_window: bool = False
+    min_pool_rows: int = 30
 
 
 def _resolve_rolling_config(config: RollingConfig | None = None, **kwargs: Any) -> RollingConfig:
@@ -84,6 +100,20 @@ def rolling(
     n_cores: int | None = None,
     memory_save: bool | None = None,
     verbose: bool | None = None,
+    log_transform: bool | None = None,
+    back_transform: str | None = None,
+    smearing_factor: float | None = None,
+    stratify_by: str | Sequence[str] | None = None,
+    conditional_k: int | None = None,
+    conditional_on: Mapping[str, Any] | None = None,
+    resample_pools: Mapping[str, pd.DataFrame] | None = None,
+    sampling: str | None = None,
+    block_hours: int | None = None,
+    cache: str | Path | None = None,
+    paired: bool | str | None = None,
+    include_summary: bool | None = None,
+    refit_per_window: bool | None = None,
+    min_pool_rows: int | None = None,
     **kwargs: Any,
 ) -> pd.DataFrame:
     """Apply weather normalisation over a sliding window of the data.
@@ -116,13 +146,10 @@ def rolling(
         Indexed by ``date`` with column ``observed`` and one ``window_<i>``
         column of normalised values per window, counted from 1 and zero-padded
         (``window_01``, ``window_02``, ...); :func:`window_columns` lists them.
+        When ``include_summary=True``, also includes ``rolling_mean``,
+        ``rolling_std``, and ``n_windows``.
     """
     _cfg = _resolve_rolling_config(
-        # An instance (empty when none was given) keeps ``None`` meaning "not
-        # given": resolve_config drops None-valued overrides only when it has a
-        # config to override. The keyword defaults are ``None`` for the same
-        # reason -- a non-None default (target="value", backend="flaml",
-        # n_samples=300, ...) used to overwrite the caller's RollingConfig.
         config=config or RollingConfig(),
         target=target,
         backend=backend,
@@ -138,6 +165,20 @@ def rolling(
         n_cores=n_cores,
         memory_save=memory_save,
         verbose=verbose,
+        log_transform=log_transform,
+        back_transform=back_transform,
+        smearing_factor=smearing_factor,
+        stratify_by=stratify_by,
+        conditional_k=conditional_k,
+        conditional_on=conditional_on,
+        resample_pools=resample_pools,
+        sampling=sampling,
+        block_hours=block_hours,
+        cache=cache,
+        paired=paired,
+        include_summary=include_summary,
+        refit_per_window=refit_per_window,
+        min_pool_rows=min_pool_rows,
         **kwargs,
     )
 
@@ -149,7 +190,7 @@ def rolling(
     if "date" not in df.columns:
         df = process_date(df)
     df = df[df["date"].notna()].sort_values("date").reset_index(drop=True)
-    assert df is not None  # narrowing: the pandas chain above always yields a DataFrame
+    assert df is not None
 
     if _cfg.target not in df.columns:
         raise ValueError(f"`df` does not contain the target column '{_cfg.target}'.")
@@ -172,6 +213,10 @@ def rolling(
         return frame
 
     df_work = _maybe_add_time_vars(df_work)
+    result = df_work.set_index("date")[["value"]].rename(columns={"value": "observed"})
+
+    if _cfg.log_transform:
+        df_work = log1p_target(df_work, "value")
 
     if model is None:
         if not _cfg.covariates:
@@ -186,6 +231,7 @@ def rolling(
             model_config=_cfg.model_config,
             seed=_cfg.seed,
             verbose=_cfg.verbose,
+            cache=_cfg.cache,
         )
 
     covariates_resolved = _cfg.covariates
@@ -200,8 +246,7 @@ def rolling(
 
     variables_resample_resolved = _cfg.variables_resample
     if variables_resample_resolved is None:
-        time_vars = {"date_unix", "day_julian", "weekday", "hour"}
-        variables_resample_resolved = [f for f in covariates_resolved if f not in time_vars]
+        variables_resample_resolved = [f for f in covariates_resolved if not _is_time_feature(f)]
 
     n_cores_eff = resolve_workers(_cfg.n_cores)
 
@@ -213,10 +258,9 @@ def rolling(
         raise ValueError("Window is larger than the entire time span of `df`.")
     start_days = pd.date_range(min_day, last_start, freq=f"{_cfg.rolling_every}D")
 
-    result = df_work.set_index("date")[["value"]].rename(columns={"value": "observed"})
-
     t0 = time.time()
     total = len(start_days)
+    small_pools = 0
 
     for i, start_day in enumerate(start_days, start=1):
         progress.report(i - 1, total)
@@ -233,17 +277,29 @@ def rolling(
             )
             continue
 
+        if len(dfa) < int(_cfg.min_pool_rows):
+            small_pools += 1
+
         try:
-            # resample_df=dfa (not the full df_work): each window draws its
-            # meteorological resample pool exclusively from its own date
-            # range. Using the full dataset here would make window_days
-            # irrelevant to the resampled distribution, defeating the point
-            # of testing whether meteorological influence separates by
-            # timescale (matches the corrected default in R's nm_rolling()).
+            win_model = model
+            if _cfg.refit_per_window and len(dfa) >= max(20, int(_cfg.min_pool_rows)):
+                _, win_model = build_model(
+                    df=dfa,
+                    target="value",
+                    backend=_cfg.backend,
+                    covariates=covariates_resolved,
+                    split_method=_cfg.split_method,
+                    train_fraction=_cfg.train_fraction,
+                    model_config=_cfg.model_config,
+                    seed=_cfg.seed + (i * 997),
+                    n_cores=n_cores_eff,
+                    verbose=False,
+                )
+
             with progress.part(i - 1, total):
                 df_norm = normalise(
                     df=dfa,
-                    model=model,
+                    model=win_model,
                     covariates=covariates_resolved,
                     variables_resample=variables_resample_resolved,
                     n_samples=_cfg.n_samples,
@@ -252,8 +308,20 @@ def rolling(
                     n_cores=n_cores_eff,
                     resample_df=dfa,
                     memory_save=_cfg.memory_save,
+                    log_transform=_cfg.log_transform,
+                    back_transform=_cfg.back_transform,
+                    smearing_factor=_cfg.smearing_factor,
+                    stratify_by=_cfg.stratify_by,
+                    conditional_k=_cfg.conditional_k,
+                    conditional_on=_cfg.conditional_on,
+                    resample_pools=_cfg.resample_pools,
+                    sampling=_cfg.sampling,
+                    block_hours=_cfg.block_hours,
+                    cache=_cfg.cache,
+                    paired=_cfg.paired,
                 )
-            result[name] = df_norm["normalised"]
+            pick = "paired" if (_cfg.paired and "paired" in df_norm.columns) else "normalised"
+            result[name] = df_norm[pick]
         except Exception as e:
             start_str = start_day.strftime("%Y-%m-%d")
             end_str = (end_excl - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
@@ -278,4 +346,25 @@ def rolling(
                 _progress_str(i, total, t0),
             )
 
-    return result.sort_index()
+    if small_pools:
+        log.warning(
+            "%d/%d rolling window(s) had fewer than min_pool_rows=%d rows in their local resample pool.",
+            small_pools,
+            total,
+            int(_cfg.min_pool_rows),
+        )
+
+    result = result.sort_index()
+    if _cfg.include_summary:
+        win_cols = window_columns(result)
+        if win_cols:
+            vals_df = result[win_cols]
+            result["rolling_mean"] = vals_df.mean(axis=1, skipna=True)
+            result["rolling_std"] = vals_df.std(axis=1, skipna=True)
+            result["n_windows"] = vals_df.notna().sum(axis=1).astype(int)
+        else:
+            result["rolling_mean"] = float("nan")
+            result["rolling_std"] = float("nan")
+            result["n_windows"] = 0
+
+    return result

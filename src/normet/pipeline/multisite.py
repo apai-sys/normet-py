@@ -54,6 +54,7 @@ def multisite_apply(
     inner_n_cores: int | None = None,
     site_kwarg: str | None = None,
     keep_index: bool = True,
+    on_error: str = "warn",
     **kwargs: Any,
 ) -> pd.DataFrame:
     """
@@ -88,6 +89,10 @@ def multisite_apply(
     keep_index : bool, default True
         If True, the returned DataFrame's original index becomes a ``date``
         column (if it's a DatetimeIndex), then the site column is appended.
+    on_error : {"warn", "raise"}, default "warn"
+        Whether to log a warning and skip failing sites (``"warn"``) or re-raise
+        the first site exception (``"raise"``). Failed site messages are attached
+        to ``result.attrs["failed_sites"]``.
     **kwargs :
         Forwarded to ``func`` as-is.
 
@@ -98,6 +103,8 @@ def multisite_apply(
     """
     if site_col not in df.columns:
         raise ValueError(f"`site_col` '{site_col}' not in df.")
+    if on_error not in ("warn", "raise"):
+        raise ValueError(f"`on_error` must be 'warn' or 'raise', got {on_error!r}.")
 
     sites = list(pd.unique(df[site_col]))
     if not sites:
@@ -106,10 +113,10 @@ def multisite_apply(
     n_workers = _resolve_workers(n_cores)
     log.info("multisite_apply: %d sites × workers=%d", len(sites), n_workers)
 
-    def _run(site_value: Any) -> pd.DataFrame | None:
+    def _run(site_value: Any) -> tuple[Any, pd.DataFrame | None, Exception | None]:
         sub = df[df[site_col] == site_value]
         if sub.empty:
-            return None
+            return site_value, None, None
         try:
             extra = {site_kwarg: site_value} if site_kwarg else {}
             call_kwargs = dict(kwargs)
@@ -119,26 +126,39 @@ def multisite_apply(
             if isinstance(res, tuple):  # type: ignore[unreachable]
                 res = res[0]  # type: ignore[unreachable]
             if res is None or len(res) == 0:
-                return None
+                return site_value, None, None
             out = res.copy()
             if keep_index and isinstance(out.index, pd.DatetimeIndex):
                 out = out.reset_index().rename(columns={out.index.name or "index": "date"})
             out[site_col] = site_value
-            return out
+            return site_value, out, None
         except Exception as e:
             log.warning("Site %s failed: %s", site_value, e)
-            return None
+            return site_value, None, e
 
     # joblib is ~100 ms of `import normet`; only this driver needs it.
     from joblib import Parallel, delayed
 
-    pieces = Parallel(n_jobs=n_workers, batch_size=dispatch_batch_size(len(sites), n_workers))(
+    raw = Parallel(n_jobs=n_workers, batch_size=dispatch_batch_size(len(sites), n_workers))(
         delayed(_run)(s) for s in sites
     )
-    pieces = [p for p in pieces if p is not None]
+    pieces: list[pd.DataFrame] = []
+    failed: dict[Any, str] = {}
+    first_exc: Exception | None = None
+    for s_val, out_piece, exc in raw:
+        if exc is not None:
+            failed[s_val] = str(exc)
+            if first_exc is None:
+                first_exc = exc
+        elif out_piece is not None:
+            pieces.append(out_piece)
+    if on_error == "raise" and first_exc is not None:
+        raise first_exc
     if not pieces:
         raise RuntimeError("All per-site runs failed.")
-    return pd.concat(pieces, ignore_index=True)
+    result = pd.concat(pieces, ignore_index=True)
+    result.attrs["failed_sites"] = failed
+    return result
 
 
 def do_all_multisite(
@@ -150,6 +170,8 @@ def do_all_multisite(
     backend: str = "flaml",
     n_cores: int | None = None,
     return_models: bool = False,
+    reference_pool: pd.DataFrame | str | None = None,
+    on_error: str = "warn",
     **do_all_kwargs: Any,
 ) -> Any:
     """
@@ -174,6 +196,13 @@ def do_all_multisite(
         :func:`_inner_site_cores`).
     return_models : bool, default False
         If True, also return a ``dict`` mapping site → trained model.
+    reference_pool : pd.DataFrame or "pooled" or None, default None
+        Optional shared meteorological reference pool forwarded as ``resample_df``
+        so every site is normalised onto a uniform regional meteorology baseline.
+        ``"pooled"`` constructs the pool from all rows in ``df`` combined.
+    on_error : {"warn", "raise"}, default "warn"
+        Whether to log a warning and skip failing sites or re-raise the first
+        exception.
     **do_all_kwargs :
         Forwarded to :func:`do_all` (e.g., ``n_samples``, ``model_config``,
         ``split_method``, ``train_fraction``).
@@ -184,49 +213,88 @@ def do_all_multisite(
         Long-format normalised series with the ``site_col`` column appended.
         If ``return_models=True``, returns ``(df_norm, models)``.
     """
+    from ..utils.prepare import add_date_variables, process_date
     from .do_all import do_all
+
+    if site_col not in df.columns:
+        raise ValueError(f"`site_col` '{site_col}' not in df.")
+    if on_error not in ("warn", "raise"):
+        raise ValueError(f"`on_error` must be 'warn' or 'raise', got {on_error!r}.")
+    if (
+        reference_pool is not None
+        and not isinstance(reference_pool, pd.DataFrame)
+        and reference_pool != "pooled"
+    ):
+        raise ValueError("`reference_pool` must be a DataFrame, 'pooled', or None.")
+
+    call_kw = dict(do_all_kwargs)
+    # Test the string *before* comparing: `reference_pool == "pooled"` on a
+    # DataFrame returns an elementwise frame, and evaluating that in an `if`
+    # raises "The truth value of a DataFrame is ambiguous", so the DataFrame
+    # branch below was unreachable.
+    if (
+        isinstance(reference_pool, str)
+        and reference_pool == "pooled"
+        and "resample_df" not in call_kw
+    ):
+        shared = df.drop(columns=[site_col]).copy()
+        shared = process_date(shared)
+        shared = add_date_variables(shared)
+        call_kw["resample_df"] = shared
+    elif isinstance(reference_pool, pd.DataFrame) and "resample_df" not in call_kw:
+        call_kw["resample_df"] = reference_pool
 
     sites = list(pd.unique(df[site_col]))
     n_workers = _resolve_workers(n_cores)
     inner_cores = _inner_site_cores(len(sites))
     log.info("do_all_multisite: %d sites × workers=%d | backend=%s", len(sites), n_workers, backend)
 
-    def _run(site_value: Any) -> tuple[Any, ...] | None:
+    def _run(site_value: Any) -> tuple[Any, Any, Any, Exception | None]:
         sub = df[df[site_col] == site_value]
         if sub.empty:
-            return None
+            return site_value, None, None, None
         try:
-            out, model, df_prep = do_all(
+            out, model, _df_prep = do_all(
                 df=sub.drop(columns=[site_col]),
                 target=target,
                 backend=backend,
                 covariates=covariates,
                 n_cores=inner_cores,
-                **do_all_kwargs,
+                **call_kw,
             )
-            return site_value, out, model
+            return site_value, out, model, None
         except Exception as e:
             log.warning("Site %s failed in do_all: %s", site_value, e)
-            return None
+            return site_value, None, None, e
 
     from joblib import Parallel, delayed
 
-    results = Parallel(n_jobs=n_workers, batch_size=dispatch_batch_size(len(sites), n_workers))(
+    raw = Parallel(n_jobs=n_workers, batch_size=dispatch_batch_size(len(sites), n_workers))(
         delayed(_run)(s) for s in sites
     )
-    results = [r for r in results if r is not None]
-    if not results:
-        raise RuntimeError("All per-site do_all runs failed.")
 
     pieces = []
     models: dict[Any, Any] = {}
-    for site_value, out, model in results:
-        df_out = out.reset_index().rename(columns={out.index.name or "index": "date"})
-        df_out[site_col] = site_value
-        pieces.append(df_out)
-        models[site_value] = model
+    failed: dict[Any, str] = {}
+    first_exc: Exception | None = None
+    for site_value, out, model, exc in raw:
+        if exc is not None:
+            failed[site_value] = str(exc)
+            if first_exc is None:
+                first_exc = exc
+        elif out is not None:
+            df_out = out.reset_index().rename(columns={out.index.name or "index": "date"})
+            df_out[site_col] = site_value
+            pieces.append(df_out)
+            models[site_value] = model
+
+    if on_error == "raise" and first_exc is not None:
+        raise first_exc
+    if not pieces:
+        raise RuntimeError("All per-site do_all runs failed.")
 
     df_norm = pd.concat(pieces, ignore_index=True)
+    df_norm.attrs["failed_sites"] = failed
     return (df_norm, models) if return_models else df_norm
 
 

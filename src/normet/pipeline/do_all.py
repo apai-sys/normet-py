@@ -9,22 +9,37 @@ models for uncertainty quantification), plus their config dataclasses
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
 import pandas as pd
 
-from ..analysis.normalise import normalise
+from ..analysis.normalise import (
+    _CROSSFIT_DEFAULT_EMBARGO,
+    CrossFitNormaliseResult,
+    _back_transform_values,
+    crossfit_normalise,
+    normalise,
+)
+from ..exceptions import ConfigError
 from ..foundation.estimator import (
     CHRONOS_BACKEND,
     resolve_n_samples,
 )
-from ..model.train import build_model
+from ..model.train import build_model, train_model
 from ..utils._config import resolve_config
 from ..utils.logging import _progress_str, get_logger
 from ..utils.metrics import modStats
-from ..utils.prepare import expm1_columns, log1p_target, prepare_data
+from ..utils.prepare import (
+    compute_duan_smearing,
+    expm1_columns,
+    impute_values,
+    log1p_target,
+    prepare_data,
+)
 
 log = get_logger(__name__)
 
@@ -57,12 +72,43 @@ class SingleConfig:
     A pollutant that spans sub-unit to hundreds of µg/m³ spends most of its
     raw-scale variance on high hours; fitting on the log scale makes errors
     count in relative terms, so a fixed relative miss maps to a bounded error
-    at every level while its absolute error grows without bound. The model
-    trains on ``log1p(value)``,
-    :func:`normalise` resamples-and-predicts on that scale, and its result is
-    returned through ``expm1`` so every column is back in the original units.
-    Default False keeps the existing behaviour bit-identical.
+    at every level while its absolute error grows without bound. With
+    ``back_transform="geometric"`` (the default, legacy behaviour), resampled
+    log predictions are averaged on the log scale before a single ``expm1``;
+    ``"arithmetic"`` back-transforms each draw before averaging; ``"smearing"``
+    adds Duan's residual correction to that arithmetic mean.
     """
+    back_transform: str = "geometric"
+    smearing_factor: float | None = None
+    paired: bool | str = False
+    paired_floor: float = 1e-6
+    return_quantiles: Sequence[float] | None = None
+    return_mc_se: bool = False
+    stratify_by: str | Sequence[str] | None = None
+    conditional_k: int | None = None
+    conditional_on: Mapping[str, Any] | None = None
+    resample_pools: Mapping[str, pd.DataFrame] | None = None
+    sampling: str = "iid"
+    block_hours: int | None = None
+    cache: str | Path | None = None
+    impute: str = "median"
+    """Missing-covariate strategy forwarded to :func:`prepare_data`.
+
+    ``"median"`` (the default) fills from the full-frame median, matching the
+    behaviour before the strategy was configurable; ``"train_median"`` opts
+    into training-set-only statistics (leak-free for the test block).
+    """
+    max_gap: int | None = 6
+    embargo: int | None = None
+    """Rows purged around a testing block.
+
+    ``None`` (the default) means 0 for the ordinary split and
+    :func:`crossfit_normalise`'s own 24-row default when ``cross_fit=True``;
+    an explicit value (including ``0``) is used as given.
+    """
+    cross_fit: bool = False
+    cv_folds: int = 5
+    chronos_mode: str = "deweather"
 
 
 @dataclass
@@ -71,12 +117,31 @@ class UncConfig(SingleConfig):
 
     n_models: int = 10
     confidence_level: float = 0.95
+    unc_method: str = "legacy"
+    ci_method: str = "quantile"
+    block_length: int | None = None
+
+
+_ICN_DESIGN_KEYS = frozenset(
+    {
+        "intervene",
+        "pool",
+        "gap_h",
+        "block_h",
+        "stride",
+        "direction",
+        "aggregate",
+        "lead_tau",
+        "min_context",
+        "support_min_frac",
+    }
+)
 
 
 def _do_all_zero_shot(
     df: pd.DataFrame, cfg: SingleConfig
 ) -> tuple[pd.DataFrame, object, pd.DataFrame]:
-    """The Chronos-2 branch of :func:`do_all`: prepare -> load -> de-weather.
+    """The Chronos-2 branch of :func:`do_all`: prepare -> load -> de-weather / ICN.
 
     The AutoML path is prepare -> train -> normalise, and the middle step has no
     counterpart here: nothing is fitted, so there is no held-out set, no model
@@ -84,12 +149,15 @@ def _do_all_zero_shot(
     the loaded :class:`~normet.foundation.Chronos2Estimator`, which is what the
     caller needs to run further projections or the covariate-sensitivity check.
 
-    ``split_method``, ``train_fraction`` and ``model_config``'s search settings
-    have nothing to act on. Rather than ignore ``model_config`` entirely, its
-    keys are passed to the estimator's constructor, which is where ``device``,
-    ``context_length`` and ``prediction_length`` belong.
+    ``chronos_mode="deweather"`` preserves the legacy past+future deweathering
+    path; ``chronos_mode="icn"`` runs future-only In-Context Normalisation via
+    :func:`~normet.foundation.in_context.normalise_in_context`.
     """
     from ..foundation import Chronos2Estimator, to_indexed_frame
+
+    mode = str(cfg.chronos_mode or "deweather").lower()
+    if mode not in ("deweather", "icn"):
+        raise ConfigError(f"`chronos_mode` must be 'deweather' or 'icn', got {cfg.chronos_mode!r}.")
 
     covariates = list(cfg.covariates or [])
     met = list(cfg.variables_resample) if cfg.variables_resample else covariates
@@ -112,12 +180,70 @@ def _do_all_zero_shot(
         split_method=cfg.split_method,
         train_fraction=cfg.train_fraction,
         seed=cfg.seed,
+        impute=cfg.impute,
+        max_gap=cfg.max_gap,
+        embargo=_prepare_embargo(cfg.embargo),
     )
     if cfg.log_transform:
         df_prep = log1p_target(df_prep)
     indexed = to_indexed_frame(df_prep)
 
-    estimator = Chronos2Estimator(met_covariates=met, **(cfg.model_config or {}))
+    raw_mcfg = dict(cfg.model_config or {})
+    if mode == "icn":
+        from ..foundation.in_context import ICNDesign
+
+        custom_pipeline = raw_mcfg.pop("pipeline", None)
+        icn_kw = {k: raw_mcfg.pop(k) for k in list(raw_mcfg) if k in _ICN_DESIGN_KEYS}
+        estimator = Chronos2Estimator(met_covariates=met, **raw_mcfg)
+        if custom_pipeline is None:
+            estimator._load_pipeline()
+        estimator._check_index(indexed.index)
+        design = ICNDesign(
+            n_resamples=cast(int, cfg.n_samples),
+            seed=cfg.seed,
+            context_length=estimator.context_length,
+            **icn_kw,
+        )
+        icn_res = estimator.normalise_in_context(
+            indexed,
+            "value",
+            design=design,
+            pipeline=custom_pipeline,
+            met_features=met,
+            schema="normet",
+        )
+        obs = indexed["value"].reindex(icn_res.level.index).to_numpy(dtype=float)
+        norm = icn_res.level.to_numpy(dtype=float)
+        pair = icn_res.paired.to_numpy(dtype=float)
+        anchor_spread = icn_res.spread_by_source["anchor"].to_numpy(dtype=float)
+        mc_spread = icn_res.spread_by_source["mc"].to_numpy(dtype=float)
+        if cfg.log_transform:
+            obs = np.expm1(obs)
+            norm = np.expm1(norm)
+            pair = np.expm1(pair)
+            # ICN reports its spreads on the input frame's scale, which here
+            # is log1p. Convert with the delta method for y = expm1(z),
+            # dy/dz = exp(z) = 1 + y, so the columns stay in the same units
+            # as `normalised`; leaving log-scale SDs beside expm1'd levels
+            # made a +/- 2 SD band invisible.
+            scale = 1.0 + norm
+            anchor_spread = anchor_spread * scale
+            mc_spread = mc_spread * scale
+        out = pd.DataFrame(
+            {
+                "observed": obs,
+                "normalised": norm,
+                "paired": pair,
+                "weather_effect": obs - norm,
+                "anchor_spread": anchor_spread,
+                "mc_spread": mc_spread,
+                "hour_contrib": icn_res.hour_contrib.to_numpy(dtype=int),
+            },
+            index=pd.Index(icn_res.level.index, name="date"),
+        )
+        return out, estimator, df_prep
+
+    estimator = Chronos2Estimator(met_covariates=met, **raw_mcfg)
     estimator._load_pipeline()
     log.info(
         "Chronos-2 ready on %s | context=%d | horizon=%d",
@@ -149,12 +275,65 @@ def _do_all_zero_shot(
     return out, estimator, df_prep
 
 
+def _prepare_embargo(embargo: int | None) -> int:
+    """Map :attr:`SingleConfig.embargo`'s ``None`` sentinel to 0 for ``prepare_data``.
+
+    ``None`` only means "the caller did not choose"; the ordinary split has
+    never purged rows by default, whereas cross-fitting uses
+    :data:`~normet.analysis.normalise._CROSSFIT_DEFAULT_EMBARGO`.
+    """
+    return 0 if embargo is None else int(embargo)
+
+
 def _resolve_single_config(config: SingleConfig | None = None, **kwargs: Any) -> SingleConfig:
     return resolve_config(SingleConfig, config, **kwargs)
 
 
 def _resolve_unc_config(config: UncConfig | None = None, **kwargs: Any) -> UncConfig:
     return resolve_config(UncConfig, config, **kwargs)
+
+
+def _stats_for_member(
+    df_eval: pd.DataFrame,
+    model: object,
+    *,
+    log_transform: bool,
+    back_transform: str,
+    seed_val: int,
+) -> pd.DataFrame | None:
+    """Compute member statistics, keeping legacy signature when log_transform is False."""
+    if not log_transform:
+        stats_i = modStats(df=df_eval, model=model, subset=None, statistic=None)
+    else:
+        from ..model.predict import ml_predict
+
+        df_orig = df_eval.copy()
+        df_orig["value"] = np.expm1(
+            pd.to_numeric(df_orig["value"], errors="coerce").to_numpy(dtype=float)
+        )
+        phi_i = 1.0
+        if back_transform == "smearing":
+            sub = df_eval[df_eval["set"] == "training"] if "set" in df_eval.columns else df_eval
+            if sub.empty:
+                sub = df_eval
+            preds_tr = ml_predict(model, sub, num_threads=1)
+            phi_i = compute_duan_smearing(sub["value"], preds_tr)
+
+        def _orig_pred(m: object, x: pd.DataFrame) -> np.ndarray:
+            return _back_transform_values(ml_predict(m, x, num_threads=1), smearing_factor=phi_i)
+
+        stats_i = modStats(
+            df=df_orig,
+            model=model,
+            subset=None,
+            statistic=None,
+            predictor=_orig_pred,
+        )
+    if isinstance(stats_i, pd.DataFrame) and not stats_i.empty:
+        stats_i = stats_i.copy()
+        stats_i["seed"] = int(seed_val)
+        return stats_i
+    return None
 
 
 def do_all(
@@ -176,19 +355,38 @@ def do_all(
     verbose: bool | None = None,
     aggregate: bool | None = None,
     log_transform: bool | None = None,
+    back_transform: str | None = None,
+    smearing_factor: float | None = None,
+    paired: bool | str | None = None,
+    paired_floor: float | None = None,
+    return_quantiles: Sequence[float] | None = None,
+    return_mc_se: bool | None = None,
+    stratify_by: str | Sequence[str] | None = None,
+    conditional_k: int | None = None,
+    conditional_on: Mapping[str, Any] | None = None,
+    resample_pools: Mapping[str, pd.DataFrame] | None = None,
+    sampling: str | None = None,
+    block_hours: int | None = None,
+    cache: str | Path | None = None,
+    impute: str | None = None,
+    max_gap: int | None = None,
+    embargo: int | None = None,
+    cross_fit: bool | None = None,
+    cv_folds: int | None = None,
+    chronos_mode: str | None = None,
     **kwargs: Any,
 ) -> tuple[pd.DataFrame, object, pd.DataFrame]:
     r"""Run the standard pipeline: prepare → build_model → normalise.
 
     With ``backend="chronos-2"`` the middle step is skipped: nothing is trained,
     the Chronos-2 checkpoint is loaded instead and the de-weathering runs through
-    :meth:`~normet.foundation.Chronos2Estimator.deweather`. The return shape is
-    unchanged, but the model slot holds the loaded estimator, ``split_method`` /
-    ``train_fraction`` have nothing to act on, and ``model_config`` is forwarded
-    to the estimator's constructor (``device``, ``context_length``,
-    ``prediction_length``). Note that the first ``context_length`` rows of the
-    result are the observed values: the model has no history to condition on
-    until then. Needs the ``foundation`` extra.
+    :meth:`~normet.foundation.Chronos2Estimator.deweather` (``chronos_mode="deweather"``)
+    or :func:`~normet.foundation.in_context.normalise_in_context` (``chronos_mode="icn"``).
+    With ``cross_fit=True`` on AutoML backends, runs blocked embargoed out-of-fold
+    normalisation via :func:`crossfit_normalise` and returns
+    ``(result_df, CrossFitNormaliseResult, df_prep)``. Leaving ``embargo`` at
+    its (``None``) default there uses ``crossfit_normalise``'s 24-row purge;
+    passing ``embargo=0`` explicitly requests no purge.
 
     Parameters
     ----------
@@ -204,16 +402,11 @@ def do_all(
         function's own defaults) leaves the config's value, or the
         dataclass's default, in place.
     log_transform : bool or None, default=None
-        Fit on ``log1p(value)`` instead of the raw target. A pollutant that
-        spans sub-unit to hundreds of µg/m³ spends most of its raw-scale
-        variance on its high hours; the log scale makes errors count in
-        relative terms, and the back-transform through ``expm1``
-        keeps the result non-negative by construction. With it on, the model
-        trains and the de-weathering runs on the log scale, and every column
-        of the normalised result comes back in the original units; the
-        prepared frame that is returned, however, carries ``log1p(value)`` in
-        its ``value`` column -- it is the frame the model was trained on.
-        ``None`` keeps the config's value (False unless it says otherwise).
+        Fit on ``log1p(value)`` instead of the raw target. With it on, the model
+        trains on the log scale and results return in original units according to
+        ``back_transform`` (``"geometric"``, the default and legacy behaviour /
+        ``"arithmetic"`` / ``"smearing"``);
+        the prepared frame returned as the third tuple item carries ``log1p(value)``.
     **kwargs
         Any additional keyword arguments are forwarded to
         :func:`_resolve_single_config`.
@@ -221,16 +414,8 @@ def do_all(
     Returns
     -------
     (pandas.DataFrame, object, pandas.DataFrame)
-        Normalised contributions, trained model, prepared dataframe.
-
-    Examples
-    --------
-    >>> import pandas as pd
-    >>> from normet import do_all
-    >>> df = pd.DataFrame({"date": pd.date_range("2024-01-01", periods=48, freq="h"),
-    ...                    "PM2.5": range(48), "t2m": 10.0, "blh": 500.0})
-    >>> result, model, df_prep = do_all(df, target="PM2.5",
-    ...                                 covariates=["t2m", "blh"])  # doctest: +SKIP
+        Normalised contributions, trained model (or :class:`CrossFitNormaliseResult`),
+        prepared dataframe.
     """
     if target is None and config is None:
         # SingleConfig's target default is "value"; a caller who gave no
@@ -257,6 +442,25 @@ def do_all(
         verbose=verbose,
         aggregate=aggregate,
         log_transform=log_transform,
+        back_transform=back_transform,
+        smearing_factor=smearing_factor,
+        paired=paired,
+        paired_floor=paired_floor,
+        return_quantiles=return_quantiles,
+        return_mc_se=return_mc_se,
+        stratify_by=stratify_by,
+        conditional_k=conditional_k,
+        conditional_on=conditional_on,
+        resample_pools=resample_pools,
+        sampling=sampling,
+        block_hours=block_hours,
+        cache=cache,
+        impute=impute,
+        max_gap=max_gap,
+        embargo=embargo,
+        cross_fit=cross_fit,
+        cv_folds=cv_folds,
+        chronos_mode=chronos_mode,
         **kwargs,
     )
 
@@ -271,15 +475,63 @@ def do_all(
         _cfg.n_samples,
     )
 
-    # The zero-shot branch dispatches before the covariates guard: it names
-    # its meteorology through variables_resample (nothing is trained), it owns
-    # the error when neither names a weather source, and the guard's raise is
-    # what tells mypy _cfg.covariates is a list on the AutoML path below.
     if _cfg.backend == CHRONOS_BACKEND:
         return _do_all_zero_shot(df, _cfg)
 
     if _cfg.covariates is None:
         raise ValueError("covariates must be provided")
+
+    if _cfg.cross_fit:
+        paired_opt: bool | str = (
+            ("log_ratio" if _cfg.log_transform else "additive")
+            if _cfg.paired is False
+            else _cfg.paired
+        )
+        cf_res = crossfit_normalise(
+            df,
+            target=_cfg.target,
+            covariates=list(_cfg.covariates),
+            variables_resample=_cfg.variables_resample,
+            backend=_cfg.backend,
+            model_config=_cfg.model_config,
+            n_splits=int(_cfg.cv_folds),
+            embargo=(_CROSSFIT_DEFAULT_EMBARGO if _cfg.embargo is None else int(_cfg.embargo)),
+            paired=paired_opt,
+            paired_floor=float(_cfg.paired_floor),
+            n_samples=int(_cfg.n_samples),
+            log_transform=bool(_cfg.log_transform),
+            back_transform=_cfg.back_transform,
+            stratify_by=_cfg.stratify_by,
+            conditional_k=_cfg.conditional_k,
+            conditional_on=_cfg.conditional_on,
+            resample_pools=_cfg.resample_pools,
+            resample_df=_cfg.resample_df,
+            return_quantiles=_cfg.return_quantiles,
+            return_mc_se=bool(_cfg.return_mc_se),
+            sampling=_cfg.sampling,
+            block_hours=_cfg.block_hours,
+            seed=int(_cfg.seed),
+            n_cores=_cfg.n_cores,
+            memory_save=bool(_cfg.memory_save),
+            cache=_cfg.cache,
+            impute=_cfg.impute,
+            max_gap=_cfg.max_gap,
+            verbose=bool(_cfg.verbose),
+        )
+        df_prep_cf = prepare_data(
+            df,
+            target=_cfg.target,
+            covariates=_cfg.covariates,
+            split_method="ts",
+            train_fraction=1.0,
+            seed=_cfg.seed,
+            impute=_cfg.impute,
+            max_gap=_cfg.max_gap,
+        )
+        if _cfg.log_transform:
+            df_prep_cf = log1p_target(df_prep_cf)
+        return cf_res.normalised, cf_res, df_prep_cf
+
     df_prep = prepare_data(
         df,
         target=_cfg.target,
@@ -287,11 +539,11 @@ def do_all(
         split_method=_cfg.split_method,
         train_fraction=_cfg.train_fraction,
         seed=_cfg.seed,
+        impute=_cfg.impute,
+        max_gap=_cfg.max_gap,
+        embargo=_prepare_embargo(_cfg.embargo),
     )
     if _cfg.log_transform:
-        # After the split is known, before the fit: the model, the de-weathering
-        # and their metrics all live on the log scale; the result comes back
-        # through expm1 inside normalise.
         df_prep = log1p_target(df_prep)
     log.info(
         "Data prepared: %d rows (%d training, %d testing)",
@@ -311,6 +563,7 @@ def do_all(
         seed=_cfg.seed,
         n_cores=_cfg.n_cores,
         verbose=_cfg.verbose,
+        cache=_cfg.cache,
     )
     log.info("Model trained with backend=%s", _cfg.backend)
 
@@ -327,6 +580,19 @@ def do_all(
         memory_save=_cfg.memory_save,
         verbose=_cfg.verbose,
         log_transform=_cfg.log_transform,
+        back_transform=_cfg.back_transform,
+        smearing_factor=_cfg.smearing_factor,
+        paired=_cfg.paired,
+        paired_floor=_cfg.paired_floor,
+        return_quantiles=_cfg.return_quantiles,
+        return_mc_se=_cfg.return_mc_se,
+        stratify_by=_cfg.stratify_by,
+        conditional_k=_cfg.conditional_k,
+        conditional_on=_cfg.conditional_on,
+        resample_pools=_cfg.resample_pools,
+        sampling=_cfg.sampling,
+        block_hours=_cfg.block_hours,
+        cache=_cfg.cache,
     )
 
     log.info("do_all finished: %d timestamps", len(out))
@@ -354,47 +620,44 @@ def do_all_unc(
     verbose: bool | None = None,
     weighted_method: str | None = None,
     log_transform: bool | None = None,
+    back_transform: str | None = None,
+    smearing_factor: float | None = None,
+    paired: bool | str | None = None,
+    paired_floor: float | None = None,
+    stratify_by: str | Sequence[str] | None = None,
+    conditional_k: int | None = None,
+    conditional_on: Mapping[str, Any] | None = None,
+    resample_pools: Mapping[str, pd.DataFrame] | None = None,
+    sampling: str | None = None,
+    block_hours: int | None = None,
+    cache: str | Path | None = None,
+    impute: str | None = None,
+    max_gap: int | None = None,
+    embargo: int | None = None,
+    cross_fit: bool | None = None,
+    cv_folds: int | None = None,
+    unc_method: str | None = None,
+    ci_method: str | None = None,
+    block_length: int | None = None,
     **kwargs: Any,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     r"""Run the uncertainty pipeline: :func:`do_all` repeated *n_models* times.
 
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        Input dataset.
-    target : str or None, default=None
-        Target column in *df*. Can be ``None`` when *config* is provided
-        with a non-None ``target`` field.
-    config : UncConfig or None, default=None
-        Optional :class:`UncConfig` holding all parameters.
-        Individual keyword arguments override fields on *config*\ -- but only
-        when they are given: a keyword left at ``None`` (every one of the
-        function's own defaults) leaves the config's value, or the
-        dataclass's default, in place.
-    log_transform : bool or None, default=None
-        As in :func:`do_all`: every ensemble member trains and de-weather on
-        the log scale, and the ensemble output (means, bounds, the weighted
-        series) is reported in the original units. The per-member statistics
-        that drive the weights are then computed on the log scale, which is
-        the scale each member was fitted on.
-    **kwargs
-        Any additional keyword arguments are forwarded to
-        :func:`_resolve_unc_config`.
+    Supports three ensemble uncertainty strategies via ``unc_method``:
+      - ``"legacy"``: repeats :func:`do_all` across ``n_models`` seeds.
+      - ``"block_bootstrap"``: circular moving-block bootstrap over the full
+        record with leak-free per-bootstrap imputation, out-of-bag skill metrics,
+        and common random weather resamples across replicates.
+      - ``"crossfit_ensemble"``: repeated blocked out-of-fold ensembles with
+        pooled OOF skill metrics.
 
-    Returns
-    -------
-    (pandas.DataFrame, pandas.DataFrame)
-        Normalised contributions and model statistics.
+    Confidence intervals use empirical order statistics (``ci_method="quantile"``)
+    or small-sample Student-*t* intervals (``ci_method="student_t"``), and model
+    weights support ``"r2"``, ``"rmse"``, ``"inv_mse"``, or ``"uniform"``.
     """
     if target is None and config is None:
-        # As in ``do_all``: an empty UncConfig would silently fall back to
-        # its "value" target default; a caller who named no target gets the
-        # explicit refusal instead.
         raise ValueError("`target` must be provided either directly or via config.")
     _cfg = _resolve_unc_config(
-        # An instance (empty when none was given) keeps ``None`` meaning
-        # "not given": resolve_config drops None-valued overrides only when
-        # it has a config to override.
         config=config or UncConfig(),
         target=target,
         backend=backend,
@@ -412,62 +675,297 @@ def do_all_unc(
         memory_save=memory_save,
         verbose=verbose,
         log_transform=log_transform,
+        back_transform=back_transform,
+        smearing_factor=smearing_factor,
+        paired=paired,
+        paired_floor=paired_floor,
+        stratify_by=stratify_by,
+        conditional_k=conditional_k,
+        conditional_on=conditional_on,
+        resample_pools=resample_pools,
+        sampling=sampling,
+        block_hours=block_hours,
+        cache=cache,
+        impute=impute,
+        max_gap=max_gap,
+        embargo=embargo,
+        cross_fit=cross_fit,
+        cv_folds=cv_folds,
+        unc_method=unc_method,
+        ci_method=ci_method,
+        block_length=block_length,
         **kwargs,
     )
 
     weighted_method = (weighted_method or "r2").lower()
-    if weighted_method not in {"r2", "rmse"}:
-        raise ValueError("`weighted_method` must be 'r2' or 'rmse'.")
+    if weighted_method not in {"r2", "rmse", "inv_mse", "uniform"}:
+        raise ValueError("`weighted_method` must be 'r2', 'rmse', 'inv_mse', or 'uniform'.")
+    unc_mode = str(_cfg.unc_method or "legacy").lower()
+    if unc_mode not in {"legacy", "block_bootstrap", "crossfit_ensemble"}:
+        raise ValueError(
+            "`unc_method` must be 'legacy', 'block_bootstrap', or 'crossfit_ensemble'."
+        )
+    ci_mode = str(_cfg.ci_method or "quantile").lower()
+    if ci_mode not in {"quantile", "student_t"}:
+        raise ValueError("`ci_method` must be 'quantile' or 'student_t'.")
+    if not (0.0 < float(_cfg.confidence_level) < 1.0):
+        raise ValueError("`confidence_level` must be strictly between 0 and 1.")
 
+    _cfg.n_samples = resolve_n_samples(_cfg.n_samples, _cfg.backend)
     rng = np.random.default_rng(_cfg.seed)
     seeds = rng.choice(1_000_001, size=_cfg.n_models, replace=False).tolist()
 
     series_list: list[pd.DataFrame] = []
     stats_list: list[pd.DataFrame] = []
     observed_ref: pd.Series | None = None
+    series_col = "paired" if _cfg.paired else "normalised"
 
     t0 = time.time()
-    for i, s in enumerate(seeds, start=1):
-        (log.info if _cfg.verbose else log.debug)(
-            "do_all_unc: running model %d/%d (seed=%d) %s",
-            i,
-            _cfg.n_models,
-            s,
-            _progress_str(i, _cfg.n_models, t0),
-        )
-
-        out_i, model_i, df_prep_i = do_all(
-            df=df,
+    if unc_mode == "block_bootstrap":
+        if not _cfg.covariates:
+            raise ValueError("covariates must be provided for `unc_method='block_bootstrap'`.")
+        df_base = prepare_data(
+            df,
             target=_cfg.target,
-            backend=_cfg.backend,
             covariates=_cfg.covariates,
-            variables_resample=_cfg.variables_resample,
-            split_method=_cfg.split_method,
-            train_fraction=_cfg.train_fraction,
-            model_config=_cfg.model_config,
-            n_samples=_cfg.n_samples,
-            seed=int(s),
-            n_cores=_cfg.n_cores,
-            resample_df=_cfg.resample_df,
-            memory_save=_cfg.memory_save,
-            aggregate=True,
-            log_transform=_cfg.log_transform,
+            dropna=True,
+            split_method="ts",
+            train_fraction=1.0,
+            seed=_cfg.seed,
+            impute="none",
+        ).drop(columns=["set"])
+        n = len(df_base)
+        b_len = (
+            int(_cfg.block_length)
+            if _cfg.block_length is not None
+            else max(24, min(168, max(1, n // 10)))
         )
+        b_len = max(1, min(b_len, n))
+        cov_list = list(_cfg.covariates)
 
-        if observed_ref is None:
-            observed_ref = out_i["observed"].copy()
+        for i, s in enumerate(seeds, start=1):
+            (log.info if _cfg.verbose else log.debug)(
+                "do_all_unc [block_bootstrap]: member %d/%d (seed=%d) %s",
+                i,
+                _cfg.n_models,
+                s,
+                _progress_str(i, _cfg.n_models, t0),
+            )
+            boot_rng = np.random.default_rng(int(s))
+            n_blocks = int(np.ceil(n / b_len))
+            starts = boot_rng.integers(0, n, size=n_blocks)
+            boot_idx = np.concatenate([(st + np.arange(b_len)) % n for st in starts])[:n]
+            oob_mask = np.ones(n, dtype=bool)
+            oob_mask[np.unique(boot_idx)] = False
 
-        col = f"normalised_{s}"
-        series_list.append(out_i[["normalised"]].rename(columns={"normalised": col}))
+            df_boot_raw = df_base.iloc[boot_idx].copy().reset_index(drop=True)
+            df_boot_raw["set"] = "training"
+            df_eval_raw = df_base.copy().reset_index(drop=True)
+            df_eval_raw["set"] = "testing"
+            combined = pd.concat([df_boot_raw, df_eval_raw], ignore_index=True)
+            # The combined frame labels the bootstrap sample "training" and
+            # the out-of-bag rows "testing"; the fill statistics must come
+            # from the former, so the full-frame "median" strategy maps to
+            # the training-only one here.
+            imputed = impute_values(
+                combined,
+                dropna=False,
+                strategy="train_median" if _cfg.impute == "median" else _cfg.impute,
+                max_gap=_cfg.max_gap,
+            )
+            df_boot_tr = imputed.iloc[:n].copy().reset_index(drop=True)
+            df_eval_i = imputed.iloc[n:].copy().reset_index(drop=True)
+            df_eval_i["set"] = np.where(oob_mask, "testing", "in_bag")
+            if _cfg.log_transform:
+                df_boot_tr = log1p_target(df_boot_tr)
+                df_eval_i = log1p_target(df_eval_i)
 
-        try:
-            stats_i = modStats(df=df_prep_i, model=model_i, subset=None, statistic=None)
-            if isinstance(stats_i, pd.DataFrame) and not stats_i.empty:
-                stats_i = stats_i.copy()
-                stats_i["seed"] = int(s)
-                stats_list.append(stats_i)
-        except Exception as e:
-            log.warning("Failed to compute metrics for seed %d: %s", s, e)
+            model_i = train_model(
+                df=df_boot_tr,
+                target="value",
+                backend=_cfg.backend,
+                covariates=cov_list,
+                model_config=_cfg.model_config,
+                seed=int(s),
+                verbose=_cfg.verbose and i == 1,
+                n_cores=_cfg.n_cores,
+                cache=_cfg.cache,
+            )
+            # Common random numbers across replicates isolate model & data uncertainty.
+            out_i = normalise(
+                df=df_eval_i,
+                model=model_i,
+                covariates=cov_list,
+                variables_resample=_cfg.variables_resample,
+                n_samples=_cfg.n_samples,
+                aggregate=True,
+                seed=int(_cfg.seed),
+                n_cores=_cfg.n_cores,
+                resample_df=_cfg.resample_df,
+                memory_save=_cfg.memory_save,
+                verbose=False,
+                log_transform=_cfg.log_transform,
+                back_transform=_cfg.back_transform,
+                smearing_factor=_cfg.smearing_factor,
+                paired=_cfg.paired,
+                paired_floor=_cfg.paired_floor,
+                stratify_by=_cfg.stratify_by,
+                conditional_k=_cfg.conditional_k,
+                conditional_on=_cfg.conditional_on,
+                resample_pools=_cfg.resample_pools,
+                sampling=_cfg.sampling,
+                block_hours=_cfg.block_hours,
+                cache=_cfg.cache,
+            )
+            if observed_ref is None:
+                observed_ref = out_i["observed"].copy()
+            pick = series_col if series_col in out_i.columns else "normalised"
+            series_list.append(out_i[[pick]].rename(columns={pick: f"normalised_{s}"}))
+            try:
+                eval_for_stats = (
+                    df_eval_i if bool(oob_mask.any()) else df_eval_i.assign(set="testing")
+                )
+                st = _stats_for_member(
+                    eval_for_stats,
+                    model_i,
+                    log_transform=bool(_cfg.log_transform),
+                    back_transform=_cfg.back_transform,
+                    seed_val=int(s),
+                )
+                if st is not None:
+                    stats_list.append(st)
+            except Exception as e:
+                log.warning("Failed to compute OOB metrics for seed %d: %s", s, e)
+
+    elif unc_mode == "crossfit_ensemble":
+        if not _cfg.covariates:
+            raise ValueError("covariates must be provided for `unc_method='crossfit_ensemble'`.")
+        paired_opt_cf: bool | str = (
+            ("log_ratio" if _cfg.log_transform else "additive")
+            if _cfg.paired is False
+            else _cfg.paired
+        )
+        for i, s in enumerate(seeds, start=1):
+            (log.info if _cfg.verbose else log.debug)(
+                "do_all_unc [crossfit_ensemble]: member %d/%d (seed=%d) %s",
+                i,
+                _cfg.n_models,
+                s,
+                _progress_str(i, _cfg.n_models, t0),
+            )
+            cf_i = crossfit_normalise(
+                df,
+                target=_cfg.target,
+                covariates=list(_cfg.covariates),
+                variables_resample=_cfg.variables_resample,
+                backend=_cfg.backend,
+                model_config=_cfg.model_config,
+                n_splits=int(_cfg.cv_folds),
+                embargo=(_CROSSFIT_DEFAULT_EMBARGO if _cfg.embargo is None else int(_cfg.embargo)),
+                paired=paired_opt_cf,
+                paired_floor=float(_cfg.paired_floor),
+                n_samples=int(_cfg.n_samples),
+                log_transform=bool(_cfg.log_transform),
+                back_transform=_cfg.back_transform,
+                stratify_by=_cfg.stratify_by,
+                conditional_k=_cfg.conditional_k,
+                conditional_on=_cfg.conditional_on,
+                resample_pools=_cfg.resample_pools,
+                resample_df=_cfg.resample_df,
+                sampling=_cfg.sampling,
+                block_hours=_cfg.block_hours,
+                seed=int(s),
+                n_cores=_cfg.n_cores,
+                memory_save=bool(_cfg.memory_save),
+                cache=_cfg.cache,
+                impute=_cfg.impute,
+                max_gap=_cfg.max_gap,
+                verbose=_cfg.verbose and i == 1,
+            )
+            out_i = cf_i.normalised
+            if observed_ref is None:
+                observed_ref = out_i["observed"].copy()
+            pick = series_col if series_col in out_i.columns else "normalised"
+            series_list.append(out_i[[pick]].rename(columns={pick: f"normalised_{s}"}))
+            if not cf_i.oof_metrics.empty:
+                st = cf_i.oof_metrics.copy()
+                st["set"] = np.where(
+                    st["fold"].astype(str) == "all", "testing", st["fold"].astype(str)
+                )
+                st["seed"] = int(s)
+                stats_list.append(st)
+
+    else:
+        for i, s in enumerate(seeds, start=1):
+            (log.info if _cfg.verbose else log.debug)(
+                "do_all_unc: running model %d/%d (seed=%d) %s",
+                i,
+                _cfg.n_models,
+                s,
+                _progress_str(i, _cfg.n_models, t0),
+            )
+
+            out_i, model_i, df_prep_i = do_all(
+                df=df,
+                target=_cfg.target,
+                backend=_cfg.backend,
+                covariates=_cfg.covariates,
+                variables_resample=_cfg.variables_resample,
+                split_method=_cfg.split_method,
+                train_fraction=_cfg.train_fraction,
+                model_config=_cfg.model_config,
+                n_samples=_cfg.n_samples,
+                seed=int(s),
+                n_cores=_cfg.n_cores,
+                resample_df=_cfg.resample_df,
+                memory_save=_cfg.memory_save,
+                aggregate=True,
+                log_transform=_cfg.log_transform,
+                back_transform=_cfg.back_transform,
+                smearing_factor=_cfg.smearing_factor,
+                paired=_cfg.paired,
+                paired_floor=_cfg.paired_floor,
+                stratify_by=_cfg.stratify_by,
+                conditional_k=_cfg.conditional_k,
+                conditional_on=_cfg.conditional_on,
+                resample_pools=_cfg.resample_pools,
+                sampling=_cfg.sampling,
+                block_hours=_cfg.block_hours,
+                cache=_cfg.cache,
+                impute=_cfg.impute,
+                max_gap=_cfg.max_gap,
+                embargo=_cfg.embargo,
+                cross_fit=_cfg.cross_fit,
+                cv_folds=_cfg.cv_folds,
+            )
+
+            if observed_ref is None:
+                observed_ref = out_i["observed"].copy()
+
+            pick = series_col if series_col in out_i.columns else "normalised"
+            series_list.append(out_i[[pick]].rename(columns={pick: f"normalised_{s}"}))
+
+            try:
+                if isinstance(model_i, CrossFitNormaliseResult):
+                    if not model_i.oof_metrics.empty:
+                        st = model_i.oof_metrics.copy()
+                        st["set"] = np.where(
+                            st["fold"].astype(str) == "all", "testing", st["fold"].astype(str)
+                        )
+                        st["seed"] = int(s)
+                        stats_list.append(st)
+                else:
+                    st = _stats_for_member(
+                        df_prep_i,
+                        model_i,
+                        log_transform=bool(_cfg.log_transform),
+                        back_transform=_cfg.back_transform,
+                        seed_val=int(s),
+                    )
+                    if st is not None:
+                        stats_list.append(st)
+            except Exception as e:
+                log.warning("Failed to compute metrics for seed %d: %s", s, e)
 
     if observed_ref is None:
         raise RuntimeError("do_all_unc produced no outputs — verify inputs and seeds.")
@@ -483,15 +981,25 @@ def do_all_unc(
     out["std"] = P.std(axis=1)
     out["median"] = P.median(axis=1)
 
-    alpha = (1.0 - _cfg.confidence_level) / 2.0
-    out["lower_bound"] = P.quantile(alpha, axis=1)
-    out["upper_bound"] = P.quantile(1.0 - alpha, axis=1)
+    alpha = (1.0 - float(_cfg.confidence_level)) / 2.0
+    if ci_mode == "student_t":
+        from scipy.stats import t as student_t
+
+        dof = max(len(pred_cols) - 1, 1)
+        t_crit = float(student_t.ppf(1.0 - alpha, df=dof))
+        half = t_crit * out["std"].to_numpy(dtype=float)
+        mean_arr = out["mean"].to_numpy(dtype=float)
+        lower_arr = mean_arr - half
+        upper_arr = mean_arr + half
+        if _cfg.log_transform:
+            lower_arr = np.maximum(lower_arr, 0.0)
+        out["lower_bound"] = lower_arr
+        out["upper_bound"] = upper_arr
+    else:
+        out["lower_bound"] = P.quantile(alpha, axis=1)
+        out["upper_bound"] = P.quantile(1.0 - alpha, axis=1)
 
     def _pick_metric(df_in: pd.DataFrame, names: list[str]) -> float | None:
-        # modStats(subset=None) returns one row per split, training first.
-        # Weights must come from held-out skill, not from the fit's own
-        # resubstitution score; fall back to "all" where no test split
-        # exists (a record too short to hold one out).
         frame = df_in
         if "set" in frame.columns:
             for wanted in ("testing", "all"):
@@ -528,7 +1036,9 @@ def do_all_unc(
     seeds_in_P = [s for s in map(_parse_seed, pred_cols)]
 
     scores = np.zeros(len(seeds_in_P), dtype=float)
-    if not perf_df.empty:
+    if weighted_method == "uniform":
+        scores[:] = 1.0
+    elif not perf_df.empty:
         if weighted_method == "r2":
             for i, s in enumerate(seeds_in_P):
                 if s is None or s not in perf_df.index:
@@ -543,7 +1053,10 @@ def do_all_unc(
                     continue
                 rmse = perf_df.loc[s, "rmse"]
                 if pd.notna(rmse):
-                    scores[i] = 1.0 / (float(cast(Any, rmse)) + eps)
+                    rm = float(cast(Any, rmse))
+                    scores[i] = (
+                        1.0 / (rm * rm + eps) if weighted_method == "inv_mse" else 1.0 / (rm + eps)
+                    )
 
     if np.all(~np.isfinite(scores)) or np.all(scores <= 0):
         w = np.full(len(pred_cols), 1.0 / len(pred_cols)) if pred_cols else np.array([])

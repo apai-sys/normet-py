@@ -19,7 +19,75 @@ from .metrics import _DEFAULT_STATS, _stats_from_arrays
 
 log = get_logger(__name__)
 
-__all__ = ["time_series_cv", "cv_score"]
+__all__ = ["time_series_cv", "blocked_time_cv", "cv_score"]
+
+
+def blocked_time_cv(
+    df: pd.DataFrame,
+    n_splits: int = 5,
+    *,
+    embargo: int = 0,
+    date_col: str = "date",
+) -> Iterator[tuple[np.ndarray, np.ndarray]]:
+    """
+    Yield contiguous blocked K-fold train/test index pairs with optional embargo.
+
+    Unlike walk-forward CV (:func:`time_series_cv`), every observation falls
+    into exactly one held-out validation block across the ``n_splits`` folds,
+    so the union of validation blocks covers the full record out-of-fold.
+    For each fold ``k``, rows within ``embargo`` positions immediately before or
+    after the validation block are excluded from that fold's training set to
+    suppress serial-correlation leakage across block boundaries.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Must contain a datetime-like ``date_col`` or be indexed by datetime.
+    n_splits : int, default 5
+        Number of contiguous temporal blocks (must be >= 2).
+    embargo : int, default 0
+        Number of rows skipped immediately before and after each test block.
+    date_col : str, default "date"
+        Datetime column used to establish temporal order.
+
+    Yields
+    ------
+    (train_idx, test_idx) : tuple of numpy.ndarray
+        Positional indices into ``df`` (for ``df.iloc``), ordered by time.
+    """
+    if int(n_splits) < 2:
+        raise ValueError("`n_splits` must be >= 2 for blocked_time_cv.")
+    if int(embargo) < 0:
+        raise ValueError("`embargo` must be >= 0.")
+
+    work = df
+    if date_col not in work.columns:
+        if isinstance(work.index, pd.DatetimeIndex):
+            work = work.reset_index().rename(columns={work.index.name or "index": date_col})
+        else:
+            raise ValueError(f"`{date_col}` not found and index is not a DatetimeIndex.")
+    if not pd.api.types.is_datetime64_any_dtype(work[date_col]):
+        raise ValueError(f"`{date_col}` must be datetime-like.")
+
+    n = len(work)
+    k_splits = int(n_splits)
+    emb = int(embargo)
+    if n < k_splits:
+        raise ValueError(f"Need at least n_splits ({k_splits}) rows; got {n}.")
+
+    sort_pos = np.argsort(work[date_col].to_numpy(), kind="stable")
+    blocks = np.array_split(np.arange(n, dtype=np.int64), k_splits)
+    for blk in blocks:
+        s = int(blk[0])
+        e = int(blk[-1]) + 1
+        left = np.arange(0, max(0, s - emb), dtype=np.int64)
+        right = np.arange(min(n, e + emb), n, dtype=np.int64)
+        tr_pos = np.concatenate([left, right])
+        if tr_pos.size == 0:
+            raise ValueError(
+                f"With n={n}, n_splits={k_splits}, embargo={emb}, no room left for training."
+            )
+        yield sort_pos[tr_pos], sort_pos[blk]
 
 
 def time_series_cv(

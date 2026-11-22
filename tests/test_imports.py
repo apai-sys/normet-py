@@ -72,6 +72,14 @@ def test_top_level_symbols_present():
         "screen_donors",
         "donut_hole_sensitivity",
         "plot_honest_did",
+        "blocked_time_cv",
+        "compute_duan_smearing",
+        "CrossFitNormaliseResult",
+        "crossfit_normalise",
+        "NormalisationDiagnostics",
+        "diagnose_normalisation",
+        "support_audit",
+        "ale",
     }
     missing = must_have - set(nm.__all__)
     assert not missing, f"Missing top-level exports: {sorted(missing)}"
