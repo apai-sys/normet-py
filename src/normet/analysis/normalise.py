@@ -157,17 +157,22 @@ def _format_quantile_name(q: float) -> str:
     return f"q{int(round(float(q) * 1000)):03d}"
 
 
-def _apply_conditional_filter(
+def _conditional_mask(
     pool: pd.DataFrame,
     conditional_on: Mapping[str, Any],
-) -> pd.DataFrame:
+) -> pd.Series:
     """
-    Restrict ``pool`` to rows matching every key/value condition.
+    Boolean row mask for every key/value condition in ``conditional_on``.
 
     - Scalar value → exact match.
     - Iterable (list/tuple/set/Series/ndarray) → ``isin`` semantics.
     - Tuple ``(lo, hi)`` is treated as iterable membership (use callable for ranges).
     - Callable → boolean mask applied to that column.
+
+    Kept separate from :func:`_apply_conditional_filter` so a caller can apply
+    the same positional mask to a row-aligned frame (see ``normalise``'s
+    stratified path) without a label-based ``.loc`` that expands a non-unique
+    index.
     """
     mask = pd.Series(True, index=pool.index)
     for col, cond in conditional_on.items():
@@ -180,6 +185,15 @@ def _apply_conditional_filter(
             mask &= s.isin(list(cond))
         else:
             mask &= s == cond
+    return mask
+
+
+def _apply_conditional_filter(
+    pool: pd.DataFrame,
+    conditional_on: Mapping[str, Any],
+) -> pd.DataFrame:
+    """Restrict ``pool`` to the rows matching every condition (see :func:`_conditional_mask`)."""
+    mask = np.asarray(_conditional_mask(pool, conditional_on), dtype=bool)
     return pool.loc[mask]
 
 
@@ -597,14 +611,26 @@ def normalise(
     df_dated_key = process_date(df.copy())
     df_keyed = check_data(df_dated_key, _cfg.covariates, "value")
     resample_pool = df_keyed if _cfg.resample_df is None else _cfg.resample_df
+    # `month`/`season` strata are derived from a pool's own `date` column, so
+    # changing the pool's date composition changes which rows serve each
+    # stratum while leaving the served covariate values (and therefore the
+    # rest of the key) identical. Hash the dates too, or a shared cache
+    # returns draws from the old month mix.
+    derived_strata_cols = {"date"} if {"month", "season"} & set(strat_cols) else set()
     resample_key_cols = sorted(
         c
         for c in set(_cfg.variables_resample or key_cols)
         | set(_cfg.conditional_on or {})
         | set(strat_cols)
+        | derived_strata_cols
         if c in resample_pool.columns
     )
-    pool_key_cols = set(_cfg.covariates) | set(_cfg.variables_resample or ()) | set(strat_cols)
+    pool_key_cols = (
+        set(_cfg.covariates)
+        | set(_cfg.variables_resample or ())
+        | set(strat_cols)
+        | derived_strata_cols
+    )
     pool_keys = [
         (str(name), dataframe_hash(pool[sorted(c for c in pool.columns if c in pool_key_cols)]))
         for name, pool in sorted((_cfg.resample_pools or {}).items(), key=lambda kv: str(kv[0]))
@@ -679,9 +705,15 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
 
     if _cfg.conditional_on:
         before = len(resample_df)
-        resample_df = _apply_conditional_filter(resample_df, _cfg.conditional_on)
+        cond_mask = np.asarray(_conditional_mask(resample_df, _cfg.conditional_on), dtype=bool)
+        resample_df = resample_df.loc[cond_mask]
         if _cfg.resample_df is None:
-            base_strata_source = base_strata_source.loc[resample_df.index]
+            # `check_data` keeps df's rows and order, so the same positional
+            # mask selects the aligned rows of the strata source. A label-based
+            # `.loc[resample_df.index]` expanded every repeated label when the
+            # index was not unique (e.g. a concat of sites), making the strata
+            # array longer than the pool values and raising IndexError.
+            base_strata_source = base_strata_source.loc[cond_mask]
         else:
             base_strata_source = resample_df
         if resample_df.empty:

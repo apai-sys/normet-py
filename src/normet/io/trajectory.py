@@ -533,6 +533,7 @@ def trajectory_features(
     *,
     source_regions: Mapping[str, tuple[float, float, float, float] | Any] | None = None,
     prefix: str = "traj_",
+    physics: bool = False,
     min_hours: float | None = None,
     blh_coupled: bool = True,
     blh_factor: float = 1.0,
@@ -555,11 +556,20 @@ def trajectory_features(
         ``(lon_min, lat_min, lon_max, lat_max)`` bounding box, or a shapely
         polygon/multipolygon (e.g. from :func:`load_source_regions`)
         for exact point-in-polygon residence time. A box whose ``lon_min``
-        exceeds ``lon_max`` wraps the dateline. For each, returns both the plain
-        2D time residence fraction ``{prefix}resid_{name}`` and the physically
-        weighted BLH/decay/scavenging exposure ``{prefix}footprint_{name}``.
+        exceeds ``lon_max`` wraps the dateline. For each, returns the plain 2D
+        time residence fraction ``{prefix}resid_{name}`` and, with
+        ``physics=True``, the physically weighted BLH/decay/scavenging
+        exposure ``{prefix}footprint_{name}``.
     prefix : str, default ``"traj_"``
         Prefix for every feature name.
+    physics : bool, default False
+        Emit the Layer-1 physical-transport descriptors: path straightness,
+        the inflow and mean-bearing unit-vector components, BLH contact
+        fraction, integrated rain, and the BLH/decay/scavenging-weighted
+        ``{prefix}footprint_{name}`` region exposures. ``False`` (default)
+        keeps the historical column set, so an existing script that trains on
+        every ``traj_*`` column gives bit-identical features; the Transport
+        Studio's physics panel passes ``True``.
     min_hours : float, optional
         Minimum backward reach (hours) a trajectory must have to be trusted.
         A trajectory whose span is shorter -- HYSPLIT stopped early because the
@@ -575,16 +585,20 @@ def trajectory_features(
         Optional backward age windows ``[(h_start, h_end), ...]`` (e.g.
         ``[(0, 12), (12, 36), (36, 72)]``) for multi-scale path/height/
         precipitation/footprint breakdown (suffixed ``_{h0:g}_{h1:g}h``).
+        The precipitation and footprint slices are emitted with
+        ``physics=True`` (they are Layer-1 quantities).
 
     Returns
     -------
     dict
         Quality descriptors ``{prefix}n_endpoints`` and ``{prefix}age_max_h``,
         transport geometry (``dist_km``, ``pathlen_km``, ``speed_kmh``,
-        ``straightness``, ``inflow_deg``, ``inflow_sin``, ``inflow_cos``,
-        ``mean_bearing_sin``, ``mean_bearing_cos``), altitude/BLH metrics,
-        per-region ``resid_<name>`` & ``footprint_<name>``, optional horizon
-        slices, and along-path diagnostics when present in ``tdump``.
+        ``inflow_deg``), altitude metrics, per-region ``resid_<name>``,
+        optional horizon slices, and along-path diagnostics when present in
+        ``tdump``. With ``physics=True`` also ``straightness``,
+        ``inflow_sin``/``inflow_cos``, ``mean_bearing_sin``/
+        ``mean_bearing_cos``, ``blh_contact_frac``, ``rain_mm`` and the
+        physical ``footprint_<name>`` exposures.
     """
     if traj is None or traj.empty:
         return {}
@@ -638,21 +652,25 @@ def trajectory_features(
         f"{prefix}dist_km": dist_km,
         f"{prefix}pathlen_km": path_len,
         f"{prefix}speed_kmh": path_len / span_h if span_h > 0 else np.nan,
-        f"{prefix}straightness": (
-            float(np.clip(dist_km / path_len, 0.0, 1.0)) if path_len > 0.0 else 1.0
-        ),
         f"{prefix}inflow_deg": inflow_deg,
-        f"{prefix}inflow_sin": float(np.sin(inflow_rad)) if len(t) > 1 else 0.0,
-        f"{prefix}inflow_cos": float(np.cos(inflow_rad)) if len(t) > 1 else 0.0,
-        f"{prefix}mean_bearing_sin": mean_b_sin,
-        f"{prefix}mean_bearing_cos": mean_b_cos,
         f"{prefix}height_mean": float(t["height"].mean()),
         f"{prefix}height_min": float(t["height"].min()),
     }
+    if physics:
+        # Layer-1 descriptors are opt-in: emitting them unconditionally added
+        # eight columns to the default output, silently changing the predictor
+        # set of any model trained on every traj_* column.
+        f[f"{prefix}straightness"] = (
+            float(np.clip(dist_km / path_len, 0.0, 1.0)) if path_len > 0.0 else 1.0
+        )
+        f[f"{prefix}inflow_sin"] = float(np.sin(inflow_rad)) if len(t) > 1 else 0.0
+        f[f"{prefix}inflow_cos"] = float(np.cos(inflow_rad)) if len(t) > 1 else 0.0
+        f[f"{prefix}mean_bearing_sin"] = mean_b_sin
+        f[f"{prefix}mean_bearing_cos"] = mean_b_cos
 
     phys_w: np.ndarray | None = None
     region_masks: dict[str, np.ndarray] = {}
-    if source_regions or horizons_h is not None:
+    if physics and (source_regions or horizons_h is not None):
         phys_w = trajectory_endpoint_weights(
             t,
             blh_coupled=blh_coupled,
@@ -673,39 +691,42 @@ def trajectory_features(
                 f[f"{prefix}resid_{name}"] = float(inside.mean())
             else:
                 f[f"{prefix}resid_{name}"] = float(weights[inside].sum() / weights.sum())
-            assert phys_w is not None
-            f[f"{prefix}footprint_{name}"] = float(phys_w[inside].sum())
+            if physics:
+                assert phys_w is not None
+                f[f"{prefix}footprint_{name}"] = float(phys_w[inside].sum())
 
     if "rainfall" in t:
         rain_raw = pd.to_numeric(t["rainfall"], errors="coerce").to_numpy(dtype=float)
         f[f"{prefix}rain_sum"] = float(t["rainfall"].sum())
-        rain_mask = non_rec & np.isfinite(rain_raw)
-        if rain_mask.any():
-            f[f"{prefix}rain_mm"] = float(
-                np.sum(np.maximum(0.0, rain_raw[rain_mask]) * dt[rain_mask])
-            )
-        else:
-            f[f"{prefix}rain_mm"] = float(
-                np.sum(np.maximum(0.0, np.nan_to_num(rain_raw, nan=0.0)) * dt)
-            )
+        if physics:
+            rain_mask = non_rec & np.isfinite(rain_raw)
+            if rain_mask.any():
+                f[f"{prefix}rain_mm"] = float(
+                    np.sum(np.maximum(0.0, rain_raw[rain_mask]) * dt[rain_mask])
+                )
+            else:
+                f[f"{prefix}rain_mm"] = float(
+                    np.sum(np.maximum(0.0, np.nan_to_num(rain_raw, nan=0.0)) * dt)
+                )
 
     if "blh" in t:
         blh_raw = pd.to_numeric(t["blh"], errors="coerce").to_numpy(dtype=float)
         f[f"{prefix}blh_mean"] = float(t["blh"].mean())
-        c_mask = (
-            (non_rec if non_rec.any() else np.ones(len(t), dtype=bool))
-            & np.isfinite(blh_raw)
-            & np.isfinite(h_arr)
-        )
-        if c_mask.any():
-            h_eff = np.maximum(blh_raw[c_mask], float(min_blh_m))
-            coupled = h_arr[c_mask] <= float(blh_factor) * h_eff
-            w_c = dt[c_mask]
-            f[f"{prefix}blh_contact_frac"] = (
-                float(w_c[coupled].sum() / w_c.sum()) if w_c.sum() > 0 else np.nan
+        if physics:
+            c_mask = (
+                (non_rec if non_rec.any() else np.ones(len(t), dtype=bool))
+                & np.isfinite(blh_raw)
+                & np.isfinite(h_arr)
             )
-        else:
-            f[f"{prefix}blh_contact_frac"] = np.nan
+            if c_mask.any():
+                h_eff = np.maximum(blh_raw[c_mask], float(min_blh_m))
+                coupled = h_arr[c_mask] <= float(blh_factor) * h_eff
+                w_c = dt[c_mask]
+                f[f"{prefix}blh_contact_frac"] = (
+                    float(w_c[coupled].sum() / w_c.sum()) if w_c.sum() > 0 else np.nan
+                )
+            else:
+                f[f"{prefix}blh_contact_frac"] = np.nan
 
     if "rh" in t:
         f[f"{prefix}rh_mean"] = float(t["rh"].mean())
@@ -715,7 +736,6 @@ def trajectory_features(
         f[f"{prefix}temp_mean"] = float(t["temp"].mean())
 
     if horizons_h is not None:
-        assert phys_w is not None
         abs_age = np.abs(age_arr)
         for h0, h1 in horizons_h:
             tag = f"{float(h0):g}_{float(h1):g}h"
@@ -738,23 +758,26 @@ def trajectory_features(
                         if bm.any() and dt[bm].sum() > 0
                         else np.nan
                     )
-                if "rainfall" in t:
+                if physics and "rainfall" in t:
                     r_vals = pd.to_numeric(t["rainfall"], errors="coerce").to_numpy(dtype=float)
                     rm = band & np.isfinite(r_vals)
                     f[f"{prefix}rain_mm_{tag}"] = (
                         float(np.sum(np.maximum(0.0, r_vals[rm]) * dt[rm])) if rm.any() else 0.0
                     )
-                for name, inside in region_masks.items():
-                    f[f"{prefix}footprint_{name}_{tag}"] = float(phys_w[band & inside].sum())
+                if physics:
+                    assert phys_w is not None
+                    for name, inside in region_masks.items():
+                        f[f"{prefix}footprint_{name}_{tag}"] = float(phys_w[band & inside].sum())
             else:
                 f[f"{prefix}pathlen_km_{tag}"] = np.nan
                 f[f"{prefix}height_mean_{tag}"] = np.nan
                 if "blh" in t:
                     f[f"{prefix}blh_mean_{tag}"] = np.nan
-                if "rainfall" in t:
+                if physics and "rainfall" in t:
                     f[f"{prefix}rain_mm_{tag}"] = np.nan
-                for name in region_masks:
-                    f[f"{prefix}footprint_{name}_{tag}"] = np.nan
+                if physics:
+                    for name in region_masks:
+                        f[f"{prefix}footprint_{name}_{tag}"] = np.nan
 
     if min_hours is not None and span_h < min_hours - 1e-6:
         quality = {f"{prefix}n_endpoints", f"{prefix}age_max_h"}
@@ -789,6 +812,9 @@ def read_trajectory_endpoints(
     -------
     pandas.DataFrame
         Tidy endpoint table sorted by ``(receptor_date, start_height, -age_h)``.
+        A trajectory read twice is kept once; the duplicate key covers the
+        start location and ``traj_id`` as well as the arrival time, height and
+        age, so trajectories from several start locations survive.
     """
     paths = sorted(glob(tdumps)) if isinstance(tdumps, str) else [str(p) for p in tdumps]
     if not paths:
@@ -823,8 +849,22 @@ def read_trajectory_endpoints(
         return pd.DataFrame()
 
     raw = pd.concat(chunks, ignore_index=True)
-    # Keep latest file when duplicate (receptor_date, start_height, age_h) exist.
-    raw = raw.drop_duplicates(subset=["receptor_date", "start_height", "age_h"], keep="last")
+    # Keep the latest copy of a trajectory read twice (the same file listed
+    # more than once, or overlapping globs). The key has to identify the whole
+    # trajectory, not just its arrival time and release height: a tdump can
+    # hold several start locations and, without start_lat/start_lon/traj_id,
+    # all but the last were silently discarded.
+    raw = raw.drop_duplicates(
+        subset=[
+            "receptor_date",
+            "start_lat",
+            "start_lon",
+            "start_height",
+            "traj_id",
+            "age_h",
+        ],
+        keep="last",
+    )
     if site is not None:
         raw["site"] = str(site)
     front = [
@@ -856,6 +896,7 @@ def build_trajectory_features(
     *,
     source_regions: Mapping[str, tuple[float, float, float, float] | Any] | None = None,
     prefix: str = "traj_",
+    physics: bool = False,
     date_col: str = "date",
     min_hours: float | None = None,
     blh_coupled: bool = True,
@@ -875,9 +916,12 @@ def build_trajectory_features(
         ``tdump`` file paths. One back-trajectory run per receptor time is the
         typical layout; files holding multiple trajectories are split per
         ``traj`` index.
-    source_regions, prefix, min_hours
-        Forwarded to :func:`trajectory_features`. With ``min_hours`` set, the
-        number of trajectories nulled for being truncated is logged.
+    source_regions, prefix, physics, min_hours
+        Forwarded to :func:`trajectory_features`. ``physics=False`` (default)
+        keeps the historical column set, so an existing caller's features stay
+        bit-identical; pass ``True`` for the Layer-1 physics panel. With
+        ``min_hours`` set, the number of trajectories nulled for being
+        truncated is logged.
     date_col : str, default ``"date"``
         Name of the index column (receptor timestamp), so the result joins
         straight onto a date-indexed panel.
@@ -925,6 +969,7 @@ def build_trajectory_features(
                 g,
                 source_regions=source_regions,
                 prefix=prefix,
+                physics=physics,
                 min_hours=min_hours,
                 blh_coupled=blh_coupled,
                 blh_factor=blh_factor,
@@ -1431,6 +1476,7 @@ def run_back_trajectories(
     diagnostics: Iterable[str] = ALL_DIAGNOSTICS,
     source_regions: Mapping[str, tuple[float, float, float, float] | Any] | None = None,
     prefix: str = "traj_",
+    physics: bool = False,
     min_hours: float | None = None,
     blh_coupled: bool = True,
     blh_factor: float = 1.0,
@@ -1492,10 +1538,12 @@ def run_back_trajectories(
         ``traj_rain_sum``/``traj_blh_mean``/``traj_rh_mean``/
         ``traj_pressure_mean``/``traj_temp_mean`` columns; pass fewer to
         skip the ones you don't need.
-    source_regions, prefix, min_hours
-        Forwarded to :func:`build_trajectory_features`. Pass
-        ``min_hours=hours_back`` to null trajectories that HYSPLIT ended early;
-        either way, truncated runs are counted in a warning.
+    source_regions, prefix, physics, min_hours
+        Forwarded to :func:`build_trajectory_features`. ``physics=False``
+        (default) keeps the historical feature columns; pass ``True`` for the
+        Layer-1 physics descriptors. Pass ``min_hours=hours_back`` to null
+        trajectories that HYSPLIT ended early; either way, truncated runs are
+        counted in a warning.
     timeout : int, default 600
         Per-run timeout (seconds) for ``hyts_std``.
     stop : threading.Event, optional
@@ -1690,6 +1738,7 @@ def run_back_trajectories(
         tdumps,
         source_regions=source_regions,
         prefix=prefix,
+        physics=physics,
         min_hours=min_hours,
         blh_coupled=blh_coupled,
         blh_factor=blh_factor,

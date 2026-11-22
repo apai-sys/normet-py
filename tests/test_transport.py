@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -10,13 +12,16 @@ import normet as nm
 from normet.analysis import (
     build_footprint_matrix,
     cluster_trajectories,
+    decom_emi,
     decom_met,
+    decompose,
     invert_source_footprints,
     normalise,
     screen_donor_transport,
     wcwt,
     wpscf,
 )
+from normet.analysis.transport import _polissar_weights, _resolve_series_frame
 
 
 def _make_corridor_endpoints(n_traj: int = 36, *, high_alt_south: bool = False):
@@ -65,12 +70,15 @@ def _make_corridor_endpoints(n_traj: int = 36, *, high_alt_south: bool = False):
 
 def test_wcwt_and_wpscf_recover_polluted_corridor_and_gate_blh():
     ep, series = _make_corridor_endpoints(36, high_alt_south=True)
-    # Check WCWT highlights North (>53 deg) over East/South
+    # Check WCWT highlights North (>53 deg) over East/South. The raw
+    # concentration field, not `weighted`: the Polissar confidence weight
+    # deliberately down-weights the sparsely sampled northern cells, so the
+    # weighted score mixes source strength with sampling density.
     res_cwt = wcwt(ep, series, value_col="pm25", grid_res=0.8)
     df_cwt = res_cwt.to_dataframe()
     assert not df_cwt.empty
-    north = df_cwt[df_cwt["lat"] > 52.5]["weighted"].mean()
-    east = df_cwt[(df_cwt["lon"] > 1.0) & (df_cwt["lat"].between(51.0, 52.0))]["weighted"].mean()
+    north = df_cwt[df_cwt["lat"] > 52.5]["value"].mean()
+    east = df_cwt[(df_cwt["lon"] > 1.0) & (df_cwt["lat"].between(51.0, 52.0))]["value"].mean()
     assert north > 2.5 * east
 
     # High-altitude Southern air (> BLH 800 m) is gated out when blh_coupled=True
@@ -293,3 +301,187 @@ def test_stratified_normalise_and_decom_met_prevent_cross_season_swaps(tmp_path)
     )
 
     assert hasattr(nm, "wpscf") and hasattr(nm, "invert_source_footprints")
+
+
+def test_resolve_series_frame_prefers_the_de_weathered_estimate():
+    """A frame carrying both observations and a de-weathered column maps the latter."""
+    dates = pd.date_range("2023-01-01", periods=5, freq="D")
+    frame = pd.DataFrame(
+        {
+            "date": dates,
+            "observed": [10.0, 11.0, 12.0, 13.0, 14.0],
+            "normalised": [1.0] * 5,
+            "emi_total": [2.0] * 5,
+            "value": [3.0] * 5,
+        }
+    )
+    assert _resolve_series_frame(frame)["_y"].tolist() == [1.0] * 5
+    assert _resolve_series_frame(frame.drop(columns="normalised"))["_y"].tolist() == [2.0] * 5
+    assert (
+        _resolve_series_frame(frame.drop(columns=["normalised", "emi_total"]))["_y"].tolist()
+        == [3.0] * 5
+    )
+    assert _resolve_series_frame(frame.drop(columns=["normalised", "emi_total", "value"]))[
+        "_y"
+    ].tolist() == [10.0, 11.0, 12.0, 13.0, 14.0]
+    # An explicit column still wins over the preference order.
+    assert _resolve_series_frame(frame, value_col="observed")["_y"].tolist() == [
+        10.0,
+        11.0,
+        12.0,
+        13.0,
+        14.0,
+    ]
+
+
+def test_wcwt_uses_the_de_weathered_column_of_a_normalise_frame():
+    ep, series = _make_corridor_endpoints(12)
+    frame = pd.DataFrame({"date": series["date"], "observed": series["pm25"], "normalised": 1.0})
+    from_frame = wcwt(ep, frame, grid_res=1.0, weighting="none")
+    normalised = pd.Series(1.0, index=pd.DatetimeIndex(frame["date"]))
+    from_series = wcwt(ep, normalised, grid_res=1.0, weighting="none")
+    assert np.allclose(from_frame.field, from_series.field, equal_nan=True)
+
+
+def test_decom_emi_forwards_stratify_by():
+    """The default emission path must honour DecomposeConfig.stratify_by."""
+    dates = pd.DatetimeIndex(
+        list(pd.date_range("2023-01-01", periods=20, freq="D"))
+        + list(pd.date_range("2023-07-01", periods=20, freq="D"))
+    )
+    months = dates.month.to_numpy(dtype=float)
+    df = pd.DataFrame(
+        {
+            "date": dates,
+            "value": 10.0 + months,
+            "ws": months * 100.0 + np.arange(len(dates)),
+            "traj_f": months * 1000.0 + np.arange(len(dates)),
+        }
+    )
+    model = _IdentityModel()
+    kw = dict(covariates=["ws", "traj_f"], n_samples=4, verbose=False)
+    unstrat = decom_emi(df, model, **kw)
+    strat = decom_emi(df, model, stratify_by="month", **kw)
+    assert not np.allclose(unstrat["emi_total"], strat["emi_total"])
+    # `decompose(method="emission")` is the default route and must forward it too.
+    strat_via_decompose = decompose(
+        df, model, target="value", method="emission", stratify_by="month", **kw
+    )
+    pd.testing.assert_frame_equal(strat, strat_via_decompose, check_exact=False)
+
+
+def test_polissar_weights_are_the_published_tiers():
+    """Pin the Polissar/PSCF step weights and their strict boundaries."""
+    count = np.array([[0, 1, 2], [5, 10, 20]], dtype=np.int64)
+    w = _polissar_weights(count)
+    # Non-empty counts are 1, 2, 5, 10, 20 -> mean 7.6.
+    assert np.isnan(w[0, 0])
+    assert w[0, 1] == w[0, 2] == w[1, 0] == 0.05  # at or below the mean
+    assert w[1, 1] == 0.42  # > mean
+    assert w[1, 2] == 0.7  # > 1.5 * mean
+
+    # Counts [1, 2, 3] have mean 2: 3 is exactly 1.5 * mean, so the strict
+    # boundary keeps it in the 0.42 tier, not the 0.7 one.
+    boundary = _polissar_weights(np.array([[1, 2, 3]], dtype=np.int64))
+    assert boundary.tolist() == [[0.05, 0.05, 0.42]]
+
+
+def test_cluster_trajectories_reports_the_clusters_it_found():
+    """Identical paths cannot be split: report 1 cluster, not empty ones."""
+    times = pd.date_range("2023-01-01", periods=4, freq="D")
+    rows = [
+        {
+            "receptor_date": t,
+            "start_lat": 51.5,
+            "start_lon": 0.0,
+            "start_height": 100.0,
+            "traj_id": 1,
+            "age_h": float(a),
+            "lat": 51.5 + 0.1 * abs(a),
+            "lon": 0.1 * abs(a),
+            "height": 500.0,
+        }
+        for t in times
+        for a in (0, -3, -6)
+    ]
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        res = cluster_trajectories(pd.DataFrame(rows), n_clusters=3)
+    assert res.n_clusters == 1
+    assert list(res.summary["cluster"]) == [1]
+    assert (res.summary["n_trajectories"] == 4).all()
+    assert np.isfinite(res.summary["mean_dist_km"]).all()
+    assert np.isfinite(res.centroids[["lat", "lon", "height"]].to_numpy()).all()
+    assert set(res.labels) == {1}
+    assert not [w for w in caught if "empty slice" in str(w.message)]
+
+
+def test_stratified_conditional_on_handles_a_non_unique_index():
+    """A concat of sites (repeated index) must not expand the resample pool."""
+    base = pd.DataFrame(
+        {
+            "date": pd.date_range("2023-01-01", periods=20, freq="D"),
+            "value": np.arange(20.0),
+            "ws": np.arange(20.0) * 10.0,
+            "traj_f": np.arange(20.0),
+        }
+    )
+    other = base.copy()
+    other["date"] = pd.date_range("2023-07-01", periods=20, freq="D")
+    df = pd.concat([base, other])  # index 0..19 twice, as a multisite frame
+    assert not df.index.is_unique
+
+    out = normalise(
+        df,
+        _IdentityModel(),
+        covariates=["ws", "traj_f"],
+        n_samples=3,
+        stratify_by="month",
+        conditional_on={"ws": lambda v: v >= 0.0},
+        batch_size=0,
+        verbose=False,
+    )
+    assert len(out) == 40
+    assert np.isfinite(pd.to_numeric(out["normalised"], errors="coerce")).all()
+
+
+def test_stratified_cache_key_includes_pool_dates(tmp_path):
+    """Changing a pool's date mix changes its month strata, so it invalidates the cache."""
+    dates = pd.DatetimeIndex(
+        list(pd.date_range("2023-01-01", periods=20, freq="D"))
+        + list(pd.date_range("2023-07-01", periods=20, freq="D"))
+    )
+    months = dates.month.to_numpy(dtype=float)
+    df = pd.DataFrame(
+        {
+            "date": dates,
+            "value": 10.0 + months,
+            "ws": months * 100.0 + np.arange(len(dates)),
+            "traj_f": months * 1000.0 + np.arange(len(dates)),
+        }
+    )
+    pool_a = df[["date", "traj_f"]].copy()
+    pool_b = pool_a.copy()
+    # Same served traj_f values, opposite month composition: only the dates
+    # (from which the month strata are derived) differ.
+    pool_b["date"] = np.concatenate([dates[20:], dates[:20]]).astype("datetime64[ns]")
+    assert pool_a["traj_f"].equals(pool_b["traj_f"])
+    assert not pool_a["date"].equals(pool_b["date"])
+
+    cache = str(tmp_path / "cache")
+    kw = dict(
+        covariates=["ws", "traj_f"],
+        n_samples=4,
+        stratify_by="month",
+        batch_size=0,
+        verbose=False,
+        cache=cache,
+    )
+    a = normalise(df, _IdentityModel(), resample_pools={"tr": pool_a}, **kw)
+    b_cached = normalise(df, _IdentityModel(), resample_pools={"tr": pool_b}, **kw)
+    b_fresh = normalise(
+        df, _IdentityModel(), resample_pools={"tr": pool_b}, **{**kw, "cache": None}
+    )
+    # Pre-fix the second call hit A's entry and returned A's stratified draws.
+    pd.testing.assert_frame_equal(b_cached, b_fresh)
+    assert not np.allclose(a["normalised"], b_cached["normalised"])

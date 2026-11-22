@@ -908,6 +908,7 @@ class TrajectoryWindow(QMainWindow):
             list(self._tdump_paths),
             source_regions=regions,
             prefix=self.prefix_edit.text() or "traj_",
+            physics=True,  # the physics panel exists to add these columns
             min_hours=self.build_min_spin.value() if self.build_min_check.isChecked() else None,
             **phys,
         )
@@ -1145,9 +1146,18 @@ class TrajectoryWindow(QMainWindow):
         run_work = Path(tempfile.mkdtemp(prefix="nm_traj_gui_"))
         self._work_dirs.append(run_work)
 
+        def site_work_dir(i: int, name: str) -> Path:
+            # One directory per receptor: tdump names are timestamp-only, so a
+            # shared work_dir let each site's files overwrite the previous
+            # site's, leaving the Analysis page (WCWT/WPSCF, clustering,
+            # inversion) mapping only the last receptor. Keep the index so two
+            # names that sanitise alike stay separate.
+            safe = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in name)
+            return run_work / f"{i:02d}_{safe or 'site'}"
+
         def job() -> pd.DataFrame:
             frames = []
-            for name, lat, lon in receptors:
+            for i, (name, lat, lon) in enumerate(receptors):
                 if stop.is_set():
                     break
                 res = run_back_trajectories(
@@ -1159,10 +1169,11 @@ class TrajectoryWindow(QMainWindow):
                     height_m=height_m,
                     heights_m=heights_m,
                     hours_back=hours_back,
-                    work_dir=run_work,
+                    work_dir=site_work_dir(i, name),
                     diagnostics=diagnostics,
                     source_regions=source_regions,
                     prefix=prefix,
+                    physics=True,
                     min_hours=min_hours,
                     n_workers=n_workers,
                     stop=stop,
@@ -1172,7 +1183,9 @@ class TrajectoryWindow(QMainWindow):
                     res = res.copy()
                     res.insert(0, "site", name)
                     frames.append(res)
-            self._last_tdump_paths = sorted(str(p) for p in run_work.glob("tdump_*"))
+            # Recursive: every receptor's tdump lives in its own subdirectory,
+            # and all of them must reach the downstream analyses.
+            self._last_tdump_paths = sorted(str(p) for p in run_work.rglob("tdump_*"))
             if not frames:
                 return pd.DataFrame()
             return pd.concat(frames) if len(frames) > 1 else frames[0]

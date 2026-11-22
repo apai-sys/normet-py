@@ -705,10 +705,10 @@ def decom_emi(
     model : object, optional
         Pre-trained model.
     config : DecomposeConfig, optional
-        Consolidated config object. ``resample_df``, ``resample_pools`` and
-        ``conditional_on`` are forwarded to every :func:`normalise` call;
-        ``groups``, ``n_permutations`` and ``attribution`` belong to
-        :func:`decom_met` and are refused here.
+        Consolidated config object. ``resample_df``, ``resample_pools``,
+        ``conditional_on`` and ``stratify_by`` are forwarded to every
+        :func:`normalise` call; ``groups``, ``n_permutations`` and
+        ``attribution`` belong to :func:`decom_met` and are refused here.
     **kwargs
         Supported shorthand for overriding individual :class:`DecomposeConfig`
         fields without constructing a config object. Any field passed both via
@@ -863,6 +863,7 @@ def decom_emi(
                 resample_df=_cfg.resample_df,
                 resample_pools=_cfg.resample_pools,
                 conditional_on=_cfg.conditional_on,
+                stratify_by=_cfg.stratify_by,
                 memory_save=_cfg.memory_save,
                 cache=_cfg.cache,
             )

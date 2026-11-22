@@ -697,7 +697,7 @@ def test_endpoint_weights_blh_decay_and_causal_scavenging():
 def test_trajectory_features_physical_columns_and_horizons(tmp_path):
     df = tj.read_trajectory_tdump(_write(tmp_path))
     box = {"sw_box": (-3.0, 50.5, -1.5, 51.5)}
-    f = tj.trajectory_features(df, source_regions=box, horizons_h=((0, 1), (1, 2)))
+    f = tj.trajectory_features(df, source_regions=box, physics=True, horizons_h=((0, 1), (1, 2)))
 
     assert {"traj_inflow_sin", "traj_inflow_cos", "traj_straightness"} <= set(f)
     assert {"traj_mean_bearing_sin", "traj_mean_bearing_cos", "traj_blh_contact_frac"} <= set(f)
@@ -721,6 +721,61 @@ def test_trajectory_features_physical_columns_and_horizons(tmp_path):
     assert tj.is_trajectory_qc_column("traj_age_max_h_500m")
     assert not tj.is_trajectory_qc_column("traj_dist_km")
     assert not tj.is_trajectory_qc_column("traj_footprint_sw_box")
+
+
+def test_default_feature_set_excludes_opt_in_physics_columns(tmp_path):
+    """Existing callers must stay bit-identical: the Layer-1 columns are opt-in."""
+    _write(tmp_path)
+    box = {"sw_box": (-3.0, 50.5, -1.5, 51.5)}
+    old = tj.trajectory_features(
+        tj.read_trajectory_tdump(tmp_path / "tdump_2020100100"), source_regions=box
+    )
+    new = tj.trajectory_features(
+        tj.read_trajectory_tdump(tmp_path / "tdump_2020100100"),
+        source_regions=box,
+        physics=True,
+    )
+    added = {
+        "traj_straightness",
+        "traj_inflow_sin",
+        "traj_inflow_cos",
+        "traj_mean_bearing_sin",
+        "traj_mean_bearing_cos",
+        "traj_blh_contact_frac",
+        "traj_rain_mm",
+        "traj_footprint_sw_box",
+    }
+    assert added.isdisjoint(old)
+    assert added <= set(new)
+    # The historical keys that remain are unchanged, bit for bit.
+    for key, value in old.items():
+        if key == "traj_resid_sw_box":
+            # Residence is computed the same way in both (time weights only).
+            assert new[key] == pytest.approx(value)
+        else:
+            assert new[key] == value
+
+    built = tj.build_trajectory_features(str(tmp_path / "tdump_*"), source_regions=box)
+    assert added.isdisjoint(built.columns)
+    built_phys = tj.build_trajectory_features(
+        str(tmp_path / "tdump_*"), source_regions=box, physics=True
+    )
+    assert added <= set(built_phys.columns)
+
+
+def test_read_trajectory_endpoints_keeps_each_start_location(tmp_path):
+    """Two start locations in one tdump (and a file read twice) survive dedupe."""
+    text = _tdump_text([(51.5, -0.1, 500.0), (40.0, 5.0, 500.0)])
+    a = tmp_path / "tdump_a"
+    a.write_text(text)
+    b = tmp_path / "tdump_b"
+    b.write_text(text)  # an overlapping glob or repeated path: same trajectories
+
+    ep = tj.read_trajectory_endpoints([str(a), str(b)])
+    assert len(ep) == 6  # 2 trajectories x 3 endpoints, each kept once
+    assert sorted(ep["start_lat"].unique()) == [40.0, 51.5]
+    assert sorted(ep["traj_id"].unique()) == [1, 2]
+    assert (ep.groupby(["start_lat", "age_h"]).size() == 1).all()
 
 
 def test_read_trajectory_endpoints_and_parallel_multi_height_hysplit(tmp_path):
@@ -795,19 +850,18 @@ Path(out_name).write_text("\\n".join(out) + "\\n")
         work_dir=work,
         n_workers=2,
         source_regions={"sw": (-3.0, 50.5, -1.5, 51.5)},
+        physics=True,
     )
     assert len(out) == 3
     assert "traj_footprint_sw_100m" in out.columns
     assert "traj_footprint_sw_500m" in out.columns
-    ctl_lines = (
-        (work / "CONTROL_tdump_2020010306").read_text()
-        if (work / "CONTROL_tdump_2020010306").exists()
-        else ""
-    )
     # Temporary .run_* dirs were cleaned up and tdump_* moved cleanly into work_dir
     assert not list(work.glob(".run_*"))
     assert len(list(work.glob("tdump_*"))) == 3
-    assert ctl_lines == ""  # isolated per worker subdir
+    # Each worker wrote its CONTROL inside its own .run_* directory, not into
+    # the shared work_dir (which serial mode uses). A regression that wrote
+    # work/CONTROL would make the concurrent runs race on one file.
+    assert not (work / "CONTROL").exists()
     ctrl = tj._control_text(
         times[0],
         51.5,

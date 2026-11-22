@@ -125,7 +125,16 @@ def _resolve_series_frame(
     value_col: str | None = None,
     date_col: str = "date",
 ) -> pd.DataFrame:
-    """Normalise a target Series/DataFrame into tidy ``[_t, _y]`` sorted by UTC time."""
+    """Normalise a target Series/DataFrame into tidy ``[_t, _y]`` sorted by UTC time.
+
+    When *value_col* is not given, a DataFrame's de-weathered estimate is
+    preferred over its raw observations: ``normalised`` (from
+    :func:`~normet.analysis.normalise`), then ``emi_total`` (from
+    :func:`~normet.analysis.decom_met`), then ``value``, and only then
+    ``observed``. A frame that carries both columns (the usual output of both
+    functions) otherwise mapped raw concentrations while the caller believed
+    it was mapping the de-weathered signal.
+    """
     if isinstance(series, pd.Series):
         if isinstance(series.index, pd.DatetimeIndex):
             times = _naive_utc(series.index)
@@ -141,7 +150,7 @@ def _resolve_series_frame(
             raise KeyError(f"series has no {date_col!r} column and no DatetimeIndex.")
         col = value_col
         if col is None:
-            for cand in ("observed", "normalised", "emi_total", "value"):
+            for cand in ("normalised", "emi_total", "value", "observed"):
                 if cand in series.columns and pd.api.types.is_numeric_dtype(series[cand]):
                     col = cand
                     break
@@ -220,6 +229,31 @@ def _match_timestamps(
     return out
 
 
+def _polissar_weights(count: np.ndarray) -> np.ndarray:
+    """Polissar/PSCF confidence weights from unique-trajectory counts per cell.
+
+    Published tiers are 1.0, 0.7, 0.42 and 0.05, at *strictly* more than
+    3x, 1.5x and 1x the mean non-empty count (Polissar et al., 1999; PSCF
+    literature). Empty cells get NaN. Earlier code used 0.4 for the third
+    tier and 0.2 for the fourth with non-strict boundaries, which inflated
+    the sparsest cells fourfold -- exactly the cells the scheme exists to
+    down-weight.
+    """
+    non_empty = count >= 1
+    if not non_empty.any():
+        return np.full(count.shape, np.nan, dtype=float)
+    mean_n = float(count[non_empty].mean())
+    return np.where(
+        count > 3.0 * mean_n,
+        1.0,
+        np.where(
+            count > 1.5 * mean_n,
+            0.7,
+            np.where(count > mean_n, 0.42, np.where(count >= 1, 0.05, np.nan)),
+        ),
+    )
+
+
 def gridded_receptor_model(
     endpoints: pd.DataFrame,
     series: pd.Series | pd.DataFrame,
@@ -259,7 +293,9 @@ def gridded_receptor_model(
         Output of :func:`~normet.io.read_trajectory_endpoints`.
     series : pandas.Series or pandas.DataFrame
         Target (or de-weathered) series indexed by datetime or carrying
-        ``date_col`` + ``value_col``.
+        ``date_col`` + ``value_col``. Without ``value_col``, a frame holding
+        both ``normalised``/``emi_total`` and ``observed`` uses the
+        de-weathered estimate (see :func:`_resolve_series_frame`).
     method : {"wcwt", "wpscf"}, default "wcwt"
         ``"wcwt"`` computes Concentration Weighted Trajectory field;
         ``"wpscf"`` computes Potential Source Contribution Function field above
@@ -275,7 +311,9 @@ def gridded_receptor_model(
     min_count : int, default 1
         Minimum distinct trajectories visiting a cell to retain ``weighted``.
     weighting : {"polissar", "none"}, default "polissar"
-        Polissar confidence step-weight using unique trajectory counts per cell.
+        Polissar confidence step-weight using unique trajectory counts per
+        cell: 1.0 above 3x the mean count, then 0.7, 0.42 and 0.05, with
+        strict ``>`` boundaries.
 
     Returns
     -------
@@ -413,16 +451,7 @@ def gridded_receptor_model(
 
     non_empty = count >= 1
     if weighting == "polissar" and non_empty.any():
-        mean_n = float(count[non_empty].mean())
-        w_mat = np.where(
-            count >= 3.0 * mean_n,
-            1.0,
-            np.where(
-                count >= 1.5 * mean_n,
-                0.7,
-                np.where(count >= mean_n, 0.4, np.where(count >= 1, 0.2, np.nan)),
-            ),
-        )
+        w_mat = _polissar_weights(count)
     else:
         w_mat = np.where(non_empty, 1.0, np.nan)
 
@@ -805,7 +834,10 @@ def cluster_trajectories(
     across the dateline, and performs Ward hierarchical clustering on
     tangent-plane km coordinates (``metric="euclidean"``) or average-linkage
     clustering on Sirois-Bottenheim mean directional angles (``metric="angle"``).
-    Clusters are numbered ``1..K`` in descending order of frequency.
+    Clusters are numbered ``1..K`` in descending order of frequency. ``K`` is
+    the number of groups ``fcluster`` actually returned: asking for more than
+    the paths support (e.g. identical stagnant trajectories) yields fewer
+    clusters rather than empty ones with NaN centroids.
     """
     if metric not in ("euclidean", "angle"):
         raise ValueError(f"metric must be 'euclidean' or 'angle', got {metric!r}")
@@ -934,10 +966,23 @@ def cluster_trajectories(
         else np.ones(n_traj, dtype=int)
     )
 
-    # Relabel 1..K sorted by descending cluster member count (ties broken stably).
+    # Relabel the clusters fcluster actually returned, sorted by descending
+    # member count (ties broken stably). fcluster's ``maxclust`` returns *at
+    # most* chosen_k groups: identical (stagnant) paths cannot be split, so
+    # looping to the requested k would report empty clusters with NaN
+    # centroids and emit "Mean of empty slice" warnings. Report the number
+    # found instead of the number asked for.
     order_c = sorted(np.unique(raw_lbl), key=lambda cid: (-int(np.sum(raw_lbl == cid)), int(cid)))
     remap = {old: new for new, old in enumerate(order_c, start=1)}
     lbl_arr = np.asarray([remap[int(c)] for c in raw_lbl], dtype=int)
+    found_k = len(order_c)
+    if found_k < chosen_k:
+        log.info(
+            "fcluster returned %d distinct cluster(s), not the %d requested: the "
+            "trajectories are too similar to separate further.",
+            found_k,
+            chosen_k,
+        )
 
     # Target values per trajectory if series is supplied.
     y_traj: np.ndarray | None = None
@@ -947,7 +992,7 @@ def cluster_trajectories(
 
     centroid_rows: list[dict[str, Any]] = []
     summary_rows: list[dict[str, Any]] = []
-    for k_id in range(1, chosen_k + 1):
+    for k_id in range(1, found_k + 1):
         sel = lbl_arr == k_id
         cnt = int(sel.sum())
         freq = float(cnt / n_traj)
@@ -998,7 +1043,7 @@ def cluster_trajectories(
         centroids=pd.DataFrame(centroid_rows),
         summary=pd.DataFrame(summary_rows),
         tsv=tsv_df,
-        n_clusters=chosen_k,
+        n_clusters=found_k,
     )
 
 
