@@ -405,6 +405,11 @@ class ICNResult:
     spread_by_source:
         Per-hour DataFrame with ``anchor`` (across anchors) and ``mc`` (across
         counterfactual resamples) spread, the ICN uncertainty decomposition.
+        Both are standard deviations on the scale of ``df[target]``: when the
+        caller passes a ``log1p`` frame, these are log-scale spreads. A
+        caller returning the levels to original units must rescale them (the
+        delta method for ``expm1`` multiplies by ``1 + level``), which is what
+        ``do_all(log_transform=True, chronos_mode="icn")`` does.
     hour_contrib:
         Integer count of anchors covering each hour (diagnoses the first-``C``
         hole; bidirectional fills it).

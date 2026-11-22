@@ -143,6 +143,32 @@ def test_modStats_by_hour():
     assert len(out) >= 2  # at least some hours + "all"
 
 
+def test_modStats_weekday_labels_default_zero_and_opt_in_one():
+    dates = pd.date_range("2024-01-01", periods=14, freq="D")  # two full weeks
+    df = pd.DataFrame({"date": dates, "value": np.arange(14.0, dtype=float)})
+
+    default = modStats(
+        df,
+        _StubModel(),
+        statistic=["n"],
+        by="weekday",
+        include_all=False,
+        predictor=lambda m, d: m.predict(d),
+    )
+    assert set(default["weekday"].astype(int)) == set(range(7))
+
+    one_based = modStats(
+        df,
+        _StubModel(),
+        statistic=["n"],
+        by="weekday",
+        include_all=False,
+        weekday_start=1,
+        predictor=lambda m, d: m.predict(d),
+    )
+    assert set(one_based["weekday"].astype(int)) == set(range(1, 8))
+
+
 # ---------------------------------------------------------------------------
 # logMAE / logRMSE (accuracy in log1p space)
 # ---------------------------------------------------------------------------

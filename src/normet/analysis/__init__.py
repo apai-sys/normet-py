@@ -1,10 +1,42 @@
 """Core analysis routines: normalisation, decomposition, rolling, PDP, events."""
 
-from .decomposition import DecomposeConfig, decom_emi, decom_met, decompose
+from .decomposition import (
+    MET_PHYSICAL_GROUPS,
+    DecomposeConfig,
+    ShapleyInteractionResult,
+    compare_attributions,
+    cross_fit_decompose,
+    decom_emi,
+    decom_emi_shapley,
+    decom_met,
+    decom_met_treeshap,
+    decompose,
+    shapley_interactions,
+    suggest_met_groups,
+)
+from .diagnostics import NormalisationDiagnostics, diagnose_normalisation, support_audit
 from .events import anomaly_scores, detect_events
-from .normalise import NormaliseConfig, normalise, normalise_auto
-from .pdp import pdp
+from .normalise import (
+    CrossFitNormaliseResult,
+    NormaliseConfig,
+    crossfit_normalise,
+    normalise,
+    normalise_auto,
+)
+from .pdp import ale, pdp
 from .rolling import RollingConfig, rolling, window_columns
+from .transport import (
+    FootprintInversionResult,
+    ReceptorGridResult,
+    TrajectoryClusterResult,
+    build_footprint_matrix,
+    cluster_trajectories,
+    gridded_receptor_model,
+    invert_source_footprints,
+    screen_donor_transport,
+    wcwt,
+    wpscf,
+)
 from .trend import (
     TrendBreaks,
     TrendResult,
@@ -16,7 +48,18 @@ from .trend import (
     trend,
 )
 from .uncertainty import UncDecomposition, decompose_uncertainty
-from .verification import crps_from_quantiles, crps_from_samples, crps_observed, pinball_loss
+from .verification import (
+    calibration_curve,
+    crps_from_quantiles,
+    crps_from_samples,
+    crps_observed,
+    crps_skill_score,
+    fair_crps_from_samples,
+    interval_coverage,
+    interval_score,
+    pinball_loss,
+    pit_diagnostics,
+)
 
 __all__ = [
     "TrendResult",
@@ -30,20 +73,50 @@ __all__ = [
     "UncDecomposition",
     "decompose_uncertainty",
     "DecomposeConfig",
+    "MET_PHYSICAL_GROUPS",
+    "ShapleyInteractionResult",
     "NormaliseConfig",
+    "CrossFitNormaliseResult",
     "RollingConfig",
     "normalise",
     "normalise_auto",
+    "crossfit_normalise",
+    "NormalisationDiagnostics",
+    "diagnose_normalisation",
+    "support_audit",
     "decom_emi",
+    "decom_emi_shapley",
     "decom_met",
+    "decom_met_treeshap",
     "decompose",
+    "shapley_interactions",
+    "suggest_met_groups",
+    "cross_fit_decompose",
+    "compare_attributions",
     "pdp",
+    "ale",
     "rolling",
     "window_columns",
     "detect_events",
     "anomaly_scores",
+    "ReceptorGridResult",
+    "FootprintInversionResult",
+    "TrajectoryClusterResult",
+    "gridded_receptor_model",
+    "wpscf",
+    "wcwt",
+    "build_footprint_matrix",
+    "invert_source_footprints",
+    "cluster_trajectories",
+    "screen_donor_transport",
     "crps_from_quantiles",
     "crps_from_samples",
     "crps_observed",
+    "fair_crps_from_samples",
+    "crps_skill_score",
+    "interval_score",
+    "interval_coverage",
+    "pit_diagnostics",
+    "calibration_curve",
     "pinball_loss",
 ]

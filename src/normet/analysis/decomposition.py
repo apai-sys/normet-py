@@ -20,13 +20,19 @@ import pandas as pd
 
 from ..exceptions import ConfigError, DataError, ModelError
 from ..foundation.estimator import CHRONOS_BACKEND, resolve_n_samples
-from ..model.train import build_model
+from ..io.trajectory import is_trajectory_qc_column
+from ..model.predict import ml_predict
+from ..model.train import build_model, train_model
 from ..utils import progress
 from ..utils._config import DEFAULT_SEED, resolve_config, resolve_workers
 from ..utils.features import extract_features
 from ..utils.logging import get_logger
-from ..utils.prepare import add_date_variables, process_date
-from .normalise import normalise
+from ..utils.prepare import (
+    add_date_variables,
+    log1p_target,
+    process_date,
+)
+from .normalise import _apply_conditional_filter, _parse_stratify_by, normalise
 
 log = get_logger(__name__)
 
@@ -116,15 +122,121 @@ class DecomposeConfig:
     conditional_on: Mapping[str, Any] | None = None
     """Filter on the ``resample_df`` pool, forwarded to every :func:`normalise`
     call. Not on the chronos-2 backend."""
+    stratify_by: str | Sequence[str] | None = None
+    """Optional stratum column(s) forwarded to every :func:`normalise` call
+    (e.g. ``"month"``, ``"season"``, ``"hour"``, or ``"traj_cluster"``) to
+    prevent cross-season or cross-regime OOD extrapolation. In :func:`decom_emi`
+    / :func:`decom_emi_shapley`, calendar strata (``"month"``/``"season"``,
+    ``"weekday"``, ``"hour"``) are activated once the corresponding time
+    variable is fixed. Not on chronos-2."""
+    conditional_k: int | None = None
+    """Optional positive integer ``k`` for kNN on-manifold conditional resampling
+    forwarded to :func:`normalise` (Conditional Shapley over fixed meteorological
+    features). Not on chronos-2."""
+    exact_base: bool = False
+    """``decom_emi`` / ``decom_emi_shapley`` only. If True, evaluate the unfixed
+    ``base`` baseline analytically as the single-pass pool mean (when no extra
+    ``resample_pools`` or non-calendar strata require Monte Carlo draws), making
+    ``emi_noise == 0`` and preventing MC sampling noise from leaking into
+    ``date_unix``."""
+    include_diagnostics: bool = False
+    """``decom_met`` only. If True, include explicit model-vs-observation columns
+    ``predicted``, ``met_explained`` (sum of meteorological player contributions),
+    and ``residual`` (``observed - predicted``) alongside the legacy ``met_*``
+    columns."""
+    return_uncertainty: bool = False
+    """``decom_met`` only. If True, attach standard error columns ``emi_total_se``
+    and ``{player}_se`` computed from paired per-seed Monte Carlo draws (and
+    permutation spread when ``n_permutations`` is active) without extra model
+    passes."""
+    scale: str = "additive"
+    """Attribution scale: ``"additive"`` (default) or ``"multiplicative"``. When
+    ``"multiplicative"``, differences are evaluated on the ``log1p`` scale and
+    mapped back to exact concentration-unit contributions via the Logarithmic
+    Mean Divisia Index (LMDI), plus ``{player}_factor`` exponential ratios."""
+    log_transform: bool = False
+    """Whether ``df`` and ``model`` already live on the ``log1p`` scale (for
+    example from :func:`normet.utils.prepare.log1p_target`)."""
+    n_sensitivity_anchors: int = 1
+    """Chronos-2 sequential attribution only. Number of valid forecast anchors
+    to average covariate sensitivity over when ordering meteorological features
+    (``1`` = latest accepted anchor, matching legacy single-anchor behaviour;
+    ``> 1`` evenly spans valid anchors across the record)."""
+
+
+@dataclass
+class ShapleyInteractionResult:
+    """Output of second-order Shapley interaction analysis (:func:`shapley_interactions`)."""
+
+    decomposition: pd.DataFrame
+    main_effects: pd.DataFrame
+    pairwise: pd.DataFrame
+    mean_matrix: pd.DataFrame
+    std_matrix: pd.DataFrame
+    summary: pd.DataFrame
 
 
 _TIME_VARS = ("date_unix", "day_julian", "weekday", "hour")
 # decom_met's own result columns, which a group may not be named after.
 _MET_RESULT_COLUMNS = frozenset(
-    {"date", "observed", "emi_total", "met_total", "met_base", "met_noise"}
+    {
+        "date",
+        "observed",
+        "predicted",
+        "emi_total",
+        "met_total",
+        "met_explained",
+        "met_base",
+        "met_noise",
+        "residual",
+    }
 )
 # Exact Shapley values need 2**k normalisations for k features or groups.
 _SHAPLEY_EXACT_MAX = 10
+#: Standard columns of :attr:`ShapleyInteractionResult.summary`, also emitted
+#: when the model has no meteorological feature and the table is empty (an
+#: empty frame without columns cannot be sorted by ``std``).
+_INTERACTION_SUMMARY_COLUMNS = ("term", "kind", "mean", "std", "mean_abs", "max_abs")
+
+#: Atmospheric-physics grouping taxonomy used by :func:`suggest_met_groups`.
+MET_PHYSICAL_GROUPS: dict[str, tuple[str, ...]] = {
+    "dynamics": (
+        "ws",
+        "wd",
+        "u10",
+        "v10",
+        "blh",
+        "pblh",
+        "mixdepth",
+        "wind_speed",
+        "wind_dir",
+    ),
+    "thermodynamics": (
+        "t2m",
+        "temp",
+        "air_temp",
+        "d2m",
+        "rh",
+        "rh2m",
+        "ssrd",
+        "ssr",
+        "srad",
+        "solar",
+        "tcc",
+        "cloud",
+    ),
+    "synoptic_removal": (
+        "sp",
+        "msl",
+        "pres",
+        "pressure",
+        "tp",
+        "rain",
+        "rainfall",
+        "precip",
+        "precipitation",
+    ),
+}
 
 
 def _resolve_config(config: DecomposeConfig | None = None, **kwargs: Any) -> DecomposeConfig:
@@ -222,9 +334,88 @@ def _players_from_groups(groups: Mapping[str, Sequence[str]], features: list[str
     return players
 
 
+def suggest_met_groups(
+    features: Sequence[str],
+    *,
+    custom_groups: Mapping[str, Sequence[str]] | None = None,
+) -> dict[str, list[str]]:
+    """Group non-time meteorological and transport predictors into physical regimes.
+
+    Organises predictors into atmospheric-physics groups suitable for
+    :func:`decom_met` ``groups=...``: ``dynamics`` (wind / boundary layer),
+    ``thermodynamics`` (temperature / humidity / solar radiation / clouds),
+    ``synoptic_removal`` (pressure / precipitation), ``transport``
+    (``traj_*`` trajectory descriptors, automatically excluding QC bookkeeping
+    columns via :func:`normet.io.trajectory.is_trajectory_qc_column`), and
+    ``other`` for remaining non-time predictors. Empty groups are omitted.
+    """
+    seen: set[str] = set()
+    candidates: list[str] = []
+    time_set = set(_TIME_VARS)
+    for raw in features:
+        col = str(raw)
+        if col in seen or col in time_set or is_trajectory_qc_column(col):
+            continue
+        seen.add(col)
+        candidates.append(col)
+
+    out: dict[str, list[str]] = {}
+    claimed: set[str] = set()
+    cand_set = set(candidates)
+
+    if custom_groups is not None:
+        for g_name, members in custom_groups.items():
+            m_list = [members] if isinstance(members, str) else [str(m) for m in members]
+            kept = [m for m in m_list if m in cand_set and m not in claimed]
+            if kept:
+                out[str(g_name)] = kept
+                claimed.update(kept)
+
+    dyn_set = set(MET_PHYSICAL_GROUPS["dynamics"])
+    thm_set = set(MET_PHYSICAL_GROUPS["thermodynamics"])
+    syn_set = set(MET_PHYSICAL_GROUPS["synoptic_removal"])
+
+    for col in candidates:
+        if col in claimed:
+            continue
+        low = col.lower()
+        if low in dyn_set:
+            grp = "dynamics"
+        elif low in thm_set:
+            grp = "thermodynamics"
+        elif low in syn_set:
+            grp = "synoptic_removal"
+        elif low.startswith("traj_"):
+            grp = "transport"
+        else:
+            grp = "other"
+        out.setdefault(grp, []).append(col)
+        claimed.add(col)
+
+    return out
+
+
+def _validate_shared_options(cfg: DecomposeConfig) -> None:
+    """Validate backend-independent config fields shared by decom_emi and decom_met."""
+    if cfg.scale not in ("additive", "multiplicative"):
+        raise ConfigError(f"`scale` must be 'additive' or 'multiplicative', got {cfg.scale!r}.")
+    if cfg.conditional_k is not None:
+        cond_k: object = cfg.conditional_k
+        if isinstance(cond_k, bool) or not isinstance(cond_k, numbers.Integral):
+            raise ConfigError(
+                f"`conditional_k` must be a positive integer or None, got {cond_k!r}."
+            )
+        if int(cond_k) < 1:
+            raise ConfigError(f"`conditional_k` must be at least 1, got {cond_k!r}.")
+    n_anc: object = cfg.n_sensitivity_anchors
+    if isinstance(n_anc, bool) or not isinstance(n_anc, numbers.Integral) or int(n_anc) < 1:
+        raise ConfigError(f"`n_sensitivity_anchors` must be a positive integer, got {n_anc!r}.")
+
+
 def _attribution_method(cfg: DecomposeConfig) -> str:
     """Resolve and validate the attribution options that do not depend on the
     model's features, so a bad call fails before a model is trained or loaded."""
+    _validate_shared_options(cfg)
     method = (
         cfg.attribution
         if cfg.attribution is not None
@@ -295,7 +486,95 @@ def _attribution_plan(
     return players, method
 
 
-def _attribute(
+def _mean_series(arr: np.ndarray) -> np.ndarray:
+    """Collapse optional MC draws axis ``(n_rows, M) -> (n_rows,)``."""
+    return arr.mean(axis=1) if arr.ndim == 2 else arr
+
+
+def _mc_se(arr: np.ndarray) -> np.ndarray:
+    """Paired Monte Carlo standard error across draws on axis 1."""
+    if arr.ndim < 2 or arr.shape[1] <= 1:
+        n_rows = arr.shape[0] if arr.ndim >= 1 else 0
+        return np.zeros(n_rows, dtype=float)
+    return np.std(arr, axis=1, ddof=1) / np.sqrt(float(arr.shape[1]))
+
+
+def _lmdi_weight(conc_end: np.ndarray, conc_start: np.ndarray) -> np.ndarray:
+    """Logarithmic Mean Divisia Index weight ``(c1 - c0) / (ln(1+c1) - ln(1+c0))``."""
+    c1 = np.asarray(conc_end, dtype=float)
+    c0 = np.asarray(conc_start, dtype=float)
+    z1 = np.log1p(np.maximum(c1, 0.0))
+    z0 = np.log1p(np.maximum(c0, 0.0))
+    dz = z1 - z0
+    limit = 1.0 + 0.5 * (np.maximum(c1, 0.0) + np.maximum(c0, 0.0))
+    safe_dz = np.where(np.abs(dz) > 1e-8, dz, 1.0)
+    return np.where(np.abs(dz) > 1e-8, (c1 - c0) / safe_dz, limit)
+
+
+def _step_stratify_by(
+    stratify_by: str | Sequence[str] | None, resample_vars: Sequence[str]
+) -> list[str] | None:
+    """Drop calendar strata whose defining time variable is still resampled in this step."""
+    cols = _parse_stratify_by(stratify_by)
+    if not cols:
+        return None
+    res_set = set(resample_vars)
+    active: list[str] = []
+    for col in cols:
+        if col in ("month", "season") and "day_julian" in res_set:
+            continue
+        if col == "weekday" and "weekday" in res_set:
+            continue
+        if col == "hour" and "hour" in res_set:
+            continue
+        active.append(col)
+    return active or None
+
+
+def _compute_interaction_indices(
+    player_names: Sequence[str],
+    values: Mapping[frozenset[int], np.ndarray],
+    shapley_phi: Mapping[str, np.ndarray],
+) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
+    """Compute exact 2nd-order Grabisch-Roubens Shapley interactions & main effects.
+
+    Uses already-evaluated coalition values ``values[S]`` (no extra normalisations).
+    Returns ``(main_effects, pairwise)`` satisfying exact closure:
+    ``sum(main_effects) + sum(pairwise) == sum(shapley_phi)``.
+    """
+    k = len(player_names)
+    first_arr = next(iter(values.values()))
+    n_rows = len(first_arr)
+    main_effects: dict[str, np.ndarray] = {
+        name: np.asarray(shapley_phi[name], dtype=float).copy() for name in player_names
+    }
+    pairwise: dict[str, np.ndarray] = {}
+    if k < 2:
+        return main_effects, pairwise
+
+    weights = [factorial(s) * factorial(k - s - 2) / factorial(k - 1) for s in range(k - 1)]
+    for i in range(k):
+        for j in range(i + 1, k):
+            others = [m for m in range(k) if m not in (i, j)]
+            acc = np.zeros(n_rows, dtype=float)
+            for mask in range(1 << len(others)):
+                s_set = frozenset(others[b] for b in range(len(others)) if mask >> b & 1)
+                w = weights[len(s_set)]
+                diff = (
+                    values[s_set | {i, j}]
+                    - values[s_set | {i}]
+                    - values[s_set | {j}]
+                    + values[s_set]
+                )
+                acc += w * diff
+            pair_name = f"{player_names[i]}:{player_names[j]}"
+            pairwise[pair_name] = acc
+            main_effects[player_names[i]] = main_effects[player_names[i]] - 0.5 * acc
+            main_effects[player_names[j]] = main_effects[player_names[j]] - 0.5 * acc
+    return main_effects, pairwise
+
+
+def _attribute_core(
     players: list[_Player],
     value_of: Callable[[list[str]], np.ndarray],
     *,
@@ -303,15 +582,18 @@ def _attribute(
     n_permutations: int | None,
     seed: int,
     verbose: bool,
-) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+) -> tuple[
+    np.ndarray,
+    dict[str, np.ndarray],
+    dict[frozenset[int], np.ndarray],
+    dict[str, np.ndarray],
+]:
     """Split ``v(every player fixed) - v(none fixed)`` among ``players``.
 
-    ``value_of(resample)`` returns the normalised series with the features in
-    ``resample`` resampled and every other feature at its observed values; the
-    value of a coalition (the set of players held at observed values) is that
-    series. Each coalition is evaluated once. Returns ``emi_total`` -- nothing
-    fixed -- and one contribution per player, which for every method add up to
-    ``v(all fixed) - emi_total``.
+    Supports both 1D coalition values ``(n_rows,)`` and 2D paired-draw matrices
+    ``(n_rows, n_draws)``. Returns ``(emi_total_raw, totals_raw, coalition_values,
+    perm_se)``, where ``perm_se`` gives permutation-sampling standard errors for
+    sampled Shapley (zeros otherwise).
     """
     k = len(players)
     values: dict[frozenset[int], np.ndarray] = {}
@@ -350,7 +632,8 @@ def _attribute(
 
     none_fixed: frozenset[int] = frozenset()
     emi_total = v(none_fixed)
-    totals = [np.zeros_like(emi_total) for _ in players]
+    totals = [np.zeros_like(emi_total, dtype=float) for _ in players]
+    perm_se = {name: np.zeros(emi_total.shape[0], dtype=float) for name, _ in players}
 
     if method == "sequential":
         prev = none_fixed
@@ -373,30 +656,77 @@ def _attribute(
         # Monte Carlo over orders, in antithetic pairs: an order and its reverse.
         rng = np.random.default_rng(seed)
         n_pairs = (n_permutations + 1) // 2
+        pair_means: list[list[np.ndarray]] = [[] for _ in players]
         for _ in range(n_pairs):
             perm = [int(i) for i in rng.permutation(k)]
+            pair_accum = [np.zeros_like(emi_total, dtype=float) for _ in players]
             for order in (perm, perm[::-1]):
                 prev = none_fixed
                 for i in order:
                     cur = prev | {i}
-                    totals[i] += v(cur) - v(prev)
+                    delta = v(cur) - v(prev)
+                    totals[i] += delta
+                    pair_accum[i] += delta
                     prev = cur
+            for i in range(k):
+                pair_means[i].append(_mean_series(pair_accum[i] / 2.0))
         totals = [t / (2 * n_pairs) for t in totals]
+        if n_pairs >= 2:
+            for idx_p, (name, _) in enumerate(players):
+                stacked_pairs = np.stack(pair_means[idx_p], axis=0)
+                perm_se[name] = np.std(stacked_pairs, axis=0, ddof=1) / np.sqrt(float(n_pairs))
 
-    return emi_total, {name: totals[i] for i, (name, _) in enumerate(players)}
+    return emi_total, {name: totals[i] for i, (name, _) in enumerate(players)}, values, perm_se
+
+
+def _attribute(
+    players: list[_Player],
+    value_of: Callable[[list[str]], np.ndarray],
+    *,
+    method: str,
+    n_permutations: int | None,
+    seed: int,
+    verbose: bool,
+) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    """Split ``v(every player fixed) - v(none fixed)`` among ``players``."""
+    emi_total, contribs, _values, _perm_se = _attribute_core(
+        players,
+        value_of,
+        method=method,
+        n_permutations=n_permutations,
+        seed=seed,
+        verbose=verbose,
+    )
+    return emi_total, contribs
 
 
 def _met_result(
-    result: pd.DataFrame, emi_total: np.ndarray, contributions: dict[str, np.ndarray]
+    result: pd.DataFrame,
+    emi_total: np.ndarray,
+    contributions: dict[str, np.ndarray],
+    *,
+    include_diagnostics: bool = False,
+    uncertainty: Mapping[str, np.ndarray] | None = None,
+    factors: Mapping[str, np.ndarray] | None = None,
 ) -> pd.DataFrame:
-    """Add ``emi_total``, the contributions and the ``met_*`` totals to ``result``."""
+    """Add ``emi_total``, the contributions, optional diagnostics/SE/factors, and ``met_*`` totals."""
     result["emi_total"] = emi_total
     for name, contribution in contributions.items():
         result[name] = contribution
+    contrib_sum = result[list(contributions)].sum(axis=1) if contributions else 0.0
+    if include_diagnostics:
+        result["predicted"] = result["emi_total"] + contrib_sum
+        result["met_explained"] = contrib_sum
+        result["residual"] = result["observed"] - result["predicted"]
     result["met_total"] = result["observed"] - result["emi_total"]
     result["met_base"] = float(result["met_total"].mean())
-    contrib_sum = result[list(contributions)].sum(axis=1) if contributions else 0.0
     result["met_noise"] = result["met_total"] - (result["met_base"] + contrib_sum)
+    if uncertainty:
+        for col, se_arr in uncertainty.items():
+            result[col] = se_arr
+    if factors:
+        for col, fac_arr in factors.items():
+            result[col] = fac_arr
     return result
 
 
@@ -508,19 +838,8 @@ def _decom_met_zero_shot(
     :meth:`Chronos2Estimator.deweather` in place of :func:`normalise`, because
     both answer the same question, "what would this series be with these
     covariates averaged over". ``deweather`` draws the weather from the frame
-    itself, so ``resample_df`` / ``resample_pools`` / ``conditional_on`` are
-    refused.
-
-    Ordering for the sequential attribution is the one real difference.
-    :func:`decom_met` ranks features by fitted importance, which does not exist
-    here. ``variable_order`` is used when given; otherwise features are ranked
-    by their individual covariate sensitivity, which is the zero-shot analogue:
-    how far the forecast moves when that one feature is shuffled, from the
-    latest context the model accepts. Ranking needs more rows than
-    ``context_length + prediction_length`` and one such context; without them
-    the covariate order is kept as given and a warning is logged, since an
-    arbitrary order still yields a valid decomposition, only a less
-    interpretable one. Shapley attribution needs no ranking.
+    itself, so ``resample_df`` / ``resample_pools`` / ``conditional_on`` /
+    ``stratify_by`` / ``conditional_k`` are refused.
     """
     from ..foundation import (
         Chronos2Estimator,
@@ -545,11 +864,21 @@ def _decom_met_zero_shot(
         raise ConfigError(f"model_config['estimate'] must be 'level' or 'paired', got {estimate!r}")
 
     refuse_names = (
-        ("resample_pools", "conditional_on")
+        ("resample_pools", "conditional_on", "stratify_by", "conditional_k")
         if method_mode == "icn"
-        else ("resample_df", "resample_pools", "conditional_on")
+        else (
+            "resample_df",
+            "resample_pools",
+            "conditional_on",
+            "stratify_by",
+            "conditional_k",
+        )
     )
     refused = [n for n in refuse_names if getattr(cfg, n) is not None]
+    if cfg.return_uncertainty:
+        refused.append("return_uncertainty")
+    if cfg.scale != "additive":
+        refused.append(f"scale={cfg.scale!r}")
     if refused:
         raise ConfigError(
             f"{', '.join(refused)} not available on the chronos-2 backend: "
@@ -654,13 +983,18 @@ def _decom_met_zero_shot(
         seed=cfg.seed,
         verbose=cfg.verbose,
     )
-    return _met_result(result, emi_total, contributions)
+    return _met_result(
+        result,
+        emi_total,
+        contributions,
+        include_diagnostics=cfg.include_diagnostics,
+    )
 
 
 def _rank_by_sensitivity(
     est: Any, indexed: pd.DataFrame, met: list[str], cfg: DecomposeConfig
 ) -> list[str]:
-    """Order meteorological features by how far each one alone moves the forecast."""
+    """Order meteorological features by mean sensitivity across evenly spaced anchors."""
     horizon = est.prediction_length
     if len(indexed) <= est.context_length + horizon:
         log.warning(
@@ -670,19 +1004,14 @@ def _rank_by_sensitivity(
             est.context_length + horizon,
         )
         return met
-    # The latest anchor whose context the model would accept. The record's end
-    # alone would refuse a trailing outage that deweather() just skips.
     target = indexed["value"].to_numpy(dtype=float)
     n_ctx = est.context_length
-    anchor = next(
-        (
-            indexed.index[i]
-            for i in range(len(indexed) - horizon, n_ctx - 1, -1)
-            if est._context_coverage(target[i - n_ctx : i]) >= est.min_context_coverage
-        ),
-        None,
-    )
-    if anchor is None:
+    valid_anchors = [
+        indexed.index[i]
+        for i in range(n_ctx, len(indexed) - horizon + 1)
+        if est._context_coverage(target[i - n_ctx : i]) >= est.min_context_coverage
+    ]
+    if not valid_anchors:
         log.warning(
             "no %d-h context has %.0f%% of its target observed to rank features by "
             "covariate sensitivity from, so the given covariate order is kept. Pass "
@@ -691,23 +1020,283 @@ def _rank_by_sensitivity(
             100 * est.min_context_coverage,
         )
         return met
+    k_anc = max(1, int(cfg.n_sensitivity_anchors))
+    if k_anc == 1 or len(valid_anchors) == 1:
+        anchors = [valid_anchors[-1]]
+    else:
+        pick_idx = np.linspace(0, len(valid_anchors) - 1, min(k_anc, len(valid_anchors)), dtype=int)
+        anchors = [valid_anchors[int(idx)] for idx in pick_idx]
     scores: dict[str, float] = {}
     for feat in met:
-        shift = est.covariate_sensitivity(
-            indexed,
-            "value",
-            anchor=anchor,
-            horizon=horizon,
-            met_features=[feat],
-            random_state=cfg.seed,
-        )
-        scores[feat] = float(shift["mean_abs_shift"])
+        vals = [
+            float(
+                est.covariate_sensitivity(
+                    indexed,
+                    "value",
+                    anchor=anc,
+                    horizon=horizon,
+                    met_features=[feat],
+                    random_state=cfg.seed,
+                )["mean_abs_shift"]
+            )
+            for anc in anchors
+        ]
+        scores[feat] = float(np.mean(vals))
     ordered = sorted(met, key=lambda f: scores[f], reverse=not cfg.importance_ascending)
     (log.info if cfg.verbose else log.debug)(
-        "covariate sensitivity ranking: %s",
+        "covariate sensitivity ranking (%d anchor(s)): %s",
+        len(anchors),
         ", ".join(f"{f}={scores[f]:.3f}" for f in ordered),
     )
     return ordered
+
+
+def _prepare_decomposition_frame(
+    df: pd.DataFrame | None,
+    cfg: DecomposeConfig,
+    *,
+    model: object | None,
+    drop_na_target: bool,
+    sort_by_importance: bool,
+) -> tuple[pd.DataFrame, object, list[str], np.ndarray, bool]:
+    """Shared input cleaning, optional model training, and calendar feature generation.
+
+    Returns ``(df_work, model, features, observed_conc, is_log_space)``.
+    """
+    if df is None:
+        raise DataError("`df` must be provided.")
+    if cfg.target is None:
+        raise DataError("`target` (target column name) must be provided.")
+    if model is None and cfg.covariates is None:
+        raise ConfigError("Either `model` or `covariates` must be provided.")
+    if model is None and cfg.backend is None:
+        raise ConfigError("When training a model, `backend` must be specified.")
+
+    work = process_date(df.copy()) if "date" not in df.columns else df.copy()
+    if "date" not in work.columns:
+        raise DataError("Could not find or create a 'date' column.")
+    if cfg.target not in work.columns:
+        raise DataError(f"`df` does not contain the target column '{cfg.target}'.")
+    if cfg.target != "value":
+        work = work.rename(columns={cfg.target: "value"})
+
+    mask = work["date"].notna() & work["value"].notna() if drop_na_target else work["date"].notna()
+    work = work.loc[mask].sort_values("date").reset_index(drop=True)
+
+    is_log_space = bool(cfg.log_transform)
+    observed_raw = work["value"].to_numpy(dtype=float)
+    observed_conc = np.expm1(observed_raw) if cfg.log_transform else observed_raw.copy()
+
+    if cfg.covariates:
+        missing_time = [v for v in _TIME_VARS if v in cfg.covariates and v not in work.columns]
+        if missing_time:
+            try:
+                work = add_date_variables(work)
+                (log.info if cfg.verbose else log.debug)(
+                    "Generated time variables: %s", missing_time
+                )
+            except Exception:
+                log.warning(
+                    "Could not generate some time features: %s", missing_time, exc_info=False
+                )
+
+    if model is None:
+        if cfg.covariates is None:
+            raise ValueError("covariates must be provided")
+        if cfg.scale == "multiplicative" and not is_log_space:
+            if (work["value"].to_numpy(dtype=float) < 0.0).any():
+                raise DataError("Cannot apply scale='multiplicative' with negative target values.")
+            work = log1p_target(work, "value")
+            is_log_space = True
+        (log.info if cfg.verbose else log.debug)(
+            "Training model via backend='%s' with features=%d...",
+            cfg.backend or "flaml",
+            len(cfg.covariates),
+        )
+        work, model = build_model(
+            df=work,
+            target="value",
+            backend=cfg.backend or "flaml",
+            covariates=cfg.covariates,
+            split_method=cfg.split_method,
+            train_fraction=cfg.train_fraction,
+            model_config=cfg.model_config,
+            seed=cfg.seed,
+            n_cores=cfg.n_cores,
+            verbose=cfg.verbose,
+            cache=cfg.cache,
+        )
+        obs_after = work["value"].to_numpy(dtype=float)
+        observed_conc = np.expm1(obs_after) if is_log_space else obs_after.copy()
+
+    try:
+        if sort_by_importance:
+            feats = [
+                str(c)
+                for c in extract_features(model, importance_ascending=cfg.importance_ascending)
+            ]
+        else:
+            feats = [str(c) for c in extract_features(model)]
+    except Exception as exc:
+        if not cfg.covariates:
+            raise ModelError("Cannot infer model features; please provide `covariates`.") from exc
+        feats = [str(c) for c in cfg.covariates]
+
+    missing_time = [v for v in _TIME_VARS if v in feats and v not in work.columns]
+    if missing_time:
+        try:
+            work = add_date_variables(work)
+            (log.info if cfg.verbose else log.debug)("Generated time variables: %s", missing_time)
+        except Exception:
+            log.warning("Could not generate some time features: %s", missing_time, exc_info=False)
+
+    feats = [f for f in feats if f in work.columns]
+    if not feats:
+        raise DataError("No valid model features found in `df`.")
+    return work, model, feats, observed_conc, is_log_space
+
+
+def _can_use_analytic_base(
+    model: object,
+    cfg: DecomposeConfig,
+    model_feats: Sequence[str],
+    resample_vars: Sequence[str],
+) -> bool:
+    """Whether ``base`` can be computed analytically via one pool mean pass."""
+    if not callable(getattr(model, "predict", None)):
+        return False
+    if _step_stratify_by(cfg.stratify_by, resample_vars) is not None:
+        return False
+    if cfg.resample_pools:
+        feat_set = set(model_feats)
+        for pool in cfg.resample_pools.values():
+            if isinstance(pool, pd.DataFrame) and (set(pool.columns) & feat_set):
+                return False
+    return True
+
+
+def _analytic_base_value(
+    df_work: pd.DataFrame,
+    model: object,
+    cfg: DecomposeConfig,
+    *,
+    is_log_space: bool,
+    n_cores_eff: int,
+    n_rows: int,
+) -> np.ndarray:
+    """Evaluate expected prediction over the reference pool in a single predict pass."""
+    base_pool = df_work if cfg.resample_df is None else cfg.resample_df.copy()
+    if cfg.conditional_on:
+        base_pool = _apply_conditional_filter(base_pool, cfg.conditional_on)
+        if base_pool.empty:
+            raise DataError("`conditional_on` filter left no rows in the resample pool.")
+    preds_base = ml_predict(model, base_pool, num_threads=n_cores_eff)
+    if cfg.scale == "multiplicative":
+        # The Monte Carlo path aggregates the draws first and only then maps
+        # the aggregate to the log1p scale (decom_emi's
+        # ``np.log1p(np.maximum(vals, 0.0))``); so the analytic limit of the
+        # linear-space branch is ``log1p(mean(preds))``, not
+        # ``mean(log1p(preds))``. The latter is a different estimand with a
+        # Jensen gap that does not shrink with n_samples. A log-space model
+        # already predicts the transformed scale, so its mean is unchanged.
+        scalar = (
+            float(np.nanmean(preds_base))
+            if is_log_space
+            else float(np.log1p(np.maximum(np.nanmean(preds_base), 0.0)))
+        )
+    elif cfg.log_transform:
+        scalar = float(np.expm1(float(np.nanmean(preds_base))))
+    else:
+        scalar = float(np.nanmean(preds_base))
+    return np.full(n_rows, scalar, dtype=float)
+
+
+def _normet_draws_array(
+    df_norm: pd.DataFrame,
+    target_index: pd.Index,
+    *,
+    want_draws: bool,
+) -> np.ndarray:
+    """Align normalised Series or per-seed draw columns to ``target_index``."""
+    aligned = df_norm.reindex(target_index)
+    if not want_draws:
+        if "normalised" not in aligned.columns:
+            log.exception("`normalise` did not return 'normalised' column (aggregate=True).")
+            raise ModelError(
+                "`normalise` must return a DataFrame with column 'normalised' when aggregate=True."
+            )
+        return aligned["normalised"].to_numpy(dtype=float)
+
+    seed_cols = [c for c in aligned.columns if c != "observed"]
+    if not seed_cols:
+        raise ModelError("`normalise` with aggregate=False returned no sample columns.")
+    arr = aligned[seed_cols].to_numpy(dtype=float)
+    return arr.reshape(len(target_index), -1)
+
+
+def _finalise_emission_scale(
+    result: pd.DataFrame,
+    component_cols: Sequence[str],
+    z_or_c_series: Mapping[str, np.ndarray],
+    *,
+    base_key: str,
+    total_key: str,
+    scale: str,
+    is_log_space: bool,
+    main_effects: Mapping[str, np.ndarray] | None = None,
+    pairwise: Mapping[str, np.ndarray] | None = None,
+) -> pd.DataFrame:
+    """Convert raw ``z`` (multiplicative) or concentration increments into output columns."""
+    raw_base = np.asarray(z_or_c_series[base_key], dtype=float)
+    raw_total = np.asarray(z_or_c_series[total_key], dtype=float)
+
+    if scale == "additive":
+        base_mean = float(np.mean(raw_base))
+        # Components first, then the totals, matching the pre-scale-option
+        # decom_emi column order (``observed``, calendar components,
+        # ``emi_total``, ``emi_noise``, ``emi_base``). Positional consumers
+        # of the default emission output -- e.g. ``out.columns[1:-3]`` for the
+        # components -- rely on it.
+        for col in component_cols:
+            result[col] = np.asarray(z_or_c_series[col], dtype=float)
+        if main_effects is not None:
+            for k, arr in main_effects.items():
+                result[f"{k}_main"] = np.asarray(arr, dtype=float)
+        if pairwise is not None:
+            for k, arr in pairwise.items():
+                result[k] = np.asarray(arr, dtype=float)
+        result["emi_total"] = raw_total
+        result["emi_noise"] = raw_base - base_mean
+        result["emi_base"] = base_mean
+        return result
+
+    def _to_z(arr: np.ndarray) -> np.ndarray:
+        return arr if is_log_space else np.log1p(np.maximum(arr, 0.0))
+
+    z_base = _to_z(raw_base)
+    z_total = _to_z(raw_total)
+    z_base_mean = float(np.mean(z_base))
+    emi_total_c = np.expm1(z_total)
+    emi_base_c = float(np.expm1(z_base_mean))
+    w = _lmdi_weight(emi_total_c, np.full_like(emi_total_c, emi_base_c))
+    dz_noise = z_base - z_base_mean
+
+    result["emi_total"] = emi_total_c
+    result["emi_base"] = emi_base_c
+    result["emi_noise"] = w * dz_noise
+    for col in component_cols:
+        dz = _to_z(raw_total) * 0.0  # shape only
+        if col in z_or_c_series:
+            dz = np.asarray(z_or_c_series[col], dtype=float)
+        result[col] = w * dz
+        result[f"{col}_factor"] = np.exp(dz)
+    if main_effects is not None:
+        for k, arr in main_effects.items():
+            result[f"{k}_main"] = w * np.asarray(arr, dtype=float)
+    if pairwise is not None:
+        for k, arr in pairwise.items():
+            result[k] = w * np.asarray(arr, dtype=float)
+    return result
 
 
 def decom_emi(
@@ -758,6 +1347,7 @@ def decom_emi(
         still decomposes cleanly into ``base``/``emi_base``/``emi_noise``
         with no time-variable columns at all.
 
+
     Parameters
     ----------
     df : pandas.DataFrame, optional
@@ -765,10 +1355,10 @@ def decom_emi(
     model : object, optional
         Pre-trained model.
     config : DecomposeConfig, optional
-        Consolidated config object. ``resample_df``, ``resample_pools`` and
-        ``conditional_on`` are forwarded to every :func:`normalise` call;
-        ``groups``, ``n_permutations`` and ``attribution`` belong to
-        :func:`decom_met` and are refused here.
+        Consolidated config object. ``resample_df``, ``resample_pools``,
+        ``conditional_on`` and ``stratify_by`` are forwarded to every
+        :func:`normalise` call; ``groups``, ``n_permutations`` and
+        ``attribution`` belong to :func:`decom_met` and are refused here.
     **kwargs
         Supported shorthand for overriding individual :class:`DecomposeConfig`
         fields without constructing a config object. Any field passed both via
@@ -780,18 +1370,9 @@ def decom_emi(
         Decomposition results.
     """
     _cfg = _resolve_config(config=config, **kwargs)
-    # n_samples is None-by-default so it can follow the backend; the AutoML
-    # paths below hand it straight to normalise(), which needs a number.
     _cfg.n_samples = resolve_n_samples(_cfg.n_samples, _cfg.backend)
+    _validate_shared_options(_cfg)
 
-    if df is None:
-        raise DataError("`df` must be provided.")
-    if _cfg.target is None:
-        raise DataError("`target` (target column name) must be provided.")
-    if model is None and _cfg.covariates is None:
-        raise ConfigError("Either `model` or `covariates` must be provided.")
-    if model is None and _cfg.backend is None:
-        raise ConfigError("When training a model, `backend` must be specified.")
     if _cfg.groups is not None or _cfg.n_permutations is not None or _cfg.attribution is not None:
         raise ConfigError(
             "`groups`, `n_permutations` and `attribution` apply to the meteorological "
@@ -799,96 +1380,12 @@ def decom_emi(
             "calendar order."
         )
 
-    df_work = process_date(df.copy()) if "date" not in df.columns else df.copy()
-    if "date" not in df_work.columns:
-        raise DataError("Could not find or create a 'date' column.")
-
-    if _cfg.target not in df_work.columns:
-        raise DataError(f"`df` does not contain the target column '{_cfg.target}'.")
-
-    observed_series = df_work[_cfg.target].copy()
-    if _cfg.target != "value":
-        df_work = df_work.rename(columns={_cfg.target: "value"})
-
-    mask_valid = df_work["date"].notna() & df_work["value"].notna()
-    df_work = df_work.loc[mask_valid].sort_values("date").reset_index(drop=True)
-    observed_series = observed_series.loc[mask_valid].reset_index(drop=True)
-
-    if _cfg.covariates:
-        missing_time_vars = [
-            v
-            for v in ["date_unix", "day_julian", "weekday", "hour"]
-            if v in _cfg.covariates and v not in df_work.columns
-        ]
-        if missing_time_vars:
-            try:
-                df_work = add_date_variables(df_work)
-                (log.info if _cfg.verbose else log.debug)(
-                    "Generated time variables: %s", missing_time_vars
-                )
-            except Exception:
-                log.warning(
-                    "Could not generate some time features: %s", missing_time_vars, exc_info=False
-                )
-
-    if model is None:
-        if _cfg.covariates is None:
-            raise ValueError("covariates must be provided")
-        (log.info if _cfg.verbose else log.debug)(
-            "Training model via backend='%s' with features=%d...",
-            _cfg.backend or "flaml",
-            len(_cfg.covariates),
-        )
-        df_work, model = build_model(
-            df=df_work,
-            target="value",
-            backend=_cfg.backend or "flaml",
-            covariates=_cfg.covariates,
-            split_method=_cfg.split_method,
-            train_fraction=_cfg.train_fraction,
-            model_config=_cfg.model_config,
-            seed=_cfg.seed,
-            n_cores=_cfg.n_cores,
-            verbose=_cfg.verbose,
-            cache=_cfg.cache,
-        )
-
-    try:
-        model_feats = [str(c) for c in extract_features(model)]
-    except Exception as exc:
-        if not _cfg.covariates:
-            raise ModelError("Cannot infer model features; please provide `covariates`.") from exc
-        model_feats = [str(c) for c in _cfg.covariates]
-
-    # The missing-time-vars generation above only runs when the caller
-    # passes `covariates` explicitly. Repeat it here against model_feats
-    # (covers the case where covariates is instead auto-derived from
-    # `model` via extract_features()) so date_unix/day_julian/weekday/hour
-    # get generated whenever the model needs them, regardless of which
-    # path supplied the feature list. add_date_variables() is idempotent,
-    # so this is a no-op whenever the first pass above already handled it.
-    missing_time_vars = [
-        v
-        for v in ["date_unix", "day_julian", "weekday", "hour"]
-        if v in model_feats and v not in df_work.columns
-    ]
-    if missing_time_vars:
-        try:
-            df_work = add_date_variables(df_work)
-            (log.info if _cfg.verbose else log.debug)(
-                "Generated time variables: %s", missing_time_vars
-            )
-        except Exception:
-            log.warning(
-                "Could not generate some time features: %s", missing_time_vars, exc_info=False
-            )
-
-    model_feats = [c for c in model_feats if c in df_work.columns]
-    if not model_feats:
-        raise DataError("No valid model features found in the provided `df` for decomposition.")
+    df_work, model, model_feats, observed_conc, is_log_space = _prepare_decomposition_frame(
+        df, _cfg, model=model, drop_na_target=True, sort_by_importance=False
+    )
 
     result = (
-        pd.DataFrame({"date": df_work["date"].to_numpy(), "observed": observed_series.to_numpy()})
+        pd.DataFrame({"date": df_work["date"].to_numpy(), "observed": observed_conc})
         .set_index("date")
         .sort_index()
     )
@@ -900,15 +1397,31 @@ def decom_emi(
 
     n_cores_eff = _effective_cores(_cfg.n_cores)
     start = time.time()
-
     resample_vars = [v for v in model_feats if v != "value"]
+    norm_log_flag = bool(is_log_space and _cfg.scale != "multiplicative")
 
+    fits: dict[str, np.ndarray] = {}
     for i, var_to_fix in enumerate(present_time_vars, start=1):
         if var_to_fix != "base":
             resample_vars = [v for v in resample_vars if v != var_to_fix]
 
         _log_decomposition_progress(_cfg.verbose, start, i, len(present_time_vars), var_to_fix)
+        if (
+            var_to_fix == "base"
+            and _cfg.exact_base
+            and _can_use_analytic_base(model, _cfg, model_feats, resample_vars)
+        ):
+            fits["base"] = _analytic_base_value(
+                df_work,
+                model,
+                _cfg,
+                is_log_space=is_log_space,
+                n_cores_eff=n_cores_eff,
+                n_rows=len(result),
+            )
+            continue
 
+        step_strat = _step_stratify_by(_cfg.stratify_by, resample_vars)
         with progress.part(i - 1, len(present_time_vars)):
             df_norm = normalise(
                 df=df_work,
@@ -923,46 +1436,284 @@ def decom_emi(
                 resample_df=_cfg.resample_df,
                 resample_pools=_cfg.resample_pools,
                 conditional_on=_cfg.conditional_on,
+                stratify_by=step_strat,
+                conditional_k=_cfg.conditional_k,
+                log_transform=norm_log_flag,
                 memory_save=_cfg.memory_save,
                 cache=_cfg.cache,
             )
-        if "normalised" not in df_norm.columns:
-            log.exception("`normalise` did not return 'normalised' column (aggregate=True).")
-            raise ModelError(
-                "`normalise` must return a DataFrame with column 'normalised' when aggregate=True."
-            )
+        vals = _normet_draws_array(df_norm, result.index, want_draws=False)
+        if _cfg.scale == "multiplicative" and not is_log_space:
+            vals = np.log1p(np.maximum(vals, 0.0))
+        fits[var_to_fix] = vals
 
-        result[var_to_fix] = df_norm.reindex(result.index)["normalised"].to_numpy()
-
-    # ``present_time_vars`` is nested from the most-aggregated fit (``base``,
-    # every feature resampled) to the least (the last calendar variable held
-    # at its observed values). The emission series is that last, fully
-    # time-fixed fit -- not the observations. A model trained without ``hour``
-    # (a subset of the calendar variables is supported) used to make
-    # ``emi_total`` the raw concentrations here, so a trend run on it
-    # described the observations. Each component is then the change the next
-    # calendar variable adds, against the previous *present* variable, so a
-    # time variable missing from the model cannot leave a higher-frequency
-    # column carrying the whole nested prediction.
-    result["emi_total"] = result[present_time_vars[-1]]
-    # Each component is the *next fit* minus the *previous fit*. The previous
-    # column is itself replaced by its increment below, so its fit has to be
-    # kept aside -- reading it back from the frame would subtract the
-    # increment and add the level beneath it a second time (weekday 4, hour 8
-    # came back as weekday 4, hour 108, and the parts no longer summed to
-    # ``emi_total``).
-    lower_fit = result["base"].copy()
+    series_map: dict[str, np.ndarray] = {
+        "__base__": fits["base"],
+        "__total__": fits[present_time_vars[-1]],
+    }
+    lower_fit = fits["base"]
     for var_to_fix in present_time_vars[1:]:
-        fit = result[var_to_fix].copy()
-        result[var_to_fix] = fit - lower_fit
+        fit = fits[var_to_fix]
+        series_map[var_to_fix] = fit - lower_fit
         lower_fit = fit
 
-    base_mean = float(result["base"].mean())
-    result["emi_noise"] = result["base"] - base_mean
-    result["emi_base"] = base_mean
-    del result["base"]
+    return _finalise_emission_scale(
+        result,
+        present_time_vars[1:],
+        series_map,
+        base_key="__base__",
+        total_key="__total__",
+        scale=_cfg.scale,
+        is_log_space=True if _cfg.scale == "multiplicative" else is_log_space,
+    )
 
-    return result
+
+def decom_emi_shapley(
+    df: pd.DataFrame,
+    model: object | None = None,
+    *,
+    config: DecomposeConfig | None = None,
+    include_interactions: bool = True,
+    exact_base: bool | None = None,
+    **kwargs: Any,
+) -> pd.DataFrame:
+    """Order-independent Shapley decomposition over time-scale components.
+
+    Evaluates exact Shapley values over whichever of ``date_unix``,
+    ``day_julian``, ``weekday``, ``hour`` are present in the model (at most
+    ``2**4 = 16`` coalitions), resolving order sensitivity between trend and
+    seasonality. When ``include_interactions=True``, also exposes main effects
+    (``{var}_main``) and second-order interaction terms (e.g.
+    ``date_unix:day_julian`` capturing non-repeating annual anomalies).
+    """
+    _cfg = _resolve_config(config=config, **kwargs)
+    _cfg.n_samples = resolve_n_samples(_cfg.n_samples, _cfg.backend)
+    _validate_shared_options(_cfg)
+    if _cfg.groups is not None or _cfg.n_permutations is not None or _cfg.attribution is not None:
+        raise ConfigError(
+            "`groups`, `n_permutations` and `attribution` do not apply to `decom_emi_shapley`."
+        )
+    use_exact_base = bool(_cfg.exact_base) if exact_base is None else bool(exact_base)
+
+    df_work, model, model_feats, observed_conc, is_log_space = _prepare_decomposition_frame(
+        df, _cfg, model=model, drop_na_target=True, sort_by_importance=False
+    )
+
+    result = (
+        pd.DataFrame({"date": df_work["date"].to_numpy(), "observed": observed_conc})
+        .set_index("date")
+        .sort_index()
+    )
+    time_players = [t for t in _TIME_VARS if t in model_feats and t in df_work.columns]
+    n_cores_eff = _effective_cores(_cfg.n_cores)
+    norm_log_flag = bool(is_log_space and _cfg.scale != "multiplicative")
+
+    # A model with no time feature is a valid input (``time_players == []``)
+    # and is handled by the ordinary zero-player attribution below: the one
+    # coalition value its empty player set needs is enough. Do NOT delegate
+    # to decom_emi here: the frame was already log1p-transformed above when
+    # ``scale='multiplicative'`` was requested and the model is in log space,
+    # while a fresh decom_emi call would re-derive ``is_log_space`` from
+    # ``log_transform`` (False) and log1p the predictions a second time,
+    # reporting observations in log1p units.
+
+    players: list[_Player] = [(t, [t]) for t in time_players]
+    all_model_vars = [v for v in model_feats if v != "value"]
+    met_vars = [v for v in all_model_vars if v not in time_players]
+
+    def value_of(resample_time: list[str]) -> np.ndarray:
+        full_resample = [
+            v for v in model_feats if v != "value" and (v in met_vars or v in resample_time)
+        ]
+        if (
+            set(resample_time) == set(time_players)
+            and use_exact_base
+            and _can_use_analytic_base(model, _cfg, model_feats, full_resample)
+        ):
+            return _analytic_base_value(
+                df_work,
+                model,
+                _cfg,
+                is_log_space=is_log_space,
+                n_cores_eff=n_cores_eff,
+                n_rows=len(result),
+            )
+        step_strat = _step_stratify_by(_cfg.stratify_by, full_resample)
+        df_norm = normalise(
+            df=df_work,
+            model=model,
+            covariates=model_feats,
+            variables_resample=full_resample,
+            n_samples=_cfg.n_samples,
+            replace=True,
+            aggregate=True,
+            seed=_cfg.seed,
+            n_cores=n_cores_eff,
+            resample_df=_cfg.resample_df,
+            resample_pools=_cfg.resample_pools,
+            conditional_on=_cfg.conditional_on,
+            stratify_by=step_strat,
+            conditional_k=_cfg.conditional_k,
+            log_transform=norm_log_flag,
+            memory_save=_cfg.memory_save,
+            cache=_cfg.cache,
+        )
+        vals = _normet_draws_array(df_norm, result.index, want_draws=False)
+        if _cfg.scale == "multiplicative" and not is_log_space:
+            vals = np.log1p(np.maximum(vals, 0.0))
+        return vals
+
+    raw_base, phi, coal_vals, _ = _attribute_core(
+        players,
+        value_of,
+        method="shapley",
+        n_permutations=None,
+        seed=_cfg.seed,
+        verbose=_cfg.verbose,
+    )
+    all_fixed = frozenset(range(len(players)))
+    raw_total = coal_vals[all_fixed]
+
+    main_eff: dict[str, np.ndarray] | None = None
+    pair_eff: dict[str, np.ndarray] | None = None
+    if include_interactions and len(time_players) >= 2:
+        main_eff, pair_eff = _compute_interaction_indices(time_players, coal_vals, phi)
+
+    series_map: dict[str, np.ndarray] = {"__base__": raw_base, "__total__": raw_total}
+    for name in time_players:
+        series_map[name] = phi[name]
+
+    return _finalise_emission_scale(
+        result,
+        time_players,
+        series_map,
+        base_key="__base__",
+        total_key="__total__",
+        scale=_cfg.scale,
+        is_log_space=True if _cfg.scale == "multiplicative" else is_log_space,
+        main_effects=main_eff,
+        pairwise=pair_eff,
+    )
+
+
+def _run_met_attribution(
+    df_work: pd.DataFrame,
+    model: object,
+    feat_sorted: list[str],
+    players: list[_Player],
+    method: str,
+    cfg: DecomposeConfig,
+    observed_conc: np.ndarray,
+    is_log_space: bool,
+) -> tuple[pd.DataFrame, dict[str, np.ndarray], dict[frozenset[int], np.ndarray]]:
+    """Shared meteorological attribution engine for ``decom_met`` and ``shapley_interactions``."""
+    result = (
+        pd.DataFrame({"date": df_work["date"].to_numpy(), "observed": observed_conc})
+        .set_index("date")
+        .sort_index()
+    )
+    n_cores_eff = _effective_cores(cfg.n_cores)
+    want_draws = bool(cfg.return_uncertainty)
+    is_mult = cfg.scale == "multiplicative"
+    norm_log_flag = bool(is_log_space and not is_mult)
+
+    def _output_scale(values: np.ndarray) -> np.ndarray:
+        """Map raw model outputs to the space the aggregate path reports."""
+        if norm_log_flag:
+            return np.expm1(values)
+        if is_mult and not is_log_space:
+            return np.log1p(np.maximum(values, 0.0))
+        return values
+
+    def value_of(resample: list[str]) -> np.ndarray:
+        df_norm = normalise(
+            df=df_work,
+            model=model,
+            covariates=feat_sorted,
+            variables_resample=resample,
+            n_samples=cfg.n_samples,
+            replace=True,
+            aggregate=not want_draws,
+            seed=cfg.seed,
+            n_cores=n_cores_eff,
+            resample_df=cfg.resample_df,
+            resample_pools=cfg.resample_pools,
+            conditional_on=cfg.conditional_on,
+            stratify_by=cfg.stratify_by,
+            conditional_k=cfg.conditional_k,
+            # The wide table is needed for per-seed draws; keep it on the
+            # model's native scale so the point estimate can be aggregated
+            # before the back-transform (see below), exactly as the
+            # aggregate=True path does.
+            log_transform=False if want_draws else norm_log_flag,
+            memory_save=cfg.memory_save,
+            cache=cfg.cache,
+        )
+        arr = _normet_draws_array(df_norm, result.index, want_draws=want_draws)
+        if not want_draws:
+            if is_mult and not is_log_space:
+                arr = np.log1p(np.maximum(arr, 0.0))
+            return arr
+        # ``return_uncertainty`` promises only to attach SE columns, so it
+        # must not move the point estimates. The aggregate path maps the mean
+        # of the raw draws to the output scale once; a wide table
+        # back-transformed per seed would instead average expm1(draw), a
+        # Jensen gap that survives more draws (measured ~7 % on emi_total).
+        # Shift every coalition's draw matrix by a constant so its mean is
+        # the aggregate-path point value; the spread across draws, and hence
+        # every MC/permutation SE, is unchanged.
+        raw = np.asarray(arr, dtype=float)
+        point = _output_scale(raw.mean(axis=1))
+        draws = _output_scale(raw)
+        return draws + (point - draws.mean(axis=1))[:, None]
+
+    raw_emi, raw_contribs, raw_values, perm_se = _attribute_core(
+        players,
+        value_of,
+        method=method,
+        n_permutations=cfg.n_permutations,
+        seed=cfg.seed,
+        verbose=cfg.verbose,
+    )
+    all_fixed = frozenset(range(len(players)))
+    mean_values = {s: _mean_series(v) for s, v in raw_values.items()}
+    mean_contribs = {name: _mean_series(arr) for name, arr in raw_contribs.items()}
+
+    uncertainty_cols: dict[str, np.ndarray] | None = None
+    factor_cols: dict[str, np.ndarray] | None = None
+
+    if not is_mult:
+        emi_out = mean_values[frozenset()]
+        contribs_out = mean_contribs
+        out_values = mean_values
+        if want_draws:
+            uncertainty_cols = {"emi_total_se": _mc_se(raw_emi)}
+            for name, arr in raw_contribs.items():
+                uncertainty_cols[f"{name}_se"] = np.hypot(_mc_se(arr), perm_se[name])
+    else:
+        z_emi = mean_values[frozenset()]
+        z_pred = mean_values[all_fixed]
+        emi_out = np.expm1(z_emi)
+        pred_c = np.expm1(z_pred)
+        w = _lmdi_weight(pred_c, emi_out)
+        contribs_out = {name: w * dz for name, dz in mean_contribs.items()}
+        factor_cols = {f"{name}_factor": np.exp(dz) for name, dz in mean_contribs.items()}
+        out_values = {s: w * z_s for s, z_s in mean_values.items()}
+        if want_draws:
+            uncertainty_cols = {"emi_total_se": (1.0 + np.maximum(emi_out, 0.0)) * _mc_se(raw_emi)}
+            for name, arr in raw_contribs.items():
+                se_z = np.hypot(_mc_se(arr), perm_se[name])
+                uncertainty_cols[f"{name}_se"] = np.abs(w) * se_z
+
+    frame = _met_result(
+        result,
+        emi_out,
+        contribs_out,
+        include_diagnostics=cfg.include_diagnostics,
+        uncertainty=uncertainty_cols,
+        factors=factor_cols,
+    )
+    return frame, contribs_out, out_values
 
 
 def decom_met(
@@ -983,209 +1734,537 @@ def decom_met(
     some of them held at their observed values instead of resampled:
 
     - ``attribution="sequential"`` fixes them one at a time and reports each
-      step's change. This is cumulative fixing, not leave-one-out: each
-      contribution is conditional on everything fixed before it, so the split
-      depends on the order -- ``variable_order`` if given, else fitted
-      importance (``importance_ascending``), which can reorder when the model
-      is refitted; with ``groups``, the order they are listed in.
+      step's change.
     - ``attribution="shapley"`` averages each feature's (or group's) marginal
-      effect over every order it could be fixed in: the Shapley value of the
-      game whose value for a set ``S`` is the normalised series with ``S`` at
-      observed values. No order is privileged, so the split does not move when
-      features are listed differently or importance reshuffles.
+      effect over every order it could be fixed in.
 
-    Either way the contributions add up exactly to ``prediction - emi_total``,
-    and every :func:`normalise` call uses the same seed, so the differences
-    between calls are paired (common random numbers).
-
-    Separating transport from local effects is what ``groups`` is for::
-
-        decom_met(df, model, groups={"local": met_cols, "transport": traj_cols})
-
-    gives one ``local`` and one ``transport`` column (Shapley by default). Both
-    are measured against ``emi_total``, which averages over the air masses in
-    the resample pool, so over the record they are anomalies with a mean near
-    zero. To measure transport against a reference air mass instead, give the
-    trajectory features a pool of their own --
-    ``resample_pools={"transport": clean_hours[traj_cols]}`` makes
-    ``emi_total`` the level under that air mass and the ``transport`` column
-    the change from it to the air that actually arrived.
-
-    Note the asymmetry with :func:`decom_emi`, which fixes the time variables
-    in a hardcoded calendar order chosen so each component has a specific
-    temporal-frequency meaning.
-
-    Parameters
-    ----------
-    df : pandas.DataFrame, optional
-        Input data with datetime and target column.
-    model : object, optional
-        Pre-trained model. If None, a new model will be trained.
-    config : DecomposeConfig, optional
-        Consolidated config object. Individual keyword arguments (``target``,
-        ``backend``, ``covariates``, ``groups``, ``attribution``,
-        ``resample_pools``, …) override the corresponding field when provided.
-
-    Returns
-    -------
-    pandas.DataFrame
-        Indexed by ``date``: ``observed``; ``emi_total``; one contribution
-        column per feature, or per group (named after it); ``met_total``
-        (``observed - emi_total``); ``met_base``, its mean (a constant); and
-        ``met_noise`` = ``met_total - met_base - sum of contributions``. That
-        last one equals the model residual ``observed - prediction`` shifted
-        by the constant ``met_base``: it is what the model does not explain,
-        not a meteorological term. When the model is trained here, rows with a
-        missing target are dropped, as :func:`build_model` drops them.
-
-    Raises
-    ------
-    DataError, ConfigError
-        If required arguments are missing, columns are not found, or
-        ``groups`` / ``attribution`` / ``variable_order`` /
-        ``n_permutations`` are inconsistent with the model's features.
-    ModelError
-        If ``normalise`` does not return a ``normalised`` column.
+    Supports ``include_diagnostics=True`` (explicit ``predicted``,
+    ``met_explained``, ``residual``), ``return_uncertainty=True`` (paired MC
+    and permutation SEs), ``scale="multiplicative"`` (LMDI log-scale closure +
+    ``_factor`` columns), ``stratify_by``, and ``conditional_k``.
     """
     _cfg = _resolve_config(config=config, **kwargs)
-    # n_samples is None-by-default so it can follow the backend; the AutoML
-    # paths below hand it straight to normalise(), which needs a number.
     _cfg.n_samples = resolve_n_samples(_cfg.n_samples, _cfg.backend)
+    _attribution_method(_cfg)
 
-    if df is None:
-        raise DataError("`df` must be provided.")
-    if _cfg.target is None:
-        raise DataError("`target` (target column name) must be provided.")
-    if model is None and _cfg.covariates is None:
-        raise ConfigError("Either `model` or `covariates` must be provided.")
-    if model is None and _cfg.backend is None:
-        raise ConfigError("When training a model, `backend` must be specified.")
-    _attribution_method(_cfg)  # before any model is trained
-
-    df = df.copy()
-    if "date" not in df.columns:
-        df = process_date(df)
-    df = df[df["date"].notna()].sort_values("date").reset_index(drop=True)
-
-    if _cfg.target not in df.columns:
-        raise DataError(f"`df` does not contain the target column '{_cfg.target}'.")
-
-    df_work = df.copy()
-    if _cfg.target != "value":
-        df_work = df_work.rename(columns={_cfg.target: "value"})
-
-    if _cfg.covariates:
-        missing_time_vars = [
-            v for v in _TIME_VARS if v in _cfg.covariates and v not in df_work.columns
-        ]
-        if missing_time_vars:
-            try:
-                df_work = add_date_variables(df_work)
-                (log.info if _cfg.verbose else log.debug)(
-                    "Generated time variables: %s", missing_time_vars
-                )
-            except Exception:
-                log.warning(
-                    "Missing time features not generated: %s", missing_time_vars, exc_info=False
-                )
-
-    if model is None:
-        if _cfg.covariates is None:
-            raise ValueError("covariates must be provided")
-        (log.info if _cfg.verbose else log.debug)(
-            "Training model via backend='%s' with features=%d...",
-            _cfg.backend or "flaml",
-            len(_cfg.covariates),
-        )
-        df_work, model = build_model(
-            df=df_work,
-            target="value",
-            backend=_cfg.backend or "flaml",
-            covariates=_cfg.covariates,
-            split_method=_cfg.split_method,
-            train_fraction=_cfg.train_fraction,
-            model_config=_cfg.model_config,
-            seed=_cfg.seed,
-            verbose=_cfg.verbose,
-            cache=_cfg.cache,
-        )
-
-    # Observed values come from the frame actually decomposed: a model trained
-    # here drops the rows with a missing target, and taking `observed` from the
-    # input instead left it longer than the dates it was paired with.
-    observed_series = df_work["value"]
-
-    try:
-        feat_sorted = extract_features(model, importance_ascending=_cfg.importance_ascending)
-    except Exception as exc:
-        if not _cfg.covariates:
-            raise ModelError("Cannot infer model features; please provide `covariates`.") from exc
-        feat_sorted = list(_cfg.covariates)
-
-    # The generation pass above only runs when the caller spelled out
-    # `covariates`. With a pre-trained model and no list, the model's own
-    # feature names are the statement of which calendar variables it needs;
-    # generate them before the filter below drops the missing ones -- else
-    # they leave the resampling list, and an AutoML backend predicts them as
-    # zeros rather than raising. ``add_date_variables`` is idempotent.
-    missing_time_vars = [v for v in _TIME_VARS if v in feat_sorted and v not in df_work.columns]
-    if missing_time_vars:
-        try:
-            df_work = add_date_variables(df_work)
-            (log.info if _cfg.verbose else log.debug)(
-                "Generated time variables: %s", missing_time_vars
-            )
-        except Exception:
-            log.warning(
-                "Could not generate some time features: %s", missing_time_vars, exc_info=False
-            )
-
-    feat_sorted = [f for f in feat_sorted if f in df_work.columns]
-    if not feat_sorted:
-        raise DataError("No valid model features found in `df`.")
-
-    # Already in importance order, which is the default sequential order.
+    df_work, model, feat_sorted, observed_conc, is_log_space = _prepare_decomposition_frame(
+        df, _cfg, model=model, drop_na_target=False, sort_by_importance=True
+    )
     contrib_candidates = [f for f in feat_sorted if f not in _TIME_VARS]
     players, method = _attribution_plan(contrib_candidates, _cfg, default_order=list)
 
+    frame, _contribs, _vals = _run_met_attribution(
+        df_work,
+        model,
+        feat_sorted,
+        players,
+        method,
+        _cfg,
+        observed_conc,
+        is_log_space,
+    )
+    return frame
+
+
+def shapley_interactions(
+    df: pd.DataFrame,
+    model: object | None = None,
+    *,
+    config: DecomposeConfig | None = None,
+    **kwargs: Any,
+) -> ShapleyInteractionResult:
+    """Decompose meteorological attribution into pure main effects and pairwise interactions.
+
+    Computes exact Grabisch–Roubens second-order Shapley interaction indices
+    ``I_ij(t)`` and adjusted main effects ``I_ii(t) = phi_i(t) - 0.5 * sum_{j!=i} I_ij(t)``
+    from the ``2**k`` coalitions evaluated during exact Shapley attribution --
+    requiring **zero** additional model predictions.
+
+    Exact closure holds row-wise:
+    ``main_effects.sum(axis=1) + pairwise.sum(axis=1) == decomposition["met_explained"]``.
+
+    A model with only calendar features (no meteorological player) is valid:
+    ``main_effects`` and ``pairwise`` then have zero columns and ``summary``
+    is empty but still carries its standard columns (``term``, ``kind``,
+    ``mean``, ``std``, ``mean_abs``, ``max_abs``).
+    """
+    _cfg = _resolve_config(config=config, **kwargs)
+    _cfg.n_samples = resolve_n_samples(_cfg.n_samples, _cfg.backend)
+    if _cfg.attribution not in (None, "shapley"):
+        raise ConfigError("`shapley_interactions` requires attribution='shapley'.")
+    if _cfg.n_permutations is not None:
+        raise ConfigError(
+            "`shapley_interactions` requires exact Shapley over all 2**k coalitions (`n_permutations=None`)."
+        )
+    _cfg.attribution = "shapley"
+    _cfg.include_diagnostics = True
+    _attribution_method(_cfg)
+
+    df_work, model, feat_sorted, observed_conc, is_log_space = _prepare_decomposition_frame(
+        df, _cfg, model=model, drop_na_target=False, sort_by_importance=True
+    )
+    contrib_candidates = [f for f in feat_sorted if f not in _TIME_VARS]
+    players, method = _attribution_plan(contrib_candidates, _cfg, default_order=list)
+    player_names = [p[0] for p in players]
+
+    frame, contribs, coal_values = _run_met_attribution(
+        df_work,
+        model,
+        feat_sorted,
+        players,
+        method,
+        _cfg,
+        observed_conc,
+        is_log_space,
+    )
+    main_dict, pair_dict = _compute_interaction_indices(player_names, coal_values, contribs)
+    main_df = pd.DataFrame(main_dict, index=frame.index)
+    pair_df = pd.DataFrame(pair_dict, index=frame.index)
+
+    k = len(player_names)
+    mean_mat = pd.DataFrame(np.zeros((k, k), dtype=float), index=player_names, columns=player_names)
+    std_mat = pd.DataFrame(np.zeros((k, k), dtype=float), index=player_names, columns=player_names)
+    summary_rows: list[dict[str, Any]] = []
+
+    for i, name in enumerate(player_names):
+        arr = main_df[name].to_numpy(dtype=float)
+        m_val, s_val = float(np.mean(arr)), float(np.std(arr))
+        mean_mat.iloc[i, i] = m_val
+        std_mat.iloc[i, i] = s_val
+        summary_rows.append(
+            {
+                "term": name,
+                "kind": "main",
+                "mean": m_val,
+                "std": s_val,
+                "mean_abs": float(np.mean(np.abs(arr))),
+                "max_abs": float(np.max(np.abs(arr))) if arr.size else 0.0,
+            }
+        )
+
+    for i in range(k):
+        for j in range(i + 1, k):
+            pname = f"{player_names[i]}:{player_names[j]}"
+            arr = pair_df[pname].to_numpy(dtype=float)
+            m_val, s_val = float(np.mean(arr)), float(np.std(arr))
+            mean_mat.iloc[i, j] = mean_mat.iloc[j, i] = m_val
+            std_mat.iloc[i, j] = std_mat.iloc[j, i] = s_val
+            summary_rows.append(
+                {
+                    "term": pname,
+                    "kind": "interaction",
+                    "mean": m_val,
+                    "std": s_val,
+                    "mean_abs": float(np.mean(np.abs(arr))),
+                    "max_abs": float(np.max(np.abs(arr))) if arr.size else 0.0,
+                }
+            )
+
+    summary_df = pd.DataFrame(summary_rows, columns=_INTERACTION_SUMMARY_COLUMNS)
+    if not summary_df.empty:
+        summary_df = summary_df.sort_values(
+            ["std", "mean_abs"], ascending=[False, False]
+        ).reset_index(drop=True)
+    return ShapleyInteractionResult(
+        decomposition=frame,
+        main_effects=main_df,
+        pairwise=pair_df,
+        mean_matrix=mean_mat,
+        std_matrix=std_mat,
+        summary=summary_df,
+    )
+
+
+def _impute_from_train(train: pd.DataFrame, frames: Sequence[pd.DataFrame]) -> list[pd.DataFrame]:
+    """Fill predictor NaNs in ``frames`` with statistics learned on ``train``.
+
+    :func:`normet.utils.prepare.impute_values` computes every median (and
+    categorical mode) over the whole frame, so a temporally blocked
+    cross-fit fold's training rows were filled with a value computed from its
+    held-out block -- future information the split is meant to exclude, and
+    the test block's own NaNs were filled from statistics that included
+    themselves. Deriving the statistics from the training rows and applying
+    them to every frame of the fold closes both leaks. A column that is all
+    NaN in ``train`` keeps whatever fill pandas can do with a NaN median,
+    matching ``impute_values``'s behaviour for an all-NaN column.
+    """
+    medians: dict[str, float] = {}
+    for col in train.select_dtypes(include=[np.number]).columns:
+        if train[col].isna().any():
+            medians[str(col)] = float(train[col].median())
+    modes: dict[str, Any] = {}
+    for col in train.select_dtypes(include=["object", "category"]).columns:
+        if train[col].isna().any():
+            mode_series = train[col].mode(dropna=True)
+            if not mode_series.empty:
+                modes[str(col)] = mode_series.iloc[0]
+
+    filled: list[pd.DataFrame] = []
+    for frame in frames:
+        out = frame.copy()
+        for col, median in medians.items():
+            if col not in out.columns:
+                continue
+            try:
+                out[col] = out[col].fillna(median)
+            except (TypeError, ValueError):
+                # A nullable Int64 column only accepts a whole-number fill;
+                # the column has to become float to carry a fractional
+                # median (same handling as impute_values).
+                out[col] = out[col].astype(float).fillna(median)
+        for col, mode in modes.items():
+            if col in out.columns:
+                out[col] = out[col].fillna(mode)
+        filled.append(out)
+    return filled
+
+
+def cross_fit_decompose(
+    df: pd.DataFrame,
+    *,
+    target: str = "value",
+    covariates: Sequence[str],
+    backend: str = "lightgbm",
+    method: str = "meteorology",
+    n_folds: int = 5,
+    block_freq: str | None = None,
+    embargo_hours: float = 0.0,
+    resample_pool: str = "full",
+    config: DecomposeConfig | None = None,
+    **kwargs: Any,
+) -> pd.DataFrame:
+    """Out-of-fold temporally blocked decomposition to prevent emission absorption.
+
+    Trains one model per contiguous temporal block (excluding that block plus an
+    optional ``embargo_hours`` buffer on either side) and runs ``decom_met``,
+    ``decom_emi``, or ``decom_emi_shapley`` strictly out-of-sample on each held-out
+    block before stitching the full record back together.
+    """
+    _cfg = _resolve_config(
+        config=config, target=target, covariates=list(covariates), backend=backend, **kwargs
+    )
+    _cfg.n_samples = resolve_n_samples(_cfg.n_samples, _cfg.backend)
+    _validate_shared_options(_cfg)
+
+    if _cfg.backend == CHRONOS_BACKEND:
+        raise ConfigError(
+            "`cross_fit_decompose` applies to trained AutoML backends, not chronos-2."
+        )
+    if method not in ("emission", "meteorology", "emission_shapley"):
+        raise ConfigError(
+            f"Unsupported `method` {method!r}: expected 'meteorology', 'emission', or 'emission_shapley'."
+        )
+    if resample_pool not in ("full", "train"):
+        raise ConfigError(f"`resample_pool` must be 'full' or 'train', got {resample_pool!r}.")
+    if float(embargo_hours) < 0.0:
+        raise ConfigError(f"`embargo_hours` must be non-negative, got {embargo_hours!r}.")
+    if not _cfg.covariates:
+        raise ConfigError("`covariates` must be non-empty.")
+    if df is None:
+        raise DataError("`df` must be provided.")
+    if method == "meteorology":
+        _attribution_method(_cfg)
+
+    work = process_date(df.copy()) if "date" not in df.columns else df.copy()
+    if "date" not in work.columns or _cfg.target not in work.columns:
+        raise DataError(f"`df` must contain 'date' and target column {_cfg.target!r}.")
+    if _cfg.target != "value":
+        work = work.rename(columns={_cfg.target: "value"})
+    work = (
+        work.loc[work["date"].notna() & work["value"].notna()]
+        .sort_values("date")
+        .reset_index(drop=True)
+    )
+    if work.empty:
+        raise DataError("No valid dated observations available for `cross_fit_decompose`.")
+
+    use_covs = [str(c) for c in _cfg.covariates]
+    if any(v in use_covs and v not in work.columns for v in _TIME_VARS):
+        work = add_date_variables(work)
+    use_covs = [c for c in use_covs if c in work.columns]
+    if not use_covs:
+        raise DataError("No requested covariates found in `df`.")
+    # Imputation happens per fold from the training rows only (see
+    # _impute_from_train); a whole-record median would leak each held-out
+    # block into every training fold.
+
+    is_log_work = bool(_cfg.log_transform)
+    work_fit = work.copy()
+    if _cfg.scale == "multiplicative" and not is_log_work:
+        if (work_fit["value"].to_numpy(dtype=float) < 0.0).any():
+            raise DataError("Cannot apply scale='multiplicative' with negative target values.")
+        work_fit = log1p_target(work_fit, "value")
+        is_log_work = True
+
+    folds: list[np.ndarray[Any, Any]]
+    if block_freq is not None:
+        folds = [
+            grp.index.to_numpy(dtype=int)
+            for _, grp in work_fit.groupby(pd.Grouper(key="date", freq=block_freq), sort=True)
+            if not grp.empty
+        ]
+    else:
+        if int(n_folds) < 2 or int(n_folds) > len(work_fit):
+            raise ConfigError(
+                f"`n_folds` must be between 2 and len(df) ({len(work_fit)}), got {n_folds}."
+            )
+        folds = [
+            np.asarray(idx, dtype=int)
+            for idx in np.array_split(np.arange(len(work_fit)), int(n_folds))
+        ]
+
+    if len(folds) < 2:
+        raise DataError("Temporal partitioning produced fewer than 2 non-empty folds.")
+
+    dates = pd.DatetimeIndex(work_fit["date"])
+    delta = pd.Timedelta(hours=float(embargo_hours))
+    n_cores_eff = _cfg.n_cores
+    parts: list[pd.DataFrame] = []
+
+    for f_idx, test_idx in enumerate(folds):
+        t_lo, t_hi = dates[test_idx].min(), dates[test_idx].max()
+        if float(embargo_hours) > 0.0:
+            train_mask = np.asarray((dates < (t_lo - delta)) | (dates > (t_hi + delta)), dtype=bool)
+        else:
+            train_mask = np.ones(len(work_fit), dtype=bool)
+            train_mask[test_idx] = False
+        if not train_mask.any():
+            raise DataError(
+                f"Fold {f_idx} has zero training rows after embargo ({embargo_hours} h); "
+                "reduce embargo_hours or increase data span."
+            )
+
+        df_train_raw = work_fit.iloc[train_mask].reset_index(drop=True)
+        df_test_raw = work_fit.iloc[test_idx].reset_index(drop=True)
+        if _cfg.resample_df is not None:
+            # An external pool is used as given (the other decompositions do
+            # not impute it either); only the fold frames need filling.
+            df_train, df_test = _impute_from_train(df_train_raw, [df_train_raw, df_test_raw])
+            fold_pool = _cfg.resample_df
+        else:
+            pool_raw = work_fit if resample_pool == "full" else df_train_raw
+            df_train, df_test, fold_pool = _impute_from_train(
+                df_train_raw, [df_train_raw, df_test_raw, pool_raw]
+            )
+        fold_model = train_model(
+            df=df_train,
+            target="value",
+            backend=_cfg.backend or "lightgbm",
+            covariates=use_covs,
+            model_config=_cfg.model_config,
+            seed=_cfg.seed + f_idx,
+            verbose=_cfg.verbose,
+            n_cores=n_cores_eff,
+            cache=_cfg.cache,
+        )
+        fold_cfg = _resolve_config(
+            config=_cfg,
+            target="value",
+            covariates=use_covs,
+            resample_df=fold_pool,
+            log_transform=is_log_work,
+        )
+        if method == "meteorology":
+            part = decom_met(df_test, model=fold_model, config=fold_cfg)
+        elif method == "emission":
+            part = decom_emi(df_test, model=fold_model, config=fold_cfg)
+        else:
+            part = decom_emi_shapley(df_test, model=fold_model, config=fold_cfg)
+        parts.append(part)
+
+    stitched = pd.concat(parts, axis=0).sort_index()
+    if method == "meteorology":
+        stitched["met_total"] = stitched["observed"] - stitched["emi_total"]
+        stitched["met_base"] = float(stitched["met_total"].mean())
+        excluded = set(_MET_RESULT_COLUMNS) | set(_TIME_VARS)
+        c_cols = [
+            c
+            for c in stitched.columns
+            if c not in excluded and not str(c).endswith(("_se", "_factor"))
+        ]
+        c_sum = stitched[c_cols].sum(axis=1) if c_cols else 0.0
+        stitched["met_noise"] = stitched["met_total"] - (stitched["met_base"] + c_sum)
+        if _cfg.include_diagnostics:
+            stitched["predicted"] = stitched["emi_total"] + c_sum
+            stitched["met_explained"] = c_sum
+            stitched["residual"] = stitched["observed"] - stitched["predicted"]
+    elif "emi_base" in stitched.columns and "emi_noise" in stitched.columns:
+        g_base = float(stitched["emi_base"].mean())
+        stitched["emi_noise"] = stitched["emi_noise"] + (stitched["emi_base"] - g_base)
+        stitched["emi_base"] = g_base
+    return stitched
+
+
+def _predict_tree_contrib(
+    model: object, X: pd.DataFrame, feat_names: list[str], n_cores: int | None
+) -> np.ndarray:
+    """Extract raw TreeSHAP contributions ``(n_rows, n_features + 1)`` from supported models."""
+    pred_fn = getattr(model, "predict_contrib", None)
+    if callable(pred_fn):
+        try:
+            arr = np.asarray(pred_fn(X, num_threads=n_cores), dtype=float)
+        except TypeError:
+            arr = np.asarray(pred_fn(X), dtype=float)
+    else:
+        inner = (
+            getattr(getattr(model, "model", None), "estimator", None)
+            or getattr(model, "model", None)
+            or model
+        )
+        booster = getattr(inner, "booster_", None) or getattr(inner, "_Booster", None)
+        if booster is not None and callable(getattr(booster, "predict", None)):
+            arr = np.asarray(
+                booster.predict(X.to_numpy(dtype=float), pred_contrib=True), dtype=float
+            )
+        elif hasattr(inner, "get_booster"):
+            import xgboost as xgb
+
+            dm = xgb.DMatrix(X.to_numpy(dtype=float), feature_names=feat_names)
+            arr = np.asarray(inner.get_booster().predict(dm, pred_contribs=True), dtype=float)
+        else:
+            inner_pred = getattr(inner, "predict", None)
+            if inner.__class__.__name__.startswith("LGBM") and callable(inner_pred):
+                arr = np.asarray(inner_pred(X, pred_contrib=True), dtype=float)
+            else:
+                raise ModelError(
+                    f"Model type {type(model).__name__!r} does not expose TreeSHAP pred_contrib."
+                )
+
+    expected_shape = (len(X), len(feat_names) + 1)
+    if arr.ndim != 2 or arr.shape != expected_shape:
+        raise ModelError(
+            f"TreeSHAP contribution shape mismatch: expected {expected_shape}, got {arr.shape}."
+        )
+    return arr
+
+
+def decom_met_treeshap(
+    df: pd.DataFrame,
+    model: object,
+    *,
+    target: str = "value",
+    groups: Mapping[str, Sequence[str]] | None = None,
+    include_diagnostics: bool = True,
+    n_cores: int | None = None,
+) -> pd.DataFrame:
+    """Observational path-dependent TreeSHAP meteorological attribution for tree models.
+
+    Complements interventional Monte Carlo Shapley (:func:`decom_met`) by
+    conditioning each tree split on the training joint path distribution, so
+    highly collinear meteorological predictors receive on-manifold observational
+    attributions. Use :func:`compare_attributions` to inspect discrepancies caused
+    by collinear extrapolation.
+    """
+    if df is None:
+        raise DataError("`df` must be provided.")
+    work = process_date(df.copy()) if "date" not in df.columns else df.copy()
+    if "date" not in work.columns or target not in work.columns:
+        raise DataError(f"`df` must contain 'date' and target column {target!r}.")
+    work = work.loc[work["date"].notna()].sort_values("date").reset_index(drop=True)
+
+    try:
+        feat_names = [str(c) for c in extract_features(model)]
+    except Exception as exc:
+        raise ModelError("Could not extract feature names from `model` for TreeSHAP.") from exc
+
+    if any(v in feat_names and v not in work.columns for v in _TIME_VARS):
+        work = add_date_variables(work)
+    missing = [f for f in feat_names if f not in work.columns]
+    if missing:
+        raise DataError(f"`df` is missing model features required for TreeSHAP: {missing}")
+
+    X = work[feat_names]
+    arr = _predict_tree_contrib(model, X, feat_names, _effective_cores(n_cores))
+    shap_by_feat = {f: arr[:, i] for i, f in enumerate(feat_names)}
+    bias = arr[:, -1]
+
+    emi_total = bias.copy()
+    for t_var in feat_names:
+        if t_var in _TIME_VARS:
+            emi_total = emi_total + shap_by_feat[t_var]
+
+    met_feats = [f for f in feat_names if f not in _TIME_VARS]
+    if groups is not None:
+        players = _players_from_groups(groups, met_feats)
+        contributions = {
+            name: np.sum([shap_by_feat[f] for f in g_feats], axis=0) for name, g_feats in players
+        }
+    else:
+        contributions = {f: shap_by_feat[f] for f in met_feats}
+
     result = (
-        pd.DataFrame({"date": df_work["date"].to_numpy(), "observed": observed_series.to_numpy()})
+        pd.DataFrame(
+            {"date": work["date"].to_numpy(), "observed": work[target].to_numpy(dtype=float)}
+        )
         .set_index("date")
         .sort_index()
     )
+    return _met_result(result, emi_total, contributions, include_diagnostics=include_diagnostics)
 
-    n_cores_eff = _effective_cores(_cfg.n_cores)
 
-    def value_of(resample: list[str]) -> np.ndarray:
-        df_norm = normalise(
-            df=df_work,
-            model=model,
-            covariates=feat_sorted,
-            variables_resample=resample,
-            n_samples=_cfg.n_samples,
-            replace=True,
-            aggregate=True,
-            seed=_cfg.seed,
-            n_cores=n_cores_eff,
-            resample_df=_cfg.resample_df,
-            resample_pools=_cfg.resample_pools,
-            conditional_on=_cfg.conditional_on,
-            memory_save=_cfg.memory_save,
-            cache=_cfg.cache,
+def compare_attributions(
+    interventional: pd.DataFrame,
+    conditional: pd.DataFrame,
+    *,
+    cols: Sequence[str] | None = None,
+) -> pd.DataFrame:
+    """Compare interventional vs. conditional/TreeSHAP attribution tables.
+
+    Aligns both DataFrames on shared timestamps and computes per-component
+    Pearson correlation, RMSE, MAE, mean difference, spread ratio, and normalised
+    OOD discrepancy ``rmse / std(interventional)``.
+    """
+    a = interventional.set_index("date") if "date" in interventional.columns else interventional
+    b = conditional.set_index("date") if "date" in conditional.columns else conditional
+    shared_idx = a.index.intersection(b.index)
+    if shared_idx.empty:
+        raise DataError("`interventional` and `conditional` share no overlapping timestamps.")
+
+    if cols is not None:
+        comp_cols = [str(c) for c in cols]
+    else:
+        skip = set(_MET_RESULT_COLUMNS) | set(_TIME_VARS) | {"emi_base", "emi_noise"}
+        comp_cols = [
+            c
+            for c in a.columns
+            if c in b.columns
+            and c not in skip
+            and not str(c).endswith(("_se", "_factor", "_ci_low", "_ci_high"))
+            and pd.api.types.is_numeric_dtype(a[c])
+            and pd.api.types.is_numeric_dtype(b[c])
+        ]
+    if not comp_cols:
+        raise DataError("No shared numeric contribution columns to compare.")
+
+    rows: list[dict[str, Any]] = []
+    for col in comp_cols:
+        va = pd.to_numeric(a.loc[shared_idx, col], errors="coerce").to_numpy(dtype=float)
+        vb = pd.to_numeric(b.loc[shared_idx, col], errors="coerce").to_numpy(dtype=float)
+        fin = np.isfinite(va) & np.isfinite(vb)
+        va_f, vb_f = va[fin], vb[fin]
+        diff = va_f - vb_f
+        std_a = float(np.std(va_f)) if va_f.size else float("nan")
+        std_b = float(np.std(vb_f)) if vb_f.size else float("nan")
+        rmse = float(np.sqrt(np.mean(diff**2))) if diff.size else float("nan")
+        if va_f.size >= 2 and std_a > 1e-12 and std_b > 1e-12:
+            corr = float(np.corrcoef(va_f, vb_f)[0, 1])
+        else:
+            corr = float("nan")
+        rows.append(
+            {
+                "component": col,
+                "pearson_r": corr,
+                "rmse": rmse,
+                "mae": float(np.mean(np.abs(diff))) if diff.size else float("nan"),
+                "mean_diff": float(np.mean(diff)) if diff.size else float("nan"),
+                "std_interventional": std_a,
+                "std_conditional": std_b,
+                "std_ratio": std_b / std_a
+                if np.isfinite(std_a) and std_a > 1e-12
+                else float("nan"),
+                "ood_discrepancy": rmse / std_a
+                if np.isfinite(std_a) and std_a > 1e-12
+                else float("nan"),
+            }
         )
-        if "normalised" not in df_norm.columns:
-            log.exception("`normalise` did not return 'normalised' column (aggregate=True).")
-            raise ModelError(
-                "`normalise` must return a DataFrame with column 'normalised' when aggregate=True."
-            )
-        return df_norm.reindex(result.index)["normalised"].to_numpy()
-
-    emi_total, contributions = _attribute(
-        players,
-        value_of,
-        method=method,
-        n_permutations=_cfg.n_permutations,
-        seed=_cfg.seed,
-        verbose=_cfg.verbose,
-    )
-    return _met_result(result, emi_total, contributions)
+    return pd.DataFrame(rows).set_index("component")

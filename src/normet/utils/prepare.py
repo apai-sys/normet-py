@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import warnings
+from collections.abc import Sequence
 
 import numpy as np
 import pandas as pd
@@ -22,6 +23,7 @@ __all__ = [
     "split_into_sets",
     "log1p_target",
     "expm1_columns",
+    "compute_duan_smearing",
 ]
 
 
@@ -33,16 +35,26 @@ def prepare_data(
     split_method: str = "random",
     train_fraction: float = 0.75,
     seed: int = 7_654_321,
+    *,
+    impute: str = "median",
+    max_gap: int | None = 6,
+    embargo: int = 0,
+    circular_cols: Sequence[str] | None = None,
+    deduplicate: str | None = None,
+    strict_covariates: bool = False,
+    local_time: bool = False,
 ) -> pd.DataFrame:
     """
     Clean, validate, and split the input DataFrame in a single pipeline.
 
     Steps:
       1) Ensure a datetime column named ``date`` is present.
-      2) Validate target and covariates.
-      3) Impute/drop missing values.
-      4) Add derived date variables (unix, julian day, weekday, hour).
-      5) Split into training/testing sets.
+      2) Validate target and covariates (and drop NA targets before splitting when ``dropna=True``).
+      3) Optionally deduplicate repeated timestamps before date feature generation.
+      4) Add date variables (unix, julian day, weekday, hour).
+      5) Split into training/testing sets (with optional ``embargo`` around test blocks).
+      6) Impute missing predictor values (see ``impute``; ``"train_median"``
+         restricts the statistics to the training rows).
 
     Parameters
     ----------
@@ -56,18 +68,42 @@ def prepare_data(
         are added automatically by this pipeline -- don't list them here;
         see :func:`add_date_variables`.
     dropna : bool, default True
-        If True, drop rows where the target is NA. Also imputes other NAs.
-    split_method : {"random","ts","month_ts","season_ts"}, default "random"
-        Train/test split method. See :func:`split_into_sets` for the exact
-        mechanics -- in particular, "month_ts"/"season_ts" hold out a
-        contiguous block at a randomised (seeded) position within every
-        period, rather than always the trailing slice; read that
-        docstring's note for why that matters and its remaining caveats
-        before choosing them over "random".
+        If True, drop rows where the target is NA before splitting.
+    split_method : {"random","ts","month_ts","season_ts","blocked"}, default "random"
+        Train/test split method. See :func:`split_into_sets`.
     train_fraction : float, default 0.75
         Training fraction for data splitting.
     seed : int, default 7654321
         Random seed for reproducibility.
+    impute : {"median","train_median","time_interp","none"}, default "median"
+        Missing-value handling applied *after* splitting.
+        ``"median"`` (the default, and the behaviour before the strategy was
+        configurable) fills numeric NAs from the full-frame median and
+        categorical NAs from the full-frame mode; ``"train_median"`` opts into
+        training-set-only statistics, so test rows never leak into the fill
+        values.
+    max_gap : int or None, default 6
+        Maximum consecutive missing steps filled by linear temporal interpolation
+        when ``impute="time_interp"``. Larger gaps fall back to training medians.
+    embargo : int, default 0
+        Number of adjacent training rows marked ``"embargo"`` around each contiguous
+        testing block (useful for autocorrelated hourly series).
+    circular_cols : sequence of str, optional
+        Angular degree columns (e.g. ``("wd",)``) interpolated via ``sin``/``cos``
+        when ``impute="time_interp"``.
+    deduplicate : {"mean", "first", "last", "raise"} or None, default None
+        How to handle duplicate timestamps in ``date`` after dropping NA targets.
+        ``None`` preserves duplicate rows and emits a warning; ``"raise"``
+        raises ``ValueError``; ``"first"``/``"last"`` keeps one row; ``"mean"``
+        averages numeric columns and keeps first non-numeric values per timestamp.
+    strict_covariates : bool, default False
+        If True, raise ``ValueError`` when any non-builtin covariate in
+        ``covariates`` is missing from ``df``.
+    local_time : bool, default False
+        Forwarded to :func:`add_date_variables`. By default the calendar
+        features (``day_julian``/``weekday``/``hour``) are derived from UTC
+        for tz-aware input, matching the historical encoding; pass True to
+        derive them from the frame's local civil time instead.
 
     Returns
     -------
@@ -77,17 +113,62 @@ def prepare_data(
           - ``value`` column (target, renamed internally)
           - covariates
           - derived date features
-          - ``set`` column indicating "training"/"testing".
+          - ``set`` column indicating "training"/"testing" (and "embargo" if ``embargo > 0``).
     """
+    valid_dedup = {None, "mean", "first", "last", "raise"}
+    if deduplicate not in valid_dedup:
+        raise ValueError(
+            f"Unknown `deduplicate` mode {deduplicate!r}; expected None or 'mean'/'first'/'last'/'raise'."
+        )
     log.debug(
         "Preparing data with split_method=%s, train_fraction=%.3f", split_method, train_fraction
     )
+    df_out = df.pipe(process_date).pipe(
+        check_data, covariates=covariates, target=target, strict_covariates=strict_covariates
+    )
+    if dropna and "value" in df_out.columns:
+        before = len(df_out)
+        df_out = df_out.dropna(subset=["value"]).reset_index(drop=True)
+        dropped = before - len(df_out)
+        if dropped:
+            log.info("Dropped %d rows with NA in target.", dropped)
+    if not df_out.empty and df_out["date"].duplicated().any():
+        n_dup = int(df_out["date"].duplicated().sum())
+        if deduplicate == "raise":
+            raise ValueError(f"Found {n_dup} duplicate timestamp(s) in `date`.")
+        if deduplicate == "first":
+            df_out = df_out.drop_duplicates(subset=["date"], keep="first").reset_index(drop=True)
+        elif deduplicate == "last":
+            df_out = df_out.drop_duplicates(subset=["date"], keep="last").reset_index(drop=True)
+        elif deduplicate == "mean":
+            orig_cols = list(df_out.columns)
+            num_cols = [c for c in df_out.select_dtypes(include=[np.number]).columns if c != "date"]
+            other_cols = [c for c in orig_cols if c not in num_cols and c != "date"]
+            agg_spec: dict[str, str] = {c: "mean" for c in num_cols}
+            agg_spec.update({c: "first" for c in other_cols})
+            df_out = df_out.groupby("date", as_index=False, sort=True).agg(agg_spec)[orig_cols]
+        else:
+            log.warning(
+                "Detected %d duplicate timestamp(s) in `date`; consider passing `deduplicate='mean'`.",
+                n_dup,
+            )
     df_out = (
-        df.pipe(process_date)
-        .pipe(check_data, covariates=covariates, target=target)
-        .pipe(impute_values, dropna=dropna)
-        .pipe(add_date_variables)
-        .pipe(split_into_sets, split_method=split_method, train_fraction=train_fraction, seed=seed)
+        df_out.pipe(add_date_variables, local_time=local_time)
+        .pipe(
+            split_into_sets,
+            split_method=split_method,
+            train_fraction=train_fraction,
+            seed=seed,
+            embargo=embargo,
+        )
+        .pipe(
+            impute_values,
+            dropna=False,
+            strategy=impute,
+            max_gap=max_gap,
+            circular_cols=circular_cols,
+            within_split=split_method != "random",
+        )
         .reset_index(drop=True)
     )
     log.info("Prepared data: %d rows, %d columns", len(df_out), df_out.shape[1])
@@ -184,7 +265,13 @@ def process_date(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def check_data(df: pd.DataFrame, covariates: list[str], target: str) -> pd.DataFrame:
+def check_data(
+    df: pd.DataFrame,
+    covariates: list[str],
+    target: str,
+    *,
+    strict_covariates: bool = False,
+) -> pd.DataFrame:
     """
     Validate target column and restrict DataFrame to relevant variables.
 
@@ -196,6 +283,9 @@ def check_data(df: pd.DataFrame, covariates: list[str], target: str) -> pd.DataF
         Requested predictor columns.
     target : str
         Target variable name.
+    strict_covariates : bool, default False
+        If True, raise ``ValueError`` if any non-builtin covariate in
+        ``covariates`` is absent from ``df.columns``.
 
     Returns
     -------
@@ -205,10 +295,17 @@ def check_data(df: pd.DataFrame, covariates: list[str], target: str) -> pd.DataF
     Raises
     ------
     ValueError
-        If target missing, or ``date`` not datetime, or has NA.
+        If target missing, or ``date`` not datetime, or has NA, or (when
+        ``strict_covariates=True``) requested external covariates are missing.
     """
     if target not in df.columns:
         raise ValueError(f"The target variable `{target}` is not in the DataFrame columns.")
+
+    if strict_covariates:
+        builtin_time = {"date_unix", "day_julian", "weekday", "hour"}
+        missing_cov = [c for c in covariates if c not in builtin_time and c not in df.columns]
+        if missing_cov:
+            raise ValueError(f"Requested covariate(s) not found in DataFrame: {missing_cov}")
 
     # Excludes "date"/target here (added back once below) so a caller who
     # accidentally includes either in `covariates` doesn't end up with
@@ -234,46 +331,227 @@ def check_data(df: pd.DataFrame, covariates: list[str], target: str) -> pd.DataF
     return df_sel
 
 
-def impute_values(df: pd.DataFrame, dropna: bool) -> pd.DataFrame:
+def _eligible_interior_gap_mask(is_na: np.ndarray, max_gap: int | None) -> np.ndarray:
+    """Mark interior NA runs flanked by valid values with length <= ``max_gap``."""
+    n = len(is_na)
+    elig = np.zeros(n, dtype=bool)
+    i = 0
+    while i < n:
+        if not is_na[i]:
+            i += 1
+            continue
+        start = i
+        while i < n and is_na[i]:
+            i += 1
+        stop = i
+        run_len = stop - start
+        if start > 0 and stop < n and (max_gap is None or run_len <= max_gap):
+            elig[start:stop] = True
+    return elig
+
+
+def _interp_segment_1d(vals: np.ndarray, *, max_gap: int | None, is_circular: bool) -> np.ndarray:
+    """Interpolate strictly interior short gaps inside one contiguous split slice."""
+    out_vals = vals.astype(float, copy=True)
+    is_na = ~np.isfinite(out_vals)
+    elig = _eligible_interior_gap_mask(is_na, max_gap)
+    if not np.any(elig):
+        return out_vals
+    if is_circular:
+        rad = np.deg2rad(out_vals)
+        sin_raw = (
+            pd.Series(np.sin(rad))
+            .interpolate(method="linear", limit_area="inside")
+            .to_numpy(dtype=float)
+        )
+        cos_raw = (
+            pd.Series(np.cos(rad))
+            .interpolate(method="linear", limit_area="inside")
+            .to_numpy(dtype=float)
+        )
+        ok = (
+            elig
+            & np.isfinite(sin_raw)
+            & np.isfinite(cos_raw)
+            & (np.hypot(sin_raw, cos_raw) > 1e-12)
+        )
+        out_vals[ok] = np.rad2deg(np.arctan2(sin_raw[ok], cos_raw[ok])) % 360.0
+    else:
+        lin_raw = (
+            pd.Series(out_vals)
+            .interpolate(method="linear", limit_area="inside")
+            .to_numpy(dtype=float)
+        )
+        out_vals[elig] = lin_raw[elig]
+    return out_vals
+
+
+def _contiguous_runs(mask: np.ndarray) -> list[tuple[int, int]]:
+    """Return maximal contiguous ``[start, stop)`` intervals where *mask* is True."""
+    runs: list[tuple[int, int]] = []
+    n = len(mask)
+    i = 0
+    while i < n:
+        if not mask[i]:
+            i += 1
+            continue
+        start = i
+        while i < n and mask[i]:
+            i += 1
+        runs.append((start, i))
+    return runs
+
+
+def _fill_numeric_median(out: pd.DataFrame, col: str, ref_mask: np.ndarray) -> None:
+    """Fill remaining NA in numeric *col* using median fit on *ref_mask* rows."""
+    ref_vals = pd.to_numeric(out.loc[ref_mask, col], errors="coerce").to_numpy(dtype=float)
+    finite_ref = ref_vals[np.isfinite(ref_vals)]
+    if finite_ref.size > 0:
+        median = float(np.median(finite_ref))
+    else:
+        all_vals = pd.to_numeric(out[col], errors="coerce").to_numpy(dtype=float)
+        finite_all = all_vals[np.isfinite(all_vals)]
+        if finite_all.size == 0:
+            return
+        median = float(np.median(finite_all))
+    try:
+        out[col] = out[col].fillna(median)
+    except (TypeError, ValueError):
+        # A nullable Int64 column accepts only a whole-number fill;
+        # a 1.5 median raises "Invalid value '1.5' for dtype
+        # 'Int64'" (whether it did depended on the data). The column
+        # has to become float to carry the median.
+        out[col] = out[col].astype(float).fillna(median)
+
+
+def impute_values(
+    df: pd.DataFrame,
+    dropna: bool = True,
+    *,
+    strategy: str = "median",
+    max_gap: int | None = 6,
+    circular_cols: Sequence[str] | None = None,
+    within_split: bool = True,
+) -> pd.DataFrame:
     """
     Impute or drop missing values in predictors and target.
+
+    ``"train_median"`` (and the fallback used by ``"time_interp"``) estimates
+    summary statistics strictly from the ``"training"`` rows of a frame
+    carrying a ``"set"`` column, so held-out test distributions never leak into
+    the fill values. ``"median"`` is the legacy full-frame fill.
 
     Parameters
     ----------
     df : pandas.DataFrame
         Input dataset with target and features.
-    dropna : bool
+    dropna : bool, default True
         If True, drop rows with NA in target ``value``.
+    strategy : {"median", "train_median", "time_interp", "none"}, default "median"
+        - ``"median"``: fill numeric NAs with the full-frame median and
+          categorical NAs with the full-frame mode (legacy behaviour).
+        - ``"train_median"``: the same fill, but the median/mode is fit on the
+          ``"training"`` rows only (opt-in leak-free behaviour).
+        - ``"time_interp"``: temporally interpolate numeric predictors over short
+          gaps up to ``max_gap`` rows (using ``sin``/``cos`` interpolation for
+          ``circular_cols``), then fill any remaining gaps with training medians.
+        - ``"none"``: only drop NA targets (if ``dropna=True``); leave predictor
+          NAs intact for tree backends with native missing-value routing.
+    max_gap : int or None, default 6
+        Maximum consecutive missing steps filled by linear interpolation when
+        ``strategy="time_interp"``. ``None`` places no gap limit.
+    circular_cols : sequence of str, optional
+        Degree columns (e.g. wind direction ``"wd"``) to interpolate on the circle
+        via ``sin``/``cos`` when ``strategy="time_interp"``.
+    within_split : bool, default True
+        When a ``"set"`` column is present and ``strategy="time_interp"``,
+        interpolate only inside contiguous runs of one split label, so a
+        testing value can never fill a training gap (and vice versa). Pass
+        False for a random split, where the labels alternate and fragment
+        nearly every run: the whole date-ordered series is then one segment,
+        which reproduces the historical behaviour. Time-based splits keep
+        the leak-free default.
 
     Returns
     -------
     pandas.DataFrame
         Cleaned DataFrame with missing values handled.
     """
+    valid_strategies = {"median", "train_median", "time_interp", "none"}
+    if strategy not in valid_strategies:
+        raise ValueError(
+            f"Unknown `impute` strategy {strategy!r}; expected one of {sorted(valid_strategies)}."
+        )
+    if max_gap is not None and int(max_gap) < 0:
+        raise ValueError(f"`max_gap` must be non-negative or None, got {max_gap!r}.")
+
     out = df.copy()
 
-    if dropna:
+    if dropna and "value" in out.columns:
         before = len(out)
         out = out.dropna(subset=["value"]).reset_index(drop=True)
         dropped = before - len(out)
         if dropped:
             log.info("Dropped %d rows with NA in target.", dropped)
 
+    if strategy == "none" or out.empty:
+        return out
+
+    has_train = "set" in out.columns and bool((out["set"] == "training").any())
+    # Only the opt-in strategies restrict their statistics to the training
+    # rows; plain "median" must keep the legacy full-frame fill, otherwise
+    # existing prepare_data()/do_all() results change without an opt-in.
+    use_train = has_train and strategy in ("train_median", "time_interp")
+    ref_mask = (out["set"] == "training").to_numpy() if use_train else np.ones(len(out), dtype=bool)
+    exclude_interp = {"value", "date_unix", "day_julian", "hour"}
+    circular_set = set(circular_cols or ())
+
+    if strategy == "time_interp":
+        order_idx = (
+            out["date"].sort_values(kind="stable").index if "date" in out.columns else out.index
+        )
+        limit_val = int(max_gap) if max_gap is not None else None
+        if limit_val is None or limit_val > 0:
+            # A random split alternates the labels, so contiguous same-label
+            # runs are mostly one or two rows long and interpolation would
+            # fall back to the median at nearly every gap. In that case
+            # (within_split=False) the whole sorted series is one segment,
+            # as it was before split-aware interpolation was introduced.
+            if "set" in out.columns and within_split:
+                split_series = out.loc[order_idx, "set"].astype(str).to_numpy()
+                segments: list[tuple[int, int]] = []
+                for split_label in dict.fromkeys(split_series):
+                    segments.extend(_contiguous_runs(split_series == split_label))
+            else:
+                segments = [(0, len(order_idx))]
+
+            for col in out.select_dtypes(include=[np.number]).columns:
+                if not out[col].isna().any() or col in exclude_interp:
+                    continue
+                vals = out.loc[order_idx, col].astype(float).to_numpy(copy=True)
+                is_circ = col in circular_set
+                for start, stop in segments:
+                    if stop - start >= 3:
+                        vals[start:stop] = _interp_segment_1d(
+                            vals[start:stop], max_gap=limit_val, is_circular=is_circ
+                        )
+                try:
+                    out.loc[order_idx, col] = vals
+                except (TypeError, ValueError):
+                    out[col] = out[col].astype(float)
+                    out.loc[order_idx, col] = vals
+
     for col in out.select_dtypes(include=[np.number]).columns:
         if out[col].isna().any():
-            median = out[col].median()
-            try:
-                out[col] = out[col].fillna(median)
-            except (TypeError, ValueError):
-                # A nullable Int64 column accepts only a whole-number fill;
-                # a 1.5 median raises "Invalid value '1.5' for dtype
-                # 'Int64'" (whether it did depended on the data). The column
-                # has to become float to carry the median.
-                out[col] = out[col].astype(float).fillna(median)
+            _fill_numeric_median(out, col, ref_mask)
 
     for col in out.select_dtypes(include=["object", "category"]).columns:
+        if col in {"date", "set"}:
+            continue
         if out[col].isna().any():
-            mode_series = out[col].mode(dropna=True)
+            mode_series = out.loc[ref_mask, col].mode(dropna=True)
+            if mode_series.empty:
+                mode_series = out[col].mode(dropna=True)
             if not mode_series.empty:
                 out[col] = out[col].fillna(mode_series.iloc[0])
             else:
@@ -282,7 +560,7 @@ def impute_values(df: pd.DataFrame, dropna: bool) -> pd.DataFrame:
     return out
 
 
-def add_date_variables(df: pd.DataFrame) -> pd.DataFrame:
+def add_date_variables(df: pd.DataFrame, *, local_time: bool = False) -> pd.DataFrame:
     """
     Add basic date/time-derived features from ``date``.
 
@@ -309,6 +587,15 @@ def add_date_variables(df: pd.DataFrame) -> pd.DataFrame:
     ----------
     df : pandas.DataFrame
         Input dataset with column ``date``.
+    local_time : bool, default False
+        For tz-aware input, derive ``day_julian``/``weekday``/``hour`` from
+        the frame's local civil time. Default False derives them from UTC,
+        which is how the function has always behaved: a model whose
+        hour-of-day effect was fitted on that encoding keeps seeing the same
+        clock, and the calendar features agree with ``date_unix``. Pass True
+        when the analysis is deliberately about local wall-clock behaviour
+        (e.g. rush hour); the three features then shift by the UTC offset
+        and no longer line up with ``date_unix``.
 
     Returns
     -------
@@ -316,19 +603,24 @@ def add_date_variables(df: pd.DataFrame) -> pd.DataFrame:
         Copy of dataset with added time-derived variables.
     """
     out = df.copy()
-    dt = pd.DatetimeIndex(out["date"])
-    if dt.tz is not None:
-        dt = dt.tz_convert("UTC").tz_localize(None)
+    dt_in = pd.DatetimeIndex(out["date"])
+    if dt_in.tz is not None:
+        dt_utc = dt_in.tz_convert("UTC").tz_localize(None)
+        dt_cal = dt_in.tz_localize(None) if local_time else dt_utc
+    else:
+        dt_utc = dt_in
+        dt_cal = dt_in
 
     # astype("int64") counts in the index's own resolution, not nanoseconds:
     # pandas >= 2.0 keeps a series' unit (datetime64[s]/[ms]/[us], e.g. from
     # Parquet) through ``DatetimeIndex``, so without the explicit ns conversion
     # ``date_unix`` came out in seconds/ms/us -- 1.7e9 -> 1.7 for a s-resolution
     # column -- and the trend feature silently lost its scale.
-    out["date_unix"] = dt.as_unit("ns").astype("int64").to_numpy() // 10**9
-    out["day_julian"] = dt.dayofyear.to_numpy()
-    out["weekday"] = pd.Categorical(dt.weekday + 1)
-    out["hour"] = dt.hour.to_numpy()
+    # ``date_unix`` always records absolute UTC epoch seconds.
+    out["date_unix"] = dt_utc.as_unit("ns").astype("int64").to_numpy() // 10**9
+    out["day_julian"] = dt_cal.dayofyear.to_numpy()
+    out["weekday"] = pd.Categorical(dt_cal.weekday + 1)
+    out["hour"] = dt_cal.hour.to_numpy()
     return out
 
 
@@ -355,7 +647,12 @@ def _mark_random_window_training(
 
 
 def split_into_sets(
-    df: pd.DataFrame, split_method: str, train_fraction: float, seed: int
+    df: pd.DataFrame,
+    split_method: str,
+    train_fraction: float,
+    seed: int,
+    *,
+    embargo: int = 0,
 ) -> pd.DataFrame:
     """
     Split dataset into training/testing subsets.
@@ -364,7 +661,7 @@ def split_into_sets(
     ----------
     df : pandas.DataFrame
         Input dataset with ``date`` column.
-    split_method : {"random","ts","month_ts","season_ts"}
+    split_method : {"random","ts","month_ts","season_ts","blocked"}
         Splitting strategy:
           - "random": random sample by fraction.
           - "ts": sequential split by time order (single global cutoff).
@@ -378,6 +675,9 @@ def split_into_sets(
             contiguous (1 - train_fraction) block is held out as testing,
             at a random position within the season (seeded by ``seed``,
             reproducible).
+          - "blocked": partitions the sorted record into contiguous temporal
+            blocks and holds out a seeded subset of blocks as ``"testing"``
+            while assigning the rest to ``"training"``.
 
         .. note::
             Before this random-position placement, "month_ts"/"season_ts"
@@ -406,17 +706,25 @@ def split_into_sets(
         Proportion of rows per group to assign to training.
     seed : int
         Random seed for reproducibility.
+    embargo : int, default 0
+        When ``> 0``, marks up to ``embargo`` training rows immediately before and
+        after every contiguous ``"testing"`` block as ``"embargo"`` so adjacent
+        autocorrelated timestamps never straddle the train/test boundary.
 
     Returns
     -------
     pandas.DataFrame
-        Dataset with added column ``set`` ("training" or "testing").
+        Dataset with added column ``set`` ("training", "testing", or "embargo").
 
     Raises
     ------
     ValueError
-        If ``split_method`` is invalid.
+        If ``split_method`` is invalid or ``embargo < 0``.
     """
+    emb = int(embargo)
+    if emb < 0:
+        raise ValueError(f"`embargo` must be >= 0, got {embargo!r}.")
+
     out = df.sort_values("date").reset_index(drop=True)
 
     if split_method == "random":
@@ -478,8 +786,50 @@ def split_into_sets(
             _mark_random_window_training(out, grp.index, train_fraction, rng)
         out = out.drop(columns=["season", "season_year"])
 
+    elif split_method == "blocked":
+        n = len(out)
+        if n <= 1 or train_fraction >= 1.0:
+            out["set"] = "training"
+        elif train_fraction <= 0.0:
+            out["set"] = "testing"
+        else:
+            n_blocks = min(n, max(4, min(10, n // 24)))
+            blocks = np.array_split(np.arange(n, dtype=np.int64), n_blocks)
+            n_test = max(
+                1, min(len(blocks) - 1, int(round((1.0 - float(train_fraction)) * len(blocks))))
+            )
+            rng = np.random.default_rng(seed)
+            test_ids = set(rng.choice(len(blocks), size=n_test, replace=False).tolist())
+            labels = np.full(n, "training", dtype=object)
+            for bid in test_ids:
+                labels[blocks[bid]] = "testing"
+            out["set"] = labels
+
     else:
         raise ValueError(f"Unknown split_method '{split_method}'.")
+
+    if emb > 0 and len(out) > 0:
+        labels = out["set"].to_numpy(dtype=object).copy()
+        n = len(labels)
+        is_test = labels == "testing"
+        i = 0
+        while i < n:
+            if not is_test[i]:
+                i += 1
+                continue
+            start = i
+            while i < n and is_test[i]:
+                i += 1
+            stop = i
+            for k in range(max(0, start - emb), start):
+                if labels[k] == "training":
+                    labels[k] = "embargo"
+            for k in range(stop, min(n, stop + emb)):
+                if labels[k] == "training":
+                    labels[k] = "embargo"
+        if not np.any(labels == "training"):
+            raise ValueError(f"`embargo={emb}` excludes all training rows across {n} samples.")
+        out["set"] = labels
 
     return out
 
@@ -550,3 +900,41 @@ def expm1_columns(df: pd.DataFrame) -> pd.DataFrame:
     if len(numeric):
         out[numeric] = np.expm1(out[numeric].to_numpy(dtype=float))
     return out
+
+
+def compute_duan_smearing(
+    y_true_log: np.ndarray | pd.Series,
+    y_pred_log: np.ndarray | pd.Series,
+) -> float:
+    """Compute Duan's (1983) nonparametric smearing factor on the log scale.
+
+    For a model fitted on ``z = log1p(y)`` returning ``z_hat = E[z | X]`` with
+    log-scale residual ``r = z - z_hat``, back-transforming by ``expm1(z_hat)``
+    alone estimates the conditional geometric mean shifted by ``-1`` rather
+    than ``E[y | X]``. Multiplying ``exp(z_hat)`` by the empirical smearing
+    factor ``phi = mean(exp(r))`` corrects the log-normal/skewed retransformation
+    bias without assuming Gaussian residuals: ``E[y | X] ≈ phi * exp(z_hat) - 1``.
+
+    Parameters
+    ----------
+    y_true_log : array-like or Series
+        Observed target values on the ``log1p`` scale.
+    y_pred_log : array-like or Series
+        Model predictions on the ``log1p`` scale (same length as ``y_true_log``).
+
+    Returns
+    -------
+    float
+        Duan smearing multiplier ``>= 0`` (defaults to ``1.0`` when no finite pairs exist).
+    """
+    y_t = np.asarray(y_true_log, dtype=float).reshape(-1)
+    y_p = np.asarray(y_pred_log, dtype=float).reshape(-1)
+    if y_t.shape != y_p.shape:
+        raise ValueError(
+            f"`y_true_log` and `y_pred_log` must have matching length ({y_t.size} vs {y_p.size})."
+        )
+    mask = np.isfinite(y_t) & np.isfinite(y_p)
+    if not np.any(mask):
+        return 1.0
+    resid = np.clip(y_t[mask] - y_p[mask], -50.0, 50.0)
+    return float(np.mean(np.exp(resid)))

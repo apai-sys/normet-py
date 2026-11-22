@@ -85,10 +85,186 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
     wired Chronos-2 PDP, Normalise ICN options (`deweather|icn`,
     `level|paired`, `log1p`), checkpoint Save/Load, and SCM Studio `chronos`
     backend in the desktop GUI.
+- **Causal inference & counterfactual scientific upgrade (`normet.causal`, `normet.counterfactual`, `normet.plotting`)**:
+  - Correctness & identification fixes: cutoff-split pre/post interpolation and
+    `max_gap` in `prepare_panel`, pre-cutoff truncation (`< cutoff_date`) in
+    `placebo_in_time`, optional `max_pre_mspe_ratio` screening in
+    `placebo_in_space`, zero-LAPACK Newey–West HAC standard errors in
+    `pre_trend_test`, pivotal test inversion in `effect_bands_space`, exact
+    subsampling rescaling / donor-cloned replacement bootstrap and true
+    moving-block pre-period resampling in `uncertainty_bands`, and $G$-tuple
+    cross-unit permutation tests with not-yet-treated donor support and
+    dynamic event-study tables in `run_scm_staggered`.
+  - Econometric estimators & finite-sample inference: leak-free Ben-Michael et al.
+    (2021) Ridge ASCM (`nm.scm_ascm`, `scm_backend="ascm"`), Synthetic
+    Difference-in-Differences (`nm.sdid`, `scm_backend="sdid"`), demeaned and
+    Elastic-Net options in `scm_abadie`, contiguous block-CV default in
+    `scm_mcnnm`, circular shift option in `conformal_effect_interval`, full
+    refitting Chernozhukov–Wüthrich–Zhu (2021) `nm.conformal_inference`, and
+    Rambachan–Roth (2023) `nm.honest_did_bounds` + `nm.plot_honest_did`.
+  - Atmospheric domain & probabilistic enhancements: donut-hole and
+    Lagrangian transport spillover screening (`nm.screen_donors`,
+    `nm.donut_hole_sensitivity`), intercept + AR(1) residuals + full posterior
+    predictive intervals + ArviZ convergence diagnostics in `nm.bayesian_scm`,
+    and held-out validation, time-blocked `alpha_ridge="auto"` CV, optional
+    meteorological covariates, HAC SE, and moving-block bootstrap uncertainty
+    in `nm.HarmonicCounterfactual`.
+- **Scientific attribution & decomposition upgrade (`normet.analysis.decomposition`,
+  `normet.analysis.normalise`, `normet.backends.lgb_backend`, `normet.plotting`)**:
+  - Zero-resampling single-pass fast path (`variables_resample=[]`) in `normalise`
+    and `Chronos2Estimator.deweather`; explicit residual separation
+    (`include_diagnostics=True`: `predicted`, `met_explained`, `residual`);
+    calendar-aware `stratify_by` + `exact_base=True` in `decom_emi`; forwarded
+    `n_cores` in `decom_met`, Chronos-2 `stratify_by`/`conditional_k` rejection,
+    multi-anchor sensitivity ranking, and diverging/double-count-free
+    `decomposition_stack()`.
+  - Second-order Shapley interaction analysis (`nm.shapley_interactions`,
+    `ShapleyInteractionResult`, `nm.plot_shapley_interactions`), order-independent
+    calendar Shapley (`nm.decom_emi_shapley`), atmospheric-physics group builder
+    (`nm.suggest_met_groups`, `MET_PHYSICAL_GROUPS`), paired MC/permutation
+    standard errors (`return_uncertainty=True`), and multiplicative LMDI log-scale
+    closure (`scale="multiplicative"`).
+  - Out-of-fold temporally blocked decomposition (`nm.cross_fit_decompose` with
+    `embargo_hours`), kNN on-manifold conditional resampling (`conditional_k`),
+    path-dependent TreeSHAP (`nm.decom_met_treeshap` + `LgbModel.predict_contrib`),
+    and interventional-vs-conditional comparison (`nm.compare_attributions`).
+- **Cross-regional transport physics & Lagrangian receptor attribution**
+  (`normet.io.trajectory`, `normet.analysis.transport`, `normet.analysis.normalise`,
+  `normet.plotting`):
+  - BLH-coupled endpoint weights (`nm.trajectory_endpoint_weights`:
+    boundary-layer gating, inverse mixing-depth sensitivity `1000 / max(BLH, min_blh_m)`,
+    exponential chemical decay, and strictly causal downstream wet scavenging),
+    continuous vector inflow (`inflow_sin/cos`, `mean_bearing_sin/cos`,
+    `straightness`), `blh_contact_frac`, time-integrated `rain_mm`, physical
+    per-region `traj_footprint_*` exposure, optional `horizons_h` bands, and
+    multi-height / `n_workers` parallel HYSPLIT execution in
+    `run_back_trajectories()`.
+  - Quality-control column classification (`nm.is_trajectory_qc_column` /
+    `TRAJ_QC_SUFFIXES`) so Transport Studio auto-ticks physical descriptors
+    without ticking `traj_n_endpoints` / `traj_age_max_h` as predictors.
+  - Stratified conditional resampling (`stratify_by=` in `NormaliseConfig` /
+    `DecomposeConfig` / `normalise` / `decom_met`) to eliminate cross-season or
+    cross-regime OOD extrapolation across local weather and transport pools.
+  - Physical BLH-weighted gridded receptor models (`nm.wpscf`, `nm.wcwt`,
+    `nm.gridded_receptor_model`), regularized non-negative source footprint
+    inversion with moving-block bootstrap CIs and sliding-window intensity tracking
+    (`nm.build_footprint_matrix`, `nm.invert_source_footprints`), Ward & angular
+    trajectory clustering with TSV elbow selection (`nm.cluster_trajectories`),
+    and SCM donor spillover / upwind coupling screening
+    (`nm.screen_donor_transport`).
+  - Transport visualisations (`nm.plot_receptor_grid`, `nm.plot_trajectory_clusters`,
+    `nm.plot_footprint_inversion`) and Transport Studio `Analysis` workflow tabs.
 - **Conda recipe.** `packaging/conda/meta.yaml` packages the 0.3.0 PyPI sdist
   as a `noarch: python` conda package (core dependencies; the CLI/MCP/GUI
   entry points), with local-build, personal-channel and conda-forge steps in
   `packaging/conda/README.md`. The root `packaging/README.md` points to it.
+- **Data preparation, modelling and evaluation v2 (`normet.utils.prepare`,
+  `normet.utils.featureeng`, `normet.utils.metrics`, `normet.utils.cv`,
+  `normet.analysis.verification`, `normet.model`,
+  `normet.backends.lgb_backend`)**:
+  - `prepare_data` gains `deduplicate` (`"mean"`/`"first"`/`"last"`/`"raise"`),
+    `strict_covariates` (a missing requested covariate raises instead of being
+    dropped) and `local_time` (calendar features from the frame's civil time for
+    tz-aware input; the default keeps the historical UTC encoding); its
+    `time_interp` fills within each set for the time-ordered splits, so a
+    value is not interpolated across the train/test boundary there, while a
+    random split keeps the legacy whole-series interpolation.
+    `impute_values` takes `within_split` to choose either behaviour, and
+    `add_lag_features` / `add_rolling_features` accept `freq=` to align rows
+    on a calendar grid (missing hours included) rather than on row counts.
+  - `screen_aq_data` (flatline, Tukey-IQR and met-bound QC, now per station
+    with `group_col=`), `add_met_physics_features` (ventilation index, BLH,
+    Magnus dew point and related physics) and `analyze_lag` (prewhitened CCF
+    with ACF/PACF diagnostics for choosing lags).
+  - Model layer: `model_feature_names` freezes the training column order so
+    prediction cannot silently reorder features, `permutation_importance`
+    computes model-agnostic importance on a held-out split, `ml_predict` /
+    `ml_predict_dask` take `strict_features`, LightGBM gains native
+    categoricals, alternative objectives/metrics, `sample_weight` and a
+    `deterministic` mode, and FLAML gains blocked/time CV. `save_model`
+    accepts `metadata=` and writes a `*.meta.json` sidecar that
+    `load_model_metadata` reads back; training-cache keys include the dates,
+    covariate order and weights.
+  - Evaluation: `modStats` gains extended skill scores and `effective_n`,
+    `exceedance_stats`, `compare_models` (circular moving-block bootstrap
+    interval and Newey–West Diebold–Mariano test for `score_b - score_a`, with
+    an explicit `y_scale` for the truth), `cv_score` and `blocked_time_cv`
+    (blocked/embargoed folds with out-of-fold predictions), and
+    `fair_crps_from_samples`, `interval_score`, `interval_coverage`,
+    `pit_diagnostics` and `calibration_curve` for probabilistic diagnostics.
+
+### Changed
+- **De-weathering defaults restored (`normet.analysis.normalise`, `nm.pdp` /
+  `nm.ale`, `nm.rolling`, `nm.decompose_uncertainty`, `nm.do_all`,
+  `nm.do_all_multisite`, `nm.prepare_data`, `nm.train_lgb`)**:
+  - `back_transform` defaults back to `"geometric"` (average the draws on the
+    `log1p` scale, one `expm1` at the end) everywhere the option appears, so
+    `log_transform=True` output from earlier releases stays bit-identical;
+    `"arithmetic"` (per-draw `expm1` before averaging) and Duan's `"smearing"`
+    remain opt-in.
+  - `SingleConfig.embargo` is now `int | None = None`, meaning "not chosen":
+    no purge for the ordinary split, and `crossfit_normalise`'s 24-row
+    default when `cross_fit=True`; an explicit value (including 0) is used
+    as given. `prepare_data` / `impute_values` default to the whole-frame
+    `"median"` strategy, the pre-option behaviour; `"train_median"` stays
+    available for a leak-free test block.
+  - `do_all(chronos_mode="icn", log_transform=True)` rescales the ICN
+    `anchor_spread` / `mc_spread` columns with the delta method (`1 + level`),
+    so the uncertainty columns share `normalised`'s units instead of being
+    log-scale SDs.
+  - `train_lgb(..., native_nan=False)` (or `model_config={"native_nan": True}`)
+    opts into LightGBM's native missing-value routing; the default keeps
+    replacing every non-finite predictor by 0.0. `do_all_multisite` accepts a
+    DataFrame `reference_pool` again (the `"pooled"` string test no longer
+    evaluates a frame's truth value). `trajectory_features` /
+    `build_trajectory_features` / `run_back_trajectories` emit the Layer-1
+    physical descriptors (straightness, inflow/bearing components, BLH contact,
+    integrated rain, physical footprints) only with the new `physics=True`, so
+    the default `traj_*` column set is unchanged; Transport Studio passes it.
+
+### Fixed
+- **Cache, conditioning and aggregation defects (`nm.normalise`,
+  `nm.decom_emi_shapley`, `nm.decom_met`, `nm.shapley_interactions`,
+  `nm.cross_fit_decompose`, `nm.cluster_trajectories`,
+  `nm.gridded_receptor_model`, `normet.io.trajectory`, `normet.causal`)**:
+  - `normalise` cache keys include the `set` column when the Duan smearing
+    factor is estimated from test rows, and the pool's `date` column when
+    `month`/`season` strata are requested; the zero-resample fast path
+    reproduces the resampling path's quantiles by replicating each row
+    `n_samples` times before grouping; `conditional_on` filtering applies one
+    positional mask to the pool and its strata source, so a non-unique index
+    no longer raises `IndexError`.
+  - `decom_emi_shapley` handles a model with no time feature itself (the
+    delegation to `decom_emi` re-derived log space and double-transformed the
+    observations under `scale="multiplicative"`), and its analytic base
+    aggregates before `log1p`, matching the Monte Carlo estimand;
+    `decom_met(return_uncertainty=True)` shifts each coalition's draws so
+    their mean equals the aggregate-path point estimate (the per-seed
+    back-transform added a Jensen gap of ~7 % on `emi_total`);
+    `shapley_interactions` returns its standard summary columns for a
+    calendar-only model; `cross_fit_decompose` imputes each fold from its
+    training rows only.
+  - `cluster_trajectories` reports the clusters `fcluster` actually returned
+    instead of padding to the requested K with NaN centroids;
+    `gridded_receptor_model` uses the published Polissar tiers
+    (1.0/0.7/0.42/0.05, strict boundaries) and, like the WCWT/WPSCF entry
+    points, prefers a de-weathered `normalised`/`emi_total` column over raw
+    `observed`; `read_trajectory_endpoints` deduplicates on start location and
+    `traj_id` as well, so trajectories from several start locations survive.
+  - `uncertainty_bands` with the three-donor minimum falls back to
+    moving-block time resampling (a donor bootstrap cannot vary a design that
+    must contain all three) and applies the finite-population rescaling
+    whenever it subsamples; `run_scm_staggered` measures event time and the
+    requested horizon in panel periods rather than rows, and its placebo
+    tasks refit the same donor pool as the real slot (the pool is now part of
+    the deduplication key); `conformal_inference` treats an explicit
+    `zeta_omega=None` as sdid's documented "auto" rule; `pre_trend_test`
+    defaults back to OLS standard errors (`se_type="hac"` opts in);
+    `cv_score` keeps missing validation targets as `NaN` and excludes them
+    from metrics instead of scoring synthesized values; `compare_models`
+    follows the explicit `y_scale` instead of guessing the truth's scale;
+    `modStats(weekday_start=0)` keeps the historical 0–6 weekday labels by
+    default; `ml_predict_dask` accepts the `strict_features` it documents.
 
 ## [0.3.0] — 2026-11-19
 

@@ -100,8 +100,10 @@ def test_staggered_summary_rows_aggregate_the_units():
     median_row = out[out["unit"] == "median"].iloc[0]
     assert np.isclose(mean_row["effect"], units["effect"].mean(), rtol=1e-12)
     assert np.isclose(median_row["effect"], units["effect"].median(), rtol=1e-12)
-    # The cross-unit test is stated on the mean; the median row is descriptive.
-    assert np.isclose(mean_row["p_value"], 1 / 6)
+    # The cross-unit permutation test pairs G=2 distinct donors across the 2
+    # cutoffs (P(5, 2) = 20 ordered tuples -> minimum p = 1/21). The median row
+    # is descriptive.
+    assert np.isclose(mean_row["p_value"], 1 / 21)
     assert np.isnan(median_row["p_value"])
     assert mean_row["cutoff_date"] is None or pd.isna(mean_row["cutoff_date"])
 

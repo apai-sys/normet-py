@@ -67,11 +67,23 @@ def scm_abadie(
     cutoff_date: str | None = None,
     donors: list[str] | None = None,
     allow_negative_weights: bool = False,
+    *,
+    demean: bool = False,
+    l2_penalty: float = 0.0,
+    l1_penalty: float = 0.0,
+    sum_to_one: bool = True,
 ) -> dict[str, Any]:
     """
-    Classic Abadie/Diamond/Hainmueller SCM with simplex weights.
+    Classic / Demeaned / Elastic-Net Abadie SCM.
 
-    Solves ``min_w || y_pre - X_pre w ||²`` with ``w >= 0, sum(w) = 1``.
+    By default (``demean=False, l2_penalty=0.0, l1_penalty=0.0, sum_to_one=True``)
+    solves classic Abadie/Diamond/Hainmueller SCM with simplex weights:
+    ``min_w || y_pre - X_pre w ||²`` subject to ``w >= 0, sum(w) = 1``.
+
+    Set ``demean=True`` for Intercept-Shifted / Demeaned SCM (Ferman & Pinto
+    2021; Doudchenko & Imbens 2016) when the treated series sits at a different
+    level from the donor convex hull, and ``l2_penalty`` / ``l1_penalty`` for
+    ridge / Elastic-Net regularisation over the donor weights.
     """
     if treated_unit is None or cutoff_date is None:
         raise ValueError("`treated_unit` and `cutoff_date` are required.")
@@ -82,18 +94,37 @@ def scm_abadie(
     if pre.shape[0] < 2:
         raise ValueError("Not enough complete pre-treatment rows.")
 
-    X_pre = pre[donors].to_numpy()
-    y_pre = pre[treated_unit].to_numpy()
+    X_pre = pre[donors].to_numpy(dtype=float)
+    y_pre = pre[treated_unit].to_numpy(dtype=float)
 
-    w = solve_simplex_weights(X_pre, y_pre, allow_negative=allow_negative_weights)
+    if demean:
+        y_pre_mean = float(np.mean(y_pre))
+        X_pre_mean = np.mean(X_pre, axis=0)
+        X_fit = X_pre - X_pre_mean[None, :]
+        y_fit = y_pre - y_pre_mean
+    else:
+        y_pre_mean = 0.0
+        X_pre_mean = np.zeros(len(donors), dtype=float)
+        X_fit = X_pre
+        y_fit = y_pre
+
+    w = solve_simplex_weights(
+        X_fit,
+        y_fit,
+        allow_negative=allow_negative_weights,
+        l2_penalty=l2_penalty,
+        l1_penalty=l1_penalty,
+        sum_to_one=sum_to_one,
+    )
+    intercept = float(y_pre_mean - np.dot(X_pre_mean, w)) if demean else 0.0
     weights = pd.Series(w, index=donors, name="weight")
-    syn_full = panel[donors].to_numpy() @ w
+    syn_full = intercept + panel[donors].to_numpy(dtype=float) @ w
     out = pd.DataFrame(
-        {"observed": panel[treated_unit].to_numpy(), "synthetic": syn_full},
+        {"observed": panel[treated_unit].to_numpy(dtype=float), "synthetic": syn_full},
         index=panel.index,
     )
     out["effect"] = out["observed"] - out["synthetic"]
-    return {"synthetic": out, "weights": weights}
+    return {"synthetic": out, "weights": weights, "intercept": intercept}
 
 
 # ---------------------------------------------------------------------------
@@ -246,24 +277,71 @@ def _mcnnm_cv_lambda(
     with_time_fe: bool,
     max_rank: int | None,
     random_state: int | None,
+    cv_strategy: str = "block",
+    block_len: int | None = None,
+    pre_len: int | None = None,
 ) -> tuple[float, np.ndarray]:
-    """Select ``lam`` minimising held-out MSE over ``cv`` random cell splits.
-
-    Each fold hides a ``1/cv`` slice of the observed cells, refits MC-NNM on the
-    remainder for every candidate ``lam``, and scores reconstruction error on the
-    held-out cells. Returns the best ``lam`` and the per-grid mean CV error.
-    """
+    """Select ``lam`` minimising held-out MSE over ``cv`` block or random splits."""
     rng = np.random.default_rng(random_state)
-    obs_idx = np.argwhere(M_obs)  # (n_obs, 2)
-    n_obs = len(obs_idx)
-    errs = np.zeros(len(lam_grid))
+    T, N = M_obs.shape
+    strategy = (cv_strategy or "block").lower()
+    if strategy not in {"block", "random"}:
+        raise ValueError(f"cv_strategy must be 'block' or 'random', got {cv_strategy!r}")
+
+    fold_masks: list[np.ndarray] = []
+    if strategy == "block":
+        if block_len is not None:
+            B = max(1, min(int(block_len), max(1, T // 2)))
+        elif pre_len is not None and (T - int(pre_len)) > 0:
+            B = max(1, min(T - int(pre_len), max(1, int(pre_len) // max(int(cv), 2))))
+        else:
+            B = max(1, T // max(int(cv) * 2, 4))
+        B = max(1, min(B, max(1, T // 2)))
+
+        row_blocks = [np.arange(s, min(s + B, T)) for s in range(0, T, B)]
+        cells: list[tuple[np.ndarray, int]] = []
+        for rows_b in row_blocks:
+            for col_j in range(N):
+                obs_r = rows_b[M_obs[rows_b, col_j]]
+                if obs_r.size > 0:
+                    cells.append((obs_r, col_j))
+        if len(cells) >= cv:
+            perm = rng.permutation(len(cells))
+            groups = np.array_split(perm, int(cv))
+            for grp in groups:
+                M_train = M_obs.copy()
+                for idx_c in grp:
+                    obs_r, col_j = cells[int(idx_c)]
+                    M_train[obs_r, col_j] = False
+                # Keep every row and column anchored so FE updates remain identifiable.
+                for r in range(T):
+                    if M_obs[r].any() and not M_train[r].any():
+                        cand_c = int(np.flatnonzero(M_obs[r])[0])
+                        M_train[r, cand_c] = True
+                for c in range(N):
+                    if M_obs[:, c].any() and not M_train[:, c].any():
+                        cand_r = int(np.flatnonzero(M_obs[:, c])[0])
+                        M_train[cand_r, c] = True
+                val_mask = M_obs & (~M_train)
+                if val_mask.any() and M_train.any():
+                    fold_masks.append(M_train)
+
+    if not fold_masks:
+        obs_idx = np.argwhere(M_obs)
+        n_obs = len(obs_idx)
+        for _ in range(int(cv)):
+            hold = rng.permutation(n_obs)[: max(1, n_obs // int(cv))]
+            val = obs_idx[hold]
+            M_train = M_obs.copy()
+            M_train[val[:, 0], val[:, 1]] = False
+            if (M_obs & (~M_train)).any() and M_train.any():
+                fold_masks.append(M_train)
+
+    errs = np.zeros(len(lam_grid), dtype=float)
     n_used = 0
-    for _ in range(cv):
-        hold = rng.permutation(n_obs)[: max(1, n_obs // cv)]
-        val = obs_idx[hold]
-        M_train = M_obs.copy()
-        M_train[val[:, 0], val[:, 1]] = False
-        if not M_train.any():
+    for M_train in fold_masks:
+        val = np.argwhere(M_obs & (~M_train))
+        if val.size == 0:
             continue
         y_val = Y_full[val[:, 0], val[:, 1]]
         for li, lam in enumerate(lam_grid):
@@ -297,6 +375,8 @@ def scm_mcnnm(
     lam: float | None = None,
     cv: int = 0,
     lam_grid: Sequence[float] | None = None,
+    cv_strategy: str = "block",
+    block_len: int | None = None,
     max_iter: int = 300,
     tol: float = 1e-5,
     with_unit_fe: bool = True,
@@ -320,11 +400,19 @@ def scm_mcnnm(
         heuristic of the observed matrix.
     cv : int, default 0
         If ``> 1`` and ``lam is None``, choose ``lam`` by ``cv``-fold
-        cross-validation over held-out observed cells (recommended — the fixed
+        cross-validation over held-out blocks or cells (recommended — the fixed
         heuristic otherwise picks an essentially arbitrary rank).
     lam_grid : sequence of float, optional
         Candidate ``lam`` values for CV. Defaults to 8 log-spaced values from
         ``1e-3 * sigma_max`` up to ``sigma_max``.
+    cv_strategy : {"block", "random"}, default "block"
+        How observed entries are held out during ``lam`` cross-validation.
+        ``"block"`` holds out contiguous ``(block, unit)`` time segments to
+        avoid single-cell serial correlation leakage; ``"random"`` uses random
+        single-cell holdouts.
+    block_len : int, optional
+        Block length (in timestamps) when ``cv_strategy="block"``. Defaults to
+        ``min(n_post, n_pre // max(cv, 2))``.
     max_iter : int, default 300
     tol : float, default 1e-5
         Frobenius-norm relative change tolerance for convergence.
@@ -385,8 +473,11 @@ def scm_mcnnm(
                 with_time_fe=with_time_fe,
                 max_rank=max_rank,
                 random_state=random_state,
+                cv_strategy=cv_strategy,
+                block_len=block_len,
+                pre_len=int(pre_mask.sum()),
             )
-            log.info("MC-NNM selected lam=%.4g via %d-fold CV.", lam, int(cv))
+            log.info("MC-NNM selected lam=%.4g via %d-fold (%s) CV.", lam, int(cv), cv_strategy)
         else:
             lam = 0.1 * sigma_max
 

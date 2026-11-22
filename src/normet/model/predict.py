@@ -9,8 +9,9 @@ import numpy as np
 import pandas as pd
 
 from ..backends import backend_registry
+from ..exceptions import DataError
 from ..utils._lazy import require
-from ..utils.features import extract_features
+from ..utils.features import model_feature_names
 from ..utils.logging import get_logger
 
 log = get_logger(__name__)
@@ -22,6 +23,7 @@ def ml_predict(
     *,
     chunk_size: int | None = None,
     num_threads: int | None = None,
+    strict_features: bool = False,
 ) -> np.ndarray:
     """
     Predict using a trained AutoML model.
@@ -51,6 +53,11 @@ def ml_predict(
         harnesses often pin to 1. Passing it per call lets ``normalise``'s
         ``n_cores`` mean what it says on the batch path too.
 
+    strict_features : bool, default False
+        If True, raise :class:`normet.exceptions.DataError` whenever any
+        trained model feature is missing from ``newdata`` instead of logging a
+        warning and continuing with the intersection.
+
     Returns
     -------
     numpy.ndarray
@@ -77,9 +84,9 @@ def ml_predict(
     # predicts as if that meteorology were zero. The ValueError below used
     # to be raised inside the try and swallowed by its own except.
     try:
-        feature_cols: list[str] = extract_features(model)
+        feature_cols: list[str] = model_feature_names(model)
     except Exception as e:
-        log.debug("extract_features failed (%s); falling back to all columns in `newdata`.", e)
+        log.debug("model_feature_names failed (%s); falling back to all columns in `newdata`.", e)
         X = newdata
         if X.shape[1] == 0:
             raise ValueError("`newdata` has no columns to predict on.") from e
@@ -87,6 +94,8 @@ def ml_predict(
         use_cols = [c for c in feature_cols if c in newdata.columns]
         if len(use_cols) != len(feature_cols):
             missing = [c for c in feature_cols if c not in newdata.columns]
+            if missing and strict_features:
+                raise DataError(f"Missing required model feature(s) in newdata: {missing}")
             if missing:
                 log.warning("Missing features in newdata (excluded from prediction): %s", missing)
         if newdata.shape[1] == 0:
@@ -138,6 +147,7 @@ def ml_predict_dask(
     ddf: Any,
     *,
     chunk_size: int | None = None,
+    strict_features: bool = False,
 ) -> Any:
     """
     Predict over a :class:`dask.dataframe.DataFrame` lazily.
@@ -153,6 +163,10 @@ def ml_predict_dask(
         Partitioned feature frame. Must contain the model's features.
     chunk_size : int, optional
         Forwarded to :func:`ml_predict` for each partition.
+    strict_features : bool, default False
+        If True, raise :class:`normet.exceptions.DataError` whenever any
+        trained model feature is missing from a partition of ``ddf`` instead
+        of logging a warning and continuing with the intersection.
 
     Returns
     -------
@@ -167,7 +181,7 @@ def ml_predict_dask(
     def _one(part: pd.DataFrame) -> np.ndarray:
         if len(part) == 0:
             return np.empty(0, dtype=float)
-        return ml_predict(model, part, chunk_size=chunk_size)
+        return ml_predict(model, part, chunk_size=chunk_size, strict_features=strict_features)
 
     # map_partitions returns a Series; pull to a numpy via to_dask_array
     series = ddf.map_partitions(lambda p: pd.Series(_one(p), index=p.index), meta=("yhat", "f8"))

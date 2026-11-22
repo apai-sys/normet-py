@@ -3,15 +3,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from ..backends import backend_registry
 from ..utils._config import DEFAULT_SEED
 from ..utils.logging import get_logger
-from ..utils.prepare import prepare_data
+from ..utils.prepare import log1p_target, prepare_data
 
 log = get_logger(__name__)
 
@@ -41,6 +43,15 @@ def build_model(
     drop_time_features: bool = False,
     n_cores: int | None = None,
     cache: str | Path | None = None,
+    impute: str = "median",
+    max_gap: int | None = 6,
+    embargo: int = 0,
+    circular_cols: Sequence[str] | None = None,
+    deduplicate: str | None = None,
+    strict_covariates: bool = False,
+    log_transform: bool = False,
+    sample_weight: str | np.ndarray | pd.Series | None = None,
+    local_time: bool = False,
 ) -> tuple[pd.DataFrame, object]:
     """
     Prepare the data and train a model with the selected AutoML backend.
@@ -79,6 +90,44 @@ def build_model(
         keep whichever ones the caller listed. Use this as a blanket
         override; to select a specific subset of time features instead,
         simply list only those in ``covariates`` and leave this False.
+    n_cores : int, optional
+        Thread count forwarded to the backend.
+    cache : str or pathlib.Path, optional
+        Directory used by :func:`train_model` to memoize the fitted model
+        on the prepared data and configuration. Off by default.
+    impute : {"median", "train_median", "time_interp", "none"}, default "median"
+        Missing-value strategy forwarded to :func:`normet.utils.prepare.prepare_data`.
+        ``"median"`` (the default, and the behaviour before the strategy was
+        configurable) fills from the full-frame median; ``"train_median"``
+        fits the statistics on training rows only, so test values never leak
+        into the fills.
+    max_gap : int or None, default 6
+        Longest consecutive predictor gap filled by linear interpolation when
+        ``impute="time_interp"``; longer gaps fall back to the training median.
+    embargo : int, default 0
+        Adjacent training rows marked ``"embargo"`` around each testing block,
+        for autocorrelated series. Forwarded to
+        :func:`normet.utils.prepare.split_into_sets`.
+    circular_cols : sequence of str, optional
+        Angular degree columns (e.g. wind direction) interpolated on the
+        circle via ``sin``/``cos`` when ``impute="time_interp"``.
+    deduplicate : {"mean", "first", "last", "raise"} or None, default None
+        How to handle duplicate timestamps before splitting. ``None`` keeps
+        them and warns.
+    strict_covariates : bool, default False
+        If True, raise when a requested non-builtin covariate is absent from
+        ``df`` instead of silently dropping it.
+    log_transform : bool, default False
+        Fit on ``log1p(target)``; the returned prepared frame carries the
+        transformed target so later predictions can be back-transformed.
+    sample_weight : str, ndarray, or Series, optional
+        Observation weights: a column name (kept through preparation) or a
+        per-row array aligned with the input ``df``. Non-finite weights
+        warn and are dropped by the backend.
+    local_time : bool, default False
+        Forwarded to :func:`normet.utils.prepare.prepare_data`: derive
+        ``day_julian``/``weekday``/``hour`` from the frame's local civil
+        time for tz-aware input instead of the historical UTC encoding.
 
     Returns
     -------
@@ -107,15 +156,44 @@ def build_model(
     else:
         variables = list(covariates)
 
+    # Track optional sample weights across prepare_data's row filtering & sorting
+    df_in = df
+    prep_covs = list(variables)
+    sw_forward: str | np.ndarray | pd.Series | None = sample_weight
+    _tmp_sw_col = "__normet_sample_weight__"
+    if isinstance(sample_weight, str):
+        if sample_weight not in df_in.columns:
+            raise ValueError(f"sample_weight column {sample_weight!r} not found in DataFrame.")
+        if sample_weight not in prep_covs:
+            prep_covs.append(sample_weight)
+    elif sample_weight is not None:
+        raw_sw = np.asarray(sample_weight, dtype=float).reshape(-1)
+        if len(raw_sw) != len(df_in):
+            raise ValueError(
+                f"sample_weight length ({len(raw_sw)}) must match input df ({len(df_in)})."
+            )
+        df_in = df_in.copy()
+        df_in[_tmp_sw_col] = raw_sw
+        prep_covs.append(_tmp_sw_col)
+
     # Prepare data (ensures 'date', renames target to 'value', splits sets, etc.)
     df_prep = prepare_data(
-        df=df,
+        df=df_in,
         target=target,
-        covariates=variables,
+        covariates=prep_covs,
         split_method=split_method,
         train_fraction=train_fraction,
         seed=seed,
+        impute=impute,
+        max_gap=max_gap,
+        embargo=embargo,
+        circular_cols=circular_cols,
+        deduplicate=deduplicate,
+        strict_covariates=strict_covariates,
+        local_time=local_time,
     )
+    if _tmp_sw_col in df_prep.columns:
+        sw_forward = df_prep.pop(_tmp_sw_col).to_numpy(dtype=float)
 
     # Align variables to what survived prepare_data (be explicit if none remain)
     variables = [c for c in variables if c in df_prep.columns]
@@ -138,6 +216,9 @@ def build_model(
             "tried 'value' and '" + target + "'. Columns: " + str(list(df_prep.columns))
         )
 
+    if log_transform:
+        df_prep = log1p_target(df_prep, target_col)
+
     # Train
     model = train_model(
         df=df_prep,
@@ -149,6 +230,7 @@ def build_model(
         verbose=verbose,
         n_cores=n_cores,
         cache=cache,
+        sample_weight=sw_forward,
     )
 
     log.info("Model trained with backend=%s", backend)
@@ -166,6 +248,7 @@ def train_model(
     verbose: bool = False,
     n_cores: int | None = None,
     cache: str | Path | None = None,
+    sample_weight: str | np.ndarray | pd.Series | None = None,
 ) -> object:
     """
     Train an AutoML model via the registered backend.
@@ -242,6 +325,8 @@ def train_model(
         verbose=verbose,
         n_cores=n_cores,
     )
+    if sample_weight is not None:
+        train_kw["sample_weight"] = sample_weight
 
     if cache is None:
         return be.train(df, **train_kw)
@@ -256,15 +341,30 @@ def train_model(
         package_version,
     )
 
-    key_cols = list(dict.fromkeys([*covariates, target, *(["set"] if "set" in df.columns else [])]))
+    sw_key: Any = None
+    extra_cols: list[str] = []
+    if "date" in df.columns:
+        extra_cols.append("date")
+    if "set" in df.columns:
+        extra_cols.append("set")
+    if isinstance(sample_weight, str) and sample_weight in df.columns:
+        extra_cols.append(sample_weight)
+        sw_key = sample_weight
+    elif sample_weight is not None:
+        sw_key = dataframe_hash(
+            pd.DataFrame({"sw": np.asarray(sample_weight, dtype=float).reshape(-1)})
+        )
+
+    key_cols = list(dict.fromkeys([*covariates, target, *extra_cols]))
     cache_key = config_hash(
         package_version(),
         dependency_versions(),
         backend,
         target,
-        sorted(covariates),
+        list(covariates),
         model_config,
         seed,
+        sw_key,
         dataframe_hash(df[key_cols]),
     )
     memory = make_memory(cache)

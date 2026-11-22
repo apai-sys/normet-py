@@ -135,14 +135,15 @@ def test_bayesian_scm_smoke(scm_panel):
         progressbar=False,
     )
 
-    # Check top-level keys
-    assert set(result.keys()) == {
+    # Check top-level keys (includes convergence diagnostics alongside legacy keys)
+    assert {
         "synthetic",
         "weights",
         "weights_summary",
         "posterior_samples",
         "idata",
-    }
+        "diagnostics",
+    } <= set(result.keys())
 
     # Check synthetic DataFrame columns
     syn = result["synthetic"]

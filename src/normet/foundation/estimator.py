@@ -1568,20 +1568,24 @@ class Chronos2Estimator:
             # same order as a per-sample loop keeps a given random_state on the
             # same weather; holding only one batch of resampled frames keeps
             # memory flat in n_samples.
-            for done in range(0, n_samples, self.batch_size):
+            eff_samples = 1 if not met else n_samples
+            for done in range(0, eff_samples, self.batch_size):
                 items = []
-                for _ in range(min(self.batch_size, n_samples - done)):
-                    idx = rng.integers(0, len(df), size=len(past) + len(future))
-                    swap_past = past.copy()
-                    swap_future = future.copy()
-                    swap_past[met] = df[met].to_numpy()[idx[: len(past)]]
-                    swap_future[met] = df[met].to_numpy()[idx[len(past) :]]
-                    items.append((hist, swap_past, swap_future))
+                for _ in range(min(self.batch_size, eff_samples - done)):
+                    if met:
+                        idx = rng.integers(0, len(df), size=len(past) + len(future))
+                        swap_past = past.copy()
+                        swap_future = future.copy()
+                        swap_past[met] = df[met].to_numpy()[idx[: len(past)]]
+                        swap_future[met] = df[met].to_numpy()[idx[len(past) :]]
+                        items.append((hist, swap_past, swap_future))
+                    else:
+                        items.append((hist, past, future))
                 blocks = self._forecast_blocks(items, cols, e - s)
                 for q in quantiles:
                     total[q] += blocks[:, i_q[q], :].sum(axis=0)
             for q in quantiles:
-                acc[q][s:e] = total[q] / n_samples
+                acc[q][s:e] = total[q] / eff_samples
 
         out = pd.DataFrame({"observed": df[target].to_numpy()}, index=df.index)
         for q in quantiles:

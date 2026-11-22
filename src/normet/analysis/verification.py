@@ -34,18 +34,26 @@ record.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
 from ..exceptions import DataError
+from ..utils._config import DEFAULT_SEED
 
 __all__ = [
     "pinball_loss",
     "crps_from_quantiles",
     "crps_from_samples",
     "crps_observed",
+    "fair_crps_from_samples",
+    "crps_skill_score",
+    "interval_score",
+    "interval_coverage",
+    "pit_diagnostics",
+    "calibration_curve",
 ]
 
 
@@ -390,3 +398,304 @@ def crps_observed(y_pred: Any, y_true: Any) -> float:
     if not mask.any():
         raise DataError("Nothing to score: no finite forecast-observation row.")
     return _POINT_MASS_FACTOR * float(np.mean(np.abs(o[mask] - p[mask])))
+
+
+def _sample_matrix_and_obs(
+    samples: pd.DataFrame | np.ndarray[Any, Any] | list,
+    obs: Any,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Validate an ensemble sample table ``(rows, K)`` and align finite rows with *obs*."""
+    s = (
+        samples.to_numpy(dtype=float)
+        if isinstance(samples, pd.DataFrame)
+        else np.asarray(samples, dtype=float)
+    )
+    if s.ndim == 1:
+        s = s[:, None]
+    if s.ndim != 2:
+        raise DataError("The ensemble needs a shape (rows, samples).")
+    if s.shape[1] < 2:
+        raise DataError("Ensemble diagnostics require at least 2 samples per row.")
+    o = _obs_array(obs)
+    if s.shape[0] != len(o):
+        raise DataError(f"The samples have {s.shape[0]} rows and the observation {len(o)}.")
+    mask = np.isfinite(s).all(axis=1) & np.isfinite(o)
+    if not mask.any():
+        raise DataError("Nothing to score: no finite sample-observation row.")
+    return s[mask], o[mask]
+
+
+def fair_crps_from_samples(samples: pd.DataFrame | np.ndarray[Any, Any] | list, obs: Any) -> float:
+    """Unbiased Fair CRPS (Ferro 2014) of ensemble samples against observations.
+
+    Uses ``1 / (K * (K - 1))`` for within-ensemble pairwise spread instead of
+    the biased empirical ``1 / K^2`` scaling, removing the finite-ensemble-size
+    penalty when comparing ensembles of different member counts *K*.
+    """
+    s_clean, o_clean = _sample_matrix_and_obs(samples, obs)
+    k = s_clean.shape[1]
+    s_sorted = np.sort(s_clean, axis=1, kind="stable")
+    term_obs = np.mean(np.abs(s_sorted - o_clean[:, None]), axis=1)
+    weights = 2.0 * np.arange(1, k + 1, dtype=float) - k - 1.0
+    term_pair = (s_sorted @ weights) / float(k * (k - 1))
+    return float(np.mean(term_obs - term_pair))
+
+
+def crps_skill_score(crps_model: float, crps_reference: float) -> float:
+    """Compute Continuous Ranked Probability Skill Score ``1 - CRPS_model / CRPS_ref``."""
+    cm = float(crps_model)
+    cr = float(crps_reference)
+    if not np.isfinite(cm) or not np.isfinite(cr):
+        raise DataError("Both `crps_model` and `crps_reference` must be finite floats.")
+    if cr <= 0.0:
+        raise DataError(f"`crps_reference` must be strictly positive, got {crps_reference!r}.")
+    return float(1.0 - cm / cr)
+
+
+def interval_score(lower: Any, upper: Any, obs: Any, alpha: float = 0.1) -> float:
+    """Proper Winkler / Gneiting-Raftery (2007) interval score for ``(1 - alpha)`` intervals."""
+    level = _as_quantile_level(alpha, "alpha")
+    lo = (
+        lower.to_numpy(dtype=float)
+        if isinstance(lower, (pd.DataFrame, pd.Series))
+        else np.asarray(lower, dtype=float)
+    ).reshape(-1)
+    hi = (
+        upper.to_numpy(dtype=float)
+        if isinstance(upper, (pd.DataFrame, pd.Series))
+        else np.asarray(upper, dtype=float)
+    ).reshape(-1)
+    o = _obs_array(obs)
+    if not (len(lo) == len(hi) == len(o)):
+        raise DataError(
+            f"Length mismatch among lower ({len(lo)}), upper ({len(hi)}), and obs ({len(o)})."
+        )
+    mask = np.isfinite(lo) & np.isfinite(hi) & np.isfinite(o)
+    if not mask.any():
+        raise DataError("Nothing to score: no finite interval-observation row.")
+    lm, hm, om = lo[mask], hi[mask], o[mask]
+    if np.any(lm > hm):
+        raise DataError("Lower interval bound exceeds upper bound.")
+    penalty = (2.0 / level) * (np.where(om < lm, lm - om, 0.0) + np.where(om > hm, om - hm, 0.0))
+    return float(np.mean((hm - lm) + penalty))
+
+
+def interval_coverage(
+    preds: pd.DataFrame | None = None,
+    obs: Any = None,
+    *,
+    lower: Any = None,
+    upper: Any = None,
+    alpha: float | None = None,
+    pairs: Sequence[tuple[str, str, float]] | None = None,
+) -> pd.DataFrame:
+    """Evaluate prediction interval empirical coverage, sharpness, and Winkler score.
+
+    Accepts either explicit ``(lower, upper)`` arrays or a prediction DataFrame
+    with ``qNNN`` columns (automatically pairing symmetric lower/upper quantiles)
+    or explicit ``pairs=[(lo_col, hi_col, alpha), ...]``.
+    """
+    o = _obs_array(obs)
+    rows: list[dict[str, Any]] = []
+
+    def _eval_one(
+        name: str, lo_arr: np.ndarray, hi_arr: np.ndarray, a_val: float | None
+    ) -> dict[str, Any]:
+        mask = np.isfinite(lo_arr) & np.isfinite(hi_arr) & np.isfinite(o)
+        if not mask.any():
+            raise DataError(f"Interval {name!r} has no finite rows to evaluate.")
+        lm, hm, om = lo_arr[mask], hi_arr[mask], o[mask]
+        if np.any(lm > hm):
+            raise DataError(f"Lower bound exceeds upper bound in interval {name!r}.")
+        emp = float(np.mean((om >= lm) & (om <= hm)))
+        widths = hm - lm
+        if a_val is not None:
+            nom = float(1.0 - float(a_val))
+            cov_err = emp - nom
+            iscore = interval_score(lm, hm, om, alpha=float(a_val))
+        else:
+            nom = float("nan")
+            cov_err = float("nan")
+            iscore = float("nan")
+        return {
+            "interval": name,
+            "nominal_coverage": nom,
+            "empirical_coverage": emp,
+            "coverage_error": cov_err,
+            "mean_width": float(np.mean(widths)),
+            "median_width": float(np.median(widths)),
+            "interval_score": iscore,
+            "n": int(mask.sum()),
+        }
+
+    if lower is not None and upper is not None:
+        lo_a = np.asarray(lower, dtype=float).reshape(-1)
+        hi_a = np.asarray(upper, dtype=float).reshape(-1)
+        if len(lo_a) != len(o) or len(hi_a) != len(o):
+            raise DataError("`lower`, `upper`, and `obs` must have the same length.")
+        if alpha is not None:
+            _as_quantile_level(alpha, "alpha")
+        rows.append(_eval_one("custom", lo_a, hi_a, alpha))
+    else:
+        if not isinstance(preds, pd.DataFrame):
+            raise DataError("Pass a DataFrame to `preds` or explicit `lower`/`upper` arrays.")
+        if len(preds) != len(o):
+            raise DataError(f"`preds` has {len(preds)} rows and `obs` has {len(o)}.")
+        spec_pairs: list[tuple[str, str, float]] = []
+        if pairs is not None:
+            spec_pairs = [
+                (str(lo_c), str(hi_c), _as_quantile_level(a_c, "alpha"))
+                for lo_c, hi_c, a_c in pairs
+            ]
+        else:
+            q_cols = sorted(
+                (
+                    (_column_level(c), str(c))
+                    for c in preds.columns
+                    if isinstance(c, str) and c.startswith("q") and c[1:].isdigit()
+                ),
+                key=lambda item: item[0],
+            )
+            by_level = {round(lvl, 6): col for lvl, col in q_cols}
+            used: set[str] = set()
+            for lvl, lo_col in q_cols:
+                if lo_col in used or lvl >= 0.5:
+                    continue
+                mate_lvl = round(1.0 - lvl, 6)
+                hi_col = by_level.get(mate_lvl)
+                if hi_col is not None and hi_col != lo_col:
+                    used.update({lo_col, hi_col})
+                    spec_pairs.append((lo_col, hi_col, float(2.0 * lvl)))
+        if not spec_pairs:
+            raise DataError("No symmetric quantile pairs or interval bounds found to evaluate.")
+        for lo_col, hi_col, a_c in spec_pairs:
+            for col in (lo_col, hi_col):
+                if col not in preds.columns:
+                    raise DataError(f"Column {col!r} not found in `preds`.")
+            lo_v = pd.to_numeric(preds[lo_col], errors="coerce").to_numpy(dtype=float)
+            hi_v = pd.to_numeric(preds[hi_col], errors="coerce").to_numpy(dtype=float)
+            rows.append(_eval_one(f"{lo_col}..{hi_col}", lo_v, hi_v, a_c))
+
+    return pd.DataFrame(rows)
+
+
+def pit_diagnostics(
+    samples: pd.DataFrame | np.ndarray[Any, Any] | list,
+    obs: Any,
+    *,
+    n_bins: int = 10,
+    seed: int = DEFAULT_SEED,
+) -> dict[str, Any]:
+    """Compute randomized Probability Integral Transform (PIT) uniformity diagnostics."""
+    from scipy import stats as _stats
+
+    if int(n_bins) < 2:
+        raise DataError("`n_bins` must be at least 2.")
+    s_clean, o_clean = _sample_matrix_and_obs(samples, obs)
+    n, k = s_clean.shape
+
+    rng = np.random.default_rng(seed)
+    c_lt = np.sum(s_clean < o_clean[:, None], axis=1).astype(float)
+    c_eq = np.sum(s_clean == o_clean[:, None], axis=1).astype(float)
+    u = rng.uniform(0.0, 1.0, size=n)
+    pit_vals = np.clip((c_lt + u * (c_eq + 1.0)) / float(k + 1), 0.0, 1.0)
+
+    counts, edges = np.histogram(pit_vals, bins=int(n_bins), range=(0.0, 1.0))
+    mean_p = float(np.mean(pit_vals))
+    std_p = float(np.std(pit_vals, ddof=1)) if n > 1 else 0.0
+    ks_res = _stats.kstest(pit_vals, "uniform")
+    ks_stat = float(ks_res.statistic)
+    ks_pval = float(ks_res.pvalue)
+
+    uniform_std = float(1.0 / np.sqrt(12.0))
+    if abs(mean_p - 0.5) > 0.08:
+        diag = "biased"
+    elif std_p > uniform_std + 0.035 and ks_pval < 0.05:
+        diag = "under_dispersed"
+    elif std_p < uniform_std - 0.035 and ks_pval < 0.05:
+        diag = "over_dispersed"
+    elif ks_pval >= 0.05 or (abs(mean_p - 0.5) <= 0.05 and abs(std_p - uniform_std) <= 0.03):
+        diag = "well_calibrated"
+    else:
+        diag = "under_dispersed" if std_p > uniform_std else "over_dispersed"
+
+    return {
+        "pit": pit_vals,
+        "counts": counts,
+        "edges": edges,
+        "mean": mean_p,
+        "std": std_p,
+        "ks_stat": ks_stat,
+        "ks_pvalue": ks_pval,
+        "diagnosis": diag,
+    }
+
+
+def calibration_curve(
+    y_pred: Any,
+    y_true: Any,
+    *,
+    n_bins: int = 10,
+    strategy: str = "quantile",
+) -> pd.DataFrame:
+    """Compute binned prediction reliability and conditional-bias diagnostics."""
+    if int(n_bins) < 2:
+        raise DataError("`n_bins` must be at least 2.")
+    if strategy not in ("quantile", "uniform"):
+        raise DataError(f"`strategy` must be 'quantile' or 'uniform', got {strategy!r}.")
+
+    p = (
+        y_pred.to_numpy(dtype=float)
+        if isinstance(y_pred, (pd.DataFrame, pd.Series))
+        else np.asarray(y_pred, dtype=float)
+    ).reshape(-1)
+    o = _obs_array(y_true)
+    if len(p) != len(o):
+        raise DataError(f"The forecast has {len(p)} rows and the observation {len(o)}.")
+    mask = np.isfinite(p) & np.isfinite(o)
+    if not mask.any():
+        raise DataError("Nothing to score: no finite forecast-observation row.")
+    pm, om = p[mask], o[mask]
+
+    nb = int(n_bins)
+    if strategy == "quantile":
+        edges = np.unique(np.quantile(pm, np.linspace(0.0, 1.0, nb + 1)))
+    else:
+        edges = np.unique(np.linspace(float(pm.min()), float(pm.max()), nb + 1))
+
+    if len(edges) < 2:
+        return pd.DataFrame(
+            [
+                {
+                    "bin": 0,
+                    "n": int(len(pm)),
+                    "pred_mean": float(np.mean(pm)),
+                    "obs_mean": float(np.mean(om)),
+                    "bias": float(np.mean(pm - om)),
+                    "rmse": float(np.sqrt(np.mean((pm - om) ** 2))),
+                    "obs_p10": float(np.percentile(om, 10.0)),
+                    "obs_p90": float(np.percentile(om, 90.0)),
+                }
+            ]
+        )
+
+    bin_idx = np.clip(np.searchsorted(edges, pm, side="left") - 1, 0, len(edges) - 2)
+    rows: list[dict[str, Any]] = []
+    for k in range(len(edges) - 1):
+        sel = bin_idx == k
+        if not np.any(sel):
+            continue
+        p_b, o_b = pm[sel], om[sel]
+        rows.append(
+            {
+                "bin": k,
+                "n": int(sel.sum()),
+                "pred_mean": float(np.mean(p_b)),
+                "obs_mean": float(np.mean(o_b)),
+                "bias": float(np.mean(p_b - o_b)),
+                "rmse": float(np.sqrt(np.mean((p_b - o_b) ** 2))),
+                "obs_p10": float(np.percentile(o_b, 10.0)),
+                "obs_p90": float(np.percentile(o_b, 90.0)),
+            }
+        )
+    return pd.DataFrame(rows)

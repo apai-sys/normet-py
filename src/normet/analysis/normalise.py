@@ -7,9 +7,10 @@ Provides :func:`normalise` (resample-and-predict) and :func:`normalise_auto`
 
 from __future__ import annotations
 
+import numbers
 import zlib
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -19,11 +20,108 @@ import pandas as pd
 from ..exceptions import ConfigError, DataError, ModelError
 from ..model.predict import ml_predict
 from ..utils import progress
-from ..utils._config import resolve_config, resolve_workers
+from ..utils._config import DEFAULT_SEED, resolve_config, resolve_workers
 from ..utils.logging import get_logger
-from ..utils.prepare import check_data, expm1_columns, process_date
+from ..utils.metrics import _DEFAULT_STATS, _stats_from_arrays
+from ..utils.prepare import (
+    add_date_variables,
+    check_data,
+    compute_duan_smearing,
+    impute_values,
+    log1p_target,
+    prepare_data,
+    process_date,
+)
 
 log = get_logger(__name__)
+
+#: Default purge width (rows) around each out-of-fold validation block.
+#: One day of hourly data, enough to separate adjacent hours whose target and
+#: weather are autocorrelated. Exposed so ``do_all(cross_fit=True)`` can use
+#: the same default instead of duplicating the number.
+_CROSSFIT_DEFAULT_EMBARGO = 24
+
+_TIME_VARS_EXACT: frozenset[str] = frozenset(
+    {
+        "date_unix",
+        "day_julian",
+        "weekday",
+        "hour",
+        "month",
+        "year",
+        "dayofyear",
+        "dayofweek",
+        "day_of_year",
+        "day_of_week",
+    }
+)
+
+_TIME_VARS_CYCLICAL: frozenset[str] = frozenset(
+    {
+        "hour_sin",
+        "hour_cos",
+        "dow_sin",
+        "dow_cos",
+        "doy_sin",
+        "doy_cos",
+        "weekday_sin",
+        "weekday_cos",
+        "day_julian_sin",
+        "day_julian_cos",
+        "month_sin",
+        "month_cos",
+    }
+)
+
+
+def _is_time_feature(col: str) -> bool:
+    """Return True if *col* is a deterministic calendar/time covariate."""
+    return col in _TIME_VARS_EXACT or col in _TIME_VARS_CYCLICAL
+
+
+def _back_transform_values(z: np.ndarray, *, smearing_factor: float = 1.0) -> np.ndarray:
+    """Invert ``log1p(y)`` with optional Duan (1983) smearing multiplier ``phi``."""
+    arr = np.asarray(z, dtype=float)
+    if smearing_factor == 1.0:
+        return np.expm1(arr)
+    return float(smearing_factor) * np.exp(arr) - 1.0
+
+
+def _resolve_paired_mode(paired: bool | str, *, log_transform: bool) -> str | None:
+    """Normalise *paired* option to ``None`` or one of ``additive|ratio|log_ratio``."""
+    if paired is False or paired is None:
+        return None
+    if paired is True:
+        return "log_ratio" if log_transform else "additive"
+    mode = str(paired).lower().strip()
+    if mode not in {"additive", "ratio", "log_ratio"}:
+        raise ConfigError(
+            f"`paired` must be False, True, 'additive', 'ratio', or 'log_ratio', got {paired!r}."
+        )
+    return mode
+
+
+def _compute_paired_series(
+    obs_orig: np.ndarray,
+    fact_orig: np.ndarray,
+    norm_orig: np.ndarray,
+    *,
+    mode: str,
+    floor: float,
+) -> np.ndarray:
+    """Compute paired de-weathered concentration preserving short-term anomalies."""
+    if mode == "additive":
+        return obs_orig - (fact_orig - norm_orig)
+    if mode == "ratio":
+        safe = np.where(np.abs(fact_orig) > floor, fact_orig, np.nan)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return obs_orig * (norm_orig / safe)
+    # mode == "log_ratio": additive difference on log1p scale keeps positive ratio
+    # well-behaved near zero and cancels multiplicative smearing terms identically.
+    z_obs = np.log1p(np.maximum(obs_orig, 0.0))
+    z_fact = np.log1p(np.maximum(fact_orig, 0.0))
+    z_norm = np.log1p(np.maximum(norm_orig, 0.0))
+    return np.maximum(np.expm1(z_obs - (z_fact - z_norm)), 0.0)
 
 
 @dataclass
@@ -124,15 +222,83 @@ class NormaliseConfig:
 
     True says the caller fitted the model on ``log1p(value)`` and hands the
     frame in that space -- what :func:`normet.do_all` does with
-    ``log_transform=True``. The resampling, the predictions and their
-    aggregation all happen on that scale (which is the point: an error then
-    counts in relative rather than absolute terms, so a fixed relative miss
-    maps to a bounded error at every level while its absolute error grows
-    without bound), and the finished frame is returned in the original units
-    via ``expm1``, so
-    ``observed``, ``normalised`` and the quantile columns are all comparable
-    with the input the user gave. False, the default, leaves the result
-    untouched.
+    ``log_transform=True``. The resampling and the model evaluation happen
+    on that scale (which is the point: an error then counts in relative
+    rather than absolute terms, so a fixed relative miss maps to a bounded
+    error at every level while its absolute error grows without bound). How
+    the per-draw predictions are returned to the units of the input is
+    chosen by :attr:`back_transform`:
+
+    - ``"geometric"`` (the default) averages on the ``log1p`` scale and
+      applies ``expm1`` once at the end -- the legacy behaviour, kept as the
+      default so results produced before the option existed stay
+      bit-identical;
+    - ``"arithmetic"`` applies ``expm1`` to every draw before averaging, so
+      the estimate targets the arithmetic mean rather than the geometric
+      one (the two differ by Jensen's inequality whenever the draws vary);
+    - ``"smearing"`` applies Duan's (1983) residual-correction factor to
+      that arithmetic mean.
+
+    In every mode ``observed``, ``normalised`` and the quantile columns
+    come back in the units of the input. False, the default, leaves the
+    result untouched.
+    """
+    stratify_by: str | Sequence[str] | None = None
+    """Optional stratum column(s) (e.g. ``"month"``, ``"season"``, ``"hour"``,
+    ``"weekday"``, or ``"traj_cluster"``) constraining each target row to resample
+    only from pool rows sharing the same stratum. Eliminates physically impossible
+    cross-season or cross-regime combinations when separating local weather
+    from long-range transport. ``"month"``, ``"season"``, ``"hour"``, and
+    ``"weekday"`` can be derived automatically from ``"date"`` if not already
+    present as columns.
+    """
+    conditional_k: int | None = None
+    """Optional positive integer ``k`` for kNN on-manifold conditional resampling.
+    When given, resampled covariates for each row are drawn uniformly from the
+    ``k`` nearest neighbours in its pool with respect to the currently fixed
+    numerical covariates (standardised via pool mean/std). Combines naturally
+    with ``stratify_by`` to search nearest neighbours within the same stratum.
+    Not available on the chronos-2 backend.
+    """
+    back_transform: str = "geometric"
+    """Retransformation mode when ``log_transform=True``:
+
+    - ``"geometric"`` (default): averages in ``log1p`` space and applies ``expm1``
+      once at the end. This is the legacy behaviour, kept as the default so
+      ``log_transform=True`` results from earlier releases stay bit-identical.
+    - ``"arithmetic"``: back-transform each resampled draw via ``expm1``
+      before averaging, estimating the meteorological arithmetic mean rather than
+      the biased geometric mean.
+    - ``"smearing"``: additionally applies Duan's (1983) nonparametric smearing
+      correction ``phi * exp(z_hat) - 1`` to remove training-residual Jensen bias.
+    """
+    smearing_factor: float | None = None
+    """Optional explicit Duan smearing factor ``phi`` used when ``log_transform=True``
+    and ``back_transform="smearing"``. When ``None``, estimated automatically from
+    held-out (``set=="testing"``) or training model residuals.
+    """
+    return_mc_se: bool = False
+    """If True and ``aggregate=True``, include a per-date ``mc_se`` column with the
+    Monte Carlo standard error ``sd(draws) / sqrt(n_samples)`` of ``normalised``.
+    """
+    paired: bool | str = False
+    """Optional paired / residual-preserving deweathering mode alongside level
+    estimation (requires ``aggregate=True``). One of ``False`` (default), ``True``
+    (``"log_ratio"`` if ``log_transform`` else ``"additive"``), ``"additive"``,
+    ``"ratio"``, or ``"log_ratio"``. Appends ``factual``, ``weather_effect``, and
+    ``paired`` columns to the output DataFrame.
+    """
+    paired_floor: float = 1e-6
+    """Denominator magnitude guard for ``paired="ratio"``."""
+    sampling: str = "iid"
+    """Resampling scheme: ``"iid"`` (standard independent Monte Carlo) or
+    ``"balanced"`` (variance-reduced cyclic balanced permutations over each pool /
+    stratum / kNN neighbourhood).
+    """
+    block_hours: int | None = None
+    """Optional contiguous weather-block length ``>= 2`` (rows). When given,
+    contiguous weather trajectories of length ``block_hours`` are drawn instead of
+    isolated timestamps, preserving temporal coherence for lag/rolling features.
     """
 
 
@@ -149,17 +315,22 @@ def _format_quantile_name(q: float) -> str:
     return f"q{int(round(float(q) * 1000)):03d}"
 
 
-def _apply_conditional_filter(
+def _conditional_mask(
     pool: pd.DataFrame,
     conditional_on: Mapping[str, Any],
-) -> pd.DataFrame:
+) -> pd.Series:
     """
-    Restrict ``pool`` to rows matching every key/value condition.
+    Boolean row mask for every key/value condition in ``conditional_on``.
 
     - Scalar value → exact match.
     - Iterable (list/tuple/set/Series/ndarray) → ``isin`` semantics.
     - Tuple ``(lo, hi)`` is treated as iterable membership (use callable for ranges).
     - Callable → boolean mask applied to that column.
+
+    Kept separate from :func:`_apply_conditional_filter` so a caller can apply
+    the same positional mask to a row-aligned frame (see ``normalise``'s
+    stratified path) without a label-based ``.loc`` that expands a non-unique
+    index.
     """
     mask = pd.Series(True, index=pool.index)
     for col, cond in conditional_on.items():
@@ -172,6 +343,15 @@ def _apply_conditional_filter(
             mask &= s.isin(list(cond))
         else:
             mask &= s == cond
+    return mask
+
+
+def _apply_conditional_filter(
+    pool: pd.DataFrame,
+    conditional_on: Mapping[str, Any],
+) -> pd.DataFrame:
+    """Restrict ``pool`` to the rows matching every condition (see :func:`_conditional_mask`)."""
+    mask = np.asarray(_conditional_mask(pool, conditional_on), dtype=bool)
     return pool.loc[mask]
 
 
@@ -244,6 +424,63 @@ def _split_across_pools(
     return ([(0, base, resample_df)] if base else []) + extra
 
 
+def _parse_stratify_by(stratify_by: str | Sequence[str] | None) -> tuple[str, ...]:
+    """Normalise ``stratify_by`` config into a tuple of column names."""
+    if stratify_by is None:
+        return ()
+    if isinstance(stratify_by, str):
+        s = stratify_by.strip()
+        return (s,) if s else ()
+    cols = tuple(str(c).strip() for c in stratify_by if str(c).strip())
+    return cols
+
+
+def _extract_strata(frame: pd.DataFrame, strat_cols: tuple[str, ...], *, label: str) -> np.ndarray:
+    """Extract per-row stratum labels from *frame*, deriving ``month``/``season`` if needed."""
+    parts: list[np.ndarray] = []
+    dates_s: pd.Series | None = None
+    for col in strat_cols:
+        vals: np.ndarray
+        if col in frame.columns:
+            vals = frame[col].astype(object).to_numpy()
+        elif col in ("month", "season", "hour", "weekday"):
+            if dates_s is None:
+                if "date" in frame.columns:
+                    dates_s = pd.to_datetime(frame["date"], errors="coerce")
+                elif isinstance(frame.index, pd.DatetimeIndex):
+                    dates_s = pd.Series(frame.index, index=frame.index)
+                else:
+                    raise ConfigError(
+                        f"stratify_by column {col!r} requires a 'date' column or DatetimeIndex in {label}."
+                    )
+            if dates_s.isna().any():
+                raise ConfigError(f"{label} contains missing dates needed for stratify_by={col!r}.")
+            if col == "month":
+                vals = np.asarray(dates_s.dt.month.to_numpy(), dtype=object)
+            elif col == "season":
+                vals = np.asarray(
+                    ((dates_s.dt.month.to_numpy() % 12) // 3).astype(int), dtype=object
+                )
+            elif col == "hour":
+                vals = np.asarray(dates_s.dt.hour.to_numpy(), dtype=object)
+            else:
+                # Match add_date_variables() 1..7 weekday encoding
+                vals = np.asarray(dates_s.dt.dayofweek.to_numpy() + 1, dtype=object)
+        else:
+            raise ConfigError(
+                f"stratify_by column {col!r} not found in {label} "
+                f"(available: {list(frame.columns)[:8]})."
+            )
+        parts.append(vals)
+
+    if len(parts) == 1:
+        return np.asarray([str(v) for v in parts[0]], dtype=object)
+    return np.asarray(
+        ["\x1f".join(str(p[i]) for p in parts) for i in range(len(frame))],
+        dtype=object,
+    )
+
+
 def _draw_rows(stream: int, seed: int, n_pool: int, n_rows: int, replace: bool) -> np.ndarray:
     """Row indices into one pool for one Monte Carlo draw.
 
@@ -258,23 +495,413 @@ def _draw_rows(stream: int, seed: int, n_pool: int, n_rows: int, replace: bool) 
     return rng.choice(n_pool, size=n_rows, replace=replace)
 
 
+def _draw_rows_balanced(
+    stream: int,
+    base_seed: int,
+    sample_pos: int,
+    n_pool: int,
+    n_rows: int,
+    *,
+    cycle_cache: dict[tuple[Any, ...], Any] | None = None,
+) -> np.ndarray:
+    """Balanced cyclic permutation draw over ``0..n_pool-1`` for variance reduction.
+
+    For each row ``r`` and each cycle of ``n_pool`` draws, every pool entry is
+    visited identically once before any entry repeats, preserving exact uniform
+    marginals while eliminating duplicate-draw Monte Carlo noise.
+    """
+    cycle = int(sample_pos) // n_pool
+    pos_in_cycle = int(sample_pos) % n_pool
+    key = ("plain", stream, cycle, n_pool, n_rows)
+    cached = cycle_cache.get(key) if cycle_cache is not None else None
+    if cached is None:
+        rng = np.random.default_rng([base_seed, stream, cycle, 1340])
+        perm = rng.permutation(n_pool)
+        offsets = rng.integers(0, n_pool, size=n_rows, dtype=np.int64)
+        cached = (perm, offsets)
+        if cycle_cache is not None:
+            cycle_cache[key] = cached
+    perm, offsets = cached
+    return perm[(offsets + pos_in_cycle) % n_pool]
+
+
+def _draw_rows_stratified(
+    stream: int,
+    seed: int,
+    df_strata: np.ndarray,
+    pool_strata: np.ndarray,
+    replace: bool,
+) -> np.ndarray:
+    """Draw pool row indices matching each target row's stratum deterministically."""
+    rng = np.random.default_rng(seed if stream == 0 else [seed, stream])
+    n_rows = len(df_strata)
+    n_pool = len(pool_strata)
+    out = np.empty(n_rows, dtype=np.int64)
+
+    pool_idx: dict[str, np.ndarray] = {}
+    for key in sorted(set(pool_strata)):
+        pool_idx[key] = np.flatnonzero(pool_strata == key)
+
+    full_pool = np.arange(n_pool, dtype=np.int64)
+    missing_keys: list[str] = []
+    for key in sorted(set(df_strata)):
+        pos = np.flatnonzero(df_strata == key)
+        candidates = pool_idx.get(key)
+        if candidates is None or candidates.size == 0:
+            missing_keys.append(str(key))
+            candidates = full_pool
+        use_replace = replace or len(pos) > len(candidates)
+        out[pos] = rng.choice(candidates, size=len(pos), replace=use_replace)
+
+    if missing_keys and stream in (0, 1):
+        log.warning(
+            "stratify_by: %d stratum value(s) absent from pool (%s); fell back to full pool.",
+            len(missing_keys),
+            ", ".join(missing_keys[:4]),
+        )
+    return out
+
+
+def _draw_rows_stratified_balanced(
+    stream: int,
+    base_seed: int,
+    sample_pos: int,
+    df_strata: np.ndarray,
+    pool_strata: np.ndarray,
+    *,
+    cycle_cache: dict[tuple[Any, ...], Any] | None = None,
+) -> np.ndarray:
+    """Balanced cyclic permutation draw within each stratum."""
+    n_rows = len(df_strata)
+    n_pool = len(pool_strata)
+    out = np.empty(n_rows, dtype=np.int64)
+
+    map_key = ("strata_map", stream)
+    cached_map = cycle_cache.get(map_key) if cycle_cache is not None else None
+    if cached_map is None:
+        pool_idx = {key: np.flatnonzero(pool_strata == key) for key in sorted(set(pool_strata))}
+        full_pool = np.arange(n_pool, dtype=np.int64)
+        missing_keys: list[str] = []
+        target_groups: list[tuple[int, np.ndarray, np.ndarray]] = []
+        for s_idx, key in enumerate(sorted(set(df_strata))):
+            pos = np.flatnonzero(df_strata == key)
+            cands = pool_idx.get(key)
+            if cands is None or cands.size == 0:
+                missing_keys.append(str(key))
+                cands = full_pool
+            target_groups.append((s_idx, pos, cands))
+        if missing_keys and stream in (0, 1) and int(sample_pos) == 0:
+            log.warning(
+                "stratify_by: %d stratum value(s) absent from pool (%s); fell back to full pool.",
+                len(missing_keys),
+                ", ".join(missing_keys[:4]),
+            )
+        cached_map = target_groups
+        if cycle_cache is not None:
+            cycle_cache[map_key] = cached_map
+
+    for s_idx, pos, cands in cached_map:
+        p_s = len(cands)
+        cycle = int(sample_pos) // p_s
+        pos_in_cycle = int(sample_pos) % p_s
+        ckey = ("strata", stream, s_idx, cycle)
+        cyc = cycle_cache.get(ckey) if cycle_cache is not None else None
+        if cyc is None:
+            rng = np.random.default_rng([base_seed, stream, s_idx, cycle, 1339])
+            perm = rng.permutation(p_s)
+            offsets = rng.integers(0, p_s, size=len(pos), dtype=np.int64)
+            cyc = (perm, offsets)
+            if cycle_cache is not None:
+                cycle_cache[ckey] = cyc
+        perm, offsets = cyc
+        out[pos] = cands[perm[(offsets + pos_in_cycle) % p_s]]
+
+    return out
+
+
+def _draw_rows_block(
+    stream: int,
+    seed: int,
+    n_pool: int,
+    n_rows: int,
+    block_hours: int,
+    *,
+    df_strata: np.ndarray | None = None,
+    pool_strata: np.ndarray | None = None,
+) -> np.ndarray:
+    """Draw contiguous meteorological blocks of length ``block_hours`` from the pool."""
+    rng = np.random.default_rng(seed if stream == 0 else [seed, stream])
+    b_len = int(block_hours)
+    out = np.empty(n_rows, dtype=np.int64)
+
+    pool_idx_map: dict[str, np.ndarray] | None = None
+    if df_strata is not None and pool_strata is not None:
+        pool_idx_map = {key: np.flatnonzero(pool_strata == key) for key in sorted(set(pool_strata))}
+
+    for start_r in range(0, n_rows, b_len):
+        end_r = min(n_rows, start_r + b_len)
+        seg = end_r - start_r
+        if pool_idx_map is not None and df_strata is not None:
+            key = df_strata[start_r]
+            cands = pool_idx_map.get(key)
+            if cands is not None and cands.size > 0:
+                if seg <= n_pool:
+                    valid = cands[cands <= n_pool - seg]
+                    pool_choices = valid if valid.size > 0 else cands
+                else:
+                    pool_choices = cands
+                start_p = int(pool_choices[int(rng.integers(0, len(pool_choices)))])
+            else:
+                max_start = max(1, n_pool - seg + 1) if seg <= n_pool else n_pool
+                start_p = int(rng.integers(0, max_start))
+        else:
+            max_start = max(1, n_pool - seg + 1) if seg <= n_pool else n_pool
+            start_p = int(rng.integers(0, max_start))
+        out[start_r:end_r] = (start_p + np.arange(seg, dtype=np.int64)) % n_pool
+    return out
+
+
+def _standardize_for_knn(
+    df: pd.DataFrame, pool: pd.DataFrame, cond_cols: Sequence[str]
+) -> tuple[np.ndarray, np.ndarray]:
+    """Z-score fixed numeric columns using the pool's mean and standard deviation."""
+    cols = list(cond_cols)
+    x_pool = pool[cols].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=np.float64)
+    x_df = df[cols].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=np.float64)
+    mu = np.nanmean(x_pool, axis=0)
+    mu = np.where(np.isfinite(mu), mu, 0.0)
+    sd = np.nanstd(x_pool, axis=0)
+    sd = np.where(np.isfinite(sd) & (sd > 1e-12), sd, 1.0)
+    z_pool = np.where(np.isfinite(x_pool), (x_pool - mu) / sd, 0.0)
+    z_df = np.where(np.isfinite(x_df), (x_df - mu) / sd, 0.0)
+    return z_df, z_pool
+
+
+def _build_knn_indices(
+    df: pd.DataFrame,
+    pool: pd.DataFrame,
+    cond_cols: Sequence[str],
+    k: int,
+    *,
+    df_strata: np.ndarray | None = None,
+    pool_strata: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray | None]:
+    """Precompute ``(n_rows, k_eff)`` pool neighbour indices for on-manifold draws."""
+    from scipy.spatial import cKDTree
+
+    n_rows = len(df)
+    n_pool = len(pool)
+    if n_pool == 0:
+        raise DataError("Resample pool has no rows for conditional_k matching.")
+    k_target = max(1, int(k))
+    z_df, z_pool = _standardize_for_knn(df, pool, cond_cols)
+
+    if df_strata is not None and pool_strata is not None:
+        width = min(k_target, n_pool)
+        out = np.zeros((n_rows, width), dtype=np.int64)
+        counts = np.full(n_rows, width, dtype=np.int64)
+        need_counts = False
+        pool_idx_map: dict[str, np.ndarray] = {
+            str(key): np.flatnonzero(pool_strata == key) for key in sorted(set(pool_strata))
+        }
+        full_tree: cKDTree | None = None
+        mapped: np.ndarray[Any, Any]
+        for key in sorted(set(df_strata)):
+            pos = np.flatnonzero(df_strata == key)
+            cand = pool_idx_map.get(str(key))
+            if cand is None or cand.size == 0:
+                if full_tree is None:
+                    full_tree = cKDTree(z_pool)
+                k_eff = min(width, n_pool)
+                _, loc = full_tree.query(z_df[pos], k=k_eff)
+                mapped = np.asarray(loc, dtype=np.int64).reshape(len(pos), k_eff)
+            else:
+                tree = cKDTree(z_pool[cand])
+                k_eff = min(width, cand.size)
+                _, loc = tree.query(z_df[pos], k=k_eff)
+                loc_2d = np.asarray(loc, dtype=np.int64).reshape(len(pos), k_eff)
+                mapped = cand[loc_2d]
+            out[pos, :k_eff] = mapped
+            if k_eff < width:
+                counts[pos] = k_eff
+                need_counts = True
+        return out, (counts if need_counts else None)
+
+    k_eff = min(k_target, n_pool)
+    tree = cKDTree(z_pool)
+    _, loc = tree.query(z_df, k=k_eff)
+    return np.asarray(loc, dtype=np.int64).reshape(n_rows, k_eff), None
+
+
+def _draw_rows_knn(
+    stream: int,
+    seed: int,
+    nbr_idx: np.ndarray,
+    valid_counts: np.ndarray | None = None,
+) -> np.ndarray:
+    """Uniformly pick one of each target row's precomputed k nearest pool neighbours."""
+    rng = np.random.default_rng(seed if stream == 0 else [seed, stream])
+    n_rows = nbr_idx.shape[0]
+    high: Any = valid_counts if valid_counts is not None else nbr_idx.shape[1]
+    pick = rng.integers(0, high, size=n_rows)
+    return nbr_idx[np.arange(n_rows), pick]
+
+
+def _draw_rows_knn_balanced(
+    stream: int,
+    base_seed: int,
+    sample_pos: int,
+    nbr_idx: np.ndarray,
+    valid_counts: np.ndarray | None = None,
+    *,
+    cycle_cache: dict[tuple[Any, ...], Any] | None = None,
+) -> np.ndarray:
+    """Balanced cyclic draw over each row's ``k_eff`` nearest pool neighbours."""
+    # ``shape`` entries are ``Any`` under the bare ndarray annotation; typing
+    # them as int picks the array-returning ``integers`` overload instead of
+    # the scalar one (numpy >= 2.4 stubs), which mypy otherwise chooses.
+    n_rows = int(nbr_idx.shape[0])
+    width = int(nbr_idx.shape[1])
+    offsets: np.ndarray[Any, Any]
+    if valid_counts is None:
+        cycle = int(sample_pos) // width
+        pos_in_cycle = int(sample_pos) % width
+        ckey = ("knn", stream, width, cycle, n_rows)
+        cyc = cycle_cache.get(ckey) if cycle_cache is not None else None
+        if cyc is None:
+            rng = np.random.default_rng([base_seed, stream, cycle, 1337])
+            perm = rng.permutation(width)
+            offsets = rng.integers(0, width, size=n_rows, dtype=np.int64)
+            cyc = (perm, offsets)
+            if cycle_cache is not None:
+                cycle_cache[ckey] = cyc
+        perm, offsets = cyc
+        pick = perm[(offsets + pos_in_cycle) % width]
+        return nbr_idx[np.arange(n_rows), pick]
+
+    pick_all = np.empty(n_rows, dtype=np.int64)
+    for k_val in np.unique(valid_counts):
+        k_int = int(k_val)
+        pos = np.flatnonzero(valid_counts == k_int)
+        cycle = int(sample_pos) // k_int
+        pos_in_cycle = int(sample_pos) % k_int
+        ckey = ("knn_var", stream, k_int, cycle, len(pos))
+        cyc = cycle_cache.get(ckey) if cycle_cache is not None else None
+        if cyc is None:
+            rng = np.random.default_rng([base_seed, stream, k_int, cycle, 1338])
+            perm = rng.permutation(k_int)
+            offsets = rng.integers(0, k_int, size=len(pos), dtype=np.int64)
+            cyc = (perm, offsets)
+            if cycle_cache is not None:
+                cycle_cache[ckey] = cyc
+        perm, offsets = cyc
+        pick_all[pos] = perm[(offsets + pos_in_cycle) % k_int]
+    return nbr_idx[np.arange(n_rows), pick_all]
+
+
+def _draw_sample_indices(
+    stream: int,
+    draw_seed: int,
+    *,
+    base_seed: int,
+    sample_pos: int,
+    n_pool: int,
+    n_rows: int,
+    replace: bool,
+    sampling: str = "iid",
+    block_hours: int | None = None,
+    df_strata: np.ndarray | None = None,
+    p_strata: np.ndarray | None = None,
+    knn_spec: tuple[np.ndarray, np.ndarray | None] | None = None,
+    cycle_cache: dict[tuple[Any, ...], Any] | None = None,
+) -> np.ndarray:
+    """Dispatch single-sample pool index generation uniformly across all execution paths."""
+    if block_hours is not None and block_hours > 1:
+        return _draw_rows_block(
+            stream,
+            draw_seed,
+            n_pool,
+            n_rows,
+            block_hours,
+            df_strata=df_strata,
+            pool_strata=p_strata,
+        )
+    if knn_spec is not None:
+        if sampling == "balanced":
+            return _draw_rows_knn_balanced(
+                stream,
+                base_seed,
+                sample_pos,
+                knn_spec[0],
+                knn_spec[1],
+                cycle_cache=cycle_cache,
+            )
+        return _draw_rows_knn(stream, draw_seed, knn_spec[0], knn_spec[1])
+    if df_strata is not None and p_strata is not None:
+        if sampling == "balanced":
+            return _draw_rows_stratified_balanced(
+                stream,
+                base_seed,
+                sample_pos,
+                df_strata,
+                p_strata,
+                cycle_cache=cycle_cache,
+            )
+        return _draw_rows_stratified(stream, draw_seed, df_strata, p_strata, replace)
+    if sampling == "balanced":
+        return _draw_rows_balanced(
+            stream,
+            base_seed,
+            sample_pos,
+            n_pool,
+            n_rows,
+            cycle_cache=cycle_cache,
+        )
+    return _draw_rows(stream, draw_seed, n_pool, n_rows, replace)
+
+
 def _stacked_columns(
     df: pd.DataFrame,
-    draws: Sequence[tuple[int, list[str], np.ndarray]],
+    draws: Sequence[tuple[int, list[str], np.ndarray, np.ndarray | None]],
     seeds: Sequence[int] | np.ndarray,
     replace: bool,
+    df_strata: np.ndarray | None = None,
+    knn_map: Mapping[int, tuple[np.ndarray, np.ndarray | None]] | None = None,
+    *,
+    base_seed: int | None = None,
+    sample_positions: Sequence[int] | None = None,
+    sampling: str = "iid",
+    block_hours: int | None = None,
 ) -> dict[str, np.ndarray]:
     """Columns of ``len(seeds)`` resampled copies of ``df``, stacked copy after copy.
 
-    ``draws`` holds ``(stream, columns, values)`` with ``values`` the pool's
-    ``columns`` as one array, so each copy takes whole pool rows.
+    ``draws`` holds ``(stream, columns, values, pool_strata)`` with ``values``
+    the pool's ``columns`` as one array, so each copy takes whole pool rows.
     """
     n_rows = len(df)
+    b_seed = int(seeds[0]) if base_seed is None and len(seeds) else int(base_seed or 0)
+    pos_list = list(sample_positions) if sample_positions is not None else list(range(len(seeds)))
+    cycle_cache: dict[tuple[Any, ...], Any] = {}
     drawn: dict[str, np.ndarray] = {}
-    for stream, cols, values in draws:
+    for stream, cols, values, p_strata in draws:
+        knn_spec = knn_map.get(stream) if knn_map is not None else None
         idx = np.empty((len(seeds), n_rows), dtype=np.int64)
-        for i, s in enumerate(seeds):
-            idx[i] = _draw_rows(stream, int(s), len(values), n_rows, replace)
+        for i, (s, pos) in enumerate(zip(seeds, pos_list, strict=True)):
+            idx[i] = _draw_sample_indices(
+                stream,
+                int(s),
+                base_seed=b_seed,
+                sample_pos=int(pos),
+                n_pool=len(values),
+                n_rows=n_rows,
+                replace=replace,
+                sampling=sampling,
+                block_hours=block_hours,
+                df_strata=df_strata,
+                p_strata=p_strata,
+                knn_spec=knn_spec,
+                cycle_cache=cycle_cache,
+            )
         picked = values[idx.ravel()]
         for j, c in enumerate(cols):
             drawn[c] = picked[:, j]
@@ -290,6 +917,14 @@ def generate_resampled(
     seed: int,
     resample_df: pd.DataFrame,
     resample_pools: Mapping[str, pd.DataFrame] | None = None,
+    *,
+    df_strata: np.ndarray | None = None,
+    pool_strata_map: Mapping[int, np.ndarray] | None = None,
+    knn_map: Mapping[int, tuple[np.ndarray, np.ndarray | None]] | None = None,
+    sampling: str = "iid",
+    block_hours: int | None = None,
+    base_seed: int | None = None,
+    sample_pos: int = 0,
 ) -> pd.DataFrame:
     """Generate a resampled copy of the dataset.
 
@@ -327,13 +962,29 @@ def generate_resampled(
     if missing:
         raise ValueError(f"`resample_df` is missing columns: {missing}")
 
+    b_seed = int(seed) if base_seed is None else int(base_seed)
     out = df.copy(deep=False).reset_index(drop=True)
     for stream, cols, pool in draws:
-        # The same indices the batch/vectorised paths draw (``_draw_rows``).
+        # The same indices the batch/vectorised paths draw (``_draw_sample_indices``).
         # pandas' ``sample(random_state=seed)`` used the legacy RandomState
         # here for stream 0, so a ``normalise(..., memory_save=True)`` and a
         # default call with the same seed resampled differently.
-        idx = _draw_rows(stream, seed, len(pool), len(df), replace)
+        p_strata = pool_strata_map.get(stream) if pool_strata_map is not None else None
+        knn_spec = knn_map.get(stream) if knn_map is not None else None
+        idx = _draw_sample_indices(
+            stream,
+            int(seed),
+            base_seed=b_seed,
+            sample_pos=int(sample_pos),
+            n_pool=len(pool),
+            n_rows=len(df),
+            replace=replace,
+            sampling=sampling,
+            block_hours=block_hours,
+            df_strata=df_strata,
+            p_strata=p_strata,
+            knn_spec=knn_spec,
+        )
         out.loc[:, cols] = pool[cols].to_numpy()[idx]
     out.loc[:, "seed"] = seed
     return out
@@ -416,6 +1067,45 @@ def normalise(
     _cfg = _resolve_normalise_config(config=config, **kwargs)
     if _cfg.resample_pools is not None and not isinstance(_cfg.resample_pools, Mapping):
         raise ConfigError("`resample_pools` must be a mapping of name -> DataFrame.")
+    if _cfg.conditional_k is not None:
+        cond_k: object = _cfg.conditional_k
+        if isinstance(cond_k, bool) or not isinstance(cond_k, numbers.Integral):
+            raise ConfigError(
+                f"`conditional_k` must be a positive integer or None, got {cond_k!r}."
+            )
+        if int(cond_k) < 1:
+            raise ConfigError(f"`conditional_k` must be at least 1, got {cond_k!r}.")
+    if _cfg.back_transform not in ("arithmetic", "smearing", "geometric"):
+        raise ConfigError(
+            "`back_transform` must be 'arithmetic', 'smearing', or 'geometric', "
+            f"got {_cfg.back_transform!r}."
+        )
+    if _cfg.smearing_factor is not None:
+        sf_obj: object = _cfg.smearing_factor
+        if isinstance(sf_obj, bool) or not isinstance(sf_obj, numbers.Real):
+            raise ConfigError(
+                f"`smearing_factor` must be a positive finite float or None, got {sf_obj!r}."
+            )
+        sf_val = float(sf_obj)
+        if not np.isfinite(sf_val) or sf_val <= 0.0:
+            raise ConfigError(f"`smearing_factor` must be a positive finite float, got {sf_obj!r}.")
+    _resolve_paired_mode(_cfg.paired, log_transform=bool(_cfg.log_transform))
+    pf_obj: object = _cfg.paired_floor
+    if (
+        isinstance(pf_obj, bool)
+        or not isinstance(pf_obj, numbers.Real)
+        or not np.isfinite(float(pf_obj))
+        or float(pf_obj) <= 0.0
+    ):
+        raise ConfigError(f"`paired_floor` must be a positive finite float, got {pf_obj!r}.")
+    if _cfg.sampling not in ("iid", "balanced"):
+        raise ConfigError(f"`sampling` must be 'iid' or 'balanced', got {_cfg.sampling!r}.")
+    if _cfg.block_hours is not None:
+        bh_obj: object = _cfg.block_hours
+        if isinstance(bh_obj, bool) or not isinstance(bh_obj, numbers.Integral):
+            raise ConfigError(f"`block_hours` must be a positive integer or None, got {bh_obj!r}.")
+        if int(bh_obj) < 1:
+            raise ConfigError(f"`block_hours` must be at least 1, got {bh_obj!r}.")
 
     required_features: set[str] | None = None
     if _cfg.covariates is None:
@@ -487,31 +1177,45 @@ def normalise(
     # reach the same set by different routes -- notably decompose(), whose
     # resample list is a shrinking sublist of a feature-importance or permutation
     # order -- otherwise recompute every single time.
+    strat_cols = _parse_stratify_by(_cfg.stratify_by)
     key_cols = sorted(set(_cfg.covariates) | {"value", "date"})
-    df_keyed = process_date(df.copy()).pipe(check_data, _cfg.covariates, "value")
+    df_dated_key = process_date(df.copy())
+    df_keyed = check_data(df_dated_key, _cfg.covariates, "value")
+    # The automatic Duan smearing factor is estimated from the rows labelled
+    # ``set == "testing"`` (``_resolve_smearing_factor``), so two frames with
+    # identical date/value/covariates but a different split produce different
+    # results and must not share a cache entry.
+    set_key = dataframe_hash(df_dated_key[["set"]]) if "set" in df_dated_key.columns else None
     resample_pool = df_keyed if _cfg.resample_df is None else _cfg.resample_df
-    # ``conditional_on`` picks rows by the filter column's own values, and a
-    # caller's ``resample_df`` may carry that column without it being a
-    # resampled variable ("season", a wind sector). Left out of the pool hash,
-    # two pools that differed only in it shared a cache entry, so the second
-    # call returned the first one's draws -- of the other pool's row set.
+    # `month`/`season` strata are derived from a pool's own `date` column, so
+    # changing the pool's date composition changes which rows serve each
+    # stratum while leaving the served covariate values (and therefore the
+    # rest of the key) identical. Hash the dates too, or a shared cache
+    # returns draws from the old month mix.
+    derived_strata_cols = {"date"} if {"month", "season"} & set(strat_cols) else set()
     resample_key_cols = sorted(
         c
-        for c in set(_cfg.variables_resample or key_cols) | set(_cfg.conditional_on or {})
+        for c in set(_cfg.variables_resample or key_cols)
+        | set(_cfg.conditional_on or {})
+        | set(strat_cols)
+        | derived_strata_cols
         if c in resample_pool.columns
     )
-    # Extra pools join the key only when given, so keys of runs without them --
-    # and the caches already on disk -- are unchanged. A pool serves whichever
-    # of its columns are in ``variables_resample``; hash those as well as the
-    # covariates. ``variables_resample`` is not validated against
-    # ``covariates``, and a served column left out of the hash made two
-    # different pools share one cache entry.
-    pool_key_cols = set(_cfg.covariates) | set(_cfg.variables_resample or ())
+    pool_key_cols = (
+        set(_cfg.covariates)
+        | set(_cfg.variables_resample or ())
+        | set(strat_cols)
+        | derived_strata_cols
+    )
     pool_keys = [
         (str(name), dataframe_hash(pool[sorted(c for c in pool.columns if c in pool_key_cols)]))
         for name, pool in sorted((_cfg.resample_pools or {}).items(), key=lambda kv: str(kv[0]))
         if isinstance(pool, pd.DataFrame)
     ]
+    strata_key: Any = None
+    if strat_cols:
+        strata_arr = _extract_strata(df_dated_key, strat_cols, label="df")
+        strata_key = dataframe_hash(pd.DataFrame({"_s": strata_arr}), include_index=False)
     conditional_key = (
         {
             str(col): _condition_key(cond)
@@ -524,6 +1228,8 @@ def normalise(
         package_version(),
         dependency_versions(),
         *([pool_keys] if pool_keys else []),
+        *([list(strat_cols), strata_key] if strat_cols else []),
+        *([("conditional_k", int(_cfg.conditional_k))] if _cfg.conditional_k is not None else []),
         sorted(_cfg.covariates),
         sorted(_cfg.variables_resample) if _cfg.variables_resample is not None else None,
         _cfg.n_samples,
@@ -536,7 +1242,16 @@ def normalise(
         _cfg.batch_size,
         # Joins the key only when on, so caches written by the linear path keep
         # their key (and their hits) -- the flag cannot change a linear result.
-        *([True] if _cfg.log_transform else []),
+        *(
+            [("log_transform", _cfg.back_transform, _cfg.smearing_factor)]
+            if _cfg.log_transform
+            else []
+        ),
+        *([("set", set_key)] if set_key is not None else []),
+        *([("mc_se", True)] if _cfg.return_mc_se else []),
+        *([("paired", _cfg.paired, float(_cfg.paired_floor))] if _cfg.paired else []),
+        *([("sampling", _cfg.sampling)] if _cfg.sampling != "iid" else []),
+        *([("block_hours", int(_cfg.block_hours))] if _cfg.block_hours is not None else []),
         dataframe_hash(df_keyed[[c for c in key_cols if c in df_keyed.columns]]),
         dataframe_hash(resample_pool[resample_key_cols]),
         model_hash(model),
@@ -553,26 +1268,195 @@ def _normalise_cached_call(
     return _normalise_uncached(df, model, cfg)
 
 
+def _resolve_smearing_factor(
+    df_dated: pd.DataFrame,
+    df_checked: pd.DataFrame,
+    model: object,
+    _cfg: NormaliseConfig,
+    n_cores_eff: int,
+) -> float:
+    """Resolve Duan smearing factor ``phi`` when ``log_transform`` and ``back_transform='smearing'``."""
+    if not _cfg.log_transform or _cfg.back_transform != "smearing":
+        return 1.0
+    if _cfg.smearing_factor is not None:
+        return float(_cfg.smearing_factor)
+    sub = df_checked
+    if "set" in df_dated.columns and len(df_dated) == len(df_checked):
+        val_num = pd.to_numeric(df_checked["value"], errors="coerce")
+        test_mask = (df_dated["set"].to_numpy() == "testing") & val_num.notna().to_numpy()
+        train_mask = (df_dated["set"].to_numpy() == "training") & val_num.notna().to_numpy()
+        if int(test_mask.sum()) >= 10:
+            sub = df_checked.loc[test_mask]
+        elif bool(train_mask.any()):
+            sub = df_checked.loc[train_mask]
+    preds_sub = ml_predict(model, sub, num_threads=n_cores_eff)
+    return compute_duan_smearing(sub["value"], preds_sub)
+
+
+def _aggregate_draws_frame(
+    df_result: pd.DataFrame,
+    _cfg: NormaliseConfig,
+    *,
+    phi: float,
+    is_log_arith: bool,
+    is_log_geom: bool,
+) -> pd.DataFrame:
+    """Aggregate per-seed predictions into normalised series, quantiles, MC SE, or wide table."""
+    if _cfg.aggregate:
+        (log.info if _cfg.verbose else log.debug)("Aggregating %d predictions.", _cfg.n_samples)
+        if is_log_arith:
+            df_work = pd.DataFrame(
+                {
+                    "date": df_result["date"].to_numpy(),
+                    "observed": np.expm1(df_result["observed"].to_numpy(dtype=float)),
+                    "normalised": _back_transform_values(
+                        df_result["normalised"].to_numpy(dtype=float), smearing_factor=phi
+                    ),
+                    "seed": df_result["seed"].to_numpy(),
+                }
+            )
+        else:
+            df_work = df_result
+
+        gb = df_work.groupby("date", as_index=True)
+        df_out = gb[["observed", "normalised"]].mean()
+        mean_z = df_out["normalised"].to_numpy(dtype=float).copy() if is_log_geom else None
+        if is_log_geom:
+            df_out["observed"] = np.expm1(df_out["observed"].to_numpy(dtype=float))
+            assert mean_z is not None
+            df_out["normalised"] = np.expm1(mean_z)
+
+        if _cfg.return_mc_se:
+            per_seed = df_work.groupby(["date", "seed"], as_index=False)["normalised"].mean()
+            gb_s = per_seed.groupby("date", as_index=True)["normalised"]
+            cnt = gb_s.count()
+            se_s = gb_s.std(ddof=1) / np.sqrt(cnt)
+            se_vals = se_s.reindex(df_out.index).to_numpy(dtype=float)
+            if is_log_geom:
+                assert mean_z is not None
+                se_vals = np.exp(mean_z) * se_vals
+            df_out["mc_se"] = se_vals
+
+        if _cfg.return_quantiles:
+            q_arr = sorted({float(q) for q in _cfg.return_quantiles})
+            gb_raw = df_result.groupby("date", as_index=True)
+            q_df = gb_raw["normalised"].quantile(np.asarray(q_arr)).unstack(level=-1)
+            if _cfg.log_transform:
+                q_df = pd.DataFrame(
+                    np.expm1(q_df.to_numpy(dtype=float)), index=q_df.index, columns=q_df.columns
+                )
+            q_df.columns = pd.Index([_format_quantile_name(float(q)) for q in q_df.columns])
+            df_out = df_out.join(q_df, how="left")
+        return df_out
+
+    observed = df_result.groupby("date", as_index=True)[["observed"]].mean()
+    wide = (
+        df_result.groupby(["date", "seed"], as_index=False)["normalised"]
+        .mean()
+        .pivot(index="date", columns="seed", values="normalised")
+    )
+    if is_log_arith:
+        observed["observed"] = np.expm1(observed["observed"].to_numpy(dtype=float))
+        wide = pd.DataFrame(
+            _back_transform_values(wide.to_numpy(dtype=float), smearing_factor=phi),
+            index=wide.index,
+            columns=wide.columns,
+        )
+    elif is_log_geom:
+        observed["observed"] = np.expm1(observed["observed"].to_numpy(dtype=float))
+        wide = pd.DataFrame(
+            np.expm1(wide.to_numpy(dtype=float)),
+            index=wide.index,
+            columns=wide.columns,
+        )
+    if _cfg.return_quantiles:
+        log.debug(
+            "`return_quantiles` ignored when aggregate=False (wide table already exposes all seeds)."
+        )
+    return pd.concat([observed, wide], axis=1)
+
+
+def _attach_paired_columns(
+    df_out: pd.DataFrame,
+    df: pd.DataFrame,
+    model: object,
+    _cfg: NormaliseConfig,
+    *,
+    phi: float,
+    paired_mode: str | None,
+    is_log_arith: bool,
+    is_log_geom: bool,
+    n_cores_eff: int,
+    fact_raw_precomputed: np.ndarray | None = None,
+) -> pd.DataFrame:
+    """Append ``factual``, ``weather_effect``, and ``paired`` columns when ``paired`` is enabled."""
+    if paired_mode is None or not _cfg.aggregate:
+        return df_out
+    fact_raw = (
+        fact_raw_precomputed
+        if fact_raw_precomputed is not None
+        else ml_predict(model, df, num_threads=n_cores_eff)
+    )
+    if is_log_arith:
+        fact_vals = _back_transform_values(fact_raw, smearing_factor=phi)
+    elif is_log_geom:
+        fact_vals = np.expm1(fact_raw)
+    else:
+        fact_vals = fact_raw
+    fact_aligned = (
+        pd.Series(fact_vals, index=pd.Index(df["date"].to_numpy(), name="date"))
+        .groupby(level=0)
+        .mean()
+        .reindex(df_out.index)
+        .to_numpy(dtype=float)
+    )
+    obs_arr = df_out["observed"].to_numpy(dtype=float)
+    norm_arr = df_out["normalised"].to_numpy(dtype=float)
+    df_out["factual"] = fact_aligned
+    df_out["weather_effect"] = fact_aligned - norm_arr
+    df_out["paired"] = _compute_paired_series(
+        obs_arr,
+        fact_aligned,
+        norm_arr,
+        mode=paired_mode,
+        floor=float(_cfg.paired_floor),
+    )
+    return df_out
+
+
 def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) -> pd.DataFrame:
     """Uncached resample-and-predict core of :func:`normalise`."""
     # narrowing: normalise() always resolves _cfg.covariates (auto-detecting
     # from `model` or raising ConfigError) before calling this helper.
     assert _cfg.covariates is not None
-    df = process_date(df).pipe(check_data, _cfg.covariates, "value")
+    df_dated = process_date(df)
+    strat_cols = _parse_stratify_by(_cfg.stratify_by)
+    df_strata = _extract_strata(df_dated, strat_cols, label="df") if strat_cols else None
+    df = check_data(df_dated, _cfg.covariates, "value")
     if "date" not in df.columns:
         raise DataError("`df` must contain a 'date' column.")
 
     resample_df = df if _cfg.resample_df is None else _cfg.resample_df
-    time_vars = {"date_unix", "day_julian", "weekday", "hour"}
+    base_strata_source = df_dated if _cfg.resample_df is None else resample_df
     variables_resample = (
         _cfg.variables_resample
         if _cfg.variables_resample is not None
-        else [c for c in _cfg.covariates if c not in time_vars]
+        else [c for c in _cfg.covariates if not _is_time_feature(c)]
     )
 
     if _cfg.conditional_on:
         before = len(resample_df)
-        resample_df = _apply_conditional_filter(resample_df, _cfg.conditional_on)
+        cond_mask = np.asarray(_conditional_mask(resample_df, _cfg.conditional_on), dtype=bool)
+        resample_df = resample_df.loc[cond_mask]
+        if _cfg.resample_df is None:
+            # `check_data` keeps df's rows and order, so the same positional
+            # mask selects the aligned rows of the strata source. A label-based
+            # `.loc[resample_df.index]` expanded every repeated label when the
+            # index was not unique (e.g. a concat of sites), making the strata
+            # array longer than the pool values and raising IndexError.
+            base_strata_source = base_strata_source.loc[cond_mask]
+        else:
+            base_strata_source = resample_df
         if resample_df.empty:
             raise DataError(
                 f"`conditional_on` filter left no rows in the resample pool (was {before}). "
@@ -596,22 +1480,148 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
     missing = [c for c in base_cols if c not in resample_df.columns]
     if missing:
         raise DataError(f"`resample_df` is missing columns required for resampling: {missing}")
+
+    if _cfg.block_hours is not None and int(_cfg.block_hours) > 1:
+        for _stream, _cols, pool in draws:
+            if len(pool) < int(_cfg.block_hours):
+                log.warning(
+                    "block_hours=%d exceeds resample pool length %d; blocks wrap cyclically.",
+                    int(_cfg.block_hours),
+                    len(pool),
+                )
+                break
+
+    pool_strata_map: dict[int, np.ndarray] = {}
+    if strat_cols:
+        base_s = _extract_strata(base_strata_source, strat_cols, label="resample_df")
+        pool_strata_map[0] = base_s
+        for name, pool in (_cfg.resample_pools or {}).items():
+            if isinstance(pool, pd.DataFrame):
+                stream_id = zlib.crc32(str(name).encode("utf-8")) or 1
+                pool_strata_map[stream_id] = _extract_strata(
+                    pool, strat_cols, label=f"resample_pools[{name!r}]"
+                )
+
     # Each pool's served columns as one array, built once for every draw.
-    draw_arrays = [(stream, cols, pool[cols].to_numpy()) for stream, cols, pool in draws]
+    draw_arrays = [
+        (stream, cols, pool[cols].to_numpy(), pool_strata_map.get(stream))
+        for stream, cols, pool in draws
+    ]
+
+    knn_map: dict[int, tuple[np.ndarray, np.ndarray | None]] = {}
+    if _cfg.conditional_k is not None and variables_resample:
+        cond_cols = [
+            c
+            for c in _cfg.covariates
+            if c not in variables_resample
+            and not _is_time_feature(c)
+            and c in df.columns
+            and pd.api.types.is_numeric_dtype(df[c])
+        ]
+        if cond_cols:
+            for stream, _cols, pool in draws:
+                p_cond = [
+                    c
+                    for c in cond_cols
+                    if c in pool.columns and pd.api.types.is_numeric_dtype(pool[c])
+                ]
+                if p_cond:
+                    knn_map[stream] = _build_knn_indices(
+                        df,
+                        pool,
+                        p_cond,
+                        int(_cfg.conditional_k),
+                        df_strata=df_strata,
+                        pool_strata=pool_strata_map.get(stream),
+                    )
 
     n_cores_eff = resolve_workers(_cfg.n_cores)
+    is_log_arith = bool(_cfg.log_transform and _cfg.back_transform in ("arithmetic", "smearing"))
+    is_log_geom = bool(_cfg.log_transform and _cfg.back_transform == "geometric")
+    phi = _resolve_smearing_factor(df_dated, df, model, _cfg, n_cores_eff)
+    paired_mode = _resolve_paired_mode(_cfg.paired, log_transform=bool(_cfg.log_transform))
 
     rng = np.random.default_rng(_cfg.seed)
     random_seeds = rng.choice(1_000_000, size=_cfg.n_samples, replace=False)
+
+    if not variables_resample:
+        preds = ml_predict(model, df, num_threads=n_cores_eff)
+        obs_raw = df["value"].to_numpy(dtype=float)
+        obs_vals = np.expm1(obs_raw) if _cfg.log_transform else obs_raw
+        pred_vals = _back_transform_values(preds, smearing_factor=phi) if is_log_arith else preds
+        df_one = pd.DataFrame(
+            {
+                "date": df["date"].to_numpy(),
+                "observed": obs_vals,
+                "normalised": pred_vals,
+            }
+        )
+        gb_one = df_one.groupby("date", as_index=True)
+        if _cfg.aggregate:
+            df_out = gb_one[["observed", "normalised"]].mean()
+            if is_log_geom:
+                df_out["normalised"] = np.expm1(df_out["normalised"].to_numpy(dtype=float))
+            if _cfg.return_mc_se:
+                df_out["mc_se"] = 0.0 if _cfg.n_samples >= 2 else np.nan
+            if _cfg.return_quantiles:
+                q_arr = sorted({float(q) for q in _cfg.return_quantiles})
+                # The resampling paths compute quantiles over their long
+                # per-seed table, where every input row appears n_samples
+                # times. With nothing resampled every seed predicts the same
+                # value, so replicating each row n_samples times reproduces
+                # that multiset exactly. Quantiling the raw rows instead
+                # changed the result whenever timestamps repeat: two rows at
+                # one timestamp predicting 6 and 7 gave 6.1 / 6.9 for the
+                # 10 % / 90 % quantiles instead of the slow path's 6 / 7.
+                # The quantile is taken on the model's scale, then inverted
+                # once (a monotone transform commutes with the quantile).
+                df_one_raw = pd.DataFrame({"date": df["date"].to_numpy(), "normalised": preds})
+                q_source = df_one_raw.iloc[np.repeat(np.arange(len(df_one_raw)), _cfg.n_samples)]
+                q_df = (
+                    q_source.groupby("date", as_index=True)["normalised"]
+                    .quantile(np.asarray(q_arr))
+                    .unstack(level=-1)
+                )
+                if _cfg.log_transform:
+                    q_df = pd.DataFrame(
+                        np.expm1(q_df.to_numpy(dtype=float)), index=q_df.index, columns=q_df.columns
+                    )
+                q_df.columns = pd.Index([_format_quantile_name(float(q)) for q in q_df.columns])
+                df_out = df_out.join(q_df, how="left")
+            df_out = _attach_paired_columns(
+                df_out,
+                df,
+                model,
+                _cfg,
+                phi=phi,
+                paired_mode=paired_mode,
+                is_log_arith=is_log_arith,
+                is_log_geom=is_log_geom,
+                n_cores_eff=n_cores_eff,
+                fact_raw_precomputed=preds,
+            )
+        else:
+            observed = gb_one[["observed"]].mean()
+            vals = gb_one["normalised"].mean().to_numpy(dtype=float)
+            if is_log_geom:
+                vals = np.expm1(vals)
+            sorted_seeds = sorted(int(s) for s in random_seeds)
+            wide = pd.DataFrame(
+                {s: vals for s in sorted_seeds},
+                index=observed.index,
+            )
+            wide.columns = pd.Index(sorted_seeds, name="seed")
+            df_out = pd.concat([observed, wide], axis=1)
+        (log.info if _cfg.verbose else log.debug)(
+            "Finished normalisation (no resampled variables; single pass)."
+        )
+        return df_out
 
     # Resolve the effective batch size. None -> auto-derive from the data
     # footprint (normet-R's heuristic: as many resampled copies of `df` as fit
     # in a ~400 MB payload budget); 0 -> batching disabled; >0 -> as given.
     if _cfg.batch_size is None:
         if _cfg.memory_save:
-            # Explicit memory_save=True selects the joblib-threaded path;
-            # don't let the auto default shadow that choice. An explicit
-            # batch_size > 0 still takes precedence over memory_save.
             eff_batch_size = 0
         else:
             one_copy_bytes = int(df.memory_usage(deep=True).sum())
@@ -627,7 +1637,7 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
     else:
         eff_batch_size = int(_cfg.batch_size)
 
-    use_batch_reduce = eff_batch_size > 0 and _cfg.aggregate and not _cfg.return_quantiles
+    use_batch_reduce = eff_batch_size > 0 and _cfg.aggregate
 
     (log.info if _cfg.verbose else log.debug)(
         "Normalising with %d resamples (aggregate=%s, memory_save=%s, "
@@ -639,7 +1649,7 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
         n_cores_eff,
     )
 
-    def process_one(seed_i: int) -> pd.DataFrame | None:
+    def process_one(sample_pos: int, seed_i: int) -> pd.DataFrame | None:
         try:
             df_resampled = generate_resampled(
                 df,
@@ -648,11 +1658,14 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
                 int(seed_i),
                 resample_df,
                 resample_pools=_cfg.resample_pools,
+                df_strata=df_strata,
+                pool_strata_map=pool_strata_map,
+                knn_map=knn_map or None,
+                sampling=_cfg.sampling,
+                block_hours=_cfg.block_hours,
+                base_seed=_cfg.seed,
+                sample_pos=int(sample_pos),
             )
-            # One predict thread per worker: this path already runs
-            # ``n_cores_eff`` of these at once, and a LightGBM call sized from
-            # the OpenMP defaults would open a full-width pool in each.
-            # Prediction is bit-identical across thread counts (ml_predict).
             preds = ml_predict(model, df_resampled, num_threads=1)
             return pd.DataFrame(
                 {
@@ -667,18 +1680,37 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
             return None
 
     # ── Batch-reduce path: O(batch_size × n_rows) peak memory ──────────────
-    # Mirrors R's transient-memory pipeline: generate → predict → accumulate
-    # → delete, one batch at a time.  Only available when aggregate=True.
+    # Supports streaming Welford MC SE and compact scalar quantile buffer.
     if use_batch_reduce:
         import gc
 
         n_rows = len(df)
-        obs_arr = df["value"].to_numpy()
+        obs_arr = df["value"].to_numpy(dtype=float)
         dates_arr = df["date"].to_numpy()
+        dates_unique = bool(pd.Index(dates_arr).is_unique)
 
         sum_norm = np.zeros(n_rows, dtype=np.float64)
         sum_obs = np.zeros(n_rows, dtype=np.float64)
         n_completed = 0
+
+        # Chan parallel Welford accumulators for MC SE when requested
+        w_count = 0
+        inv_date_idx: np.ndarray | None = None
+        date_counts: np.ndarray | None = None
+        if _cfg.return_mc_se:
+            if dates_unique:
+                w_mean = np.zeros(n_rows, dtype=np.float64)
+                w_m2 = np.zeros(n_rows, dtype=np.float64)
+            else:
+                unique_dates, inv_date_idx = np.unique(dates_arr, return_inverse=True)
+                date_counts = np.bincount(inv_date_idx).astype(np.float64)
+                w_mean = np.zeros(len(unique_dates), dtype=np.float64)
+                w_m2 = np.zeros(len(unique_dates), dtype=np.float64)
+
+        # Compact scalar prediction buffer for quantiles (avoids full feature copy in RAM)
+        q_buf: np.ndarray | None = (
+            np.empty((_cfg.n_samples, n_rows), dtype=np.float64) if _cfg.return_quantiles else None
+        )
 
         seeds_batched = [
             random_seeds[i : i + eff_batch_size] for i in range(0, _cfg.n_samples, eff_batch_size)
@@ -690,32 +1722,64 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
             _cfg.n_samples,
         )
 
+        sample_offset = 0
         for b_idx, batch_seeds in enumerate(seeds_batched):
             progress.report(b_idx, len(seeds_batched))
             b_size = len(batch_seeds)
+            batch_positions = list(range(sample_offset, sample_offset + b_size))
 
-            # Build prediction DataFrame without materialising the full n_samples × n_rows frame
-            df_batch_dict = _stacked_columns(df, draw_arrays, batch_seeds, _cfg.replace)
+            df_batch_dict = _stacked_columns(
+                df,
+                draw_arrays,
+                batch_seeds,
+                _cfg.replace,
+                df_strata=df_strata,
+                knn_map=knn_map or None,
+                base_seed=_cfg.seed,
+                sample_positions=batch_positions,
+                sampling=_cfg.sampling,
+                block_hours=_cfg.block_hours,
+            )
             df_batch = pd.DataFrame(df_batch_dict)
+            batch_preds = ml_predict(model, df_batch, num_threads=n_cores_eff)
+            batch_z_2d = batch_preds.reshape(b_size, n_rows)
 
-            # The batch path has no per-seed worker pool, so n_cores sizes the
-            # prediction threads instead (LightGBM only; other backends ignore
-            # it). Results do not depend on the thread count.
-            batch_preds = ml_predict(
-                model, df_batch, num_threads=n_cores_eff
-            )  # shape (b_size × n_rows,)
+            if q_buf is not None:
+                q_buf[sample_offset : sample_offset + b_size] = batch_z_2d
 
-            # Accumulate into running sums and immediately free batch arrays
-            batch_preds_2d = batch_preds.reshape(b_size, n_rows)
-            sum_norm += batch_preds_2d.sum(axis=0)
-            # A broadcast view, not np.tile: summing the b_size identical
-            # copies is bit-identical to the tiled array (same pairwise
-            # reduction order) without allocating b_size × n_rows floats.
+            batch_y_2d = (
+                _back_transform_values(batch_z_2d, smearing_factor=phi)
+                if is_log_arith
+                else batch_z_2d
+            )
+            sum_norm += batch_y_2d.sum(axis=0)
             sum_obs += np.broadcast_to(obs_arr, (b_size, n_rows)).sum(axis=0)
-            n_completed += b_size
 
-            del df_batch_dict, df_batch
-            del batch_preds, batch_preds_2d
+            if _cfg.return_mc_se:
+                if dates_unique:
+                    w_data = batch_y_2d
+                else:
+                    assert inv_date_idx is not None and date_counts is not None
+                    w_data = np.zeros((b_size, len(date_counts)), dtype=np.float64)
+                    np.add.at(w_data.T, inv_date_idx, batch_y_2d.T)
+                    w_data /= date_counts[None, :]
+                b_mean = w_data.mean(axis=0)
+                b_m2 = ((w_data - b_mean) ** 2).sum(axis=0)
+                if w_count == 0:
+                    w_mean = b_mean
+                    w_m2 = b_m2
+                    w_count = b_size
+                else:
+                    new_count = w_count + b_size
+                    delta = b_mean - w_mean
+                    w_mean = w_mean + delta * (b_size / new_count)
+                    w_m2 = w_m2 + b_m2 + (delta**2) * (w_count * b_size / new_count)
+                    w_count = new_count
+
+            n_completed += b_size
+            sample_offset += b_size
+
+            del df_batch_dict, df_batch, batch_preds, batch_z_2d, batch_y_2d
             gc.collect()
 
             (log.debug)(
@@ -726,30 +1790,83 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
                 _cfg.n_samples,
             )
 
-        df_out = pd.DataFrame(
-            {
-                "observed": sum_obs / n_completed,
-                "normalised": sum_norm / n_completed,
-            },
-            index=pd.Index(dates_arr, name="date"),
-        )
-        # The other paths group by date before returning an aggregated table;
-        # with duplicate timestamps this one used to return one row per input
-        # row, so the shape (and the observed average) depended on which
-        # memory setting the call happened to use.
-        df_out = df_out.groupby(level="date", as_index=True).mean()
-        df_out.index.name = "date"
+        obs_mean = sum_obs / n_completed
+        if _cfg.log_transform:
+            obs_mean = np.expm1(obs_mean)
+        norm_raw_mean = sum_norm / n_completed
+
+        if dates_unique:
+            order = np.argsort(dates_arr, kind="stable")
+            sorted_idx = pd.Index(dates_arr[order], name="date")
+            mean_z = norm_raw_mean[order] if is_log_geom else None
+            norm_out = np.expm1(mean_z) if mean_z is not None else norm_raw_mean[order]
+            df_out = pd.DataFrame(
+                {"observed": obs_mean[order], "normalised": norm_out},
+                index=sorted_idx,
+            )
+            if _cfg.return_mc_se:
+                if n_completed >= 2:
+                    se_vals = np.sqrt(np.clip(w_m2 / (n_completed - 1), 0.0, None) / n_completed)
+                    se_vals = se_vals[order]
+                    if mean_z is not None:
+                        se_vals = np.exp(mean_z) * se_vals
+                else:
+                    se_vals = np.full(n_rows, np.nan, dtype=float)
+                df_out["mc_se"] = se_vals
+            if q_buf is not None:
+                q_arr = sorted({float(q) for q in (_cfg.return_quantiles or ())})
+                q_mat = np.quantile(q_buf[:, order], q_arr, axis=0)
+                if _cfg.log_transform:
+                    q_mat = np.expm1(q_mat)
+                for qi, q_val in enumerate(q_arr):
+                    df_out[_format_quantile_name(q_val)] = q_mat[qi]
+        else:
+            df_out = pd.DataFrame(
+                {"observed": obs_mean, "normalised": norm_raw_mean},
+                index=pd.Index(dates_arr, name="date"),
+            )
+            df_out = df_out.groupby(level="date", as_index=True).mean()
+            df_out.index.name = "date"
+            mean_z = df_out["normalised"].to_numpy(dtype=float).copy() if is_log_geom else None
+            if mean_z is not None:
+                df_out["normalised"] = np.expm1(mean_z)
+            if _cfg.return_mc_se:
+                if n_completed >= 2:
+                    se_vals = np.sqrt(np.clip(w_m2 / (n_completed - 1), 0.0, None) / n_completed)
+                    if mean_z is not None:
+                        se_vals = np.exp(mean_z) * se_vals
+                else:
+                    se_vals = np.full(len(df_out), np.nan, dtype=float)
+                df_out["mc_se"] = se_vals
+            if q_buf is not None:
+                q_arr = sorted({float(q) for q in (_cfg.return_quantiles or ())})
+                q_src = pd.DataFrame(
+                    {"date": np.tile(dates_arr, n_completed), "_pred": q_buf.ravel()}
+                )
+                q_df = (
+                    q_src.groupby("date", as_index=True)["_pred"]
+                    .quantile(np.asarray(q_arr))
+                    .unstack(level=-1)
+                )
+                if _cfg.log_transform:
+                    q_df = pd.DataFrame(
+                        np.expm1(q_df.to_numpy(dtype=float)),
+                        index=q_df.index,
+                        columns=q_df.columns,
+                    )
+                q_df.columns = pd.Index([_format_quantile_name(float(q)) for q in q_df.columns])
+                df_out = df_out.join(q_df, how="left")
+
+        if q_buf is not None:
+            del q_buf
+            gc.collect()
 
     # ── joblib threaded path: memory_save=True ─────────────────────────────
     elif _cfg.memory_save:
         from joblib import Parallel, delayed
 
-        # prefer="threads" keeps the (large) model + frame shared in-process
-        # rather than pickling them to worker processes. This relies on the
-        # heavy work (model.predict in FLAML/LightGBM, NumPy/pandas ops)
-        # releasing the GIL; a pure-Python predict path would not parallelise.
         results_raw = Parallel(n_jobs=n_cores_eff, prefer="threads")(
-            delayed(process_one)(int(s)) for s in random_seeds
+            delayed(process_one)(pos, int(s)) for pos, s in enumerate(random_seeds)
         )
         results: list[pd.DataFrame] = [r for r in results_raw if r is not None]
         if not results:
@@ -765,39 +1882,28 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
                 _cfg.n_samples,
             )
         df_result = pd.concat(results, ignore_index=True)
+        df_out = _aggregate_draws_frame(
+            df_result, _cfg, phi=phi, is_log_arith=is_log_arith, is_log_geom=is_log_geom
+        )
 
-        if _cfg.aggregate:
-            (log.info if _cfg.verbose else log.debug)("Aggregating %d predictions.", _cfg.n_samples)
-            gb = df_result.groupby("date", as_index=True)
-            df_out = gb[["observed", "normalised"]].mean()
-            if _cfg.return_quantiles:
-                q_arr = sorted({float(q) for q in _cfg.return_quantiles})
-                q_df = gb["normalised"].quantile(np.asarray(q_arr)).unstack(level=-1)
-                q_df.columns = pd.Index([_format_quantile_name(float(q)) for q in q_df.columns])
-                df_out = df_out.join(q_df, how="left")
-        else:
-            # A frame with duplicate timestamps gives each seed several rows
-            # per date, which ``pivot`` refuses to reshape. Averaging those
-            # rows first keeps the documented wide table (and the same values
-            # as before whenever the dates are unique).
-            observed = df_result.groupby("date", as_index=True)[["observed"]].mean()
-            wide = (
-                df_result.groupby(["date", "seed"], as_index=False)["normalised"]
-                .mean()
-                .pivot(index="date", columns="seed", values="normalised")
-            )
-            df_out = pd.concat([observed, wide], axis=1)
-
-    # ── Vectorised path: default, O(n_samples × n_rows) ───────────────────
+    # ── Vectorised path: O(n_samples × n_rows) ────────────────────────────
     else:
         n_rows = len(df)
-
-        # All draws at once with numpy (fast PRNG, per-seed reproducibility).
-        df_all = pd.DataFrame(_stacked_columns(df, draw_arrays, random_seeds, _cfg.replace))
+        df_all = pd.DataFrame(
+            _stacked_columns(
+                df,
+                draw_arrays,
+                random_seeds,
+                _cfg.replace,
+                df_strata=df_strata,
+                knn_map=knn_map or None,
+                base_seed=_cfg.seed,
+                sample_positions=list(range(_cfg.n_samples)),
+                sampling=_cfg.sampling,
+                block_hours=_cfg.block_hours,
+            )
+        )
         df_all["seed"] = np.repeat(random_seeds, n_rows)
-
-        # Like the batch path, this path has no pool of its own: n_cores sizes
-        # the prediction threads (LightGBM only; other backends ignore it).
         preds = ml_predict(model, df_all, num_threads=n_cores_eff)
 
         df_result = pd.DataFrame(
@@ -808,36 +1914,22 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
                 "seed": df_all["seed"].to_numpy(),
             }
         )
+        df_out = _aggregate_draws_frame(
+            df_result, _cfg, phi=phi, is_log_arith=is_log_arith, is_log_geom=is_log_geom
+        )
 
-        if _cfg.aggregate:
-            (log.info if _cfg.verbose else log.debug)("Aggregating %d predictions.", _cfg.n_samples)
-            gb = df_result.groupby("date", as_index=True)
-            df_out = gb[["observed", "normalised"]].mean()
-            if _cfg.return_quantiles:
-                q_arr = sorted({float(q) for q in _cfg.return_quantiles})
-                q_df = gb["normalised"].quantile(np.asarray(q_arr)).unstack(level=-1)
-                q_df.columns = pd.Index([_format_quantile_name(float(q)) for q in q_df.columns])
-                df_out = df_out.join(q_df, how="left")
-        else:
-            # A frame with duplicate timestamps gives each seed several rows
-            # per date, which ``pivot`` refuses to reshape. Averaging those
-            # rows first keeps the documented wide table (and the same values
-            # as before whenever the dates are unique).
-            observed = df_result.groupby("date", as_index=True)[["observed"]].mean()
-            wide = (
-                df_result.groupby(["date", "seed"], as_index=False)["normalised"]
-                .mean()
-                .pivot(index="date", columns="seed", values="normalised")
-            )
-            df_out = pd.concat([observed, wide], axis=1)
-            if _cfg.return_quantiles:
-                log.debug(
-                    "`return_quantiles` ignored when aggregate=False (wide table already exposes all seeds)."
-                )
-
+    df_out = _attach_paired_columns(
+        df_out,
+        df,
+        model,
+        _cfg,
+        phi=phi,
+        paired_mode=paired_mode,
+        is_log_arith=is_log_arith,
+        is_log_geom=is_log_geom,
+        n_cores_eff=n_cores_eff,
+    )
     (log.info if _cfg.verbose else log.debug)("Finished normalisation.")
-    if _cfg.log_transform:
-        df_out = expm1_columns(df_out)
     return df_out
 
 
@@ -857,6 +1949,7 @@ def normalise_auto(
     seed: int = 7_654_321,
     verbose: bool = True,
     return_history: bool = False,
+    return_mc_se: bool = False,
     **normalise_kwargs: Any,
 ) -> dict:
     """Run meteorological normalisation in batches until the result converges.
@@ -891,7 +1984,7 @@ def normalise_auto(
     Parameters
     ----------
     df : pandas.DataFrame
-        Input dataset with ``date`` and target ``value`` columns.
+        Input dataset with ``date`` column (or DatetimeIndex) and target ``value``.
     model : object
         Trained model with a ``predict`` method.
     covariates : list[str], optional
@@ -930,17 +2023,20 @@ def normalise_auto(
     return_history : bool, default False
         Also return a per-check history DataFrame (columns ``n``,
         ``metric``, ``global_mean``, ``stable_count``).
+    return_mc_se : bool, default False
+        If True, append a per-date ``mc_se`` column to ``res``.
     **normalise_kwargs : Any
         Extra keyword arguments forwarded to :func:`normalise` (e.g.
-        ``n_cores``, ``memory_save``). A ``seed`` passed here is ignored
-        in favour of the explicit ``seed`` parameter above.
+        ``n_cores``, ``memory_save``, ``log_transform``, ``back_transform``).
+        A ``seed`` passed here is ignored in favour of ``seed`` above.
 
     Returns
     -------
     dict
-        A dict with keys ``best_n`` (int, total samples used), ``res``
-        (DataFrame with ``date``, ``observed`` and ``normalised``) and
-        ``history`` (DataFrame, only when ``return_history=True``).
+        A dict with keys ``best_n`` (int, total samples used), ``converged``
+        (bool), ``res`` (DataFrame with ``date``, ``observed``, ``normalised``,
+        and optional ``mc_se``) and ``history`` (DataFrame, only when
+        ``return_history=True``).
     """
     normalise_kwargs.pop("seed", None)
 
@@ -960,21 +2056,57 @@ def normalise_auto(
     if stability_streak is None:
         stability_streak = 3 if metric == "series" else 5
 
+    df_dated = process_date(df)
     if resample_df is None:
         resample_df = df
 
-    # --- 1. Initialise accumulators ---
-    # Per-date running sums of batch means (and their squares, for the
-    # series criterion's per-date variance) as flat numpy arrays aligned to
-    # a frozen date index -- far cheaper than per-date dict updates.
-    obs_col = df["value"] if "value" in df.columns else pd.Series(np.nan, index=df.index)
-    observed_by_date: dict[object, float] = {
-        d: float(o) for d, o in zip(df["date"], obs_col, strict=False)
-    }
+    call_kwargs = dict(normalise_kwargs)
+    is_log = bool(call_kwargs.get("log_transform", False))
+    bt_mode = str(call_kwargs.get("back_transform", "geometric"))
+    if bt_mode not in ("arithmetic", "smearing", "geometric"):
+        raise ConfigError(
+            f"`back_transform` must be 'arithmetic', 'smearing', or 'geometric', got {bt_mode!r}."
+        )
+    is_log_geom_auto = is_log and bt_mode == "geometric"
+    if is_log and bt_mode == "smearing" and call_kwargs.get("smearing_factor") is None:
+        covs_for_phi = covariates or _resolve_normalise_config(**call_kwargs).covariates
+        if covs_for_phi is None and model is not None:
+            try:
+                from ..utils.features import extract_features
 
-    dates_idx: pd.Index | None = None  # frozen on the first batch
-    sum_bm: np.ndarray | None = None  # per-date sum of batch means
-    sum_bm2: np.ndarray | None = None  # per-date sum of squared batch means
+                covs_for_phi = [str(c) for c in extract_features(model)]
+            except Exception:
+                covs_for_phi = None
+        if covs_for_phi is not None and "value" in df_dated.columns:
+            df_phi = check_data(df_dated, list(covs_for_phi), "value")
+            tmp_cfg = _resolve_normalise_config(
+                covariates=list(covs_for_phi),
+                log_transform=True,
+                back_transform="smearing",
+                n_cores=call_kwargs.get("n_cores"),
+            )
+            call_kwargs["smearing_factor"] = _resolve_smearing_factor(
+                df_dated, df_phi, model, tmp_cfg, resolve_workers(tmp_cfg.n_cores)
+            )
+    if is_log_geom_auto:
+        # Accumulate batch means on log1p scale so final expm1(mean) is invariant
+        # to batch_size and agrees with single-call back_transform="geometric".
+        call_kwargs["log_transform"] = False
+
+    # --- 1. Initialise Welford accumulators ---
+    if "value" in df_dated.columns:
+        obs_series = df_dated.groupby("date")["value"].mean()
+        if is_log:
+            obs_series = pd.Series(
+                np.expm1(obs_series.to_numpy(dtype=float)), index=obs_series.index
+            )
+        observed_by_date: dict[object, float] = {d: float(o) for d, o in obs_series.items()}
+    else:
+        observed_by_date = {}
+
+    dates_idx: pd.Index | None = None
+    mean_bm: np.ndarray | None = None
+    m2_bm: np.ndarray | None = None
 
     total_n = 0
     n_batches = 0
@@ -995,7 +2127,7 @@ def normalise_auto(
     # --- 2. Main loop ---
     while total_n < max_samples:
         batch_result = normalise(
-            df,
+            df_dated,
             model,
             covariates=covariates,
             variables_resample=variables_resample,
@@ -1004,32 +2136,37 @@ def normalise_auto(
             aggregate=True,
             seed=seed + total_n,
             verbose=False,
-            **normalise_kwargs,
+            **call_kwargs,
         )
 
         bm_series = batch_result["normalised"]
         if dates_idx is None:
             dates_idx = bm_series.index
-            sum_bm = np.zeros(len(dates_idx))
-            sum_bm2 = np.zeros(len(dates_idx))
-        assert sum_bm is not None and sum_bm2 is not None
-        bm = bm_series.reindex(dates_idx).to_numpy(dtype=float)
-        sum_bm += bm
-        sum_bm2 += bm**2
+            bm = bm_series.reindex(dates_idx).to_numpy(dtype=float)
+            mean_bm = bm.copy()
+            m2_bm = np.zeros_like(bm)
+        else:
+            assert mean_bm is not None and m2_bm is not None
+            bm = bm_series.reindex(dates_idx).to_numpy(dtype=float)
 
         total_n += batch_size
         n_batches += 1
+        if n_batches >= 2:
+            assert mean_bm is not None and m2_bm is not None
+            delta = bm - mean_bm
+            mean_bm = mean_bm + delta / n_batches
+            m2_bm = m2_bm + delta * (bm - mean_bm)
 
         # --- 3. Convergence check ---
         if n_batches >= 2:
-            cum_mean = sum_bm / n_batches
+            assert mean_bm is not None and m2_bm is not None
+            cum_mean = np.expm1(mean_bm) if is_log_geom_auto else mean_bm
             current_global_mean = float(np.nanmean(cum_mean))
 
             if metric == "series":
-                # Per-date relative standard error of the cumulative mean:
-                # SE_t = sd(batch means at t)/sqrt(n_batches); RSE_t = SE_t/|mean_t|.
-                var_bm = (sum_bm2 - sum_bm**2 / n_batches) / (n_batches - 1)
-                se = np.sqrt(np.clip(var_bm, 0.0, None) / n_batches)
+                var_bm = np.clip(m2_bm, 0.0, None) / (n_batches - 1)
+                se_raw = np.sqrt(var_bm / n_batches)
+                se = np.exp(mean_bm) * se_raw if is_log_geom_auto else se_raw
                 denom = np.abs(cum_mean)
                 ok = denom > 1e-12
                 rse = se[ok] / denom[ok]
@@ -1082,11 +2219,9 @@ def normalise_auto(
 
             prev_global_mean = current_global_mean
         else:
-            # Seed the global-metric baseline from the first batch so the
-            # first real check (batch 2) compares against batch 1 rather
-            # than against 0 (which would waste a check and shift the stop
-            # point by one batch relative to the legacy behaviour).
-            prev_global_mean = float(np.nanmean(sum_bm / n_batches))
+            assert mean_bm is not None
+            first_est = np.expm1(mean_bm) if is_log_geom_auto else mean_bm
+            prev_global_mean = float(np.nanmean(first_est))
 
     if not converged:
         # Deliberately not gated on `verbose`: silently returning an
@@ -1099,22 +2234,293 @@ def normalise_auto(
         )
 
     # --- 4. Assemble output ---
-    cum_mean = sum_bm / n_batches if n_batches and sum_bm is not None else np.array([])
-    res = (
-        pd.DataFrame(
-            {
-                "date": list(dates_idx) if dates_idx is not None else [],
-                "observed": [observed_by_date.get(d, float("nan")) for d in dates_idx]
-                if dates_idx is not None
-                else [],
-                "normalised": cum_mean,
-            }
-        )
-        .sort_values("date")
-        .reset_index(drop=True)
-    )
+    if n_batches and mean_bm is not None:
+        cum_mean_out = np.expm1(mean_bm) if is_log_geom_auto else mean_bm
+        if n_batches >= 2 and m2_bm is not None:
+            se_raw_out = np.sqrt(np.clip(m2_bm, 0.0, None) / (n_batches - 1) / n_batches)
+            mc_se_out = np.exp(mean_bm) * se_raw_out if is_log_geom_auto else se_raw_out
+        else:
+            mc_se_out = np.full(len(cum_mean_out), np.nan, dtype=float)
+    else:
+        cum_mean_out = np.array([])
+        mc_se_out = np.array([])
 
-    out = {"best_n": total_n, "res": res}
+    res_dict: dict[str, Any] = {
+        "date": list(dates_idx) if dates_idx is not None else [],
+        "observed": [observed_by_date.get(d, float("nan")) for d in dates_idx]
+        if dates_idx is not None
+        else [],
+        "normalised": cum_mean_out,
+    }
+    if return_mc_se:
+        res_dict["mc_se"] = mc_se_out
+    res = pd.DataFrame(res_dict).sort_values("date").reset_index(drop=True)
+
+    out: dict[str, Any] = {"best_n": total_n, "converged": converged, "res": res}
     if return_history:
         out["history"] = pd.DataFrame(history)
     return out
+
+
+@dataclass
+class CrossFitNormaliseResult:
+    """Result container returned by :func:`crossfit_normalise`."""
+
+    normalised: pd.DataFrame
+    oof_metrics: pd.DataFrame
+    fold_models: list[object]
+    n_splits: int
+    embargo: int
+    paired_mode: str
+    log_transform: bool
+    back_transform: str
+    smearing_factors: list[float] = field(default_factory=list)
+
+
+def crossfit_normalise(
+    df: pd.DataFrame,
+    target: str = "value",
+    *,
+    covariates: list[str],
+    variables_resample: list[str] | None = None,
+    backend: str = "lightgbm",
+    model_config: dict[str, Any] | None = None,
+    n_splits: int = 5,
+    embargo: int = _CROSSFIT_DEFAULT_EMBARGO,
+    paired: bool | str = "log_ratio",
+    paired_floor: float = 1e-6,
+    n_samples: int = 300,
+    log_transform: bool = False,
+    back_transform: str = "geometric",
+    stratify_by: str | Sequence[str] | None = None,
+    conditional_k: int | None = None,
+    conditional_on: Mapping[str, Any] | None = None,
+    resample_pools: Mapping[str, pd.DataFrame] | None = None,
+    resample_df: pd.DataFrame | None = None,
+    return_quantiles: Sequence[float] | None = None,
+    return_mc_se: bool = False,
+    sampling: str = "iid",
+    block_hours: int | None = None,
+    seed: int = DEFAULT_SEED,
+    n_cores: int | None = None,
+    memory_save: bool = False,
+    cache: str | Path | None = None,
+    impute: str = "train_median",
+    max_gap: int | None = 6,
+    circular_cols: Sequence[str] | None = None,
+    verbose: bool = False,
+) -> CrossFitNormaliseResult:
+    """Temporally blocked, embargoed out-of-fold meteorological normalisation.
+
+    Mitigates in-sample absorption of short-to-medium emission events by
+    predicting each temporal block solely from a model fitted outside that
+    block (excluding an ``embargo`` buffer on both sides) and pairing observed
+    concentrations against the out-of-fold factual/counterfactual ratio.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input time series carrying ``date`` (or DatetimeIndex), ``target``, and
+        predictors.
+    target : str, default "value"
+        Target concentration column in ``df``.
+    covariates : list of str
+        Model predictors (may include helper calendar features
+        ``date_unix``/``day_julian``/``weekday``/``hour``).
+    variables_resample : list of str, optional
+        Variables to marginalise over; defaults to non-time predictors in
+        ``covariates``.
+    backend : str, default "lightgbm"
+        Registered training backend.
+    model_config : dict, optional
+        Forwarded to :func:`normet.model.train.train_model`.
+    n_splits : int, default 5
+        Number of contiguous temporal blocks.
+    embargo : int, default 24
+        Rows excluded on both sides of each validation block when fitting its
+        out-of-fold model.
+    paired : bool or {"additive", "ratio", "log_ratio"}, default "log_ratio"
+        Paired anomaly-preserving estimator alongside ``normalised`` level.
+    paired_floor : float, default 1e-6
+        Near-zero denominator floor when ``paired="ratio"``.
+    n_samples, log_transform, back_transform, stratify_by, conditional_k, conditional_on, resample_pools, resample_df, return_quantiles, return_mc_se, sampling, block_hours, seed, n_cores, memory_save, cache :
+        Forwarded to :func:`normalise` on each fold's validation block.
+    impute, max_gap, circular_cols :
+        Per-fold leak-free missing-value handling fit only on that fold's training rows.
+    verbose : bool, default False
+        Emit progress logs.
+
+    Returns
+    -------
+    CrossFitNormaliseResult
+    """
+    from ..model.train import train_model
+    from ..utils.cv import blocked_time_cv
+
+    if not covariates:
+        raise ValueError("`covariates` must be a non-empty list.")
+    cov_list = list(covariates)
+    paired_mode_resolved = _resolve_paired_mode(paired, log_transform=log_transform) or "none"
+
+    # Build clean base frame with target NA rows removed and time variables added,
+    # keeping missing predictors intact so each fold imputes from its own training set.
+    df_base = prepare_data(
+        df,
+        target=target,
+        covariates=cov_list,
+        dropna=True,
+        split_method="ts",
+        train_fraction=1.0,
+        seed=seed,
+        impute="none",
+    ).drop(columns=["set"])
+    missing_cov = [c for c in cov_list if c not in df_base.columns]
+    if missing_cov:
+        raise ConfigError(
+            f"Covariate column(s) {missing_cov} not found after date-feature generation."
+        )
+
+    ext_pool: pd.DataFrame | None = None
+    if resample_df is not None:
+        ext_pool = process_date(resample_df.copy())
+        need_time = [v for v in _TIME_VARS_EXACT if v in cov_list and v not in ext_pool.columns]
+        if need_time:
+            ext_pool = add_date_variables(ext_pool)
+
+    n_cores_eff = resolve_workers(n_cores)
+    fold_frames: list[pd.DataFrame] = []
+    fold_stats: list[pd.DataFrame] = []
+    fold_models: list[object] = []
+    smearing_factors: list[float] = []
+    oof_obs_all: list[np.ndarray] = []
+    oof_fact_all: list[np.ndarray] = []
+
+    folds = list(blocked_time_cv(df_base, n_splits=n_splits, embargo=embargo, date_col="date"))
+    for k, (tr_idx, te_idx) in enumerate(folds):
+        df_fold = df_base.copy()
+        set_labels = np.full(len(df_fold), "embargo", dtype=object)
+        set_labels[tr_idx] = "training"
+        set_labels[te_idx] = "testing"
+        df_fold["set"] = set_labels
+        # Every fold must impute from its own training rows alone. The plain
+        # "median" strategy is a full-frame fill, which would mix the held-out
+        # block (and the embargo) into the fill values, so it means train-only
+        # statistics here.
+        fold_impute = "train_median" if impute == "median" else impute
+        df_fold = impute_values(
+            df_fold,
+            dropna=False,
+            strategy=fold_impute,
+            max_gap=max_gap,
+            circular_cols=circular_cols,
+        )
+
+        df_tr = df_fold.iloc[tr_idx].copy()
+        df_te = df_fold.iloc[te_idx].copy()
+        pool_k = df_fold.drop(columns=["set"]) if ext_pool is None else ext_pool
+
+        if log_transform:
+            df_tr = log1p_target(df_tr, "value")
+            df_te = log1p_target(df_te, "value")
+            if ext_pool is None and "value" in pool_k.columns:
+                pool_k = log1p_target(pool_k, "value")
+
+        model_k = train_model(
+            df=df_tr,
+            target="value",
+            backend=backend,
+            covariates=cov_list,
+            model_config=model_config,
+            seed=int(seed) + k,
+            verbose=bool(verbose and k == 0),
+            n_cores=n_cores,
+            cache=cache,
+        )
+        fold_models.append(model_k)
+
+        phi_k = 1.0
+        if log_transform and back_transform == "smearing":
+            tr_preds = ml_predict(model_k, df_tr, num_threads=n_cores_eff)
+            phi_k = compute_duan_smearing(df_tr["value"], tr_preds)
+        smearing_factors.append(float(phi_k))
+
+        norm_k = normalise(
+            df_te,
+            model_k,
+            covariates=cov_list,
+            variables_resample=variables_resample,
+            n_samples=n_samples,
+            aggregate=True,
+            seed=int(seed),
+            n_cores=n_cores,
+            resample_df=pool_k,
+            resample_pools=resample_pools,
+            conditional_on=conditional_on,
+            stratify_by=stratify_by,
+            conditional_k=conditional_k,
+            return_quantiles=return_quantiles,
+            return_mc_se=return_mc_se,
+            log_transform=log_transform,
+            back_transform=back_transform,
+            smearing_factor=phi_k if (log_transform and back_transform == "smearing") else None,
+            paired=paired,
+            paired_floor=paired_floor,
+            sampling=sampling,
+            block_hours=block_hours,
+            memory_save=memory_save,
+            cache=cache,
+            verbose=False,
+        )
+        norm_k["fold"] = int(k)
+        fold_frames.append(norm_k)
+
+        if "factual" in norm_k.columns:
+            y_fact = norm_k["factual"].to_numpy(dtype=float)
+            y_obs = norm_k["observed"].to_numpy(dtype=float)
+        else:
+            raw_pred = ml_predict(model_k, df_te, num_threads=n_cores_eff)
+            if log_transform:
+                y_fact = _back_transform_values(
+                    raw_pred, smearing_factor=phi_k if back_transform == "smearing" else 1.0
+                )
+                y_obs = np.expm1(df_te["value"].to_numpy(dtype=float))
+            else:
+                y_fact = raw_pred
+                y_obs = df_te["value"].to_numpy(dtype=float)
+        oof_obs_all.append(y_obs)
+        oof_fact_all.append(y_fact)
+
+        row = _stats_from_arrays(y_fact, y_obs, _DEFAULT_STATS)
+        row["fold"] = str(k)
+        row["n_train"] = int(len(df_tr))
+        row["n_test"] = int(len(df_te))
+        row["test_start"] = df_te["date"].iloc[0]
+        row["test_end"] = df_te["date"].iloc[-1]
+        fold_stats.append(row)
+
+    out_df = pd.concat(fold_frames, axis=0).sort_index()
+    out_df.index.name = "date"
+
+    obs_cat = np.concatenate(oof_obs_all) if oof_obs_all else np.array([])
+    fact_cat = np.concatenate(oof_fact_all) if oof_fact_all else np.array([])
+    all_row = _stats_from_arrays(fact_cat, obs_cat, _DEFAULT_STATS)
+    all_row["fold"] = "all"
+    all_row["n_train"] = int(sum(int(r["n_train"].iloc[0]) for r in fold_stats))
+    all_row["n_test"] = int(len(obs_cat))
+    all_row["test_start"] = out_df.index.min()
+    all_row["test_end"] = out_df.index.max()
+    oof_metrics = pd.concat([*fold_stats, all_row], ignore_index=True)
+    meta = ["fold", "n_train", "n_test", "test_start", "test_end"]
+    oof_metrics = oof_metrics[meta + [c for c in oof_metrics.columns if c not in meta]]
+
+    return CrossFitNormaliseResult(
+        normalised=out_df,
+        oof_metrics=oof_metrics,
+        fold_models=fold_models,
+        n_splits=len(folds),
+        embargo=int(embargo),
+        paired_mode=paired_mode_resolved,
+        log_transform=bool(log_transform),
+        back_transform=str(back_transform),
+        smearing_factors=smearing_factors,
+    )

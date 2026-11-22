@@ -4,7 +4,9 @@
 from typing import Any
 
 # --- Core methods ------------------------------------------------------------
+from .ascm import scm_ascm
 from .scm import scm
+from .sdid import sdid
 
 # mlscm may require optional deps; fail gracefully with a helpful error.
 try:
@@ -37,9 +39,16 @@ from .bands import (
 # --- Batch runner ------------------------------------------------------------
 from .batch import run_scm_staggered, scm_all
 from .diagnostics import loo_weight_stability, scm_diagnostics
-from .inference import conformal_effect_interval, rmspe_ratio_test
-from .prediagnostics import PreTrend, pre_trend_test
-from .spatial import bearing, donor_spatial_summary, haversine, spatial_summary
+from .inference import conformal_effect_interval, conformal_inference, rmspe_ratio_test
+from .prediagnostics import HonestDiDResult, PreTrend, honest_did_bounds, pre_trend_test
+from .spatial import (
+    bearing,
+    donor_spatial_summary,
+    donut_hole_sensitivity,
+    haversine,
+    screen_donors,
+    spatial_summary,
+)
 
 # Bayesian SCM is heavy (PyMC); graceful fallback if PyMC missing.
 try:
@@ -68,6 +77,8 @@ from .variants import did_baseline, scm_abadie, scm_mcnnm, scm_robust
 # --- Simple backend registry -------------------------------------------------
 BACKENDS = {
     "scm": scm,
+    "ascm": scm_ascm,
+    "sdid": sdid,
     "mlscm": mlscm,
     "abadie": scm_abadie,
     "did": did_baseline,
@@ -78,6 +89,8 @@ BACKENDS = {
 __all__ = [
     # run_scm
     "scm",
+    "scm_ascm",
+    "sdid",
     "mlscm",
     "run_scm",
     # placebo
@@ -99,11 +112,15 @@ __all__ = [
     "scm_diagnostics",
     "loo_weight_stability",
     "PreTrend",
+    "HonestDiDResult",
     "pre_trend_test",
-    # spatial diagnostics
+    "honest_did_bounds",
+    # spatial diagnostics & screening
     "bearing",
     "donor_spatial_summary",
+    "donut_hole_sensitivity",
     "haversine",
+    "screen_donors",
     "spatial_summary",
     # variants
     "scm_abadie",
@@ -112,6 +129,7 @@ __all__ = [
     "scm_robust",
     # inference
     "conformal_effect_interval",
+    "conformal_inference",
     "rmspe_ratio_test",
     "bayesian_scm",
     # registry

@@ -2,11 +2,15 @@
 """
 Inference layers for synthetic-control estimates.
 
-Two complementary helpers:
+Three complementary helpers:
 
-- :func:`conformal_effect_interval` — finite-sample (sub-sampling) conformal
-  prediction interval for the average post-period effect, in the spirit of
-  Chernozhukov, Wüthrich & Zhu (2021).
+- :func:`conformal_effect_interval` — circular (or block) sub-sampling
+  conformal prediction interval for the average post-period effect on an
+  already-fitted result.
+- :func:`conformal_inference` — full refitting Chernozhukov, Wüthrich & Zhu
+  (2021, JASA) finite-sample conformal inference via symmetric full-horizon
+  estimation under ``H0: tau = tau_0`` and circular / i.i.d. permutations,
+  inverting the test into ATT confidence bounds plus a pointwise band.
 - :func:`rmspe_ratio_test` — Abadie's classical placebo significance heuristic:
   compare the treated unit's ``post / pre`` RMSPE ratio against the placebo
   distribution.
@@ -21,10 +25,11 @@ import numpy as np
 import pandas as pd
 
 from ..utils.logging import get_logger
+from ._common import newey_west_se_mean, pivot_panel, solve_simplex_weights_fast
 
 log = get_logger(__name__)
 
-__all__ = ["conformal_effect_interval", "rmspe_ratio_test"]
+__all__ = ["conformal_effect_interval", "conformal_inference", "rmspe_ratio_test"]
 
 
 def _coerce_effect_series(scm_result: Any) -> pd.Series:
@@ -46,17 +51,17 @@ def conformal_effect_interval(
     *,
     n_perm: int = 1000,
     ci_level: float = 0.95,
+    circular: bool = True,
     random_state: int = 7_654_321,
 ) -> dict[str, float]:
     """
     Conformal inference for the average post-period effect.
 
-    The idea: under the null that the post-period effect equals ``τ``, the
-    residuals ``effect_t - 1[post]·τ`` should be exchangeable in t. We
-    therefore construct a sub-sampling null distribution of the test statistic
-    ``|mean(window)|`` over random length-``T_post`` blocks drawn from the full
-    horizon, and invert the test to obtain an interval for the post-period
-    ATT.
+    Under the null that the post-period effect equals ``tau``, the residuals
+    ``effect_t - 1[post] * tau`` should be stationary / exchangeable across
+    time. By default (``circular=True``), wraps the residual series in a circle
+    so every timestamp receives identical weight instead of down-weighting
+    boundary observations.
 
     Parameters
     ----------
@@ -66,20 +71,20 @@ def conformal_effect_interval(
     cutoff_date : str
         Treatment cutoff date.
     n_perm : int, default 1000
-        Number of random sub-samples used to build the null distribution.
+        Maximum number of shifts used to build the null distribution (when
+        ``circular=True`` and ``n_perm >= n_total``, all ``n_total`` exact
+        circular shifts are evaluated).
     ci_level : float, default 0.95
         Two-sided confidence level.
+    circular : bool, default True
+        Use circular wrap-around block shifts (uniform timestamp weighting).
+        Set to ``False`` for legacy non-circular random sub-blocks.
     random_state : int, default 7_654_321
 
     Returns
     -------
     dict
-        - ``att``    : observed average post-period effect
-        - ``low``    : lower confidence limit
-        - ``high``   : upper confidence limit
-        - ``p_value``: two-sided p-value for H0 (τ = 0)
-        - ``n_post`` : number of post-period observations
-        - ``n_perm`` : number of permutations actually used
+        ``att``, ``low``, ``high``, ``p_value``, ``n_post``, ``n_perm``.
     """
     eff = _coerce_effect_series(scm_result).dropna()
     cutoff_ts = pd.to_datetime(cutoff_date)
@@ -95,23 +100,32 @@ def conformal_effect_interval(
         raise ValueError("Need pre-period observations to build a null distribution.")
 
     rng = np.random.default_rng(random_state)
-    # Impose the null τ = 0 on the observed series by shifting the post-period
-    # residuals down by the observed ATT: only then does a length-T_post block
-    # drawn anywhere on the horizon have zero expectation. Drawing from the raw
-    # series instead leaves every mixed pre/post window carrying a share of the
-    # very effect being tested, which shifts the null right and inflates both
-    # the interval and the p-value.
     resid = all_vals.copy()
     resid[(eff.index.to_series() >= cutoff_ts).to_numpy()] -= att
-    starts = rng.integers(0, n_total - n_post + 1, size=int(n_perm))
-    means = np.empty(starts.size, dtype=float)
-    for k, s in enumerate(starts):
-        means[k] = float(np.nanmean(resid[s : s + n_post]))
 
-    # Two-sided p-value with the +1 small-sample correction.
+    starts: np.ndarray[Any, Any]
+    if circular:
+        resid2 = np.concatenate([resid, resid])
+        n_want = max(1, int(n_perm))
+        if n_want >= n_total:
+            starts = np.arange(n_total, dtype=int)
+        elif n_want == 1:
+            starts = np.array([0], dtype=int)
+        else:
+            other = rng.choice(np.arange(1, n_total, dtype=int), size=n_want - 1, replace=False)
+            starts = np.concatenate([np.array([0], dtype=int), other])
+        means = np.empty(starts.size, dtype=float)
+        for k, s in enumerate(starts):
+            means[k] = float(np.nanmean(resid2[s : s + n_post]))
+    else:
+        starts = rng.integers(0, n_total - n_post + 1, size=int(n_perm))
+        means = np.empty(starts.size, dtype=float)
+        for k, s in enumerate(starts):
+            means[k] = float(np.nanmean(resid[s : s + n_post]))
+
+    # Two-sided p-value with the +1 finite-sample correction.
     p_two_sided = (np.sum(np.abs(means) >= abs(att)) + 1.0) / (means.size + 1.0)
 
-    # Invert the test: CI = att ± q where q is the (1-α) quantile of |perm mean|.
     alpha = 1.0 - float(ci_level)
     q = float(np.quantile(np.abs(means), 1.0 - alpha))
     return {
@@ -121,6 +135,356 @@ def conformal_effect_interval(
         "p_value": float(p_two_sided),
         "n_post": int(n_post),
         "n_perm": int(means.size),
+    }
+
+
+def _stat_value(v: np.ndarray, statistic: str, q_norm: float) -> float:
+    fin = v[np.isfinite(v)]
+    if fin.size == 0:
+        return float("nan")
+    if statistic == "mean":
+        return float(abs(np.mean(fin)))
+    return float((np.mean(np.abs(fin) ** float(q_norm))) ** (1.0 / float(q_norm)))
+
+
+def conformal_inference(
+    df: pd.DataFrame,
+    *,
+    date_col: str,
+    unit_col: str,
+    outcome_col: str,
+    treated_unit: str,
+    cutoff_date: str,
+    donors: list[str] | None = None,
+    scm_backend: str = "ascm",
+    null_effect: float = 0.0,
+    ci_level: float = 0.95,
+    statistic: str = "mean",
+    q_norm: float = 1.0,
+    permutation: str = "circular",
+    n_perm: int | None = None,
+    grid_points: int = 31,
+    pointwise: bool = True,
+    random_state: int = 7_654_321,
+    **scm_kwargs: Any,
+) -> dict[str, Any]:
+    """Chernozhukov, Wüthrich & Zhu (2021, JASA) refitting conformal inference.
+
+    Unlike :func:`conformal_effect_interval` (which holds fitted weights fixed),
+    this function refits the synthetic-control estimator **symmetrically across
+    the full pre + post horizon** after subtracting each candidate null effect
+    ``tau_0`` from the treated unit's post-period outcomes, accounting for
+    estimation error in the weights and ensuring exact finite-sample validity
+    under stationary / circularly exchangeable errors.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Long panel with ``[date_col, unit_col, outcome_col]``.
+    date_col, unit_col, outcome_col : str
+        Column names in ``df``.
+    treated_unit, cutoff_date : str
+        Treated unit identifier and intervention date.
+    donors : list of str, optional
+        Donor pool.
+    scm_backend : str, default "ascm"
+        Estimator passed to :func:`~normet.causal.run_scm.run_scm` (supports
+        ``"ascm"``, ``"sdid"``, ``"abadie"``, ``"did"``, ``"scm"``,
+        ``"robust"``, ``"mcnnm"``, ``"mlscm"``).
+    null_effect : float, default 0.0
+        Null ATT hypothesis ``H0: tau == null_effect`` for the reported ``p_value``.
+    ci_level : float, default 0.95
+        Confidence level in ``(0, 1)`` for the inverted CI and pointwise band.
+    statistic : {"mean", "lp"}, default "mean"
+        Test statistic on the post-period residuals: ``"mean"`` tests
+        ``|mean(u_post)|`` (sharp for average treatment effect shifts);
+        ``"lp"`` tests the ``L_q`` norm ``(mean(|u_post|^q))^(1/q)``.
+    q_norm : float, default 1.0
+        Exponent ``q > 0`` when ``statistic="lp"``.
+    permutation : {"circular", "iid"}, default "circular"
+        Permutation scheme across time indices (CWZ 2021 Algorithm 1).
+    n_perm : int, optional
+        Number of permutations (defaults to all ``T`` circular shifts for
+        ``permutation="circular"``, or 500 draws for ``permutation="iid"``).
+    grid_points : int, default 31
+        Initial grid density used to bracket the inverted confidence interval
+        before bisection refinement.
+    pointwise : bool, default True
+        Whether to compute a post-period pointwise conformal band around the
+        unrestricted effect path from the full-horizon refit at ``tau = att``.
+    random_state : int, default 7_654_321
+    **scm_kwargs
+        Forwarded to the chosen backend.
+
+    Returns
+    -------
+    dict
+        ``att``, ``low``, ``high``, ``p_value``, ``null_effect``, ``ci_level``,
+        ``n_pre``, ``n_post``, ``n_perm``, ``permutation``, ``refit`` (``True``),
+        ``grid`` (DataFrame of ``tau`` vs. ``p_value``), and ``pointwise``
+        (post-period DataFrame with ``effect``, ``lower``, ``upper`` or ``None``).
+    """
+    from .run_scm import run_scm
+
+    stat_mode = (statistic or "mean").lower()
+    if stat_mode not in {"mean", "lp"}:
+        raise ValueError(f"statistic must be 'mean' or 'lp', got {statistic!r}")
+    if float(q_norm) <= 0.0:
+        raise ValueError(f"q_norm must be positive, got {q_norm}")
+    perm_mode = (permutation or "circular").lower()
+    if perm_mode not in {"circular", "iid"}:
+        raise ValueError(f"permutation must be 'circular' or 'iid', got {permutation!r}")
+    if not (0.0 < float(ci_level) < 1.0):
+        raise ValueError(f"ci_level must be in (0, 1), got {ci_level}")
+    backend_eff = (scm_backend or "ascm").lower()
+
+    d = df.copy()
+    d[date_col] = pd.to_datetime(d[date_col], errors="coerce")
+    if d[date_col].isna().any():
+        raise ValueError(f"Invalid timestamps in `{date_col}`.")
+    cutoff_ts = pd.to_datetime(cutoff_date)
+
+    # 1. Unrestricted point fit to obtain ATT and scale.
+    base_kw = dict(scm_kwargs)
+    zeta_omega_sdid: float | None = None
+    if backend_eff == "sdid":
+        from .sdid import sdid
+
+        sdid_out = sdid(
+            d,
+            date_col=date_col,
+            unit_col=unit_col,
+            outcome_col=outcome_col,
+            treated_unit=treated_unit,
+            cutoff_date=cutoff_ts.strftime("%Y-%m-%d"),
+            donors=donors,
+            **base_kw,
+        )
+        unrest_df = sdid_out["synthetic"]
+        zeta_omega_sdid = float(sdid_out["zeta_omega"])
+    else:
+        unrest_df = run_scm(
+            df=d,
+            date_col=date_col,
+            unit_col=unit_col,
+            outcome_col=outcome_col,
+            treated_unit=treated_unit,
+            cutoff_date=cutoff_ts.strftime("%Y-%m-%d"),
+            donors=donors,
+            scm_backend=backend_eff,
+            **base_kw,
+        )
+
+    eff_unrest = unrest_df["effect"].sort_index()
+    dates_all = eff_unrest.index
+    pre_mask = np.asarray(pd.to_datetime(dates_all) < cutoff_ts, dtype=bool)
+    post_mask = ~pre_mask
+    n_pre = int(pre_mask.sum())
+    n_post = int(post_mask.sum())
+    if n_pre < 3 or n_post < 1:
+        raise ValueError(
+            f"conformal_inference requires >=3 pre and >=1 post rows, got ({n_pre}, {n_post})."
+        )
+
+    eff_pre = eff_unrest.to_numpy(dtype=float)[pre_mask]
+    eff_post = eff_unrest.to_numpy(dtype=float)[post_mask]
+    att = float(np.nanmean(eff_post))
+    pre_rmse = float(np.sqrt(np.nanmean(eff_pre**2)))
+    se_init, _ = newey_west_se_mean(eff_post)
+    if not np.isfinite(se_init) or se_init <= 0.0:
+        se_init = float(np.nanstd(eff_pre, ddof=1) / np.sqrt(max(n_post, 1)))
+
+    # Symmetric "all-pre" cutoff strictly past the final timestamp so backends
+    # estimate on the entire horizon under H0 without treatment-boundary asymmetry.
+    max_dt = pd.to_datetime(d[date_col]).max()
+    sym_cutoff_str = (pd.Timestamp(max_dt).normalize() + pd.Timedelta(days=2)).strftime("%Y-%m-%d")
+    treated_mask = (d[unit_col] == treated_unit) & (d[date_col] >= cutoff_ts)
+    y_treated_post = d.loc[treated_mask, outcome_col].to_numpy(dtype=float)
+
+    # Pre-resolve SDID panel geometry once when backend is "sdid".
+    if backend_eff == "sdid":
+        panel_all, donors_eff = pivot_panel(
+            d,
+            date_col=date_col,
+            unit_col=unit_col,
+            outcome_col=outcome_col,
+            treated_unit=treated_unit,
+            donors=donors,
+            parse_dates=False,
+        )
+        panel_all = panel_all.reindex(dates_all)
+        Y_co_all = panel_all[donors_eff].to_numpy(dtype=float)
+        y_tr_all_orig = panel_all[treated_unit].to_numpy(dtype=float)
+        finite_all = np.all(np.isfinite(Y_co_all), axis=1) & np.isfinite(y_tr_all_orig)
+        Y_co_c_all = Y_co_all[finite_all] - Y_co_all[finite_all].mean(axis=0, keepdims=True)
+        # ``zeta_omega=None`` is sdid's documented "auto" rule, so an explicit
+        # None in the forwarded kwargs must not shadow the fitted value: a plain
+        # dict.get default is only used when the key is absent.
+        zeta_kw = base_kw.get("zeta_omega")
+        zeta_eff = float(zeta_omega_sdid or 0.0) if zeta_kw is None else float(zeta_kw)
+        sdid_l2 = float(finite_all.sum()) * (zeta_eff**2)
+
+    T = len(dates_all)
+    post_pos = np.flatnonzero(post_mask)
+    rng = np.random.default_rng(random_state)
+
+    shifts: np.ndarray[Any, Any]
+    if perm_mode == "circular":
+        if n_perm is None or int(n_perm) >= T:
+            shifts = np.arange(T, dtype=int)
+        elif int(n_perm) <= 1:
+            shifts = np.array([0], dtype=int)
+        else:
+            other = rng.choice(np.arange(1, T, dtype=int), size=int(n_perm) - 1, replace=False)
+            shifts = np.concatenate([np.array([0], dtype=int), other])
+        n_perm_eff = int(shifts.size)
+        iid_perms: list[np.ndarray] | None = None
+    else:
+        n_perm_eff = max(2, int(n_perm) if n_perm is not None else 500)
+        iid_perms = [np.arange(T, dtype=int)] + [rng.permutation(T) for _ in range(n_perm_eff - 1)]
+        shifts = np.empty(0, dtype=int)
+
+    def _refit_null_residuals(tau_0: float) -> np.ndarray:
+        if backend_eff == "sdid":
+            y_null = y_tr_all_orig.copy()
+            y_null[post_mask] -= float(tau_0)
+            y_c = y_null[finite_all] - float(np.mean(y_null[finite_all]))
+            omega = solve_simplex_weights_fast(Y_co_c_all, y_c, l2_penalty=sdid_l2)
+            mu = float(np.mean(y_null[finite_all] - Y_co_all[finite_all] @ omega))
+            return y_null - (mu + Y_co_all @ omega)
+
+        d_null = d.copy()
+        d_null.loc[treated_mask, outcome_col] = y_treated_post - float(tau_0)
+        syn_null = run_scm(
+            df=d_null,
+            date_col=date_col,
+            unit_col=unit_col,
+            outcome_col=outcome_col,
+            treated_unit=treated_unit,
+            cutoff_date=sym_cutoff_str,
+            donors=donors,
+            scm_backend=backend_eff,
+            **base_kw,
+        )
+        return syn_null["effect"].reindex(dates_all).to_numpy(dtype=float)
+
+    def _eval_null(tau_0: float) -> tuple[float, np.ndarray]:
+        u = _refit_null_residuals(tau_0)
+        s_obs = _stat_value(u[post_pos], stat_mode, q_norm)
+        if not np.isfinite(s_obs):
+            return float("nan"), u
+
+        if perm_mode == "circular":
+            u2 = np.concatenate([u, u])
+            stats_arr = np.empty(shifts.size, dtype=float)
+            for k, sh in enumerate(shifts):
+                stats_arr[k] = _stat_value(u2[post_pos + int(sh)], stat_mode, q_norm)
+        else:
+            assert iid_perms is not None
+            stats_arr = np.empty(len(iid_perms), dtype=float)
+            for k, p_idx in enumerate(iid_perms):
+                stats_arr[k] = _stat_value(u[p_idx][post_pos], stat_mode, q_norm)
+
+        fin = stats_arr[np.isfinite(stats_arr)]
+        if fin.size == 0:
+            return float("nan"), u
+        p_val = float(np.mean(fin >= (s_obs - 1e-12)))
+        return p_val, u
+
+    p_null, _ = _eval_null(float(null_effect))
+
+    # Invert the conformal p-value function to obtain [low, high].
+    alpha = 1.0 - float(ci_level)
+    scale = max(se_init, pre_rmse / np.sqrt(max(n_post, 1)), 0.1 * max(abs(att), 1.0), 1e-2)
+    half_span = 4.0 * scale
+
+    n_pts = max(9, int(grid_points))
+    cache: dict[float, float] = {}
+
+    def _p_cached(tau_val: float) -> float:
+        key = round(float(tau_val), 12)
+        if key not in cache:
+            p_v, _ = _eval_null(float(tau_val))
+            cache[key] = p_v
+        return cache[key]
+
+    taus = np.linspace(att - half_span, att + half_span, n_pts)
+    pvals = np.array([_p_cached(t) for t in taus], dtype=float)
+
+    # Expand outward if either endpoint is still accepted (p > alpha) and rejection is possible.
+    if n_perm_eff > int(np.ceil(1.0 / max(alpha, 1e-12))):
+        for _ in range(4):
+            expand_left = np.isfinite(pvals[0]) and pvals[0] > alpha
+            expand_right = np.isfinite(pvals[-1]) and pvals[-1] > alpha
+            if not (expand_left or expand_right):
+                break
+            half_span *= 2.0
+            taus = np.linspace(att - half_span, att + half_span, n_pts)
+            pvals = np.array([_p_cached(t) for t in taus], dtype=float)
+
+    accepted = np.flatnonzero(np.isfinite(pvals) & (pvals > alpha))
+    if accepted.size == 0:
+        idx_max = int(np.nanargmax(pvals)) if np.any(np.isfinite(pvals)) else n_pts // 2
+        ci_low = float(taus[idx_max])
+        ci_high = float(taus[idx_max])
+    else:
+        lo_i = int(accepted[0])
+        hi_i = int(accepted[-1])
+        ci_low = float(taus[lo_i])
+        ci_high = float(taus[hi_i])
+
+        if lo_i > 0:
+            a, b = float(taus[lo_i - 1]), float(taus[lo_i])
+            for _ in range(8):
+                mid = 0.5 * (a + b)
+                if _p_cached(mid) > alpha:
+                    b = mid
+                else:
+                    a = mid
+            ci_low = float(b)
+
+        if hi_i < len(taus) - 1:
+            a, b = float(taus[hi_i]), float(taus[hi_i + 1])
+            for _ in range(8):
+                mid = 0.5 * (a + b)
+                if _p_cached(mid) > alpha:
+                    a = mid
+                else:
+                    b = mid
+            ci_high = float(a)
+
+    grid_df = pd.DataFrame({"tau": taus, "p_value": pvals})
+
+    pointwise_df: pd.DataFrame | None = None
+    if pointwise:
+        _, u_att = _eval_null(att)
+        fin_u = np.abs(u_att[np.isfinite(u_att)])
+        post_index = dates_all[post_mask]
+        pointwise_df = pd.DataFrame(index=post_index)
+        pointwise_df["effect"] = eff_post
+        if fin_u.size > 0:
+            q_level = min(1.0, float(np.ceil((1.0 - alpha) * (fin_u.size + 1))) / float(fin_u.size))
+            q_pt = float(np.quantile(fin_u, q_level))
+            pointwise_df["lower"] = eff_post - q_pt
+            pointwise_df["upper"] = eff_post + q_pt
+        else:
+            pointwise_df["lower"] = np.nan
+            pointwise_df["upper"] = np.nan
+
+    return {
+        "att": att,
+        "low": float(min(ci_low, ci_high)),
+        "high": float(max(ci_low, ci_high)),
+        "p_value": float(p_null),
+        "null_effect": float(null_effect),
+        "ci_level": float(ci_level),
+        "n_pre": n_pre,
+        "n_post": n_post,
+        "n_perm": n_perm_eff,
+        "permutation": perm_mode,
+        "refit": True,
+        "grid": grid_df,
+        "pointwise": pointwise_df,
     }
 
 

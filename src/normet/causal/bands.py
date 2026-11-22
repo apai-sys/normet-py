@@ -17,6 +17,14 @@ from .run_scm import run_scm
 
 log = get_logger(__name__)
 
+# Moving-block length (days) used when the donor pool is at the three-unit
+# minimum and the caller requested no usable time block. Three donors cannot be
+# subsampled without reusing the same design, so the time dimension is the only
+# source of bootstrap variability left. One week is long enough to retain
+# serial dependence yet short enough to leave several blocks in a typical
+# pre-period.
+_SMALL_POOL_BLOCK_DAYS = 7
+
 
 def _eff_cores(n_cores: int | None) -> int:
     """Resolve worker count: explicit value, else the allocation minus one."""
@@ -39,9 +47,11 @@ def effect_bands_space(
     """Build per-time uncertainty bands for the treated effect.
 
     Uses placebo-in-space output (works for SCM or ML-SCM). Bands are formed
-    around the treated effect by adding placebo distribution summaries at
-    each timestamp: effect(t) + Q_{α}(placebo_t) and effect(t) + Q_{1-α}(placebo_t),
-    or effect(t) ± z * std(placebo_t).
+    by pivotal test inversion around the treated effect:
+    ``[effect(t) - Q_{1-alpha/2}(placebo_t), effect(t) - Q_{alpha/2}(placebo_t)]``
+    (or ``effect(t) - mean(placebo_t) ± z * std(placebo_t)`` for ``method="std"``),
+    so any positive/negative bias or skewness in the placebo distribution shifts
+    the interval in the statistically valid direction.
 
     Parameters
     ----------
@@ -106,9 +116,9 @@ def effect_bands_space(
         alpha = (1.0 - level) / 2.0
         q_low = plc_mat.quantile(alpha, axis=1)
         q_high = plc_mat.quantile(1.0 - alpha, axis=1)
-        # bands around treated effect
-        out["lower"] = effect + q_low
-        out["upper"] = effect + q_high
+        # Pivotal inversion: tau = effect - placebo => invert [q_low, q_high].
+        out["lower"] = effect - q_high
+        out["upper"] = effect - q_low
         # helpful diagnostics (raw placebo quantiles, not shifted)
         out["plc_q_low"] = q_low
         out["plc_q_high"] = q_high
@@ -121,8 +131,8 @@ def effect_bands_space(
         z = float(norm.ppf(0.5 + level / 2.0))
         mu = plc_mat.mean(axis=1)
         sd = plc_mat.std(axis=1, ddof=1)
-        out["lower"] = effect + (mu - z * sd)
-        out["upper"] = effect + (mu + z * sd)
+        out["lower"] = effect - mu - z * sd
+        out["upper"] = effect - mu + z * sd
         out["plc_mean"] = mu
         out["plc_std"] = sd
         out["z"] = z
@@ -276,6 +286,7 @@ def uncertainty_bands(
     B: int = 200,
     random_state: int = DEFAULT_SEED,
     donor_frac: float = 0.8,
+    bootstrap_mode: str = "subsample",
     time_block_days: int | None = None,
     ci_level: float = 0.95,
     n_cores: int | None = None,
@@ -311,18 +322,39 @@ def uncertainty_bands(
         Backend used in `run_scm` (e.g. "scm", "abadie", "mlscm", "robust").
     method : {"bootstrap", "jackknife"}, default="jackknife"
         Uncertainty estimation method:
-          - "bootstrap": donor subsampling (and optional block time resampling).
-          - "jackknife": leave-one-donor-out jackknife variance estimation.
+
+        - "bootstrap": donor subsampling (and optional block time resampling).
+        - "jackknife": leave-one-donor-out jackknife variance estimation.
+
     B : int, default=200
         Number of bootstrap replications (ignored if `method="jackknife"`).
     random_state : int, default=7654321
         Random seed for reproducibility in bootstrap sampling.
     donor_frac : float, default=0.8
         Fraction of donor pool to sample in each bootstrap replicate.
+    bootstrap_mode : {"subsample", "replace"}, default="subsample"
+        How donor units are resampled when ``method="bootstrap"``:
+
+        - ``"subsample"``: draw ``k < J`` donors without replacement and apply the
+          finite-population subsampling variance rescaling ``sqrt(k / (J - k))``
+          around the point estimate so bands do not shrink when ``donor_frac`` is
+          close to 1. The rescaling is applied whether or not
+          ``time_block_days`` is also set.
+        - ``"replace"``: true nonparametric donor bootstrap with replacement,
+          cloning duplicate draws so ``run_scm`` preserves donor multiplicity.
+
     time_block_days : int, optional
-        If provided, pre-treatment time is resampled in blocks of this length
-        (days) during bootstrap. Post-treatment period is always kept intact.
-        Ignored if `method="jackknife"`.
+        If provided, pre-treatment time is resampled in moving blocks of this
+        length (days) with replacement and re-indexed onto sequential pre-cutoff
+        dates so block multiplicity is preserved. Post-treatment period is always
+        kept intact. Ignored if ``method="jackknife"``.
+
+        When the donor pool has the minimum three units and no usable time block
+        was requested, moving-block time resampling is enabled automatically with
+        a 7-day block (clipped to leave at least two blocks). Resampling three
+        donors cannot change the fitted design -- every draw must contain all of
+        them -- so without time resampling the bands would collapse to
+        numerical zero.
     ci_level : float, default=0.95
         Confidence interval level (e.g., 0.95 for 95% bands).
     n_cores : int, optional
@@ -371,6 +403,12 @@ def uncertainty_bands(
     from joblib import Parallel, delayed
     from scipy.stats import norm
 
+    bmode = (bootstrap_mode or "subsample").lower()
+    if bmode not in {"subsample", "replace"}:
+        raise ValueError(
+            f"`bootstrap_mode` must be 'subsample' or 'replace', got {bootstrap_mode!r}"
+        )
+
     rng = np.random.default_rng(random_state)
     n_jobs = _eff_cores(n_cores)
     df = df.copy()
@@ -409,40 +447,132 @@ def uncertainty_bands(
     # Method 1: Bootstrap
     # --------------------------------------------------
     if method.lower() == "bootstrap":
+        n_base = len(base_donors)
         dates = df[date_col]
         pre_mask = dates < cutoff_ts
-        pre_days = np.asarray(pd.to_datetime(df.loc[pre_mask, date_col]).dt.normalize().unique())
-        pre_days = np.sort(pre_days)
+        df_pre_raw = df.loc[pre_mask].copy()
+        df_post_raw = df.loc[~pre_mask].copy()
+        pre_norm = pd.to_datetime(df_pre_raw[date_col]).dt.normalize()
+        pre_days = [pd.Timestamp(d) for d in np.sort(np.asarray(pre_norm.unique()))]
+
+        block_len = (
+            min(int(time_block_days), len(pre_days))
+            if (
+                time_block_days is not None
+                and int(time_block_days) > 0
+                and len(pre_days) >= int(time_block_days)
+            )
+            else 0
+        )
+        if block_len == 0 and n_base <= 3 and len(pre_days) >= 2:
+            # With three donors every draw must contain all three, so donor
+            # resampling alone refits the same design and yields a zero-width
+            # band. Fall back to moving-block time resampling explicitly.
+            block_len = min(_SMALL_POOL_BLOCK_DAYS, len(pre_days) - 1)
+            log.warning(
+                "uncertainty_bands: %d donors cannot vary across donor resamples; "
+                "using moving-block time resampling (block=%d days).",
+                n_base,
+                block_len,
+            )
+        do_time_block = block_len > 0
+        day_groups: dict[pd.Timestamp, pd.DataFrame] = (
+            {pd.Timestamp(day): grp.copy() for day, grp in df_pre_raw.groupby(pre_norm, sort=False)}
+            if do_time_block
+            else {}
+        )
+
+        # Determine effective bootstrap mode, sample size k, and subsampling scale factor.
+        k_req = max(3, int(round(n_base * float(donor_frac))))
+        if do_time_block and float(donor_frac) >= 1.0:
+            pure_time_mbb = True
+            bmode_eff = "pure_time"
+            k = n_base
+            scale = 1.0
+        elif bmode == "subsample":
+            pure_time_mbb = False
+            if n_base <= 3 and not do_time_block:
+                # Only reachable when the pre-period has a single day, where no
+                # time resampling is possible either; the fit is then degenerate
+                # by construction.
+                log.warning(
+                    "uncertainty_bands: bootstrap_mode='subsample' with %d donors and "
+                    "a one-day pre-period cannot resample; falling back to "
+                    "bootstrap_mode='replace'.",
+                    n_base,
+                )
+                bmode_eff = "replace"
+                k = n_base
+                scale = 1.0
+            else:
+                bmode_eff = "subsample"
+                k = min(k_req, n_base - 1) if n_base > 3 else n_base
+                scale = float(np.sqrt(k / (n_base - k))) if n_base > k else 1.0
+        else:
+            pure_time_mbb = False
+            bmode_eff = "replace"
+            k = k_req
+            scale = float(np.sqrt(k / n_base)) if k != n_base else 1.0
 
         # Per-replicate child seeds so the parallel run is reproducible.
         seeds = rng.integers(0, 2**32 - 1, size=int(B))
 
         def _one_bootstrap(seed: int) -> np.ndarray | None:
             r = np.random.default_rng(seed)
-            k = max(3, int(round(len(base_donors) * float(donor_frac))))
-            k = min(k, len(base_donors))
-            replace_flag = k > len(base_donors)
-            sub_donors = r.choice(base_donors, size=k, replace=replace_flag)
 
-            df_b = df
-            if time_block_days and time_block_days > 0 and len(pre_days) >= time_block_days:
-                df_b = df.copy()
-                n_blocks = max(1, len(pre_days) // time_block_days)
-                if len(pre_days) == time_block_days:
-                    starts = np.array([0])
+            if do_time_block:
+                n_days = len(pre_days)
+                if n_days == block_len:
+                    boot_days = list(pre_days)
                 else:
-                    starts = r.integers(0, len(pre_days) - time_block_days + 1, size=n_blocks)
+                    n_blocks = int(np.ceil(n_days / block_len))
+                    starts = r.integers(0, n_days - block_len + 1, size=n_blocks)
+                    boot_days = [d for s in starts for d in pre_days[s : s + block_len]][:n_days]
+                pre_parts = []
+                for pos, src_day in enumerate(boot_days):
+                    blk = day_groups.get(src_day)
+                    if blk is None or blk.empty:
+                        continue
+                    shift = pd.Timestamp(pre_days[pos]) - pd.Timestamp(src_day)
+                    blk_s = blk.copy()
+                    blk_s[date_col] = blk_s[date_col] + shift
+                    blk_s = blk_s[blk_s[date_col] < cutoff_ts]
+                    pre_parts.append(blk_s)
+                df_b = pd.concat([*pre_parts, df_post_raw], ignore_index=True)
+            else:
+                df_b = df
 
-                boot_days: list[pd.Timestamp] = []
-                for s in starts:
-                    boot_days.extend(pre_days[s : s + time_block_days])
-                boot_days_ser = pd.to_datetime(pd.Series(boot_days)).dt.normalize()
-
-                is_pre = df_b[date_col] < cutoff_ts
-                keep_pre = df_b[date_col].dt.normalize().isin(boot_days_ser)
-                df_b = pd.concat(
-                    [df_b.loc[is_pre & keep_pre], df_b.loc[~is_pre]], ignore_index=True
-                )
+            if pure_time_mbb:
+                boot_donors = list(base_donors)
+            elif bmode_eff == "subsample":
+                boot_donors = list(r.choice(base_donors, size=k, replace=False))
+            else:
+                min_unique = min(3, n_base)
+                drawn = r.choice(base_donors, size=k, replace=True)
+                for _ in range(10):
+                    if len(set(drawn)) >= min_unique:
+                        break
+                    drawn = r.choice(base_donors, size=k, replace=True)
+                if len(set(drawn)) < min_unique:
+                    return None
+                # Clone sampled donors so duplicate picks retain multiplicity through run_scm.
+                parts_rep = [df_b.loc[df_b[unit_col] == treated_unit]]
+                unit_groups = {
+                    u: g for u, g in df_b.groupby(unit_col, sort=False) if u != treated_unit
+                }
+                boot_donors = []
+                for idx_c, orig_u in enumerate(drawn):
+                    g_u = unit_groups.get(orig_u)
+                    if g_u is None:
+                        continue
+                    cloned_id = f"{orig_u}__b{idx_c}"
+                    g_copy = g_u.copy()
+                    g_copy[unit_col] = cloned_id
+                    parts_rep.append(g_copy)
+                    boot_donors.append(cloned_id)
+                if len(boot_donors) < 3:
+                    return None
+                df_b = pd.concat(parts_rep, ignore_index=True)
 
             try:
                 out_b = run_scm(
@@ -452,7 +582,7 @@ def uncertainty_bands(
                     outcome_col=outcome_col,
                     treated_unit=treated_unit,
                     cutoff_date=cutoff_date,
-                    donors=list(sub_donors),
+                    donors=boot_donors,
                     scm_backend=scm_backend,
                     **kwargs,
                 )
@@ -477,6 +607,11 @@ def uncertainty_bands(
         alpha = (1.0 - float(ci_level)) / 2.0
         q_low = np.nanquantile(M, alpha, axis=0)
         q_high = np.nanquantile(M, 1.0 - alpha, axis=0)
+
+        if scale != 1.0:
+            center = df_true["effect"].to_numpy(dtype=float)
+            q_low = center + scale * (q_low - center)
+            q_high = center + scale * (q_high - center)
 
         low = pd.Series(q_low, index=effect_index, name="low")
         high = pd.Series(q_high, index=effect_index, name="high")

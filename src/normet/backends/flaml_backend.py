@@ -7,11 +7,13 @@ import warnings
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from ..utils._config import DEFAULT_SEED
 from ..utils._lazy import require
 from ..utils.logging import get_logger
+from ._shared import resolve_sample_weight
 
 log = get_logger(__name__)
 
@@ -148,6 +150,7 @@ def train_flaml(
     seed: int = DEFAULT_SEED,
     verbose: bool = False,
     n_cores: int | None = None,
+    sample_weight: str | np.ndarray | pd.Series | None = None,
 ) -> object:
     """
     Train a model with FLAML AutoML and tag it with ``backend='flaml'``.
@@ -220,14 +223,20 @@ def train_flaml(
 
     # Pick training rows if a split is present
     if "set" in df.columns:
-        df_train = df.loc[df["set"] == "training", [target] + covariates]
-        if df_train.empty:
-            df_train = df[[target] + covariates]
+        train_mask = (df["set"] == "training").to_numpy()
+        df_sub = df.loc[train_mask]
+        if df_sub.empty:
+            train_mask = np.ones(len(df), dtype=bool)
+            df_sub = df
     else:
-        df_train = df[[target] + covariates]
+        train_mask = np.ones(len(df), dtype=bool)
+        df_sub = df
+    df_train = df_sub[[target] + covariates]
 
     if df_train[covariates].shape[1] == 0:
         raise ValueError("No predictor columns available after preprocessing.")
+
+    weights_vec = resolve_sample_weight(sample_weight, df, df_sub, train_mask)
 
     # Defaults
     default_cfg: dict[str, Any] = {
@@ -283,6 +292,7 @@ def train_flaml(
         "n_jobs",
         "split_type",
         "n_splits",
+        "groups",
         # Bounds the per-estimator search space (e.g. capping LGBM's
         # num_leaves, which defaults to a [4, 32768] range) rather than the
         # search *effort* (time_budget/max_iter). Needed because CFO can
@@ -293,11 +303,8 @@ def train_flaml(
         # docstring for the {"estimator": {"param": {"domain": ...}}} shape.
         "custom_hp",
     }
-    # A key that is neither a default nor forwarded is silently discarded,
-    # which is how a caller ends up believing it has configured something it
-    # has not. Warn instead: the cost is one log line, and the alternative is
-    # a run that looks configured and is not.
-    _ignored = set(model_config or {}) - passthrough - {"save_model", "path", "filename"}
+    _backend_only_keys = {"save_model", "path", "filename", "cv_strategy", "cv_folds"}
+    _ignored = set(model_config or {}) - passthrough - _backend_only_keys
     if _ignored:
         log.warning(
             "FLAML backend ignoring unsupported model_config key(s): %s",
@@ -305,16 +312,45 @@ def train_flaml(
         )
     automl_kwargs = {k: default_cfg[k] for k in passthrough if k in default_cfg}
 
+    X_tr = df_train[covariates]
+    y_tr = df_train[target]
+    cv_strategy = str((model_config or {}).get("cv_strategy", "auto")).lower()
+    if cv_strategy not in {"auto", "random", "blocked", "time"}:
+        raise ValueError(
+            f"Unknown FLAML `cv_strategy` {cv_strategy!r}; expected 'auto', 'random', 'blocked', or 'time'."
+        )
+    if cv_strategy in {"blocked", "time"} and "split_type" not in (model_config or {}):
+        if "date" in df_sub.columns and pd.api.types.is_datetime64_any_dtype(df_sub["date"]):
+            sort_pos = np.argsort(df_sub["date"].to_numpy(), kind="stable")
+            X_tr = X_tr.iloc[sort_pos].reset_index(drop=True)
+            y_tr = y_tr.iloc[sort_pos].reset_index(drop=True)
+            if weights_vec is not None:
+                weights_vec = weights_vec[sort_pos]
+        if cv_strategy == "blocked" and len(X_tr) >= 2:
+            n_sp = int(default_cfg.get("n_splits") or default_cfg.get("cv_folds") or 5)
+            n_sp = max(2, min(n_sp, len(X_tr)))
+            groups = np.empty(len(X_tr), dtype=np.int64)
+            for gid, blk in enumerate(np.array_split(np.arange(len(X_tr)), n_sp)):
+                groups[blk] = gid
+            automl_kwargs["split_type"] = "group"
+            automl_kwargs["eval_method"] = "cv"
+            automl_kwargs["n_splits"] = n_sp
+            automl_kwargs["groups"] = groups
+        elif cv_strategy == "time":
+            automl_kwargs["split_type"] = "time"
+    if weights_vec is not None:
+        automl_kwargs["sample_weight"] = weights_vec
+
     AutoML = _import_flaml_automl()
     automl = AutoML()
 
     (log.info if verbose else log.debug)(
-        "Training FLAML AutoML: X shape=%s, target='%s'", df_train[covariates].shape, target
+        "Training FLAML AutoML: X shape=%s, target='%s'", X_tr.shape, target
     )
 
     automl.fit(
-        X_train=df_train[covariates],
-        y_train=df_train[target],
+        X_train=X_tr,
+        y_train=y_tr,
         seed=seed,
         **automl_kwargs,
     )
@@ -350,6 +386,7 @@ class _FlamlBackend:
         seed: int = DEFAULT_SEED,
         verbose: bool = False,
         n_cores: int | None = None,
+        sample_weight: str | np.ndarray | pd.Series | None = None,
     ) -> object:
         return train_flaml(
             df,
@@ -360,6 +397,7 @@ class _FlamlBackend:
             seed=seed,
             verbose=verbose,
             n_cores=n_cores,
+            sample_weight=sample_weight,
         )
 
     def save(
