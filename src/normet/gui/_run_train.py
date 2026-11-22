@@ -12,7 +12,7 @@ from collections.abc import Callable
 from typing import Any
 
 import pandas as pd
-from PySide6.QtWidgets import QMainWindow
+from PySide6.QtWidgets import QFileDialog, QMainWindow
 
 from normet import style as S
 
@@ -723,3 +723,57 @@ class TrainRunMixin(QMainWindow):
         self.tabs.setCurrentWidget(self.tab_model)
         self.statusBar().showMessage("Fine-tuned — normalise again to use the tuned weights.")
         log.info("Fine-tuning finished")
+
+    def _save_chronos_checkpoint(self, folder: str | bool | None = None) -> None:
+        """Persist the active Chronos-2 checkpoint or LoRA adapter to a folder."""
+        if not self._check_model() or not self._is_chronos():
+            return
+        if not isinstance(folder, str) or not folder:
+            from .uilang import panel_caption
+
+            folder = QFileDialog.getExistingDirectory(
+                self, panel_caption("Save Chronos-2 checkpoint folder")
+            )
+            if not folder:
+                return
+        self.runner.submit(
+            "save chronos-2",
+            _chronos.save_estimator,
+            self._save_chronos_done,
+            self._show_error,
+            self.model,
+            folder,
+        )
+
+    def _save_chronos_done(self, saved_path: object) -> None:
+        self.statusBar().showMessage(f"Saved Chronos-2 checkpoint to {saved_path}")
+        self._log_history("save_chronos", str(saved_path))
+        log.info("Saved Chronos-2 checkpoint to %s", saved_path)
+
+    def _load_chronos_checkpoint(self, folder: str | bool | None = None) -> None:
+        """Load a previously saved Chronos-2 checkpoint or LoRA adapter folder."""
+        if not self._check_data() or not self._is_chronos():
+            return
+        if not isinstance(folder, str) or not folder:
+            from .uilang import panel_caption
+
+            folder = QFileDialog.getExistingDirectory(
+                self, panel_caption("Load Chronos-2 checkpoint folder")
+            )
+            if not folder:
+                return
+        target = self.target_combo.currentText()
+        features = self._selected_features()
+        self._pending_features = features
+        self.statusBar().showMessage(f"Loading Chronos-2 checkpoint from {folder}…")
+        self.runner.submit(
+            f"load ({_chronos.BACKEND})",
+            _chronos.load_saved_session,
+            self._train_done,
+            self._show_error,
+            self.df_raw,
+            target,
+            features,
+            folder,
+            self._selected_device(),
+        )

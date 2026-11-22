@@ -273,3 +273,67 @@ def test_log_scale_note_only_when_the_flag_is_on(tmp_path):
 
     zh = generate_html(log_run, tmp_path / "log_zh.html", lang="zh").read_text("utf-8")
     assert "对数尺度拟合" in zh
+
+
+def test_auto_plot_handles_imputation_pdp_and_backtest(monkeypatch):
+    """_auto_plot recognises Chronos-2 imputation, PDP, and backtest lead frames."""
+    import matplotlib.pyplot as plt
+
+    from normet import plotting
+    from normet.report import _auto_plot
+
+    called: list[str] = []
+    orig_plot_imp = plotting.plot_imputation
+    orig_pdp_grid = plotting.pdp_grid
+
+    def _spy_imp(*a, **kw):
+        called.append("imputation")
+        return orig_plot_imp(*a, **kw)
+
+    def _spy_pdp(*a, **kw):
+        called.append("pdp")
+        return orig_pdp_grid(*a, **kw)
+
+    monkeypatch.setattr(plotting, "plot_imputation", _spy_imp)
+    monkeypatch.setattr(plotting, "pdp_grid", _spy_pdp)
+
+    dates = pd.date_range("2024-01-01", periods=16, freq="h")
+    imp_df = pd.DataFrame(
+        {
+            "observed": [1.0 if i not in (5, 6, 7) else np.nan for i in range(16)],
+            "imputed": np.linspace(1.0, 5.0, 16),
+            "is_imputed": [i in (5, 6, 7) for i in range(16)],
+            "lower": np.linspace(0.5, 4.5, 16),
+            "upper": np.linspace(1.5, 5.5, 16),
+        },
+        index=dates,
+    )
+    fig_imp = _auto_plot(make_run(result=imp_df, kind="impute"))
+    assert fig_imp is not None
+    assert "imputation" in called
+
+    pdp_df = pd.DataFrame(
+        {
+            "variable": ["t2m"] * 4,
+            "value": [0.0, 5.0, 10.0, 15.0],
+            "pdp_mean": [20.0, 18.0, 16.0, 15.0],
+            "pdp_lower": [17.0, 15.0, 13.0, 12.0],
+            "pdp_upper": [23.0, 21.0, 19.0, 18.0],
+        }
+    )
+    fig_pdp = _auto_plot(make_run(result=pdp_df, kind="pdp"))
+    assert fig_pdp is not None
+    assert "pdp" in called
+
+    bt_df = pd.DataFrame(
+        {
+            "lead": [1, 2, 3, 4],
+            "crps": [0.8, 0.9, 1.0, 1.1],
+            "mae": [0.6, 0.7, 0.8, 0.9],
+            "rmse": [0.9, 1.0, 1.1, 1.2],
+            "coverage_80": [0.82, 0.81, 0.80, 0.78],
+        }
+    )
+    fig_bt = _auto_plot(make_run(result=bt_df, kind="backtest"))
+    assert fig_bt is not None and fig_bt.axes[0].get_xlabel() == "Lead step"
+    plt.close("all")

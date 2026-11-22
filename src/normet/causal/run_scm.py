@@ -47,10 +47,16 @@ def run_scm(
         Treatment cutoff in "YYYY-MM-DD" (flexible parsing accepted).
     donors : List[str] | None
         Donor pool. If None, use all units except the treated unit.
-    scm_backend : {"scm","ascm","sdid","mlscm","abadie","did","mcnnm","robust"}
+    scm_backend : {"scm","ascm","sdid","mlscm","abadie","did","mcnnm","robust","chronos"}
         Which synthetic-control backend to use.
     **kwargs
         Forwarded to the selected backend function.
+
+        If scm_backend == "chronos":
+          - estimator: optional pre-loaded :class:`~normet.foundation.Chronos2Estimator`
+          - model_config / device / context_length / prediction_length
+          - met_df, met_covariates, past_only_covariates, quantiles, validation_steps,
+            max_horizon, calibrated, rollout, freq
 
         If scm_backend == "mlscm":
           - backend: {"flaml"} (ML AutoML backend, default "flaml")
@@ -183,5 +189,51 @@ def run_scm(
             **kwargs,
         )
         return out["synthetic"]
+
+    if scm_backend == "chronos":
+        from ..foundation import Chronos2Estimator, chronos_scm
+
+        kw = dict(kwargs)
+        est = kw.pop("estimator", None)
+        if est is None:
+            mc = dict(kw.pop("model_config", None) or {})
+            model_path = mc.pop("model_path", kw.pop("model_path", None))
+            for k in ("device", "context_length", "prediction_length"):
+                if k in kw and kw[k] is not None:
+                    mc[k] = kw.pop(k)
+                else:
+                    kw.pop(k, None)
+            if model_path is not None:
+                est = Chronos2Estimator.load(model_path, device=mc.get("device"))
+            else:
+                est = Chronos2Estimator(**mc)
+        else:
+            for k in (
+                "model_config",
+                "model_path",
+                "device",
+                "context_length",
+                "prediction_length",
+            ):
+                kw.pop(k, None)
+        log.info(
+            "Running synthetic control | scm_backend=%s | treated=%s | donors=%d | cutoff=%s",
+            scm_backend,
+            treated_unit,
+            len(donor_pool),
+            cutoff_str,
+        )
+        res = chronos_scm(
+            est,
+            df,
+            date_col=date_col,
+            unit_col=unit_col,
+            outcome_col=outcome_col,
+            treated_unit=treated_unit,
+            cutoff_date=cutoff_date,
+            donors=donor_pool,
+            **kw,
+        )
+        return res.to_scm_frame()
 
     raise ValueError(f"Unsupported scm_backend: {scm_backend}")

@@ -9,6 +9,8 @@ def test_top_level_symbols_present():
         "normalise",
         "rolling",
         "pdp",
+        "plot_attention_attribution",
+        "plot_imputation",
         "decompose",
         "scm",
         "mlscm",
@@ -38,6 +40,21 @@ def test_top_level_symbols_present():
         "detect_trend_breaks",
         "TrendBreaks",
         "normalise_in_context",
+        "normalise_in_context_multivariate",
+        "normalise_in_context_multisite",
+        "ICNDrawBank",
+        "build_icn_draw_bank",
+        "AdaptiveConformalCalibrator",
+        "select_donors_by_embedding",
+        "chronos_scm",
+        "chronos_anomaly_scores",
+        "chronos_attention_attribution",
+        "chronos_backtest",
+        "chronos_pdp",
+        "chronos_impute",
+        "CovariateSensitivityCallback",
+        "decompose_icn_uncertainty",
+        "detect_chronos_events",
         "read_trajectory_endpoints",
         "trajectory_endpoint_weights",
         "is_trajectory_qc_column",
@@ -120,7 +137,7 @@ def test_imports_without_the_heavy_optional_extras():
     script = textwrap.dedent("""
         import sys
 
-        BLOCKED = ("torch", "chronos", "PySide6")
+        BLOCKED = ("torch", "chronos", "transformers", "PySide6")
 
         class Blocker:
             def find_module(self, name, path=None):

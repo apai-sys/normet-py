@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 import numpy as np
@@ -21,6 +22,35 @@ __all__ = ["placebo_in_space", "placebo_in_time"]
 def _eff_cores(n_cores: int | None) -> int:
     """Resolve effective worker count (>=1)."""
     return resolve_workers(n_cores)
+
+
+def _resolve_chronos_scm_kwargs(
+    scm_backend: str, kwargs: Mapping[str, Any]
+) -> tuple[bool, dict[str, Any]]:
+    """Prepare shared-estimator kwargs so Chronos-2 SCM batches load weights once."""
+    if str(scm_backend or "scm").lower() != "chronos":
+        return False, dict(kwargs)
+
+    from ..foundation import Chronos2Estimator
+
+    kw = dict(kwargs)
+    est = kw.pop("estimator", None)
+    mc = dict(kw.pop("model_config", None) or {})
+    model_path = mc.pop("model_path", kw.pop("model_path", None))
+    for k in ("device", "context_length", "prediction_length"):
+        val = kw.pop(k, None)
+        if val is not None and k not in mc:
+            mc[k] = val
+
+    if est is None:
+        if model_path is not None:
+            est = Chronos2Estimator.load(model_path, device=mc.get("device"))
+        else:
+            est = Chronos2Estimator(**mc)
+    if getattr(est, "_pipeline", None) is None:
+        est._load_pipeline()
+    kw["estimator"] = est
+    return True, kw
 
 
 def placebo_in_space(
@@ -74,6 +104,8 @@ def placebo_in_space(
         cutoff_date,
     )
 
+    is_chronos, run_kw = _resolve_chronos_scm_kwargs(scm_backend, kwargs)
+
     # True treated run
     df_true = run_scm(
         df=df,
@@ -84,7 +116,7 @@ def placebo_in_space(
         cutoff_date=cutoff_ts.strftime("%Y-%m-%d"),
         donors=donors,
         scm_backend=scm_backend,
-        **kwargs,
+        **run_kw,
     )
 
     all_units = sorted(pd.unique(df[unit_col]))
@@ -110,7 +142,7 @@ def placebo_in_space(
             res_empty["pre_mspe_ratios"] = pd.Series(dtype=float, name="pre_mspe_ratio")
         return res_empty
 
-    # Run placebos in parallel — each donor-as-treated run is independent.
+    # Run placebos in parallel -- except Chronos-2, which shares one in-process checkpoint.
     n_cores_eff = _eff_cores(n_cores)
 
     def _one_donor_placebo(u: str) -> tuple[str, pd.DataFrame] | None:
@@ -131,19 +163,22 @@ def placebo_in_space(
                 cutoff_date=cutoff_ts.strftime("%Y-%m-%d"),
                 donors=[d for d in donor_pool if d != u],
                 scm_backend=scm_backend,
-                **kwargs,
+                **run_kw,
             )
             return u, syn_u[["effect"]].rename(columns={"effect": u})
         except Exception as e:
             log.warning("Placebo failed for unit %s: %s", u, e)
             return None
 
-    # joblib is ~100 ms of `import normet`; the parallel branches pay it.
-    from joblib import Parallel, delayed
+    if is_chronos:
+        results = [_one_donor_placebo(u) for u in donor_pool]
+    else:
+        # joblib is ~100 ms of `import normet`; the parallel branches pay it.
+        from joblib import Parallel, delayed
 
-    results = Parallel(
-        n_jobs=n_cores_eff, batch_size=dispatch_batch_size(len(donor_pool), n_cores_eff)
-    )(delayed(_one_donor_placebo)(u) for u in donor_pool)
+        results = Parallel(
+            n_jobs=n_cores_eff, batch_size=dispatch_batch_size(len(donor_pool), n_cores_eff)
+        )(delayed(_one_donor_placebo)(u) for u in donor_pool)
     placebo_effects: dict[str, pd.DataFrame] = {
         u: eff for r in results if r is not None for u, eff in [r]
     }
@@ -295,6 +330,8 @@ def placebo_in_time(
     if not donors:
         raise ValueError("No valid donors after excluding the treated unit.")
 
+    is_chronos, run_kw = _resolve_chronos_scm_kwargs(scm_backend, kwargs)
+
     df_true = run_scm(
         df=d,
         date_col=date_col,
@@ -304,7 +341,7 @@ def placebo_in_time(
         cutoff_date=cutoff_dt.strftime("%Y-%m-%d"),
         donors=donors,
         scm_backend=scm_backend,
-        **kwargs,
+        **run_kw,
     )
     dates_all = df_true.index.sort_values()
     post_dates_true = dates_all[(dates_all >= cutoff_dt).tolist()]
@@ -355,7 +392,7 @@ def placebo_in_time(
                 cutoff_date=pc_date.strftime("%Y-%m-%d"),
                 donors=donors,
                 scm_backend=scm_backend,
-                **kwargs,
+                **run_kw,
             )
             eff = syn_pc["effect"]
 
@@ -380,13 +417,16 @@ def placebo_in_time(
             return None
 
     n_cores_eff = _eff_cores(n_cores)
-    from joblib import Parallel, delayed
+    if is_chronos:
+        raw_jobs = [_one_placebo(pc) for pc in placebo_candidates]
+    else:
+        from joblib import Parallel, delayed
 
-    jobs = Parallel(
-        n_jobs=n_cores_eff,
-        batch_size=dispatch_batch_size(len(placebo_candidates), n_cores_eff),
-    )(delayed(_one_placebo)(pc) for pc in placebo_candidates)
-    jobs = [j for j in jobs if j is not None]
+        raw_jobs = Parallel(
+            n_jobs=n_cores_eff,
+            batch_size=dispatch_batch_size(len(placebo_candidates), n_cores_eff),
+        )(delayed(_one_placebo)(pc) for pc in placebo_candidates)
+    jobs = [j for j in raw_jobs if j is not None]
     if not jobs:
         log.warning("All placebo-in-time runs failed.")
         return {
@@ -413,7 +453,7 @@ def placebo_in_time(
     else:
         p_value = (np.sum(np.abs(stats[finite]) >= np.abs(obs_stat)) + 1) / (int(finite.sum()) + 1)
 
-    M = np.vstack([seg["effect"].to_numpy() for seg in placebo_dict.values()])
+    M = np.vstack([seg["effect"].to_numpy(dtype=float) for seg in placebo_dict.values()])
     k_index = pd.RangeIndex(start=0, stop=post_len, step=1, name="event_time")
 
     ref_band_event_time = pd.DataFrame(

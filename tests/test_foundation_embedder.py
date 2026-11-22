@@ -115,6 +115,99 @@ def test_continuous_gradients_track_a_known_slope():
     np.testing.assert_allclose(deriv, 0.5, rtol=1e-3)
 
 
+def test_embed_patches_and_patch_regime_shifts_torch_free():
+    """Patch embeddings preserve time order and peak cosine distance at regime boundary."""
+    n_patches, d_model = 12, 8
+    patch_mat = np.zeros((1, n_patches, d_model), dtype=np.float32)
+    patch_mat[0, :6, 0] = 1.0
+    patch_mat[0, 6:, 1] = 1.0
+
+    class _FakeEmbedPipe:
+        def embed(self, windows, batch_size=32):
+            return [patch_mat for _ in windows], None
+
+    emb = ChronosEmbedder()
+    emb._pipeline = _FakeEmbedPipe()
+
+    idx = pd.date_range("2024-01-01", periods=192, freq="h")
+    s = pd.Series(np.linspace(10.0, 20.0, 192), index=idx)
+
+    patches = emb.embed_patches(s, context_length=192)
+    assert patches.shape == (n_patches, d_model)
+    assert patches.dtype == np.float32
+
+    shifts = emb.patch_regime_shifts(s, context_length=192, window=2)
+    assert list(shifts.columns) == ["date", "patch_idx", "position", "cosine_distance", "z_score"]
+    peak = shifts.loc[shifts["cosine_distance"].idxmax()]
+    assert int(peak["patch_idx"]) == 6
+    assert float(peak["cosine_distance"]) == pytest.approx(1.0)
+    assert float(peak["z_score"]) > 1.5
+
+    # Array input has no date column; window<1 raises
+    arr_shifts = emb.patch_regime_shifts(s.to_numpy(), context_length=192, window=2)
+    assert list(arr_shifts.columns) == ["patch_idx", "position", "cosine_distance", "z_score"]
+    with pytest.raises(ValueError, match="window"):
+        emb.patch_regime_shifts(s, window=0)
+
+
+def test_special_token_trimming_reg_pooling_and_multivariate_torch_free():
+    """Trim trailing special tokens, support REG pooling, and encode multi-variates jointly."""
+
+    class _FakeSpecialPipe:
+        n_special_tokens = 2
+        use_reg_token = True
+
+        def embed(self, windows, batch_size=32):
+            out = []
+            for w in windows:
+                arr = np.asarray(w, dtype=np.float32)
+                n_v = 1 if arr.ndim == 1 else arr.shape[0]
+                # 4 context patches filled with 1.0, [REG] with 7.0 + n_v, output patch with -5.0
+                toks = np.zeros((n_v, 6, 8), dtype=np.float32)
+                toks[:, :4, :] = 1.0
+                toks[:, 4, :] = 7.0 + float(n_v)
+                toks[:, 5, :] = -5.0
+                out.append(toks)
+            return out, None
+
+    emb = ChronosEmbedder()
+    emb._pipeline = _FakeSpecialPipe()
+    s = np.linspace(1.0, 10.0, 64, dtype=np.float32)
+
+    trimmed = emb.embed_patches(s, context_length=64)
+    full = emb.embed_patches(s, context_length=64, include_special_tokens=True)
+    assert trimmed.shape == (4, 8)
+    assert full.shape == (6, 8)
+    np.testing.assert_allclose(trimmed, 1.0)
+
+    reg_vec = emb.embed_series(s, context_length=64, pooling="reg")
+    mean_vec = emb.embed_series(s, context_length=64, pooling="mean")
+    assert reg_vec.shape == (8,) and np.allclose(reg_vec, 8.0)
+    assert not np.allclose(reg_vec, mean_vec)
+
+    station_reg = emb.embed_stations({"A": s, "B": s * 2.0}, context_length=64, pooling="reg")
+    assert set(station_reg) == {"A", "B"}
+    np.testing.assert_allclose(station_reg["A"], 8.0)
+
+    df_mv = pd.DataFrame({"pm25": s, "no2": s * 0.5, "ws": np.ones(64, dtype=np.float32)})
+    mv_vec = emb.embed_multivariate(
+        df_mv, cols=["pm25", "no2", "ws"], context_length=64, pooling="reg"
+    )
+    assert mv_vec.shape == (8,) and np.allclose(mv_vec, 10.0)
+
+    with pytest.raises(ValueError, match="pooling must be"):
+        emb.embed_series(s, context_length=64, pooling="cls")
+
+    # Pipeline with no [REG] token refuses pooling="reg"
+    class _NoRegPipe(_FakeSpecialPipe):
+        n_special_tokens = 1
+        use_reg_token = False
+
+    emb._pipeline = _NoRegPipe()
+    with pytest.raises(ValueError, match="use_reg_token"):
+        emb.embed_series(s, context_length=64, pooling="reg")
+
+
 # ---------------------------------------------------------------- inference
 
 
@@ -193,3 +286,29 @@ def test_all_missing_station_is_rejected_not_embedded(embedder):
         embedder.embed_stations(
             {"dead": np.full(CONTEXT, np.nan, dtype="float32")}, context_length=CONTEXT
         )
+
+
+@needs_chronos
+def test_embed_patches_reg_pooling_and_multivariate_real(embedder):
+    """Real Chronos-2 trims [REG]+output patches cleanly, exposes [REG] and multivariate."""
+    s = _series(CONTEXT, seed=11)
+    patches = embedder.embed_patches(s, context_length=CONTEXT)
+    with_spec = embedder.embed_patches(s, context_length=CONTEXT, include_special_tokens=True)
+    # 256 / 16 == 16 context patches; +2 for [REG] and masked output patch
+    assert patches.shape == (16, EMBED_DIM)
+    assert with_spec.shape == (18, EMBED_DIM)
+
+    vec_mean = embedder.embed_series(s, context_length=CONTEXT, pooling="mean")
+    vec_reg = embedder.embed_series(s, context_length=CONTEXT, pooling="reg")
+    assert vec_reg.shape == (EMBED_DIM,) and np.isfinite(vec_reg).all()
+    assert not np.allclose(vec_mean, vec_reg)
+
+    df = pd.DataFrame(
+        {
+            "pm25": _series(CONTEXT, seed=12),
+            "no2": _series(CONTEXT, seed=13),
+            "ws": _series(CONTEXT, seed=14),
+        }
+    )
+    mv = embedder.embed_multivariate(df, cols=["pm25", "no2", "ws"], context_length=CONTEXT)
+    assert mv.shape == (EMBED_DIM,) and np.isfinite(mv).all()

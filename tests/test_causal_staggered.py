@@ -185,3 +185,50 @@ def test_staggered_rejects_a_cutoff_after_the_units_last_observation():
             _staggered_panel(),
             cutoff_dates={"T1": T1_CUTOFF, "T2": "2024-01-01"},
         )
+
+
+def test_staggered_chronos_single_checkpoint_in_process(monkeypatch):
+    """run_scm_staggered(..., scm_backend='chronos') loads one checkpoint and avoids joblib."""
+    import joblib
+
+    import normet.foundation.estimator as est_mod
+
+    levels = [0.1, 0.5, 0.9]
+    load_count = 0
+
+    class _FakePipe:
+        quantiles = levels
+
+        def predict(self, inputs, prediction_length, **kwargs):
+            out = []
+            for item in inputs:
+                hist = np.asarray(item["target"], dtype=float)
+                med = np.full(prediction_length, float(np.nanmedian(hist)))
+                out.append(np.stack([med - 1.0, med, med + 1.0])[None, ...])
+            return out
+
+    def _fake_load(name, dev, auto):
+        nonlocal load_count
+        load_count += 1
+        return _FakePipe(), dev or "cpu"
+
+    monkeypatch.setattr(est_mod, "_load_pipeline_on", _fake_load)
+    monkeypatch.setattr(est_mod, "resolve_device", lambda req=None: req or "cpu")
+    monkeypatch.setattr(
+        joblib,
+        "Parallel",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("chronos staggered should run in-process without joblib")
+        ),
+    )
+
+    out = _run(
+        _staggered_panel(),
+        scm_backend="chronos",
+        context_length=30,
+        prediction_length=15,
+        validation_steps=10,
+        device="cpu",
+    )
+    assert load_count == 1
+    assert set(out["unit"]) == {"T1", "T2", "mean", "median"}

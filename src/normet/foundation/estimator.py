@@ -19,6 +19,7 @@ call is a forecast, not a de-weathering, and this class refuses to pretend other
 from __future__ import annotations
 
 import importlib.util
+import json
 import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -360,6 +361,24 @@ class CounterfactualResult:
             quantile_cols={0.1: "counterfactual_p10", 0.9: "counterfactual_p90"},
         )
 
+    def to_scm_frame(self) -> pd.DataFrame:
+        """Return the projection on :func:`normet.run_scm`'s panel-effect schema.
+
+        Aligns ``observed``, ``synthetic`` (``counterfactual_p50``), ``effect``
+        (``observed - synthetic``), and the ``lower`` / ``upper`` band edges
+        onto :attr:`observed`'s index (named ``"date"``).
+        """
+        return pd.DataFrame(
+            {
+                "observed": self.observed.to_numpy(),
+                "synthetic": self.counterfactual_p50.reindex(self.observed.index).to_numpy(),
+                "effect": self.absolute_impact_p50.reindex(self.observed.index).to_numpy(),
+                "lower": self.counterfactual_p10.reindex(self.observed.index).to_numpy(),
+                "upper": self.counterfactual_p90.reindex(self.observed.index).to_numpy(),
+            },
+            index=pd.Index(self.observed.index, name="date"),
+        )
+
 
 class Chronos2Estimator:
     """Covariate-conditioned Chronos-2 estimator for de-weathering and counterfactuals.
@@ -406,6 +425,11 @@ class Chronos2Estimator:
         rolling ones (:meth:`predict`, :meth:`deweather`) leave that block NaN
         with a warning and raise only if no block qualifies -- so a long record
         gap no longer calls for lowering this to 0, which lets every gap through.
+    past_only_covariates : sequence of str, optional
+        Columns passed only through ``past_covariates`` (never through
+        ``future_covariates``), for predictors observed historically whose future
+        values are unavailable or would leak post-intervention outcomes (such as
+        co-pollutants, traffic counts, or lagged transport indicators).
     """
 
     def __init__(
@@ -418,6 +442,7 @@ class Chronos2Estimator:
         device: str | None = None,
         batch_size: int = 32,
         min_context_coverage: float = 0.25,
+        past_only_covariates: Sequence[str] | None = None,
     ) -> None:
         if "chronos-t5" in model_name or "chronos-bolt" in model_name:
             raise ValueError(
@@ -429,6 +454,9 @@ class Chronos2Estimator:
         self.prediction_length = int(prediction_length)
         self.context_length = int(context_length)
         self.met_covariates = list(met_covariates) if met_covariates is not None else None
+        self.past_only_covariates = (
+            list(past_only_covariates) if past_only_covariates is not None else None
+        )
         self.use_calendar = bool(use_calendar)
         self.device = device
         self.batch_size = max(1, int(batch_size))
@@ -460,9 +488,16 @@ class Chronos2Estimator:
     def _q_index(self, q: float) -> int:
         return int(np.argmin(np.abs(self.quantile_levels - q)))
 
-    def _resolve_covariates(self, df: pd.DataFrame, target: str | Sequence[str]) -> list[str]:
+    def _resolve_covariates(
+        self,
+        df: pd.DataFrame,
+        target: str | Sequence[str],
+        *,
+        exclude: Sequence[str] = (),
+    ) -> list[str]:
         """Covariate columns for ``target``, which may name several variates."""
         targets = {target} if isinstance(target, str) else set(target)
+        excluded = set(self.past_only_covariates or ()) | set(exclude)
         if self.met_covariates is not None:
             missing = [c for c in self.met_covariates if c not in df.columns]
             if missing:
@@ -473,11 +508,36 @@ class Chronos2Estimator:
                 c
                 for c in df.columns
                 if c not in targets
+                and c not in excluded
                 and c not in _CALENDAR_ENCODERS
                 and (pd.api.types.is_numeric_dtype(df[c]) or _is_categorical(df[c]))
             ]
         if self.use_calendar:
             cols = cols + [c for c in _CALENDAR_ENCODERS if c in df.columns]
+        return cols
+
+    def _resolve_past_only_covariates(
+        self,
+        df: pd.DataFrame,
+        target: str | Sequence[str],
+        future_cols: Sequence[str],
+        past_only: Sequence[str] | None = None,
+    ) -> list[str]:
+        """Validate and return past-only covariate names for ``target``."""
+        raw = list(past_only) if past_only is not None else list(self.past_only_covariates or ())
+        if not raw:
+            return []
+        cols = list(dict.fromkeys(raw))
+        missing = [c for c in cols if c not in df.columns]
+        if missing:
+            raise KeyError(f"past-only covariate columns absent from frame: {missing}")
+        targets = {target} if isinstance(target, str) else set(target)
+        bad_targets = [c for c in cols if c in targets]
+        if bad_targets:
+            raise ValueError(f"target columns cannot be past-only covariates: {bad_targets}")
+        overlap = [c for c in cols if c in set(future_cols)]
+        if overlap:
+            raise ValueError(f"covariate(s) cannot be both known-future and past-only: {overlap}")
         return cols
 
     # ------------------------------------------------------- low-level predict
@@ -494,6 +554,7 @@ class Chronos2Estimator:
         past: pd.DataFrame,
         future: pd.DataFrame,
         cols: Sequence[str],
+        past_only_cols: Sequence[str] = (),
     ) -> dict[str, Any]:
         """One ``predict`` input dict: numeric covariates cleaned, categoricals left alone.
 
@@ -508,20 +569,28 @@ class Chronos2Estimator:
         NaN is passed through rather than filled, because the encoder gives it
         its own category slot -- a station with no recorded site type is a fact
         about the station, not a value to impute.
+
+        Columns listed in ``past_only_cols`` are placed in ``past_covariates``
+        only, leaving ``future_covariates`` restricted to ``cols`` (as Chronos-2
+        requires: ``future_covariates`` must be a subset of ``past_covariates``).
         """
-        numeric = [c for c in cols if not _is_categorical(past[c])]
-        categorical = [c for c in cols if _is_categorical(past[c])]
+        all_past = list(dict.fromkeys([*cols, *past_only_cols]))
+        numeric = [c for c in all_past if not _is_categorical(past[c])]
+        categorical = [c for c in all_past if _is_categorical(past[c])]
         fills = {
             c: float(np.nanmean(past[c])) if np.isfinite(past[c]).any() else 0.0 for c in numeric
         }
         past_cov: dict[str, np.ndarray] = {
             c: self._clean(past[c].to_numpy(), fills[c]) for c in numeric
         }
+        future_numeric = [c for c in cols if not _is_categorical(past[c])]
+        future_categorical = [c for c in cols if _is_categorical(past[c])]
         future_cov: dict[str, np.ndarray] = {
-            c: self._clean(future[c].to_numpy(), fills[c]) for c in numeric
+            c: self._clean(future[c].to_numpy(), fills[c]) for c in future_numeric
         }
         for c in categorical:
             past_cov[c] = _as_category_values(past[c])
+        for c in future_categorical:
             future_cov[c] = _as_category_values(future[c])
         return {
             "target": np.asarray(target_hist, dtype=np.float32),
@@ -639,8 +708,13 @@ class Chronos2Estimator:
         past: pd.DataFrame,
         future: pd.DataFrame,
         cols: Sequence[str],
+        past_only_cols: Sequence[str] = (),
     ) -> np.ndarray:
         """One forward pass. Returns ``(n_quantiles, horizon)``."""
+        if past_only_cols:
+            return self._forecast_blocks(
+                [(target_hist, past, future)], cols, len(future), past_only_cols=past_only_cols
+            )[0]
         return self._forecast_blocks([(target_hist, past, future)], cols, len(future))[0]
 
     def _forecast_blocks(
@@ -648,6 +722,8 @@ class Chronos2Estimator:
         items: Sequence[tuple[np.ndarray, pd.DataFrame, pd.DataFrame]],
         cols: Sequence[str],
         horizon: int,
+        past_only_cols: Sequence[str] = (),
+        cross_learning: bool = False,
     ) -> np.ndarray:
         """Forward passes for several ``(history, past, future)`` triples.
 
@@ -663,8 +739,12 @@ class Chronos2Estimator:
         inputs = []
         for hist, past, future in items:
             self._check_context(hist)
-            inputs.append(self._make_input(hist, past, future, cols))
-        raw = self._predict_raw(inputs, horizon)
+            inputs.append(self._make_input(hist, past, future, cols, past_only_cols=past_only_cols))
+        raw = (
+            self._predict_raw(inputs, horizon, cross_learning=True)
+            if cross_learning
+            else self._predict_raw(inputs, horizon)
+        )
         if len(raw) != len(items):
             raise RuntimeError(f"pipeline returned {len(raw)} forecasts for {len(items)} inputs")
         return np.stack([block[0] for block in raw])
@@ -674,6 +754,7 @@ class Chronos2Estimator:
         inputs: Sequence[dict[str, Any]],
         horizon: int,
         cross_learning: bool = False,
+        **predict_kwargs: Any,
     ) -> list[np.ndarray]:
         """Every ``pipeline.predict`` call in this class goes through here.
 
@@ -692,11 +773,19 @@ class Chronos2Estimator:
         pipe = self._load_pipeline()
         out: list[np.ndarray] = []
         for s in range(0, len(inputs), self.batch_size):
-            preds = pipe.predict(
-                list(inputs[s : s + self.batch_size]),
-                prediction_length=horizon,
-                cross_learning=cross_learning,
-            )
+            if predict_kwargs:
+                preds = pipe.predict(
+                    list(inputs[s : s + self.batch_size]),
+                    prediction_length=horizon,
+                    cross_learning=cross_learning,
+                    **predict_kwargs,
+                )
+            else:
+                preds = pipe.predict(
+                    list(inputs[s : s + self.batch_size]),
+                    prediction_length=horizon,
+                    cross_learning=cross_learning,
+                )
             out.extend(np.asarray(pred) for pred in preds)
         return out
 
@@ -718,6 +807,7 @@ class Chronos2Estimator:
         horizon: int | None = None,
         quantiles: Sequence[float] = (0.1, 0.5, 0.9),
         covariates: Sequence[str] | None = None,
+        past_only_covariates: Sequence[str] | None = None,
     ) -> pd.DataFrame:
         """Probabilistic forecast from ``anchor``, conditioned on observed covariates.
 
@@ -736,6 +826,8 @@ class Chronos2Estimator:
             Levels to return. Snapped to the nearest natively emitted level.
         covariates : sequence of str, optional
             Overrides the resolved covariate set for this call.
+        past_only_covariates : sequence of str, optional
+            Overrides :attr:`past_only_covariates` for this call.
 
         Returns
         -------
@@ -745,7 +837,12 @@ class Chronos2Estimator:
         """
         self._check_index(df.index)
         anchor = pd.Timestamp(anchor)
-        cols = list(covariates) if covariates is not None else self._resolve_covariates(df, target)
+        cols = (
+            list(covariates)
+            if covariates is not None
+            else self._resolve_covariates(df, target, exclude=past_only_covariates or ())
+        )
+        past_only_cols = self._resolve_past_only_covariates(df, target, cols, past_only_covariates)
         horizon = int(horizon or self.prediction_length)
 
         past = df.loc[df.index < anchor].iloc[-self.context_length :]
@@ -753,7 +850,9 @@ class Chronos2Estimator:
         if past.empty or future.empty:
             raise ValueError("anchor leaves no context or no forecast window")
 
-        block = self._forecast_block(past[target].to_numpy(), past, future, cols)
+        block = self._forecast_block(
+            past[target].to_numpy(), past, future, cols, past_only_cols=past_only_cols
+        )
         return pd.DataFrame(
             {f"q{q}": block[self._q_index(q)] for q in quantiles},
             index=future.index,
@@ -783,6 +882,7 @@ class Chronos2Estimator:
         horizon: int | None = None,
         quantiles: Sequence[float] = (0.1, 0.5, 0.9),
         covariates: Sequence[str] | None = None,
+        past_only_covariates: Sequence[str] | None = None,
     ) -> dict[str, pd.DataFrame]:
         """Forecast several target series that share a frame, as one joint task.
 
@@ -819,6 +919,8 @@ class Chronos2Estimator:
             Levels to return. Snapped to the nearest natively emitted level.
         covariates : sequence of str, optional
             Overrides the resolved covariate set for this call.
+        past_only_covariates : sequence of str, optional
+            Overrides :attr:`past_only_covariates` for this call.
 
         Returns
         -------
@@ -839,13 +941,18 @@ class Chronos2Estimator:
         self._check_index(df.index)
         at = pd.Timestamp(anchor)
         horizon = int(horizon or self.prediction_length)
-        cols = list(covariates) if covariates is not None else self._resolve_covariates(df, targets)
+        cols = (
+            list(covariates)
+            if covariates is not None
+            else self._resolve_covariates(df, targets, exclude=past_only_covariates or ())
+        )
+        past_only_cols = self._resolve_past_only_covariates(df, targets, cols, past_only_covariates)
         past, future = self._window(df, at, horizon)
 
         stacked = np.stack([past[t].to_numpy(dtype=np.float32) for t in targets])
         for row in stacked:
             self._check_context(row)
-        item = self._make_input(stacked, past, future, cols)
+        item = self._make_input(stacked, past, future, cols, past_only_cols=past_only_cols)
 
         block = self._predict_raw([item], horizon)[0]
         if block.shape[0] != len(targets):
@@ -866,6 +973,7 @@ class Chronos2Estimator:
         quantiles: Sequence[float] = (0.1, 0.5, 0.9),
         covariates: Sequence[str] | None = None,
         cross_learning: bool = True,
+        past_only_covariates: Sequence[str] | None = None,
     ) -> dict[str, pd.DataFrame]:
         """Forecast the same target at several sites in one call.
 
@@ -901,6 +1009,8 @@ class Chronos2Estimator:
             frame otherwise, because the batch shares one covariate schema.
         cross_learning : bool, default True
             Whether the sites are predicted jointly.
+        past_only_covariates : sequence of str, optional
+            Overrides :attr:`past_only_covariates` for this call.
 
         Returns
         -------
@@ -915,7 +1025,12 @@ class Chronos2Estimator:
 
         first = frames[names[0]]
         cols = (
-            list(covariates) if covariates is not None else self._resolve_covariates(first, target)
+            list(covariates)
+            if covariates is not None
+            else self._resolve_covariates(first, target, exclude=past_only_covariates or ())
+        )
+        past_only_cols = self._resolve_past_only_covariates(
+            first, target, cols, past_only_covariates
         )
 
         items: list[dict[str, Any]] = []
@@ -926,12 +1041,12 @@ class Chronos2Estimator:
                 raise KeyError(f"site {name!r} has no column {target!r}")
             self._check_index(df.index)
             past, future = self._window(df, at, horizon)
-            missing = [c for c in cols if c not in df.columns]
+            missing = [c for c in [*cols, *past_only_cols] if c not in df.columns]
             if missing:
                 raise KeyError(f"site {name!r} is missing covariates {missing}")
             hist = past[target].to_numpy(dtype=np.float32)
             self._check_context(hist)
-            items.append(self._make_input(hist, past, future, cols))
+            items.append(self._make_input(hist, past, future, cols, past_only_cols=past_only_cols))
             indices.append(future.index)
 
         raw = self._predict_raw(items, horizon, cross_learning=cross_learning)
@@ -950,12 +1065,15 @@ class Chronos2Estimator:
         mode: str = "lora",
         prediction_length: int | None = None,
         covariates: Sequence[str] | None = None,
+        past_only_covariates: Sequence[str] | None = None,
         validation_df: pd.DataFrame | None = None,
         learning_rate: float | None = None,
         num_steps: int = 1000,
         batch_size: int = 32,
         output_dir: str | Path | None = None,
         lora_config: Mapping[str, Any] | None = None,
+        min_past: int | None = None,
+        callbacks: Sequence[Any] | None = None,
         **trainer_kwargs: Any,
     ) -> Chronos2Estimator:
         """Adapt the checkpoint to one site's own record and return a new estimator.
@@ -989,6 +1107,8 @@ class Chronos2Estimator:
             the adapted model is trained for the horizon it will be asked about.
         covariates : sequence of str, optional
             Overrides the resolved covariate set.
+        past_only_covariates : sequence of str, optional
+            Overrides :attr:`past_only_covariates` for this training run.
         validation_df : pandas.DataFrame, optional
             Held-out frame for model selection. Same columns as ``df``.
         learning_rate : float, optional
@@ -1005,6 +1125,12 @@ class Chronos2Estimator:
             Where the HuggingFace ``Trainer`` writes checkpoints.
         lora_config : mapping, optional
             Overrides for ``peft.LoraConfig``. Ignored when ``mode="full"``.
+        min_past : int, optional
+            Minimum observed history steps required per training window.
+            Forwarded to upstream ``pipe.fit`` when provided.
+        callbacks : sequence, optional
+            HuggingFace ``TrainerCallback`` instances forwarded to upstream
+            ``pipe.fit`` when provided.
         **trainer_kwargs
             Forwarded to ``TrainingArguments``.
 
@@ -1021,10 +1147,59 @@ class Chronos2Estimator:
             silently falls back to full fine-tuning in that case, which is a
             different and far more expensive thing than what was asked for.
         """
+        return self.finetune_multisite(
+            [df],
+            target,
+            mode=mode,
+            prediction_length=prediction_length,
+            covariates=covariates,
+            past_only_covariates=past_only_covariates,
+            validation_frames=[validation_df] if validation_df is not None else None,
+            learning_rate=learning_rate,
+            num_steps=num_steps,
+            batch_size=batch_size,
+            output_dir=output_dir,
+            lora_config=lora_config,
+            min_past=min_past,
+            callbacks=callbacks,
+            **trainer_kwargs,
+        )
+
+    def finetune_multisite(
+        self,
+        frames: Mapping[str, pd.DataFrame] | Sequence[pd.DataFrame],
+        target: str,
+        *,
+        mode: str = "lora",
+        prediction_length: int | None = None,
+        covariates: Sequence[str] | None = None,
+        past_only_covariates: Sequence[str] | None = None,
+        validation_frames: Mapping[str, pd.DataFrame] | Sequence[pd.DataFrame] | None = None,
+        learning_rate: float | None = None,
+        num_steps: int = 1000,
+        batch_size: int = 32,
+        output_dir: str | Path | None = None,
+        lora_config: Mapping[str, Any] | None = None,
+        min_past: int | None = None,
+        callbacks: Sequence[Any] | None = None,
+        **trainer_kwargs: Any,
+    ) -> Chronos2Estimator:
+        """Adapt the checkpoint jointly across several site frames and return a new estimator.
+
+        Domain-adaptive fine-tuning (DAFT) across multiple stations shares the
+        common meteorological response without overfitting a single site's
+        short record. The original estimator is left on its pretrained weights.
+        """
         if mode not in ("lora", "full"):
             raise ValueError(f"mode must be 'lora' or 'full', got {mode!r}")
-        if target not in df.columns:
-            raise KeyError(f"target column absent from frame: {target!r}")
+        if min_past is not None and int(min_past) < 1:
+            raise ValueError(f"min_past must be >= 1, got {min_past}")
+        seq = list(frames.values()) if isinstance(frames, Mapping) else list(frames)
+        if not seq:
+            raise ValueError("frames is empty; nothing to fine-tune on")
+        for f in seq:
+            if target not in f.columns:
+                raise KeyError(f"target column absent from frame: {target!r}")
         if mode == "lora" and importlib.util.find_spec("peft") is None:
             raise ImportError(
                 "mode='lora' requires peft. Install it with `pip install peft`, or "
@@ -1032,28 +1207,64 @@ class Chronos2Estimator:
             )
 
         horizon = int(prediction_length or self.prediction_length)
-        cols = list(covariates) if covariates is not None else self._resolve_covariates(df, target)
-        self._check_index(df.index)
-
-        inputs = self._training_inputs(df, target, cols, horizon)
-        validation = (
-            self._training_inputs(validation_df, target, cols, horizon)
-            if validation_df is not None
-            else None
+        first = seq[0]
+        cols = (
+            list(covariates)
+            if covariates is not None
+            else self._resolve_covariates(first, target, exclude=past_only_covariates or ())
         )
+        past_only_cols = self._resolve_past_only_covariates(
+            first, target, cols, past_only_covariates
+        )
+        all_covs = [*cols, *past_only_cols]
+        for f in seq:
+            self._check_index(f.index)
+            missing = [c for c in all_covs if c not in f.columns]
+            if missing:
+                raise KeyError(f"covariate columns absent from frame: {missing}")
+
+        inputs = self._training_inputs_many(
+            seq, target, cols, horizon, past_only_cols=past_only_cols
+        )
+        validation: list[Any] | None = None
+        if validation_frames is not None:
+            val_seq = (
+                list(validation_frames.values())
+                if isinstance(validation_frames, Mapping)
+                else list(validation_frames)
+            )
+            if not val_seq:
+                raise ValueError("validation_frames is empty")
+            for f in val_seq:
+                if target not in f.columns:
+                    raise KeyError(f"target column absent from validation frame: {target!r}")
+                self._check_index(f.index)
+                missing = [c for c in all_covs if c not in f.columns]
+                if missing:
+                    raise KeyError(f"covariate columns absent from validation frame: {missing}")
+            validation = self._training_inputs_many(
+                val_seq, target, cols, horizon, past_only_cols=past_only_cols
+            )
 
         if learning_rate is None:
             learning_rate = 1e-5 if mode == "lora" else 1e-6
 
+        total_rows = sum(len(f) for f in seq)
         log.info(
-            "Fine-tuning %s (%s) on %d rows for horizon %d, %d steps at lr %g",
+            "Fine-tuning %s (%s) on %d series (%d rows) for horizon %d, %d steps at lr %g",
             self.model_name,
             mode,
-            len(df),
+            len(seq),
+            total_rows,
             horizon,
             num_steps,
             learning_rate,
         )
+        fit_kwargs: dict[str, Any] = dict(trainer_kwargs)
+        if min_past is not None:
+            fit_kwargs["min_past"] = int(min_past)
+        if callbacks is not None:
+            fit_kwargs["callbacks"] = list(callbacks)
         pipe = self._load_pipeline()
         tuned = pipe.fit(
             inputs,
@@ -1066,7 +1277,7 @@ class Chronos2Estimator:
             num_steps=num_steps,
             batch_size=batch_size,
             output_dir=output_dir,
-            **trainer_kwargs,
+            **fit_kwargs,
         )
 
         out = Chronos2Estimator(
@@ -1078,6 +1289,7 @@ class Chronos2Estimator:
             device=self.device,
             batch_size=self.batch_size,
             min_context_coverage=self.min_context_coverage,
+            past_only_covariates=past_only_cols or None,
         )
         out._pipeline = tuned
         out._quantiles = np.asarray(tuned.quantiles, dtype=float)
@@ -1085,8 +1297,75 @@ class Chronos2Estimator:
         out.feature_cols = list(cols)
         return out
 
+    def save(self, path: str | Path) -> Path:
+        """Persist the loaded or fine-tuned Chronos-2 pipeline and estimator metadata.
+
+        Saves the HuggingFace / PEFT model directory via ``save_pretrained``
+        alongside a ``normet_estimator.json`` sidecar so :meth:`load` restores
+        both the weights (full checkpoint or LoRA adapter) and the covariate /
+        window configuration.
+        """
+        if self._pipeline is None:
+            raise RuntimeError("No Chronos-2 pipeline is loaded to save. Load or finetune() first.")
+        dest = Path(path)
+        dest.mkdir(parents=True, exist_ok=True)
+        self._pipeline.save_pretrained(dest)
+        meta = {
+            "schema_version": 1,
+            "model_name": self.model_name,
+            "prediction_length": self.prediction_length,
+            "context_length": self.context_length,
+            "met_covariates": self.met_covariates,
+            "past_only_covariates": self.past_only_covariates,
+            "use_calendar": self.use_calendar,
+            "batch_size": self.batch_size,
+            "min_context_coverage": self.min_context_coverage,
+            "target_col": self.target_col,
+            "feature_cols": self.feature_cols,
+        }
+        (dest / "normet_estimator.json").write_text(
+            json.dumps(meta, indent=2, sort_keys=True), encoding="utf-8"
+        )
+        return dest
+
+    @classmethod
+    def load(cls, path: str | Path, *, device: str | None = None) -> Chronos2Estimator:
+        """Load a saved :class:`Chronos2Estimator` directory or PEFT LoRA adapter."""
+        src = Path(path)
+        if not src.exists():
+            raise FileNotFoundError(f"Saved Chronos-2 estimator directory not found: {src}")
+        meta_path = src / "normet_estimator.json"
+        meta: dict[str, Any] = {}
+        if meta_path.exists():
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+
+        auto = device is None
+        resolved = resolve_device(device)
+        pipeline, landed = _load_pipeline_on(str(src), resolved, auto)
+        est = cls(
+            model_name=str(meta.get("model_name", src)),
+            prediction_length=int(meta.get("prediction_length", 168)),
+            context_length=int(meta.get("context_length", 2048)),
+            met_covariates=meta.get("met_covariates"),
+            use_calendar=bool(meta.get("use_calendar", True)),
+            device=landed,
+            batch_size=int(meta.get("batch_size", 32)),
+            min_context_coverage=float(meta.get("min_context_coverage", 0.25)),
+            past_only_covariates=meta.get("past_only_covariates"),
+        )
+        est._pipeline = pipeline
+        est._quantiles = np.asarray(pipeline.quantiles, dtype=float)
+        est.target_col = meta.get("target_col")
+        est.feature_cols = list(meta.get("feature_cols") or [])
+        return est
+
     def _training_inputs(
-        self, df: pd.DataFrame, target: str, cols: Sequence[str], horizon: int
+        self,
+        df: pd.DataFrame,
+        target: str,
+        cols: Sequence[str],
+        horizon: int,
+        past_only_cols: Sequence[str] = (),
     ) -> list[Any]:
         """Prepare one series for ``Chronos2Pipeline.fit``.
 
@@ -1098,16 +1377,36 @@ class Chronos2Estimator:
         them as past-only would adapt the model to a problem it will never be
         asked to solve.
         """
+        return self._training_inputs_many(
+            [df], target, cols, horizon, past_only_cols=past_only_cols
+        )
+
+    def _training_inputs_many(
+        self,
+        frames: Sequence[pd.DataFrame],
+        target: str,
+        cols: Sequence[str],
+        horizon: int,
+        past_only_cols: Sequence[str] = (),
+    ) -> list[Any]:
+        """Prepare one or more series for ``Chronos2Pipeline.fit``."""
         from chronos.chronos2 import preprocess
 
-        past = {
-            c: _as_category_values(df[c]) if _is_categorical(df[c]) else df[c].to_numpy(np.float32)
-            for c in cols
-        }
-        item = {"target": df[target].to_numpy(np.float32), "past_covariates": past}
+        all_cols = list(dict.fromkeys([*cols, *past_only_cols]))
+        items = []
+        for frame in frames:
+            past = {
+                c: (
+                    _as_category_values(frame[c])
+                    if _is_categorical(frame[c])
+                    else frame[c].to_numpy(np.float32)
+                )
+                for c in all_cols
+            }
+            items.append({"target": frame[target].to_numpy(np.float32), "past_covariates": past})
         return list(
             preprocess.from_list_of_dicts(
-                [item],
+                items,
                 prediction_length=horizon,
                 known_covariates_names=list(cols),
             )
@@ -1134,6 +1433,7 @@ class Chronos2Estimator:
         if target not in X.columns:
             raise KeyError(f"target column {target!r} not in frame")
         cols = self._resolve_covariates(X, target)
+        past_only_cols = self._resolve_past_only_covariates(X, target, cols)
         obs = X[target].to_numpy(dtype=np.float32)
         out = obs.astype(np.float32).copy()
 
@@ -1157,7 +1457,12 @@ class Chronos2Estimator:
             for s, e in group:
                 past = X.iloc[max(0, s - self.context_length) : s]
                 items.append((past[target].to_numpy(), past, X.iloc[s:e]))
-            blocks = self._forecast_blocks(items, cols, group[0][1] - group[0][0])
+            if past_only_cols:
+                blocks = self._forecast_blocks(
+                    items, cols, group[0][1] - group[0][0], past_only_cols=past_only_cols
+                )
+            else:
+                blocks = self._forecast_blocks(items, cols, group[0][1] - group[0][0])
             for (s, e), block in zip(group, blocks, strict=True):
                 out[s:e] = block[i50]
         return out
@@ -1302,6 +1607,8 @@ class Chronos2Estimator:
         pipeline: Any = None,
         met_features: list[str] | None = None,
         schema: str = "chronos",
+        pool: Any = None,
+        quantiles: Sequence[float] | None = None,
     ) -> Any:
         """In-context normalisation (ICN) -- the future-only analogue of :meth:`deweather`.
 
@@ -1337,6 +1644,62 @@ class Chronos2Estimator:
             pipeline=pipeline,
             met_features=met_features,
             schema=schema,
+            pool=pool,
+            quantiles=quantiles,
+        )
+
+    def normalise_in_context_multivariate(
+        self,
+        df: pd.DataFrame,
+        targets: Sequence[str],
+        design: Any = None,
+        pipeline: Any = None,
+        met_features: list[str] | None = None,
+        schema: str = "chronos",
+        pool: Any = None,
+        quantiles: Sequence[float] | None = None,
+    ) -> dict[str, Any]:
+        """Jointly normalise co-varying targets via Chronos-2 multivariate inference."""
+        from .in_context import normalise_in_context_multivariate as _nic_mv
+
+        return _nic_mv(
+            self,
+            df,
+            targets,
+            design=design,
+            pipeline=pipeline,
+            met_features=met_features,
+            schema=schema,
+            pool=pool,
+            quantiles=quantiles,
+        )
+
+    def normalise_in_context_multisite(
+        self,
+        frames: Mapping[str, pd.DataFrame],
+        target: str,
+        design: Any = None,
+        pipeline: Any = None,
+        met_features: list[str] | None = None,
+        schema: str = "chronos",
+        pool: Any = None,
+        quantiles: Sequence[float] | None = None,
+        cross_learning: bool = True,
+    ) -> dict[str, Any]:
+        """Normalise a multi-site network jointly via Chronos-2 cross-learning."""
+        from .in_context import normalise_in_context_multisite as _nic_ms
+
+        return _nic_ms(
+            self,
+            frames,
+            target,
+            design=design,
+            pipeline=pipeline,
+            met_features=met_features,
+            schema=schema,
+            pool=pool,
+            quantiles=quantiles,
+            cross_learning=cross_learning,
         )
 
     def covariate_sensitivity(
@@ -1397,6 +1760,9 @@ class Chronos2Estimator:
         validation_hours: int = 720,
         max_horizon: int | None = None,
         calibrated: bool = False,
+        *,
+        past_only_covariates: Sequence[str] | None = None,
+        rollout: str = "median",
     ) -> CounterfactualResult:
         """Business-as-usual projection across an intervention.
 
@@ -1405,7 +1771,9 @@ class Chronos2Estimator:
         "what would concentrations have been under the observed weather had the
         intervention not happened". Post-intervention observations are never fed
         back as context — doing so would leak the intervention into its own
-        counterfactual — so long horizons roll forward on the model's own median.
+        counterfactual — so long horizons either roll forward on the model's own
+        median (``rollout="median"``) or use Chronos-2's native multi-patch /
+        quantile-branching horizon rollout (``rollout="quantile"``).
 
         Before projecting, the same machinery is run on ``validation_hours`` of
         pre-intervention data held out from the context. The resulting
@@ -1443,7 +1811,20 @@ class Chronos2Estimator:
             (``calibration``) with its cross-validated coverage table, and a
             :class:`~normet.exceptions.CalibrationWarning` names the level it
             could not bring onto target.
+        past_only_covariates : sequence of str, optional
+            Historical covariates included only before ``intervention_date``.
+            In ``rollout="median"``, post-intervention values are masked as NaN
+            rather than fed back so future observations never leak into the BAU
+            projection.
+        rollout : {"median", "quantile"}, default "median"
+            ``"median"`` steps block-by-block feeding the predicted median back
+            as pseudo-history (unchanged default). ``"quantile"`` invokes
+            Chronos-2's native multi-patch projection (and built-in quantile
+            unrolling beyond ``model_prediction_length``) in one call, avoiding
+            uncertainty collapse over multi-block horizons.
         """
+        if rollout not in ("median", "quantile"):
+            raise ValueError(f"rollout must be 'median' or 'quantile', got {rollout!r}")
         self._check_index(df.index)
         interv = pd.to_datetime(intervention_date)
         qs = tuple(sorted(float(q) for q in quantiles))
@@ -1452,7 +1833,12 @@ class Chronos2Estimator:
                 "`quantiles` must name at least three levels with the median 0.5 "
                 f"among them, e.g. (0.1, 0.5, 0.9); got {tuple(quantiles)!r}."
             )
-        cols = list(features) if features is not None else self._resolve_covariates(df, target)
+        cols = (
+            list(features)
+            if features is not None
+            else self._resolve_covariates(df, target, exclude=past_only_covariates or ())
+        )
+        past_only_cols = self._resolve_past_only_covariates(df, target, cols, past_only_covariates)
 
         pre = df.loc[df.index < interv]
         post = df.loc[df.index >= interv]
@@ -1469,16 +1855,58 @@ class Chronos2Estimator:
         # intervention, the same conditioning the projection is made under.
         calibration: QuantileCalibration | None = None
         if calibrated:
+            cal_est: Any = self
+            if past_only_covariates is not None:
+                base_est = self
+
+                class _PastOnlyAdapter:
+                    def __init__(self, po: list[str]) -> None:
+                        self._po = po
+                        self.prediction_length = base_est.prediction_length
+                        self.context_length = base_est.context_length
+
+                    def predict_quantiles(
+                        self,
+                        frame: pd.DataFrame,
+                        tgt: str,
+                        anchor: pd.Timestamp | str,
+                        *,
+                        horizon: int | None = None,
+                        quantiles: Sequence[float] = (0.1, 0.5, 0.9),
+                        covariates: Sequence[str] | None = None,
+                    ) -> pd.DataFrame:
+                        return base_est.predict_quantiles(
+                            frame,
+                            tgt,
+                            anchor,
+                            horizon=horizon,
+                            quantiles=quantiles,
+                            covariates=covariates,
+                            past_only_covariates=self._po,
+                        )
+
+                cal_est = _PastOnlyAdapter(past_only_cols)
             calibration = calibrate_quantiles(
-                self, pre, target, interv, quantiles=quantiles, covariates=cols
+                cal_est, pre, target, interv, quantiles=quantiles, covariates=cols
             ).calibration
 
         # --- placebo: project the pre-intervention hold-out under identical rules
         val = pre.iloc[-validation_hours:]
         val_ctx = pre.iloc[:-validation_hours]
-        val_p50 = self._roll_forward(
-            val_ctx, val, target, cols, {0.5: self._q_index(0.5)}, calibration
-        )[0.5]
+        if rollout == "quantile":
+            val_p50 = self._project_native(
+                val_ctx, val, target, cols, past_only_cols, {0.5: self._q_index(0.5)}, calibration
+            )[0.5]
+        else:
+            val_p50 = self._roll_forward(
+                val_ctx,
+                val,
+                target,
+                cols,
+                {0.5: self._q_index(0.5)},
+                calibration,
+                past_only_cols=past_only_cols,
+            )[0.5]
         val_obs = val[target].to_numpy(dtype=float)
         ok = np.isfinite(val_obs)
         # The denominator is the level's magnitude: a negative-valued target
@@ -1492,7 +1920,12 @@ class Chronos2Estimator:
 
         # --- the counterfactual itself
         i_q = {q: self._q_index(q) for q in qs}
-        proj = self._roll_forward(pre, post, target, cols, i_q, calibration)
+        if rollout == "quantile":
+            proj = self._project_native(pre, post, target, cols, past_only_cols, i_q, calibration)
+        else:
+            proj = self._roll_forward(
+                pre, post, target, cols, i_q, calibration, past_only_cols=past_only_cols
+            )
 
         p50 = pd.Series(proj[0.5], index=post.index)
         p10 = pd.Series(proj[qs[0]], index=post.index)
@@ -1517,6 +1950,8 @@ class Chronos2Estimator:
             "fraction_outside_interval": round(outside, 3),
             "validation_hours": int(validation_hours),
         }
+        if rollout != "median":
+            summary["rollout"] = rollout
         if calibration is not None:
             summary["calibrated"] = True
             summary["calibration"] = str(calibration)
@@ -1539,6 +1974,259 @@ class Chronos2Estimator:
             calibration=calibration,
         )
 
+    def counterfactual_multivariate(
+        self,
+        df: pd.DataFrame,
+        targets: Sequence[str],
+        intervention_date: str | pd.Timestamp,
+        features: Sequence[str] | None = None,
+        quantiles: Sequence[float] = (0.1, 0.5, 0.9),
+        validation_hours: int = 720,
+        max_horizon: int | None = None,
+        *,
+        past_only_covariates: Sequence[str] | None = None,
+        rollout: str = "quantile",
+    ) -> dict[str, CounterfactualResult]:
+        """Joint multivariate counterfactual BAU projection across correlated species.
+
+        Stacks ``targets`` as a 2-D ``(n_variates, T)`` history so Chronos-2
+        attends across species via group self-attention while projecting across
+        ``intervention_date`` conditioned on shared weather and optional
+        pre-cutoff ``past_only_covariates``. Returns one :class:`CounterfactualResult`
+        per target.
+        """
+        target_list = list(targets)
+        if len(target_list) < 2:
+            raise ValueError(
+                "counterfactual_multivariate needs at least two targets; "
+                "use counterfactual() for a single series"
+            )
+        missing = [t for t in target_list if t not in df.columns]
+        if missing:
+            raise KeyError(f"target columns absent from frame: {missing}")
+        if rollout not in ("median", "quantile"):
+            raise ValueError(f"rollout must be 'median' or 'quantile', got {rollout!r}")
+        self._check_index(df.index)
+        interv = pd.to_datetime(intervention_date)
+        qs = tuple(sorted(float(q) for q in quantiles))
+        if len(qs) < 3 or 0.5 not in qs:
+            raise ValueError(
+                "`quantiles` must name at least three levels with the median 0.5 "
+                f"among them, e.g. (0.1, 0.5, 0.9); got {tuple(quantiles)!r}."
+            )
+
+        cols = (
+            list(features)
+            if features is not None
+            else self._resolve_covariates(df, target_list, exclude=past_only_covariates or ())
+        )
+        past_only_cols = self._resolve_past_only_covariates(
+            df, target_list, cols, past_only_covariates
+        )
+
+        pre = df.loc[df.index < interv]
+        post = df.loc[df.index >= interv]
+        if post.empty:
+            raise ValueError("no post-intervention data after intervention_date")
+        if len(pre) < self.context_length + validation_hours:
+            raise ValueError(
+                f"need at least {self.context_length + validation_hours} pre-intervention hours, got {len(pre)}"
+            )
+        if max_horizon is not None:
+            post = post.iloc[: int(max_horizon)]
+
+        val = pre.iloc[-validation_hours:]
+        val_ctx = pre.iloc[:-validation_hours]
+        i50 = self._q_index(0.5)
+        if rollout == "quantile":
+            val_p50_list = self._project_native_multivariate(
+                val_ctx, val, target_list, cols, past_only_cols, {0.5: i50}
+            )
+        else:
+            val_p50_list = self._roll_forward_multivariate(
+                val_ctx, val, target_list, cols, {0.5: i50}, past_only_cols=past_only_cols
+            )
+
+        i_q = {q: self._q_index(q) for q in qs}
+        if rollout == "quantile":
+            proj_list = self._project_native_multivariate(
+                pre, post, target_list, cols, past_only_cols, i_q
+            )
+        else:
+            proj_list = self._roll_forward_multivariate(
+                pre, post, target_list, cols, i_q, past_only_cols=past_only_cols
+            )
+
+        results: dict[str, CounterfactualResult] = {}
+        for idx_t, tgt in enumerate(target_list):
+            val_obs = val[tgt].to_numpy(dtype=float)
+            ok = np.isfinite(val_obs)
+            val_p50 = val_p50_list[idx_t][0.5]
+            bias_pct = (
+                float(
+                    100.0
+                    * np.mean(val_p50[ok] - val_obs[ok])
+                    / max(abs(np.mean(val_obs[ok])), 1e-6)
+                )
+                if ok.any()
+                else float("nan")
+            )
+
+            proj = proj_list[idx_t]
+            p50 = pd.Series(proj[0.5], index=post.index)
+            p10 = pd.Series(proj[qs[0]], index=post.index)
+            p90 = pd.Series(proj[qs[-1]], index=post.index)
+            obs_post = post[tgt]
+            impact = obs_post - p50
+            impact_pct = 100.0 * impact / p50.where(p50.abs() > 1e-6)
+
+            mean_obs = float(np.nanmean(obs_post))
+            mean_bau = float(np.nanmean(p50))
+            outside = float(np.nanmean((obs_post < p10) | (obs_post > p90)))
+            summary = {
+                "intervention_date": str(interv),
+                "post_intervention_hours": int(len(post)),
+                "mean_observed": round(mean_obs, 3),
+                "mean_counterfactual_bau": round(mean_bau, 3),
+                "net_impact": round(mean_obs - mean_bau, 3),
+                "net_impact_pct": round(
+                    100.0 * (mean_obs - mean_bau) / max(abs(mean_bau), 1e-6), 3
+                ),
+                "pre_intervention_bias_pct": round(bias_pct, 3),
+                "fraction_outside_interval": round(outside, 3),
+                "validation_hours": int(validation_hours),
+                "rollout": rollout,
+                "multivariate_targets": list(target_list),
+            }
+            results[tgt] = CounterfactualResult(
+                observed=df[tgt],
+                counterfactual_p50=p50,
+                counterfactual_p10=p10,
+                counterfactual_p90=p90,
+                absolute_impact_p50=impact,
+                relative_impact_pct_p50=impact_pct,
+                pre_intervention_bias_pct=bias_pct,
+                summary=summary,
+            )
+        return results
+
+    def _project_native_multivariate(
+        self,
+        context: pd.DataFrame,
+        horizon_frame: pd.DataFrame,
+        targets: Sequence[str],
+        cols: Sequence[str],
+        past_only_cols: Sequence[str],
+        q_index: dict[float, int],
+    ) -> list[dict[float, np.ndarray]]:
+        """Joint native multi-patch / quantile-unrolled projection for several targets."""
+        self._check_index(context.index)
+        self._check_index(horizon_frame.index)
+        past = context.iloc[-self.context_length :]
+        stacked = np.stack([past[t].to_numpy(dtype=np.float32) for t in targets])
+        for row in stacked:
+            self._check_context(row)
+        item = self._make_input(stacked, past, horizon_frame, cols, past_only_cols=past_only_cols)
+        raw = self._predict_raw([item], len(horizon_frame), limit_prediction_length=False)
+        if len(raw) != 1:
+            raise RuntimeError(f"pipeline returned {len(raw)} forecasts for 1 input")
+        block = np.asarray(raw[0], dtype=float)
+        if block.shape[0] != len(targets):
+            raise RuntimeError(
+                f"pipeline returned {block.shape[0]} variates for {len(targets)} targets"
+            )
+        return [{q: block[i, qi].copy() for q, qi in q_index.items()} for i in range(len(targets))]
+
+    def _roll_forward_multivariate(
+        self,
+        context: pd.DataFrame,
+        horizon_frame: pd.DataFrame,
+        targets: Sequence[str],
+        cols: Sequence[str],
+        q_index: dict[float, int],
+        past_only_cols: Sequence[str] = (),
+    ) -> list[dict[float, np.ndarray]]:
+        """Block-by-block joint rollout feeding multi-target medians back together."""
+        self._check_index(context.index)
+        self._check_index(horizon_frame.index)
+        hist = np.stack([context[t].to_numpy(dtype=np.float32) for t in targets])
+        all_cov_cols = [*cols, *past_only_cols]
+        cov_hist = context[all_cov_cols].copy()
+        for c in past_only_cols:
+            if not _is_categorical(cov_hist[c]):
+                cov_hist[c] = cov_hist[c].astype(np.float32)
+        out = [{q: np.zeros(len(horizon_frame)) for q in q_index} for _ in targets]
+
+        step = self.prediction_length
+        i50 = self._q_index(0.5)
+        for s in range(0, len(horizon_frame), step):
+            e = min(s + step, len(horizon_frame))
+            future = horizon_frame.iloc[s:e]
+            past_cov = cov_hist.iloc[-self.context_length :]
+            sub_hist = hist[:, -self.context_length :]
+            for row in sub_hist:
+                self._check_context(row)
+            item = self._make_input(sub_hist, past_cov, future, cols, past_only_cols=past_only_cols)
+            raw = self._predict_raw([item], len(future))
+            if len(raw) != 1:
+                raise RuntimeError(f"pipeline returned {len(raw)} forecasts for 1 input")
+            block = np.asarray(raw[0], dtype=float)
+            if block.shape[0] != len(targets):
+                raise RuntimeError(
+                    f"pipeline returned {block.shape[0]} variates for {len(targets)} targets"
+                )
+            for i in range(len(targets)):
+                for q, qi in q_index.items():
+                    out[i][q][s:e] = block[i, qi]
+            step_med = np.asarray(block[:, i50, :], dtype=np.float32)
+            hist = np.concatenate([hist, step_med], axis=1)
+            if past_only_cols:
+                step_cov = pd.DataFrame(index=future.index)
+                for c in cols:
+                    step_cov[c] = future[c]
+                for c in past_only_cols:
+                    if _is_categorical(cov_hist[c]):
+                        step_cov[c] = pd.Series(
+                            [None] * len(future), index=future.index, dtype=object
+                        )
+                    else:
+                        step_cov[c] = np.full(len(future), np.nan, dtype=np.float32)
+                cov_hist = pd.concat([cov_hist, step_cov[all_cov_cols]])
+            else:
+                cov_hist = pd.concat([cov_hist, future[list(cols)]])
+        return out
+
+    def _project_native(
+        self,
+        context: pd.DataFrame,
+        horizon_frame: pd.DataFrame,
+        target: str,
+        cols: Sequence[str],
+        past_only_cols: Sequence[str],
+        q_index: dict[float, int],
+        calibration: QuantileCalibration | None = None,
+    ) -> dict[float, np.ndarray]:
+        """Project across ``horizon_frame`` in one Chronos-2 call.
+
+        Uses Chronos-2's native multi-patch horizon (up to 1024 steps in one
+        forward pass) and its built-in 9-path quantile-branching unroller beyond
+        that, avoiding the uncertainty collapse caused by rolling forward only
+        the median point forecast.
+        """
+        self._check_index(context.index)
+        self._check_index(horizon_frame.index)
+        past = context.iloc[-self.context_length :]
+        hist = past[target].to_numpy(dtype=np.float32)
+        self._check_context(hist)
+        item = self._make_input(hist, past, horizon_frame, cols, past_only_cols=past_only_cols)
+        raw = self._predict_raw([item], len(horizon_frame), limit_prediction_length=False)
+        if len(raw) != 1:
+            raise RuntimeError(f"pipeline returned {len(raw)} forecasts for 1 input")
+        block = np.asarray(raw[0][0], dtype=float)
+        if calibration is not None:
+            block = calibration.rescale_block(block, self._q_index)
+        return {q: block[qi].copy() for q, qi in q_index.items()}
+
     def _roll_forward(
         self,
         context: pd.DataFrame,
@@ -1547,6 +2235,7 @@ class Chronos2Estimator:
         cols: Sequence[str],
         q_index: dict[float, int],
         calibration: QuantileCalibration | None = None,
+        past_only_cols: Sequence[str] = (),
     ) -> dict[float, np.ndarray]:
         """Project across ``horizon_frame`` without ever seeing its observations.
 
@@ -1562,7 +2251,11 @@ class Chronos2Estimator:
         self._check_index(context.index)
         self._check_index(horizon_frame.index)
         hist = context[target].to_numpy(dtype=np.float32)
-        cov_hist = context[list(cols)].copy()
+        all_cov_cols = [*cols, *past_only_cols]
+        cov_hist = context[all_cov_cols].copy()
+        for c in past_only_cols:
+            if not _is_categorical(cov_hist[c]):
+                cov_hist[c] = cov_hist[c].astype(np.float32)
         out = {q: np.zeros(len(horizon_frame)) for q in q_index}
 
         step = self.prediction_length
@@ -1570,12 +2263,253 @@ class Chronos2Estimator:
             e = min(s + step, len(horizon_frame))
             future = horizon_frame.iloc[s:e]
             past_cov = cov_hist.iloc[-self.context_length :]
-            block = self._forecast_block(hist[-self.context_length :], past_cov, future, cols)
+            block = self._forecast_block(
+                hist[-self.context_length :],
+                past_cov,
+                future,
+                cols,
+                past_only_cols=past_only_cols,
+            )
             if calibration is not None:
                 block = calibration.rescale_block(block, self._q_index)
             for q, qi in q_index.items():
                 out[q][s:e] = block[qi]
-            # roll the model's own median forward as pseudo-history
+            # roll the model's own median forward as pseudo-history; mask any
+            # past-only columns as missing so post-intervention values never leak.
             hist = np.concatenate([hist, block[q_index[0.5]].astype(np.float32)])
-            cov_hist = pd.concat([cov_hist, future[list(cols)]])
+            if past_only_cols:
+                step_cov = future[list(cols)].copy()
+                for c in past_only_cols:
+                    if _is_categorical(cov_hist[c]):
+                        step_cov[c] = pd.Series(
+                            [None] * len(future), index=future.index, dtype=object
+                        )
+                    else:
+                        step_cov[c] = np.full(len(future), np.nan, dtype=np.float32)
+                cov_hist = pd.concat([cov_hist, step_cov[all_cov_cols]])
+            else:
+                cov_hist = pd.concat([cov_hist, future[list(cols)]])
         return out
+
+    def synthetic_control(
+        self,
+        df: pd.DataFrame,
+        *,
+        date_col: str = "date",
+        unit_col: str = "ID",
+        outcome_col: str = "value",
+        treated_unit: str,
+        cutoff_date: str | pd.Timestamp,
+        donors: Sequence[str] | None = None,
+        met_df: pd.DataFrame | None = None,
+        met_covariates: Sequence[str] | None = None,
+        past_only_covariates: Sequence[str] | None = None,
+        quantiles: Sequence[float] = (0.1, 0.5, 0.9),
+        validation_steps: int | None = None,
+        max_horizon: int | None = None,
+        calibrated: bool = False,
+        rollout: str = "quantile",
+        freq: str | None = None,
+    ) -> CounterfactualResult:
+        """Zero-shot covariate-conditioned synthetic control (:func:`chronos_scm`)."""
+        from .operators import chronos_scm as _chronos_scm
+
+        return _chronos_scm(
+            self,
+            df,
+            date_col=date_col,
+            unit_col=unit_col,
+            outcome_col=outcome_col,
+            treated_unit=treated_unit,
+            cutoff_date=cutoff_date,
+            donors=donors,
+            met_df=met_df,
+            met_covariates=met_covariates,
+            past_only_covariates=past_only_covariates,
+            quantiles=quantiles,
+            validation_steps=validation_steps,
+            max_horizon=max_horizon,
+            calibrated=calibrated,
+            rollout=rollout,
+            freq=freq,
+        )
+
+    def anomaly_scores(
+        self,
+        df: pd.DataFrame,
+        target: str,
+        *,
+        covariates: Sequence[str] | None = None,
+        past_only_covariates: Sequence[str] | None = None,
+        stride: int | None = None,
+        interval: tuple[float, float] = (0.1, 0.9),
+        calibration: QuantileCalibration | Any | None = None,
+        adaptive: bool = False,
+        aci_gamma: float = 0.05,
+        aci_window: int = 336,
+    ) -> pd.DataFrame:
+        """Meteorology-conditioned probabilistic anomaly scores (:func:`chronos_anomaly_scores`)."""
+        from .operators import chronos_anomaly_scores as _scores
+
+        return _scores(
+            self,
+            df,
+            target,
+            covariates=covariates,
+            past_only_covariates=past_only_covariates,
+            stride=stride,
+            interval=interval,
+            calibration=calibration,
+            adaptive=adaptive,
+            aci_gamma=aci_gamma,
+            aci_window=aci_window,
+        )
+
+    def detect_events(
+        self,
+        df: pd.DataFrame,
+        target: str,
+        *,
+        alpha: float = 0.05,
+        min_length: int = 1,
+        direction: str = "both",
+        covariates: Sequence[str] | None = None,
+        past_only_covariates: Sequence[str] | None = None,
+        stride: int | None = None,
+        interval: tuple[float, float] = (0.1, 0.9),
+        calibration: QuantileCalibration | Any | None = None,
+        adaptive: bool = False,
+        aci_gamma: float = 0.05,
+        aci_window: int = 336,
+    ) -> pd.DataFrame:
+        """Weather-conditioned emission/anomaly event intervals (:func:`detect_chronos_events`)."""
+        from .operators import detect_chronos_events as _detect
+
+        return _detect(
+            self,
+            df,
+            target,
+            alpha=alpha,
+            min_length=min_length,
+            direction=direction,
+            covariates=covariates,
+            past_only_covariates=past_only_covariates,
+            stride=stride,
+            interval=interval,
+            calibration=calibration,
+            adaptive=adaptive,
+            aci_gamma=aci_gamma,
+            aci_window=aci_window,
+        )
+
+    def attention_attribution(
+        self,
+        df: pd.DataFrame,
+        target: str,
+        anchor: pd.Timestamp | str,
+        *,
+        horizon: int | None = None,
+        covariates: Sequence[str] | None = None,
+        past_only_covariates: Sequence[str] | None = None,
+        layers: str | int | Sequence[int] = "all",
+    ) -> dict[str, Any]:
+        """White-box group and temporal attention weights (:func:`chronos_attention_attribution`)."""
+        from .operators import chronos_attention_attribution as _attr
+
+        return _attr(
+            self,
+            df,
+            target,
+            anchor,
+            horizon=horizon,
+            covariates=covariates,
+            past_only_covariates=past_only_covariates,
+            layers=layers,
+        )
+
+    def pdp(
+        self,
+        df: pd.DataFrame,
+        target: str,
+        *,
+        var_list: Sequence[str] | None = None,
+        grid_points: int = 25,
+        quantile_range: tuple[float, float] = (0.01, 0.99),
+        n_anchors: int = 8,
+        horizon: int | None = None,
+        quantiles: Sequence[float] = (0.1, 0.5, 0.9),
+        past_only_covariates: Sequence[str] | None = None,
+    ) -> pd.DataFrame:
+        """Future-only in-context Partial Dependence (:func:`chronos_pdp`)."""
+        from .operators import chronos_pdp as _pdp
+
+        return _pdp(
+            self,
+            df,
+            target,
+            var_list=var_list,
+            grid_points=grid_points,
+            quantile_range=quantile_range,
+            n_anchors=n_anchors,
+            horizon=horizon,
+            quantiles=quantiles,
+            past_only_covariates=past_only_covariates,
+        )
+
+    def impute(
+        self,
+        df: pd.DataFrame,
+        target: str,
+        *,
+        covariates: Sequence[str] | None = None,
+        past_only_covariates: Sequence[str] | None = None,
+        direction: str = "bidirectional",
+        quantiles: Sequence[float] = (0.1, 0.5, 0.9),
+        max_gap: int | None = None,
+        calibration: QuantileCalibration | Any | None = None,
+    ) -> pd.DataFrame:
+        """Covariate-conditioned bidirectional gap imputation (:func:`chronos_impute`)."""
+        from .operators import chronos_impute as _impute
+
+        return _impute(
+            self,
+            df,
+            target,
+            covariates=covariates,
+            past_only_covariates=past_only_covariates,
+            direction=direction,
+            quantiles=quantiles,
+            max_gap=max_gap,
+            calibration=calibration,
+        )
+
+    def backtest(
+        self,
+        df: pd.DataFrame,
+        target: str,
+        *,
+        covariates: Sequence[str] | None = None,
+        past_only_covariates: Sequence[str] | None = None,
+        horizon: int | None = None,
+        stride: int | None = None,
+        quantiles: Sequence[float] | None = None,
+        intervals: Sequence[float] = (0.5, 0.8, 0.9),
+        calibrate: bool = False,
+        calibration_frac: float = 0.5,
+    ) -> dict[str, Any]:
+        """Rolling probabilistic verification and calibration (:func:`chronos_backtest`)."""
+        from .operators import chronos_backtest as _bt
+
+        return _bt(
+            self,
+            df,
+            target,
+            covariates=covariates,
+            past_only_covariates=past_only_covariates,
+            horizon=horizon,
+            stride=stride,
+            quantiles=quantiles,
+            intervals=intervals,
+            calibrate=calibrate,
+            calibration_frac=calibration_frac,
+        )

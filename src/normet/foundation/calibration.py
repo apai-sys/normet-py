@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import logging
 import warnings
+from collections import deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -58,6 +59,7 @@ from ..exceptions import CalibrationWarning, ConfigError
 log = logging.getLogger(__name__)
 
 __all__ = [
+    "AdaptiveConformalCalibrator",
     "CalibratedEstimator",
     "QuantileCalibration",
     "calibrate_quantiles",
@@ -612,3 +614,107 @@ class CalibratedEstimator:
         """The median path: the estimator's own, uncorrected (the correction
         acts on the band edges; the median is where the band is centred)."""
         return self.base.predict(X)
+
+
+class AdaptiveConformalCalibrator:
+    """Causal Adaptive Conformal Inference (ACI; Gibbs & Candes 2021).
+
+    Updates the target miscoverage level ``alpha_t`` step-by-step from past
+    band misses so interval half-widths track non-stationary variance shifts and
+    seasonal drift without leaking future observations.
+    """
+
+    def __init__(
+        self,
+        alpha: float = 0.2,
+        gamma: float = 0.05,
+        window: int = 336,
+        alpha_bounds: tuple[float, float] = (0.01, 0.5),
+    ) -> None:
+        alpha_f = float(alpha)
+        gamma_f = float(gamma)
+        win_i = int(window)
+        a_min, a_max = float(alpha_bounds[0]), float(alpha_bounds[1])
+        if not (0.0 < alpha_f < 1.0):
+            raise ValueError(f"alpha must be in (0, 1), got {alpha}")
+        if gamma_f < 0.0:
+            raise ValueError(f"gamma must be non-negative, got {gamma}")
+        if win_i < 1:
+            raise ValueError(f"window must be >= 1, got {window}")
+        if not (0.0 < a_min < a_max < 1.0):
+            raise ValueError(f"alpha_bounds must satisfy 0 < min < max < 1, got {alpha_bounds!r}")
+        self.alpha = alpha_f
+        self.gamma = gamma_f
+        self.window = win_i
+        self.alpha_bounds = (a_min, a_max)
+
+    def calibrate_series(
+        self,
+        observed: pd.Series | np.ndarray,
+        expected: pd.Series | np.ndarray,
+        lower: pd.Series | np.ndarray,
+        upper: pd.Series | np.ndarray,
+    ) -> pd.DataFrame:
+        """Causally calibrate prediction bounds over a time-ordered sequence."""
+        idx = observed.index if isinstance(observed, pd.Series) else None
+        obs = np.asarray(observed, dtype=float)
+        exp = np.asarray(expected, dtype=float)
+        lo = np.asarray(lower, dtype=float)
+        hi = np.asarray(upper, dtype=float)
+        n = len(obs)
+        if not (len(exp) == len(lo) == len(hi) == n):
+            raise ValueError("observed, expected, lower, upper must have the same length")
+
+        lower_cal = np.full(n, np.nan)
+        upper_cal = np.full(n, np.nan)
+        scale_arr = np.full(n, np.nan)
+        alpha_arr = np.full(n, np.nan)
+        covered_arr = np.full(n, np.nan)
+        running_cov = np.full(n, np.nan)
+
+        alpha_t = self.alpha
+        a_min, a_max = self.alpha_bounds
+        scores: deque[float] = deque(maxlen=self.window)
+        cov_hits = 0
+        cov_total = 0
+
+        for t in range(n):
+            alpha_arr[t] = alpha_t
+            half = 0.5 * (hi[t] - lo[t])
+            if not (np.isfinite(exp[t]) and np.isfinite(half) and half > 0.0):
+                continue
+            scale_t = (
+                _conformal_threshold(np.asarray(scores, dtype=float), 1.0 - alpha_t)
+                if scores
+                else 1.0
+            )
+            scale_arr[t] = scale_t
+            lc = exp[t] - scale_t * half
+            uc = exp[t] + scale_t * half
+            lower_cal[t] = lc
+            upper_cal[t] = uc
+
+            y = obs[t]
+            if np.isfinite(y):
+                is_cov = 1.0 if (lc <= y <= uc) else 0.0
+                err = 1.0 - is_cov
+                covered_arr[t] = is_cov
+                cov_hits += int(is_cov)
+                cov_total += 1
+                running_cov[t] = cov_hits / cov_total
+                alpha_t = float(np.clip(alpha_t + self.gamma * (self.alpha - err), a_min, a_max))
+                scores.append(abs(y - exp[t]) / half)
+
+        out = pd.DataFrame(
+            {
+                "lower_cal": lower_cal,
+                "upper_cal": upper_cal,
+                "scale": scale_arr,
+                "alpha_t": alpha_arr,
+                "covered": covered_arr,
+                "running_coverage": running_cov,
+            }
+        )
+        if idx is not None:
+            out.index = idx
+        return out

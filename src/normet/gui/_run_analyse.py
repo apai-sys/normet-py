@@ -203,17 +203,47 @@ class AnalyseRunMixin(QMainWindow):
             )
             return
         if self._is_chronos():
-            self.runner.submit(
-                "de-weather (chronos-2)",
-                _chronos.deweather,
-                self._normalise_done,
-                self._show_error,
-                self.model,
-                self.df_prep,
-                [v for v in resample_vars if v not in TIME_VARS],
-                self.norm_quantiles.isChecked(),
-                self.norm_samples.value(),
+            met_vars = [v for v in resample_vars if v not in TIME_VARS]
+            method = (
+                self.chronos_norm_method.currentText()
+                if hasattr(self, "chronos_norm_method")
+                else "deweather"
             )
+            if method == "icn":
+                estimate = (
+                    self.chronos_norm_estimate.currentText()
+                    if hasattr(self, "chronos_norm_estimate")
+                    else "level"
+                )
+                log_tf = bool(
+                    hasattr(self, "chronos_norm_log") and self.chronos_norm_log.isChecked()
+                )
+                self.runner.submit(
+                    f"ICN-v1 ({estimate}, chronos-2)",
+                    _chronos.deweather,
+                    self._normalise_done,
+                    self._show_error,
+                    self.model,
+                    self.df_prep,
+                    met_vars,
+                    self.norm_quantiles.isChecked(),
+                    self.norm_samples.value(),
+                    method="icn",
+                    estimate=estimate,
+                    log_transform=log_tf,
+                )
+            else:
+                self.runner.submit(
+                    "de-weather (chronos-2)",
+                    _chronos.deweather,
+                    self._normalise_done,
+                    self._show_error,
+                    self.model,
+                    self.df_prep,
+                    met_vars,
+                    self.norm_quantiles.isChecked(),
+                    self.norm_samples.value(),
+                )
             return
 
         from normet import normalise
@@ -241,13 +271,19 @@ class AnalyseRunMixin(QMainWindow):
 
         qcols = sorted(c for c in result.columns if c.startswith("q") and c[1:].isdigit())
         target = self.target_combo.currentText()
-        # Chronos-2 has no history to condition on for the first context_length
-        # rows, so deweather() seeds them with the observed values: normalised
-        # equals observed there by construction, not by result. Averaging across
-        # them drags the reported effect toward zero, and on a record not much
-        # longer than the context that is most of the series -- so say how many
-        # rows are seeded and take the mean over the rest.
-        seeded = min(int(self.model.context_length), len(result)) if self._is_chronos() else 0
+        # Legacy deweather() seeds the first context_length rows with observed
+        # values because it lacks earlier context; ICN-v1 uses bidirectional
+        # context instead, so it does not truncate the leading block.
+        is_icn = (
+            self._is_chronos()
+            and hasattr(self, "chronos_norm_method")
+            and self.chronos_norm_method.currentText() == "icn"
+        )
+        seeded = (
+            min(int(self.model.context_length), len(result))
+            if (self._is_chronos() and not is_icn)
+            else 0
+        )
         projected = result.iloc[seeded:]
 
         from normet.plotting import profile_axes, usable_cycles
@@ -1000,6 +1036,28 @@ class AnalyseRunMixin(QMainWindow):
             self.notify("Tick at least one variable for the PDP.", key="need-pdp-vars")
             return
         from normet import pdp
+
+        if self._is_chronos():
+            met_vars = [v for v in variables if v not in TIME_VARS]
+            if not met_vars:
+                self.notify(
+                    "Chronos-2 PDP varies meteorological covariates only — tick at least one meteorological variable.",
+                    key="need-pdp-vars",
+                )
+                return
+            self.runner.submit(
+                "pdp (chronos-2)",
+                pdp,
+                self._pdp_done,
+                self._show_error,
+                self.df_prep,
+                self.model,
+                var_list=met_vars,
+                grid_points=self.pdp_grid.value(),
+                target="value",
+                n_anchors=6,
+            )
+            return
 
         self.runner.submit(
             "pdp",

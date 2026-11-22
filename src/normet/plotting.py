@@ -28,6 +28,8 @@ __all__ = [
     "wind_rose",
     "pollution_rose",
     "pdp_grid",
+    "plot_attention_attribution",
+    "plot_imputation",
     "decomposition_stack",
     "scm_dashboard",
     "normalise_plot",
@@ -315,8 +317,9 @@ def pdp_grid(
     Parameters
     ----------
     pdp_df : pandas.DataFrame
-        Output of :func:`normet.pdp` with columns ``[variable, value, pdp_mean,
-        pdp_std]``.
+        Output of :func:`normet.pdp` with columns ``[variable, value, pdp_mean]``
+        and optional uncertainty columns ``[pdp_lower, pdp_upper]`` (native
+        quantile envelope) or ``pdp_std`` (symmetric standard-deviation band).
     cols : int, default 3
         Number of columns in the grid.
     sharey : bool, default False
@@ -364,7 +367,18 @@ def pdp_grid(
             len(x) <= 31 and bool(np.all(np.isfinite(x))) and bool(np.allclose(x, np.round(x)))
         )
         step = "steps-mid" if discrete else "default"
-        if "pdp_std" in sub.columns and sub["pdp_std"].notna().any():
+        has_quantile_band = (
+            "pdp_lower" in sub.columns
+            and "pdp_upper" in sub.columns
+            and bool((sub["pdp_lower"].notna() & sub["pdp_upper"].notna()).any())
+        )
+        if has_quantile_band:
+            lo = pd.to_numeric(sub["pdp_lower"], errors="coerce")
+            hi = pd.to_numeric(sub["pdp_upper"], errors="coerce")
+            ax.fill_between(
+                x, lo, hi, color=S.COMPONENT, alpha=0.15, lw=0, step="mid" if discrete else None
+            )
+        elif "pdp_std" in sub.columns and sub["pdp_std"].notna().any():
             lo = sub["pdp_mean"] - sub["pdp_std"]
             hi = sub["pdp_mean"] + sub["pdp_std"]
             ax.fill_between(
@@ -1085,6 +1099,256 @@ def cycle_profiles(
 
 
 # ---------------------------------------------------------------------------
+# Chronos-2 interpretability & imputation figures
+# ---------------------------------------------------------------------------
+@styled
+def plot_attention_attribution(
+    attribution: dict[str, Any],
+    *,
+    top_k: int = 12,
+    title: str | None = None,
+    figsize: tuple[float, float] = (9.5, 3.6),
+) -> Any:
+    """Two-panel visualisation of Chronos-2 white-box attention attribution.
+
+    Left panel ranks the top variables by forecast-patch attention share coloured
+    by role (``target``, ``known_future``, ``past_only``). Right panel shows how
+    attention is distributed across historical context patches / timestamps.
+
+    Parameters
+    ----------
+    attribution : dict
+        Result returned by :func:`normet.chronos_attention_attribution`.
+    top_k : int, default 12
+        Maximum number of variables to show in the left bar chart.
+    title : str, optional
+        Figure suptitle.
+    figsize : (float, float), default (9.5, 3.6)
+        Output figure dimensions in inches.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Patch
+
+    if not isinstance(attribution, dict):
+        raise ValueError("`attribution` must be a dict returned by chronos_attention_attribution.")
+    for key in ("group_weights", "time_weights"):
+        if key not in attribution:
+            raise ValueError(f"`attribution` missing key '{key}'.")
+
+    gw_all = attribution["group_weights"]
+    if not isinstance(gw_all, pd.DataFrame) or gw_all.empty:
+        raise ValueError("`attribution['group_weights']` must be a non-empty DataFrame.")
+    for col in ("variable", "role", "share"):
+        if col not in gw_all.columns:
+            raise ValueError(f"`group_weights` missing column '{col}'.")
+
+    gw = gw_all.sort_values("share", ascending=False).head(max(1, int(top_k))).iloc[::-1]
+    role_colors = {
+        "target": S.OBSERVED,
+        "known_future": S.COMPONENT,
+        "past_only": S.MODELLED,
+    }
+    role_labels = {
+        "target": "Target (self)",
+        "known_future": "Known future",
+        "past_only": "Past only",
+    }
+    colors = [role_colors.get(str(r), S.NEUTRAL) for r in gw["role"]]
+
+    fig, (ax_g, ax_t) = plt.subplots(1, 2, figsize=figsize, layout="constrained")
+    ax_g.barh(
+        gw["variable"].astype(str),
+        gw["share"].to_numpy(dtype=float) * 100.0,
+        color=colors,
+        height=0.65,
+    )
+    ax_g.set_xlabel("Forecast-patch attention share (%)")
+    ax_g.tick_params(axis="y", length=0)
+    S.grid(ax_g, axis="x")
+
+    present_roles = [
+        r for r in ("target", "known_future", "past_only") if r in set(gw["role"].astype(str))
+    ]
+    if len(present_roles) > 1:
+        handles = [Patch(facecolor=role_colors[r], label=role_labels[r]) for r in present_roles]
+        ax_g.legend(handles=handles, loc="lower right", frameon=False)
+
+    if "target_self_share" in attribution and "covariate_share" in attribution:
+        self_pct = 100.0 * float(attribution["target_self_share"])
+        cov_pct = 100.0 * float(attribution["covariate_share"])
+        ax_g.set_title(f"Variable attribution (self {self_pct:.1f}%, cov {cov_pct:.1f}%)")
+    else:
+        ax_g.set_title("Variable attribution")
+
+    tw = attribution["time_weights"]
+    if isinstance(tw, pd.DataFrame) and not tw.empty and "share" in tw.columns:
+        y = tw["share"].to_numpy(dtype=float) * 100.0
+        has_dates = "date" in tw.columns and bool(tw["date"].notna().any())
+        x_t: np.ndarray[Any, Any]
+        if has_dates:
+            x_t = pd.to_datetime(tw["date"]).to_numpy()
+            S.format_time_axis(ax_t)
+        elif "patch_idx" in tw.columns:
+            x_t = pd.to_numeric(tw["patch_idx"], errors="coerce").to_numpy(dtype=float)
+            ax_t.set_xlabel("Context patch")
+        else:
+            x_t = np.arange(len(tw), dtype=float)
+            ax_t.set_xlabel("Context patch")
+        ax_t.fill_between(x_t, 0.0, y, color=S.COMPONENT, alpha=0.15, lw=0)
+        ax_t.plot(x_t, y, color=S.COMPONENT, lw=1.3)
+        ax_t.set_ylabel("Temporal attention share (%)")
+        ax_t.set_title("Context lag profile")
+        ax_t.margins(x=0)
+        S.grid(ax_t)
+    else:
+        ax_t.text(0.5, 0.5, "No context patches", ha="center", va="center", color=S.NEUTRAL)
+        ax_t.axis("off")
+
+    if title:
+        fig.suptitle(title)
+    return fig
+
+
+@styled
+def plot_imputation(
+    impute_df: pd.DataFrame,
+    *,
+    title: str | None = None,
+    ylabel: str = "Value",
+    ax: Any | None = None,
+) -> Any:
+    """Plot observed values alongside Chronos-2 imputed gaps and uncertainty bands.
+
+    Parameters
+    ----------
+    impute_df : pandas.DataFrame
+        Output of :func:`normet.chronos_impute` containing ``[observed, imputed,
+        is_imputed]`` and optional ``[lower, upper]`` interval bounds.
+    title : str, optional
+        Panel title.
+    ylabel : str, default "Value"
+        Y-axis label.
+    ax : matplotlib.axes.Axes, optional
+        Existing axes to draw onto; creates a new figure when omitted.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+    """
+    import matplotlib.pyplot as plt
+
+    for col in ("observed", "imputed", "is_imputed"):
+        if col not in impute_df.columns:
+            raise ValueError(f"`impute_df` missing column '{col}'.")
+
+    x_raw = pd.to_datetime(impute_df["date"]) if "date" in impute_df.columns else impute_df.index
+    x_vals = x_raw.to_numpy()
+    is_dt = isinstance(x_raw, pd.DatetimeIndex) or pd.api.types.is_datetime64_any_dtype(x_raw)
+
+    obs = pd.to_numeric(impute_df["observed"], errors="coerce").to_numpy(dtype=float)
+    imp = pd.to_numeric(impute_df["imputed"], errors="coerce").to_numpy(dtype=float)
+    mask = impute_df["is_imputed"].fillna(False).to_numpy(dtype=bool)
+
+    has_band = (
+        "lower" in impute_df.columns
+        and "upper" in impute_df.columns
+        and bool(mask.any())
+        and bool(
+            (
+                pd.to_numeric(impute_df.loc[mask, "lower"], errors="coerce").notna()
+                & pd.to_numeric(impute_df.loc[mask, "upper"], errors="coerce").notna()
+            ).any()
+        )
+    )
+    lo = (
+        pd.to_numeric(impute_df["lower"], errors="coerce").to_numpy(dtype=float)
+        if has_band
+        else None
+    )
+    hi = (
+        pd.to_numeric(impute_df["upper"], errors="coerce").to_numpy(dtype=float)
+        if has_band
+        else None
+    )
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(8, 3.2), layout="constrained")
+    else:
+        fig = ax.figure
+
+    ax.plot(x_vals, obs, lw=0.9, color=S.OBSERVED, label="Observed")
+
+    n = len(mask)
+    runs: list[tuple[int, int]] = []
+    in_run = False
+    start = 0
+    for i, flagged in enumerate(mask):
+        if flagged and not in_run:
+            start = i
+            in_run = True
+        elif not flagged and in_run:
+            runs.append((start, i))
+            in_run = False
+    if in_run:
+        runs.append((start, n))
+
+    band_labeled = False
+    for idx_r, (s, e) in enumerate(runs):
+        seg_s = max(0, s - 1)
+        seg_e = min(n, e + 1)
+        y_seg = np.where(np.isfinite(imp[seg_s:seg_e]), imp[seg_s:seg_e], obs[seg_s:seg_e])
+        single = (e - s) == 1
+        if single:
+            ax.axvline(x_vals[s], color=S.MODELLED, alpha=0.22, lw=1.0)
+        else:
+            ax.axvspan(x_vals[s], x_vals[e - 1], color=S.MODELLED, alpha=0.08, lw=0)
+        plot_kw: dict[str, Any] = {
+            "lw": 1.3,
+            "color": S.MODELLED,
+            "marker": "o" if single else None,
+            "ms": 3.2,
+        }
+        if idx_r == 0:
+            plot_kw["label"] = "Imputed"
+        ax.plot(x_vals[seg_s:seg_e], y_seg, **plot_kw)
+        if lo is not None and hi is not None:
+            if single:
+                if np.isfinite(lo[s]) and np.isfinite(hi[s]):
+                    v_kw: dict[str, Any] = {
+                        "color": S.MODELLED,
+                        "alpha": 0.45,
+                        "lw": 2.0,
+                    }
+                    if not band_labeled:
+                        v_kw["label"] = "Predictive interval"
+                        band_labeled = True
+                    ax.vlines(x_vals[s], lo[s], hi[s], **v_kw)
+            else:
+                fb_kw: dict[str, Any] = {
+                    "color": S.MODELLED,
+                    "alpha": 0.22,
+                    "lw": 0,
+                }
+                if not band_labeled:
+                    fb_kw["label"] = "Predictive interval"
+                    band_labeled = True
+                ax.fill_between(x_vals[s:e], lo[s:e], hi[s:e], **fb_kw)
+
+    if is_dt:
+        S.format_time_axis(ax)
+    ax.set_ylabel(ylabel)
+    ax.margins(x=0)
+    S.grid(ax)
+    S.legend(ax, loc="best")
+    if title:
+        ax.set_title(title)
+    return fig
+
+
 # Cross-regional transport & trajectory receptor plots
 # ---------------------------------------------------------------------------
 @styled

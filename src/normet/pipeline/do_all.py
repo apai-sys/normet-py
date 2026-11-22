@@ -152,12 +152,57 @@ def _do_all_zero_shot(
     ``chronos_mode="deweather"`` preserves the legacy past+future deweathering
     path; ``chronos_mode="icn"`` runs future-only In-Context Normalisation via
     :func:`~normet.foundation.in_context.normalise_in_context`.
-    """
-    from ..foundation import Chronos2Estimator, to_indexed_frame
 
+    Two ICN spellings remain accepted so neither caller changes behaviour.
+    ``model_config`` may carry ``method`` / ``estimate`` / ``icn_design`` /
+    ``pool`` / ``model_path`` / ``estimator`` (the chronos-2 branch's spelling;
+    it returns the compact ``observed/normalised/qNNN`` frame from
+    :meth:`~normet.foundation.in_context.ICNResult.to_normet_frame`), or the
+    design fields directly (``block_h``, ``stride``, ``min_context``, ... with
+    ``chronos_mode="icn"``, the stack spelling; it returns the richer frame
+    with the per-hour uncertainty decomposition). An explicit
+    ``model_config['method']`` wins over ``chronos_mode``.
+    """
+    from ..foundation import (
+        Chronos2Estimator,
+        ICNDesign,
+        MetPool,
+        add_calendar_covariates,
+        to_indexed_frame,
+    )
+
+    raw_mcfg = dict(cfg.model_config or {})
+    explicit_method = raw_mcfg.pop("method", None)
+    method = str(
+        explicit_method if explicit_method is not None else (cfg.chronos_mode or "deweather")
+    ).lower()
+    estimate = str(raw_mcfg.pop("estimate", "level")).lower()
+    model_path = raw_mcfg.pop("model_path", None)
+    estimator_arg = raw_mcfg.pop("estimator", None)
+    icn_design = raw_mcfg.pop("icn_design", None)
+    ext_pool = raw_mcfg.pop("pool", None)
+    custom_pipeline = raw_mcfg.pop("pipeline", None)
+    if method not in ("deweather", "icn"):
+        raise ValueError(f"model_config['method'] must be 'deweather' or 'icn', got {method!r}")
+    if estimate not in ("level", "paired"):
+        raise ValueError(f"model_config['estimate'] must be 'level' or 'paired', got {estimate!r}")
     mode = str(cfg.chronos_mode or "deweather").lower()
     if mode not in ("deweather", "icn"):
         raise ConfigError(f"`chronos_mode` must be 'deweather' or 'icn', got {cfg.chronos_mode!r}.")
+    # Without an explicit ``method`` the stack's spelling applies: the design
+    # axes live in ``model_config`` and ICN runs on the caller's frame scale
+    # (log1p applied here) rather than through ``design.log_transform``.
+    stack_dialect = explicit_method is None
+    design_kw: dict[str, Any] = {}
+    if method == "icn":
+        design_kw = {
+            k: raw_mcfg.pop(k) for k in list(raw_mcfg) if k in _ICN_DESIGN_KEYS and k != "pool"
+        }
+        if isinstance(ext_pool, str):
+            # ``pool`` is an ICNDesign field name; an object reserves the
+            # external-weather meaning used by the chronos spelling.
+            design_kw["pool"] = ext_pool
+            ext_pool = None
 
     covariates = list(cfg.covariates or [])
     met = list(cfg.variables_resample) if cfg.variables_resample else covariates
@@ -184,26 +229,90 @@ def _do_all_zero_shot(
         max_gap=cfg.max_gap,
         embargo=_prepare_embargo(cfg.embargo),
     )
-    if cfg.log_transform:
+    if cfg.log_transform and (method == "deweather" or stack_dialect):
         df_prep = log1p_target(df_prep)
     indexed = to_indexed_frame(df_prep)
 
-    raw_mcfg = dict(cfg.model_config or {})
-    if mode == "icn":
-        from ..foundation.in_context import ICNDesign
-
-        custom_pipeline = raw_mcfg.pop("pipeline", None)
-        icn_kw = {k: raw_mcfg.pop(k) for k in list(raw_mcfg) if k in _ICN_DESIGN_KEYS}
+    if estimator_arg is not None:
+        estimator = estimator_arg
+        if estimator.met_covariates is None:
+            estimator.met_covariates = list(met)
+        if custom_pipeline is None and getattr(estimator, "_pipeline", None) is None:
+            estimator._load_pipeline()
+    elif model_path is not None:
+        estimator = Chronos2Estimator.load(model_path, device=raw_mcfg.get("device"))
+        if estimator.met_covariates is None:
+            estimator.met_covariates = list(met)
+    else:
         estimator = Chronos2Estimator(met_covariates=met, **raw_mcfg)
         if custom_pipeline is None:
             estimator._load_pipeline()
-        estimator._check_index(indexed.index)
-        design = ICNDesign(
-            n_resamples=cast(int, cfg.n_samples),
-            seed=cfg.seed,
-            context_length=estimator.context_length,
-            **icn_kw,
+    log.info(
+        "Chronos-2 ready on %s | context=%d | horizon=%d",
+        estimator.device,
+        estimator.context_length,
+        estimator.prediction_length,
+    )
+    estimator._check_index(indexed.index)
+
+    if method == "icn" and not stack_dialect:
+        # Chronos-2 spelling: future-only ICNDesign.v1 on a frame carrying
+        # the calendar covariates, converted to the compact normet frame.
+        indexed_icn = add_calendar_covariates(indexed)
+        if isinstance(icn_design, ICNDesign):
+            design = icn_design
+        else:
+            overrides: dict[str, Any] = {
+                "context_length": estimator.context_length,
+                "n_resamples": cast(int, cfg.n_samples),
+                "seed": cfg.seed,
+                "log_transform": bool(cfg.log_transform),
+            }
+            if "prediction_length" in raw_mcfg:
+                bh = int(raw_mcfg["prediction_length"])
+                overrides["block_h"] = bh
+                overrides["stride"] = max(1, bh // 2)
+            overrides.update(design_kw)
+            if isinstance(icn_design, Mapping):
+                overrides.update(icn_design)
+            design = ICNDesign.v1(**overrides)
+        pool_arg: Any = ext_pool
+        if pool_arg is None and cfg.resample_df is not None:
+            pool_arg = MetPool.from_frame(to_indexed_frame(cfg.resample_df), met)
+        icn_res = estimator.normalise_in_context(
+            indexed_icn,
+            "value",
+            design=design,
+            pipeline=custom_pipeline,
+            met_features=met,
+            pool=pool_arg,
+            quantiles=(0.1, 0.5, 0.9),
         )
+        out = icn_res.to_normet_frame(estimate=estimate)
+        uncovered = int(icn_res.diagnostics["uncovered_hours"])
+        log.info(
+            "do_all (ICN-v1, %s) finished: %d timestamps, %d uncovered hours",
+            estimate,
+            len(out),
+            uncovered,
+        )
+        return out, estimator, df_prep
+
+    if method == "icn":
+        # Stack spelling: the design is built from ``model_config``'s design
+        # fields and the result keeps the uncertainty decomposition.
+        if isinstance(icn_design, ICNDesign):
+            design = icn_design
+        else:
+            if isinstance(icn_design, Mapping):
+                design_kw.update(icn_design)
+            design = ICNDesign(
+                n_resamples=cast(int, cfg.n_samples),
+                seed=cfg.seed,
+                context_length=estimator.context_length,
+                **design_kw,
+            )
+        quantiles = tuple(cfg.return_quantiles) if cfg.return_quantiles is not None else None
         icn_res = estimator.normalise_in_context(
             indexed,
             "value",
@@ -211,6 +320,8 @@ def _do_all_zero_shot(
             pipeline=custom_pipeline,
             met_features=met,
             schema="normet",
+            pool=ext_pool,
+            quantiles=quantiles,
         )
         obs = indexed["value"].reindex(icn_res.level.index).to_numpy(dtype=float)
         norm = icn_res.level.to_numpy(dtype=float)
@@ -241,17 +352,18 @@ def _do_all_zero_shot(
             },
             index=pd.Index(icn_res.level.index, name="date"),
         )
+        if icn_res.quantiles is not None:
+            for col in icn_res.quantiles.columns:
+                vals = icn_res.quantiles[col].reindex(icn_res.level.index).to_numpy(dtype=float)
+                out[col] = np.expm1(vals) if cfg.log_transform else vals
+        uncovered = int(icn_res.diagnostics["uncovered_hours"])
+        log.info(
+            "do_all (ICN, %s) finished: %d timestamps, %d uncovered hours",
+            estimate,
+            len(out),
+            uncovered,
+        )
         return out, estimator, df_prep
-
-    estimator = Chronos2Estimator(met_covariates=met, **raw_mcfg)
-    estimator._load_pipeline()
-    log.info(
-        "Chronos-2 ready on %s | context=%d | horizon=%d",
-        estimator.device,
-        estimator.context_length,
-        estimator.prediction_length,
-    )
-    estimator._check_index(indexed.index)
 
     out = estimator.deweather(
         indexed,
@@ -896,6 +1008,8 @@ def do_all_unc(
                 stats_list.append(st)
 
     else:
+        is_chronos = _cfg.backend == CHRONOS_BACKEND
+        shared_chronos: object | None = None
         for i, s in enumerate(seeds, start=1):
             (log.info if _cfg.verbose else log.debug)(
                 "do_all_unc: running model %d/%d (seed=%d) %s",
@@ -905,6 +1019,12 @@ def do_all_unc(
                 _progress_str(i, _cfg.n_models, t0),
             )
 
+            mc_i = _cfg.model_config
+            if is_chronos and shared_chronos is not None:
+                # Chronos-2 is zero-shot: one checkpoint serves every member,
+                # and only the weather draws differ across seeds.
+                mc_i = {**(mc_i or {}), "estimator": shared_chronos}
+
             out_i, model_i, df_prep_i = do_all(
                 df=df,
                 target=_cfg.target,
@@ -913,7 +1033,7 @@ def do_all_unc(
                 variables_resample=_cfg.variables_resample,
                 split_method=_cfg.split_method,
                 train_fraction=_cfg.train_fraction,
-                model_config=_cfg.model_config,
+                model_config=mc_i,
                 n_samples=_cfg.n_samples,
                 seed=int(s),
                 n_cores=_cfg.n_cores,
@@ -937,13 +1057,31 @@ def do_all_unc(
                 embargo=_cfg.embargo,
                 cross_fit=_cfg.cross_fit,
                 cv_folds=_cfg.cv_folds,
+                chronos_mode=_cfg.chronos_mode,
             )
+
+            if is_chronos and shared_chronos is None:
+                shared_chronos = model_i
 
             if observed_ref is None:
                 observed_ref = out_i["observed"].copy()
 
             pick = series_col if series_col in out_i.columns else "normalised"
             series_list.append(out_i[[pick]].rename(columns={pick: f"normalised_{s}"}))
+
+            if is_chronos:
+                stats_list.append(
+                    pd.DataFrame(
+                        [
+                            {
+                                "seed": int(s),
+                                "backend": CHRONOS_BACKEND,
+                                "n_samples": _cfg.n_samples,
+                            }
+                        ]
+                    )
+                )
+                continue
 
             try:
                 if isinstance(model_i, CrossFitNormaliseResult):

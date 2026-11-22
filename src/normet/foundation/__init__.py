@@ -1,6 +1,11 @@
 """Foundation model embeddings, zero-shot de-weathering, and counterfactual inference."""
 
-from .calibration import CalibratedEstimator, QuantileCalibration, calibrate_quantiles
+from .calibration import (
+    AdaptiveConformalCalibrator,
+    CalibratedEstimator,
+    QuantileCalibration,
+    calibrate_quantiles,
+)
 from .chronos import ChronosEmbedder
 from .embedding_diagnostics import (
     embedding_projection,
@@ -22,22 +27,53 @@ from .estimator import (
     to_regular_index,
 )
 from .in_context import (
+    BatchICLPipeline,
     Chronos2ICLPipeline,
+    Chronos2MultivariateICLPipeline,
     ICLPipeline,
     ICNDesign,
+    ICNDrawBank,
     ICNResult,
     MetPool,
+    MultivariateICLPipeline,
+    build_icn_draw_bank,
+    decompose_icn_uncertainty,
     normalise_in_context,
+    normalise_in_context_multisite,
+    normalise_in_context_multivariate,
+)
+from .operators import (
+    CovariateSensitivityCallback,
+    chronos_anomaly_scores,
+    chronos_attention_attribution,
+    chronos_backtest,
+    chronos_impute,
+    chronos_pdp,
+    chronos_scm,
+    detect_chronos_events,
+    select_donors_by_embedding,
 )
 
 __all__ = [
     "CHRONOS_BACKEND",
     "CHRONOS_DEFAULT_SAMPLES",
+    "AdaptiveConformalCalibrator",
+    "BatchICLPipeline",
     "CalibratedEstimator",
     "ChronosEmbedder",
+    "CovariateSensitivityCallback",
     "QuantileCalibration",
     "add_calendar_covariates",
     "calibrate_quantiles",
+    "chronos_anomaly_scores",
+    "chronos_attention_attribution",
+    "chronos_backtest",
+    "chronos_impute",
+    "chronos_pdp",
+    "chronos_scm",
+    "decompose_icn_uncertainty",
+    "detect_chronos_events",
+    "select_donors_by_embedding",
     "embedding_projection",
     "plot_embedding_diagnostics",
     "silhouette_curve",
@@ -51,9 +87,15 @@ __all__ = [
     "to_normet_frame",
     "to_regular_index",
     "ICNDesign",
+    "ICNDrawBank",
     "ICNResult",
     "ICLPipeline",
+    "MultivariateICLPipeline",
     "Chronos2ICLPipeline",
+    "Chronos2MultivariateICLPipeline",
     "MetPool",
+    "build_icn_draw_bank",
     "normalise_in_context",
+    "normalise_in_context_multivariate",
+    "normalise_in_context_multisite",
 ]

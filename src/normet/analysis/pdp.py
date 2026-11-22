@@ -110,12 +110,17 @@ def pdp(
     back_transform: str = "geometric",
     smearing_factor: float = 1.0,
     verbose: bool = False,
+    target: str | None = None,
+    n_anchors: int = 8,
+    horizon: int | None = None,
 ) -> pd.DataFrame:
     """
     Compute Partial Dependence values for one or more features.
 
     Works with any registered backend (e.g. ``'flaml'``, ``'lightgbm'``)
-    via the shared :func:`ml_predict` interface.
+    via the shared :func:`ml_predict` interface, or with a
+    :class:`~normet.foundation.Chronos2Estimator` via in-context future-only
+    interventions (:func:`~normet.foundation.chronos_pdp`).
 
     Parameters
     ----------
@@ -123,7 +128,8 @@ def pdp(
         Dataset containing features (and optionally a 'set' column == 'training').
     model : object
         Trained model with a `backend` attribute matching a registered
-        backend and a predict interface supported by `ml_predict`.
+        backend and a predict interface supported by `ml_predict`, or a
+        :class:`~normet.foundation.Chronos2Estimator`.
     var_list : List[str] | None
         Variables to compute PDP for. If None, use model feature names.
     training_only : bool, default True
@@ -151,12 +157,52 @@ def pdp(
         and ``back_transform="smearing"``.
     verbose : bool, default False
         If True, emit info logs.
+    target : str | None, default None
+        Target column name when ``model`` is a ``Chronos2Estimator`` (defaults to
+        ``model.target_col`` or ``"value"``).
+    n_anchors : int, default 8
+        Number of forecast origins averaged by :func:`chronos_pdp`.
+    horizon : int | None, default None
+        Forecast horizon (steps) when ``model`` is a ``Chronos2Estimator``.
 
     Returns
     -------
     pandas.DataFrame
-        Columns: ['variable', 'value', 'pdp_mean', 'pdp_std'].
+        Columns: ['variable', 'value', 'pdp_mean', 'pdp_std'] (plus ``pdp_lower``
+        and ``pdp_upper`` quantile bands for Chronos-2).
     """
+    # --- model type guard ---
+    model_type = getattr(model, "backend", None)
+    if not model_type or not backend_registry.has(model_type):
+        from ..foundation.estimator import Chronos2Estimator, to_indexed_frame
+        from ..foundation.operators import chronos_pdp
+
+        if isinstance(model, Chronos2Estimator):
+            work = df if isinstance(df.index, pd.DatetimeIndex) else to_indexed_frame(df)
+            target_col = (
+                target or model.target_col or ("value" if "value" in work.columns else None)
+            )
+            if target_col is None or target_col not in work.columns:
+                raise ValueError(
+                    "Cannot infer target column for Chronos2Estimator PDP; pass `target=`."
+                )
+            return chronos_pdp(
+                model,
+                work,
+                target_col,
+                var_list=var_list,
+                grid_points=grid_points,
+                quantile_range=quantile_range,
+                n_anchors=n_anchors,
+                horizon=horizon,
+            )
+
+        available = backend_registry.available
+        raise TypeError(
+            f"Unsupported model backend '{model_type}'. Expected one of: {', '.join(available)}"
+        )
+
+    # --- resolve features and data subset ---
     sf = _validate_back_transform(back_transform, smearing_factor)
     X_df, vars_for_pdp = _resolve_model_and_data(df, model, var_list, training_only, verbose)
 

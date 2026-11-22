@@ -13,6 +13,9 @@ All return a DataFrame of consecutive anomalous intervals, ranked by score.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from typing import Any
+
 import numpy as np
 import pandas as pd
 
@@ -78,6 +81,20 @@ def _intervals_from_mask(
     return pd.DataFrame(rows).sort_values("max_score", ascending=False).reset_index(drop=True)
 
 
+def _prepare_chronos_frame(series: pd.Series | pd.DataFrame, value_col: str | None) -> pd.DataFrame:
+    """Validate and sort a DataFrame input for ``method='chronos'`` anomaly scoring."""
+    if not isinstance(series, pd.DataFrame) or value_col is None:
+        raise ValueError(
+            "method='chronos' requires a DataFrame `series` and `value_col` target column."
+        )
+    work = series.copy()
+    if not isinstance(work.index, pd.DatetimeIndex):
+        if "date" in work.columns:
+            work = work.set_index("date")
+        work.index = pd.to_datetime(work.index)
+    return work.sort_index()
+
+
 def anomaly_scores(
     series: pd.Series | pd.DataFrame,
     *,
@@ -85,6 +102,11 @@ def anomaly_scores(
     method: str = "iqr",
     stl_period: int | None = None,
     seed: int = 7_654_321,
+    estimator: Any | None = None,
+    covariates: Sequence[str] | None = None,
+    past_only_covariates: Sequence[str] | None = None,
+    calibration: Any | None = None,
+    adaptive: bool = False,
 ) -> pd.Series:
     """
     Compute a per-timestamp anomaly score (larger = more anomalous).
@@ -95,17 +117,39 @@ def anomaly_scores(
         Time-indexed series. If DataFrame, pass ``value_col``.
     value_col : str, optional
         Column to score when ``series`` is a DataFrame.
-    method : {"iqr","isolation","stl_residual"}, default "iqr"
+    method : {"iqr","isolation","stl_residual","chronos"}, default "iqr"
     stl_period : int, optional
         Period for STL decomposition (e.g., 24 for hourly w/ daily cycle).
     seed : int, default=7654321
         Random seed for reproducible methods (IsolationForest).
+    estimator : Chronos2Estimator, optional
+        Pre-loaded Chronos-2 estimator when ``method="chronos"``.
+    covariates, past_only_covariates, calibration, adaptive :
+        Forwarded to :func:`normet.foundation.chronos_anomaly_scores` when
+        ``method="chronos"``.
 
     Returns
     -------
     pandas.Series
         Same index as input; anomaly score per timestamp.
     """
+    if method == "chronos":
+        work = _prepare_chronos_frame(series, value_col)
+        assert value_col is not None
+        from ..foundation import Chronos2Estimator, chronos_anomaly_scores
+
+        est = estimator if estimator is not None else Chronos2Estimator()
+        scores_df = chronos_anomaly_scores(
+            est,
+            work,
+            value_col,
+            covariates=covariates,
+            past_only_covariates=past_only_covariates,
+            calibration=calibration,
+            adaptive=adaptive,
+        )
+        return scores_df["surprise"].rename("score")
+
     s = _to_series(series, value_col)
     s = s.astype(float)
 
@@ -156,6 +200,13 @@ def detect_events(
     min_length: int = 1,
     stl_period: int | None = None,
     seed: int = 7_654_321,
+    estimator: Any | None = None,
+    covariates: Sequence[str] | None = None,
+    past_only_covariates: Sequence[str] | None = None,
+    calibration: Any | None = None,
+    adaptive: bool = False,
+    alpha: float = 0.05,
+    direction: str = "both",
 ) -> pd.DataFrame:
     """
     Identify consecutive anomalous time intervals.
@@ -168,6 +219,9 @@ def detect_events(
         Minimum number of consecutive flagged timestamps for an event.
     seed : int, default=7654321
         Random seed forwarded to :func:`anomaly_scores`.
+    estimator, covariates, past_only_covariates, calibration, adaptive, alpha, direction :
+        Forwarded to :func:`normet.foundation.detect_chronos_events` when
+        ``method="chronos"``.
 
     Returns
     -------
@@ -176,6 +230,25 @@ def detect_events(
         sorted by ``max_score`` descending. Returns an empty DataFrame
         with these columns if nothing is flagged.
     """
+    if method == "chronos":
+        work = _prepare_chronos_frame(series, value_col)
+        assert value_col is not None
+        from ..foundation import Chronos2Estimator, detect_chronos_events
+
+        est = estimator if estimator is not None else Chronos2Estimator()
+        return detect_chronos_events(
+            est,
+            work,
+            value_col,
+            alpha=alpha,
+            min_length=min_length,
+            direction=direction,
+            covariates=covariates,
+            past_only_covariates=past_only_covariates,
+            calibration=calibration,
+            adaptive=adaptive,
+        )
+
     score = anomaly_scores(
         series, value_col=value_col, method=method, stl_period=stl_period, seed=seed
     )

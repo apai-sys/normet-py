@@ -12,10 +12,12 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QFormLayout,
     QGroupBox,
+    QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QPushButton,
     QWidget,
 )
 
@@ -27,6 +29,7 @@ from ._widgets import (
     NoWheelSpinBox,
     hint_label,
     run_button,
+    wrap_row,
 )
 
 
@@ -220,6 +223,14 @@ class TrainPanelMixin(QMainWindow):
         )
         self.ft_button.clicked.connect(self._run_finetune)
         ft.addRow(self.ft_button)
+        ckpt_row = QHBoxLayout()
+        self.ft_save_button = QPushButton("Save checkpoint…")
+        self.ft_save_button.clicked.connect(self._save_chronos_checkpoint)
+        self.ft_load_button = QPushButton("Load checkpoint…")
+        self.ft_load_button.clicked.connect(self._load_chronos_checkpoint)
+        ckpt_row.addWidget(self.ft_save_button)
+        ckpt_row.addWidget(self.ft_load_button)
+        ft.addRow(wrap_row(ckpt_row))
         self._ft_box.setVisible(False)
         form.addRow(self._ft_box)
         return box
@@ -248,6 +259,8 @@ class TrainPanelMixin(QMainWindow):
         self.cv_button.setVisible(not is_chronos)
         self._chronos_hint.setVisible(is_chronos)
         self._ft_box.setVisible(is_chronos)
+        if hasattr(self, "_chronos_norm_box"):
+            self._chronos_norm_box.setVisible(is_chronos)
         self._device_label.setVisible(is_chronos)
         self.device_combo.setVisible(is_chronos)
         self.train_button.setText("▶  Load Chronos-2" if is_chronos else "▶  Train model")

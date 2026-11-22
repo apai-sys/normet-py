@@ -7,6 +7,84 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ## [Unreleased]
 
 ### Added
+- **Chronos-2 core primitives and first-principles operators** (`normet.foundation`):
+  - `past_only_covariates` on `Chronos2Estimator` (constructor, `predict`,
+    `predict_quantiles*`, `counterfactual`, `finetune`, `finetune_multisite`)
+    so historical co-pollutants and activity series condition the context
+    without appearing in `future_covariates` (and are masked post-intervention
+    during counterfactual rollouts to prevent leakage).
+  - `counterfactual(..., rollout="quantile")` using Chronos-2's native
+    multi-patch forecast and 9-path quantile unrolling instead of median-only
+    feedback, plus `CounterfactualResult.to_scm_frame()`.
+  - `Chronos2Estimator.save()` / `load()` (pipeline weights or PEFT LoRA
+    adapter + `normet_estimator.json` metadata sidecar) and multi-site domain
+    adaptation via `Chronos2Estimator.finetune_multisite()`.
+  - Batched `BatchICLPipeline` execution in `Chronos2ICLPipeline` and
+    `normalise_in_context()`, `ICNDesign.v1()` frozen preset, external/reversed
+    `MetPool.from_frame()` / `.reversed()` support via `pool=`, aggregated
+    counterfactual `quantiles=` output, and `ICNResult.to_normet_frame()`.
+  - Zero-shot covariate-conditioned Synthetic Control (`nm.chronos_scm` /
+    `Chronos2Estimator.synthetic_control()`) using untreated donors and optional
+    meteorology without pre-period parameter fitting.
+  - Meteorology-conditioned probabilistic anomaly detection
+    (`nm.chronos_anomaly_scores`, `nm.detect_chronos_events` /
+    `Chronos2Estimator.anomaly_scores()`, `.detect_events()`, plus `method="chronos"`
+    in `nm.anomaly_scores` / `nm.detect_events`) scored by PIT and tail
+    surprise, supporting optional static split-conformal calibration and causal
+    `AdaptiveConformalCalibrator` (ACI).
+  - Log-space additive pairing (`ICNDesign(log_transform=True)`), empty-`met_cols`
+    identity fast path, `ICNResult.paired_quantiles`, reusable zero-inference
+    `nm.ICNDrawBank` / `nm.build_icn_draw_bank()`, joint multivariate ICN
+    (`nm.normalise_in_context_multivariate`), and cross-learning multi-site ICN
+    (`nm.normalise_in_context_multisite`).
+  - Patch-level latent trajectory inspection (`ChronosEmbedder.embed_patches()`
+    with exact context-patch special-token trimming, `.patch_regime_shifts()`,
+    `pooling="mean"|"reg"`, and joint `embed_multivariate()`), plus
+    pre-cutoff embedding donor ranking (`nm.select_donors_by_embedding()`).
+  - White-box attention attribution (`nm.chronos_attention_attribution` /
+    `Chronos2Estimator.attention_attribution()`), future-only in-context Partial
+    Dependence (`nm.chronos_pdp` / `Chronos2Estimator.pdp()`, dispatched via
+    `nm.pdp()`), and covariate-conditioned bidirectional gap imputation
+    (`nm.chronos_impute` / `Chronos2Estimator.impute()` with optional
+    conformal `calibration=`).
+  - Rolling probabilistic verification and causal calibration closure
+    (`nm.chronos_backtest` / `Chronos2Estimator.backtest()` scoring CRPS,
+    pinball loss, PIT uniformity, and coverage by lead with optional prefix
+    conformal calibration), zero-inference ICN variance partitioning
+    (`nm.decompose_icn_uncertainty` / `ICNDrawBank.decompose_uncertainty()`),
+    joint multivariate counterfactual BAU projections
+    (`Chronos2Estimator.counterfactual_multivariate()`), and
+    `nm.CovariateSensitivityCallback` to guard fine-tuning against covariate
+    collapse.
+  - Single-checkpoint in-process fast paths across `nm.do_all_multisite`,
+    `nm.decompose_multisite`, `nm.do_all_unc(..., backend="chronos-2")`,
+    `nm.placebo_in_space`, `nm.placebo_in_time`, `nm.scm_all`, and
+    `nm.run_scm_staggered(..., scm_backend="chronos")` (eliminating duplicate
+    per-worker checkpoint loads), explicit validated `min_past` / `callbacks` on
+    `finetune()` / `finetune_multisite()`, and GUI helpers
+    (`normet.gui._chronos.deweather` `method="icn"`, `save_estimator`,
+    `load_saved_estimator`).
+  - Full-stack Chronos-2 integration across `nm.run_scm(..., scm_backend="chronos")`,
+    `nm.do_all(..., backend="chronos-2", model_config={"method": "icn", ...})`,
+    `nm.decompose(..., backend="chronos-2", model_config={"method": "icn"}, resample_df=...)`,
+    `normet deweather --log-transform`, `normet scm --backend chronos`, and
+    MCP/agent tool `normet_start_deweather` (`Tools.start_deweather`).
+  - CLI: `normet deweather --method icn --estimate level|paired` exposes ICN-v1,
+    and `normet do-all` / `normet decompose` preserve `resolve_n_samples()`
+    defaults (`8` for `chronos-2`, `300` for AutoML) when `--n-samples` is
+    omitted.
+  - Plotting, reporting, CLI, Agent/MCP, and GUI closure:
+    `nm.pdp_grid()` renders native `[pdp_lower, pdp_upper]` quantile envelopes
+    (with `pdp_mean ± pdp_std` fallback); added `nm.plot_attention_attribution()`
+    and `nm.plot_imputation()`; `report._auto_plot()` automatically renders
+    imputation, PDP, and backtest lead profiles; added `normet impute`,
+    `normet backtest`, `normet events`, and `--model-path` on `deweather` /
+    `scm`; added `Tools.start_impute`, `Tools.start_backtest`,
+    `Tools.start_events`, their readings and `imputation` figure, plus MCP
+    tools `normet_start_impute`, `normet_start_backtest`, `normet_start_events`;
+    wired Chronos-2 PDP, Normalise ICN options (`deweather|icn`,
+    `level|paired`, `log1p`), checkpoint Save/Load, and SCM Studio `chronos`
+    backend in the desktop GUI.
 - **Causal inference & counterfactual scientific upgrade (`normet.causal`, `normet.counterfactual`, `normet.plotting`)**:
   - Correctness & identification fixes: cutoff-split pre/post interpolation and
     `max_gap` in `prepare_panel`, pre-cutoff truncation (`< cutoff_date`) in

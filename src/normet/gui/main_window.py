@@ -177,6 +177,8 @@ class MainWindow(
         self._run_buttons = [
             self.train_button,
             self.ft_button,
+            self.ft_save_button,
+            self.ft_load_button,
             self.norm_button,
             self.decom_button,
             self.roll_button,

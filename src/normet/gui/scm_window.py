@@ -86,6 +86,7 @@ BACKEND_TIPS = {
     "mcnnm": "Matrix-completion (MC-NNM) estimator.",
     "robust": "Robust SCM (de-noised donor matrix).",
     "bayesian": "Bayesian simplex SCM — needs pymc, gives credible bands.",
+    "chronos": "Zero-shot Chronos-2 SCM (covariate-conditioned foundation model) — needs foundation extra.",
 }
 
 
@@ -457,9 +458,15 @@ class SCMWindow(QMainWindow):
         self.backend_combo = NoWheelComboBox()
         for name, tip in BACKEND_TIPS.items():
             self.backend_combo.addItem(name)
-            self.backend_combo.setItemData(
-                self.backend_combo.count() - 1, tip, Qt.ItemDataRole.ToolTipRole
-            )
+            idx = self.backend_combo.count() - 1
+            self.backend_combo.setItemData(idx, tip, Qt.ItemDataRole.ToolTipRole)
+            if name == "chronos" and not self._chronos_ok:
+                self.backend_combo.model().item(idx).setEnabled(False)
+                self.backend_combo.setItemData(
+                    idx,
+                    f"Needs the foundation extra: {chronos_why}",
+                    Qt.ItemDataRole.ToolTipRole,
+                )
         self.backend_combo.setToolTip("Which synthetic-control estimator to use.")
         self.backend_combo.currentTextChanged.connect(self._backend_changed)
         ef.addRow("Backend", self.backend_combo)
@@ -1023,6 +1030,20 @@ class SCMWindow(QMainWindow):
         draws = self.bayes_draws.value()
 
         def job():
+            if backend == "chronos":
+                from normet.causal import run_scm
+
+                synth = run_scm(
+                    design["df"],
+                    date_col=design["date_col"],
+                    unit_col=design["unit_col"],
+                    outcome_col=design["outcome_col"],
+                    treated_unit=design["treated_unit"],
+                    donors=design["donors"],
+                    cutoff_date=design["cutoff_date"],
+                    scm_backend="chronos",
+                )
+                return {"synthetic": synth, "weights": None}, None
             if backend == "mlscm":
                 from normet.causal import mlscm
 

@@ -315,3 +315,53 @@ def test_ensemble_weights_come_from_the_test_split(monkeypatch):
     monkeypatch.setattr(d, "modStats", fake_mod_stats)
     out, _ = d.do_all_unc(df, target="PM2.5", n_models=2, n_samples=2, n_cores=1)
     assert np.allclose(out["weighted"], 1.0)
+
+
+def test_do_all_unc_chronos_shares_single_checkpoint(monkeypatch):
+    """do_all_unc(..., backend='chronos-2') loads one checkpoint across all seeds without modStats."""
+    import normet.foundation.estimator as est_mod
+    from normet.pipeline.do_all import do_all_unc
+
+    levels = [0.1, 0.5, 0.9]
+    load_count = 0
+
+    class _FakePipe:
+        quantiles = levels
+
+        def predict(self, inputs, prediction_length, **kwargs):
+            out = []
+            for item in inputs:
+                hist = np.asarray(item["target"], dtype=float)
+                med = np.full(prediction_length, float(np.nanmedian(hist)))
+                out.append(np.stack([med - 1.0, med, med + 1.0])[None, ...])
+            return out
+
+    def _fake_load(name, dev, auto):
+        nonlocal load_count
+        load_count += 1
+        return _FakePipe(), dev or "cpu"
+
+    monkeypatch.setattr(est_mod, "_load_pipeline_on", _fake_load)
+    monkeypatch.setattr(est_mod, "resolve_device", lambda req=None: req or "cpu")
+
+    n = 72
+    df = pd.DataFrame(
+        {
+            "date": pd.date_range("2024-01-01", periods=n, freq="h"),
+            "PM2.5": np.linspace(15.0, 25.0, n),
+            "ws": np.linspace(1.0, 5.0, n),
+        }
+    )
+    out, mod_stats = do_all_unc(
+        df=df,
+        target="PM2.5",
+        backend="chronos-2",
+        covariates=["ws"],
+        n_samples=2,
+        n_models=3,
+        model_config={"context_length": 24, "prediction_length": 12, "device": "cpu"},
+    )
+    assert load_count == 1
+    assert len([c for c in out.columns if c.startswith("normalised_")]) == 3
+    assert set(mod_stats["backend"]) == {"chronos-2"}
+    np.testing.assert_allclose(mod_stats["weight"].to_numpy(), [1 / 3, 1 / 3, 1 / 3], atol=1e-6)

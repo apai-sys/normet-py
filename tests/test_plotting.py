@@ -168,6 +168,108 @@ def test_usable_cycles_is_independent_of_datetime_resolution():
     assert usable_cycles(coarse) == usable_cycles(ns)
 
 
+def test_pdp_grid_prefers_quantile_envelope_with_std_fallback():
+    """pdp_grid renders [pdp_lower, pdp_upper] when finite, else pdp_mean ± pdp_std."""
+    from matplotlib.collections import PolyCollection
+
+    x = np.linspace(0.0, 4.0, 5)
+    pdp_q = pd.DataFrame(
+        {
+            "variable": ["ws"] * 5,
+            "value": x,
+            "pdp_mean": np.array([10.0, 11.0, 12.0, 13.0, 14.0]),
+            "pdp_std": np.array([1.0, 1.0, 1.0, 1.0, 1.0]),
+            "pdp_lower": np.array([6.0, 7.0, 8.0, 9.0, 10.0]),
+            "pdp_upper": np.array([20.0, 21.0, 22.0, 23.0, 24.0]),
+        }
+    )
+    fig_q = pdp_grid(pdp_q, cols=1)
+    polys_q = [c for c in fig_q.axes[0].collections if isinstance(c, PolyCollection)]
+    assert len(polys_q) == 1
+    y_verts = polys_q[0].get_paths()[0].vertices[:, 1]
+    assert np.isclose(y_verts.min(), 6.0)
+    assert np.isclose(y_verts.max(), 24.0)
+
+    # Without pdp_lower / pdp_upper, fall back to pdp_mean ± pdp_std
+    pdp_s = pdp_q.drop(columns=["pdp_lower", "pdp_upper"])
+    fig_s = pdp_grid(pdp_s, cols=1)
+    polys_s = [c for c in fig_s.axes[0].collections if isinstance(c, PolyCollection)]
+    assert len(polys_s) == 1
+    y_verts_s = polys_s[0].get_paths()[0].vertices[:, 1]
+    assert np.isclose(y_verts_s.min(), 9.0)
+    assert np.isclose(y_verts_s.max(), 15.0)
+
+
+def test_plot_attention_attribution_and_validation():
+    from normet.plotting import plot_attention_attribution
+
+    dates = pd.date_range("2024-01-01", periods=6, freq="h")
+    attrib = {
+        "group_weights": pd.DataFrame(
+            {
+                "variable": ["PM2.5", "ws", "co", "t2m"],
+                "role": ["target", "known_future", "past_only", "known_future"],
+                "attention": [0.4, 0.3, 0.2, 0.1],
+                "share": [0.4, 0.3, 0.2, 0.1],
+                "context_attention": [0.35, 0.25, 0.25, 0.15],
+            }
+        ),
+        "time_weights": pd.DataFrame(
+            {
+                "patch_idx": np.arange(6),
+                "date": dates,
+                "attention": np.linspace(0.05, 0.3, 6),
+                "share": np.linspace(0.05, 0.3, 6) / np.linspace(0.05, 0.3, 6).sum(),
+            }
+        ),
+        "target_self_share": 0.4,
+        "covariate_share": 0.6,
+    }
+    fig = plot_attention_attribution(attrib, top_k=3, title="Attribution test")
+    assert fig is not None and len(fig.axes) == 2
+    assert len(fig.axes[0].patches) == 3  # top_k respected
+
+    # Empty time_weights should render cleanly without error
+    fig_empty = plot_attention_attribution(
+        {
+            "group_weights": attrib["group_weights"],
+            "time_weights": pd.DataFrame(columns=["patch_idx", "date", "attention", "share"]),
+        }
+    )
+    assert fig_empty is not None
+
+    with pytest.raises(ValueError, match="missing key"):
+        plot_attention_attribution({"group_weights": attrib["group_weights"]})
+
+
+def test_plot_imputation_with_gaps_and_intervals():
+    from normet.plotting import plot_imputation
+
+    dates = pd.date_range("2024-01-01", periods=24, freq="h")
+    obs = np.linspace(10.0, 33.0, 24)
+    obs[5:9] = np.nan  # 4-point contiguous gap
+    obs[15] = np.nan  # 1-point isolated gap
+    imp = np.linspace(10.0, 33.0, 24)
+    is_imp = np.isnan(obs)
+    lo = np.where(is_imp, imp - 2.0, np.nan)
+    hi = np.where(is_imp, imp + 2.0, np.nan)
+
+    df_idx = pd.DataFrame(
+        {"observed": obs, "imputed": imp, "is_imputed": is_imp, "lower": lo, "upper": hi},
+        index=dates,
+    )
+    fig = plot_imputation(df_idx, title="Gap fill", ylabel="PM2.5")
+    assert fig is not None
+
+    # Also accepts an explicit `date` column and no uncertainty columns
+    df_col = df_idx[["observed", "imputed", "is_imputed"]].reset_index(names="date")
+    fig_col = plot_imputation(df_col)
+    assert fig_col is not None
+
+    with pytest.raises(ValueError, match="missing column"):
+        plot_imputation(pd.DataFrame({"observed": [1.0, 2.0]}))
+
+
 def test_transport_plots_render_cleanly():
     import matplotlib.pyplot as plt
 

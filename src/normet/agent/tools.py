@@ -52,14 +52,19 @@ FIGURES: dict[str, str] = {
     "importance": "the model's feature importance (a run)",
     "decomposition": "each component of a decomposition over time (a decomposition CSV)",
     "scm": "the treated unit against its synthetic control (an SCM CSV; cutoff marks the date)",
+    "imputation": "observed series with imputed gaps and predictive interval (an imputation CSV)",
 }
 
 #: What each job writes, read back once it has ended.
 _OUTPUTS = {
     "do_all": "normalised.csv",
     "decompose": "decomposition.csv",
+    "deweather": "normalised.csv",
     "scm": "scm.csv",
     "cv": "cv.csv",
+    "impute": "imputed.csv",
+    "backtest": "backtest.csv",
+    "events": "events.csv",
 }
 
 
@@ -311,6 +316,46 @@ class Tools:
         argv += ["--out", _OUTPUTS["decompose"]]
         return self._start("decompose", argv, label)
 
+    def start_deweather(
+        self,
+        target: str,
+        met_vars: list[str],
+        data: str | None = None,
+        example: str | None = None,
+        method: str = "icn",
+        estimate: str = "level",
+        n_samples: int | None = None,
+        context_length: int | None = None,
+        prediction_length: int | None = None,
+        log_transform: bool = False,
+        seed: int | None = None,
+        model_path: str | None = None,
+        label: str = "",
+    ) -> str:
+        """Zero-shot Chronos-2 normalisation / ICN-v1 (``normet deweather``)."""
+        if not met_vars:
+            raise ValueError("give the meteorological covariates (met_vars) to condition on")
+        if method not in ("deweather", "icn"):
+            raise ValueError(f"method must be 'deweather' or 'icn', got {method!r}")
+        if estimate not in ("level", "paired"):
+            raise ValueError(f"estimate must be 'level' or 'paired', got {estimate!r}")
+        ckpt = self.path(model_path) if model_path is not None else None
+        argv = ["deweather", self._source(data, example)] + self._options(
+            target=target,
+            met_vars=met_vars,
+            method=method,
+            estimate=estimate,
+            n_samples=n_samples,
+            context_length=context_length,
+            prediction_length=prediction_length,
+            seed=seed,
+            model_path=ckpt,
+        )
+        if log_transform:
+            argv.append("--log-transform")
+        argv += ["--out", _OUTPUTS["deweather"]]
+        return self._start("deweather", argv, label)
+
     def start_scm(
         self,
         treated: str,
@@ -322,10 +367,14 @@ class Tools:
         unit_col: str | None = None,
         outcome_col: str | None = None,
         backend: str | None = None,
+        model_path: str | None = None,
         label: str = "",
     ) -> str:
         """A synthetic control of *treated* from the donors, its effect after
         *cutoff* (``normet scm``)."""
+        ckpt = self.path(model_path) if model_path is not None else None
+        if ckpt is not None and backend != "chronos":
+            raise ValueError("model_path is only supported when backend='chronos'")
         argv = ["scm", self._source(data, example)] + self._options(
             treated=treated,
             cutoff=cutoff,
@@ -334,6 +383,7 @@ class Tools:
             unit_col=unit_col,
             outcome_col=outcome_col,
             backend=backend,
+            model_path=ckpt,
         )
         argv += ["--out", _OUTPUTS["scm"]]
         return self._start("scm", argv, label)
@@ -355,6 +405,118 @@ class Tools:
         )
         argv += ["--out", _OUTPUTS["cv"]]
         return self._start("cv", argv, label)
+
+    def start_impute(
+        self,
+        target: str,
+        met_vars: list[str] | None = None,
+        data: str | None = None,
+        example: str | None = None,
+        direction: str = "bidirectional",
+        max_gap: int | None = None,
+        calibrate: bool = False,
+        context_length: int | None = None,
+        prediction_length: int | None = None,
+        model_path: str | None = None,
+        label: str = "",
+    ) -> str:
+        """Covariate-conditioned Chronos-2 gap imputation (``normet impute``)."""
+        if direction not in ("bidirectional", "forward", "backward"):
+            raise ValueError(
+                f"direction must be 'bidirectional', 'forward', or 'backward', got {direction!r}"
+            )
+        ckpt = self.path(model_path) if model_path is not None else None
+        argv = ["impute", self._source(data, example)] + self._options(
+            target=target,
+            met_vars=met_vars,
+            direction=direction,
+            max_gap=max_gap,
+            context_length=context_length,
+            prediction_length=prediction_length,
+            model_path=ckpt,
+        )
+        if calibrate:
+            argv.append("--calibrate")
+        argv += ["--out", _OUTPUTS["impute"]]
+        return self._start("impute", argv, label)
+
+    def start_backtest(
+        self,
+        target: str,
+        met_vars: list[str] | None = None,
+        data: str | None = None,
+        example: str | None = None,
+        horizon: int | None = None,
+        stride: int | None = None,
+        calibrate: bool = False,
+        calibration_frac: float | None = None,
+        context_length: int | None = None,
+        prediction_length: int | None = None,
+        model_path: str | None = None,
+        label: str = "",
+    ) -> str:
+        """Rolling probabilistic Chronos-2 backtest (``normet backtest``)."""
+        ckpt = self.path(model_path) if model_path is not None else None
+        argv = ["backtest", self._source(data, example)] + self._options(
+            target=target,
+            met_vars=met_vars,
+            horizon=horizon,
+            stride=stride,
+            calibration_frac=calibration_frac,
+            context_length=context_length,
+            prediction_length=prediction_length,
+            model_path=ckpt,
+        )
+        if calibrate:
+            argv.append("--calibrate")
+        argv += ["--out", _OUTPUTS["backtest"]]
+        return self._start("backtest", argv, label)
+
+    def start_events(
+        self,
+        value_col: str,
+        method: str = "iqr",
+        covariates: list[str] | None = None,
+        data: str | None = None,
+        example: str | None = None,
+        alpha: float | None = None,
+        k: float | None = None,
+        min_length: int | None = None,
+        direction: str | None = None,
+        adaptive: bool = False,
+        context_length: int | None = None,
+        prediction_length: int | None = None,
+        model_path: str | None = None,
+        label: str = "",
+    ) -> str:
+        """Detect anomalous episodes (classical or conditional ``chronos``, ``normet events``)."""
+        if method not in ("iqr", "isolation", "stl_residual", "chronos"):
+            raise ValueError(
+                f"method must be 'iqr', 'isolation', 'stl_residual', or 'chronos', got {method!r}"
+            )
+        if direction is not None and direction not in ("both", "high", "low"):
+            raise ValueError(f"direction must be 'both', 'high', or 'low', got {direction!r}")
+        ckpt = self.path(model_path) if model_path is not None else None
+        if ckpt is not None and method != "chronos":
+            raise ValueError("model_path is only supported when method='chronos'")
+        if adaptive and method != "chronos":
+            raise ValueError("adaptive is only supported when method='chronos'")
+        argv = ["events", self._source(data, example)] + self._options(
+            value_col=value_col,
+            method=method,
+            covariates=covariates,
+            alpha=alpha,
+            k=k,
+            min_length=min_length,
+            direction=direction,
+            context_length=context_length,
+            prediction_length=prediction_length,
+            model_path=ckpt,
+        )
+        if adaptive:
+            argv.append("--adaptive")
+        argv += ["--out", _OUTPUTS["events"]]
+        return self._start("events", argv, label)
 
     def _readings_of(self, job: dict[str, Any]) -> str:
         folder, kind = job["folder"], job["kind"]
@@ -439,10 +601,11 @@ class Tools:
         return "\n\n".join(parts)
 
     def read_result(self, path: str, kind: str, cutoff: str | None = None) -> str:
-        """A result table read as its *kind* says: ``normalised``/``do_all``,
-        ``decomposition``/``decompose``, ``scm`` (with *cutoff*) or ``cv``."""
+        """A result table read as its *kind* says: ``normalised``/``do_all``/``deweather``,
+        ``decomposition``/``decompose``, ``scm`` (with *cutoff*), ``cv``, ``impute``,
+        ``backtest``, or ``events``."""
         df = self._table(self.path(path))
-        if kind in ("normalised", "do_all"):
+        if kind in ("normalised", "do_all", "deweather"):
             return readings.normalised_reading(df)
         if kind in ("decomposition", "decompose"):
             return readings.decomposition_reading(df)
@@ -452,7 +615,13 @@ class Tools:
             return readings.scm_reading(df, cutoff)
         if kind == "cv":
             return readings.cv_reading(df)
-        raise ValueError("kind is normalised, decomposition, scm or cv")
+        if kind in ("impute", "imputation"):
+            return readings.imputation_reading(df)
+        if kind == "backtest":
+            return readings.backtest_reading(df)
+        if kind == "events":
+            return readings.events_reading(df)
+        raise ValueError("kind is normalised, decomposition, scm, cv, impute, backtest, or events")
 
     def figure(
         self, source: str, kind: str, cutoff: str | None = None, dpi: int = 100
@@ -580,4 +749,9 @@ def _draw_table(fig: Any, ax: Any, df: pd.DataFrame, kind: str, cutoff: str | No
         return "The treated unit and its synthetic control" + (
             f"; dotted: {cutoff}." if cutoff else "."
         )
+    if kind == "imputation":
+        from normet.plotting import plot_imputation
+
+        plot_imputation(df, ax=ax)
+        return "Observed series with Chronos-2 imputed gaps and predictive interval."
     raise ValueError(f"a {kind!r} figure is drawn from a run (.joblib)")

@@ -220,11 +220,41 @@ def test_scm_job_through_the_tools(tools, scm_panel, tmp_path):
         tools.figure(out, "other")
 
 
-def test_start_tools_check_their_arguments(tools):
+def test_start_tools_check_their_arguments(tools, tmp_path):
     with pytest.raises(ValueError, match="covariates"):
         tools.start_do_all("NO2", [], example="my1")
     with pytest.raises(ValueError, match="method"):
         tools.start_decompose("NO2", ["ws"], method="other", example="my1")
+    with pytest.raises(ValueError, match="met_vars"):
+        tools.start_deweather("NO2", [], example="my1")
+    with pytest.raises(ValueError, match="method"):
+        tools.start_deweather("NO2", ["ws"], example="my1", method="bogus")
+    with pytest.raises(ValueError, match="estimate"):
+        tools.start_deweather("NO2", ["ws"], example="my1", estimate="bogus")
+
+    # Command assembly for start_deweather without actually running chronos-2 in CI
+    tools.store.submit = lambda kind, argv, label="": {
+        "id": "job-dw",
+        "state": "queued",
+        "command": command_line(argv),
+    }
+    msg = tools.start_deweather(
+        "NO2",
+        ["ws", "temp"],
+        example="my1",
+        method="icn",
+        estimate="paired",
+        log_transform=True,
+        n_samples=3,
+    )
+    assert "job-dw" in msg and "deweather" in msg
+    assert "--method icn" in msg and "--estimate paired" in msg
+    assert "--log-transform" in msg and "--out normalised.csv" in msg
+
+    df = _normalised(24 * 40).reset_index(names="date")
+    dw_csv = tmp_path / "dw.csv"
+    df.to_csv(dw_csv, index=False)
+    assert "Means by month" in tools.read_result(str(dw_csv), "deweather")
 
 
 def test_a_run_read_drawn_and_reported(tools, synthetic_aq, tmp_path):
@@ -269,6 +299,10 @@ def test_mcp_server_lists_and_calls_tools(tools):
     assert {
         "normet_inspect_data",
         "normet_start_do_all",
+        "normet_start_deweather",
+        "normet_start_impute",
+        "normet_start_backtest",
+        "normet_start_events",
         "normet_job_status",
         "normet_figure",
     } <= names
@@ -618,3 +652,103 @@ def test_ca_bundle_falls_back_to_certifi(monkeypatch):
     monkeypatch.setenv("SSL_CERT_FILE", "/mine.pem")
     llm.ca_bundle()
     assert os.environ["SSL_CERT_FILE"] == "/mine.pem"
+
+
+def test_chronos_impute_backtest_events_tools_and_readings(tools, tmp_path):
+    """New start_impute / start_backtest / start_events, readings, and imputation figure."""
+    import pandas as pd
+
+    ckpt = tmp_path / "ckpt_dir"
+    ckpt.mkdir()
+
+    # Sandbox enforcement on model_path
+    with pytest.raises(PermissionError):
+        tools.start_impute("NO2", example="my1", model_path="/etc")
+
+    msg_imp = tools.start_impute(
+        "NO2",
+        met_vars=["ws", "temp"],
+        example="my1",
+        direction="forward",
+        max_gap=12,
+        calibrate=True,
+        model_path=str(ckpt),
+        label="gap-fill",
+    )
+    assert "impute" in msg_imp and "--direction forward" in msg_imp
+    assert "--calibrate" in msg_imp and "--out imputed.csv" in msg_imp
+
+    msg_bt = tools.start_backtest(
+        "NO2",
+        met_vars=["ws"],
+        example="my1",
+        horizon=24,
+        stride=12,
+        calibrate=True,
+        calibration_frac=0.4,
+    )
+    assert "backtest" in msg_bt and "--horizon 24" in msg_bt and "--out backtest.csv" in msg_bt
+
+    msg_ev = tools.start_events(
+        "NO2",
+        method="chronos",
+        covariates=["ws"],
+        example="my1",
+        alpha=0.01,
+        min_length=3,
+        direction="high",
+        adaptive=True,
+    )
+    assert "events" in msg_ev and "--method chronos" in msg_ev
+    assert "--adaptive" in msg_ev and "--out events.csv" in msg_ev
+
+    with pytest.raises(ValueError, match="adaptive"):
+        tools.start_events("NO2", method="iqr", example="my1", adaptive=True)
+
+    # Readings + figure
+    dates = pd.date_range("2024-01-01", periods=12, freq="h")
+    imp_df = pd.DataFrame(
+        {
+            "date": dates,
+            "observed": [float(i) if i not in (4, 5) else float("nan") for i in range(12)],
+            "imputed": [float(i) for i in range(12)],
+            "is_imputed": [i in (4, 5) for i in range(12)],
+            "lower": [float(i) - 1.0 for i in range(12)],
+            "upper": [float(i) + 1.0 for i in range(12)],
+        }
+    )
+    imp_csv = tmp_path / "imputed.csv"
+    imp_df.to_csv(imp_csv, index=False)
+    imp_txt = tools.read_result(str(imp_csv), "impute")
+    assert "imputed spans" in imp_txt and "mean interval width" in imp_txt
+    caption, png = tools.figure(str(imp_csv), "imputation")
+    assert png[:4] == b"\x89PNG" and "Chronos-2" in caption
+
+    bt_df = pd.DataFrame(
+        {
+            "lead": [1, 2, 3],
+            "crps": [0.5, 0.6, 0.7],
+            "crps_skill": [0.3, 0.25, 0.2],
+            "mae": [0.4, 0.5, 0.6],
+            "coverage_80": [0.80, 0.81, 0.79],
+        }
+    )
+    bt_csv = tmp_path / "backtest.csv"
+    bt_df.to_csv(bt_csv, index=False)
+    bt_txt = tools.read_result(str(bt_csv), "backtest")
+    assert "mean CRPS" in bt_txt and "mean cov80" in bt_txt
+
+    ev_df = pd.DataFrame(
+        {
+            "start": ["2024-01-02 01:00"],
+            "end": ["2024-01-02 04:00"],
+            "n": [4],
+            "direction": ["high"],
+            "max_surprise": [8.5],
+            "mean_residual": [22.0],
+        }
+    )
+    ev_csv = tmp_path / "events.csv"
+    ev_df.to_csv(ev_csv, index=False)
+    ev_txt = tools.read_result(str(ev_csv), "events")
+    assert "1 episode(s)" in ev_txt and "max_surprise" in ev_txt
