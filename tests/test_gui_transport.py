@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 import tempfile
 import time
 
@@ -96,7 +97,9 @@ def test_send_takes_the_latest_trajectory_to_have_arrived(main_win):
     assert got["2020-01-01 04:00"] == 0.0  # 00:00's: 06:00's has not arrived yet
     assert got["2020-01-01 23:00"] == 18.0
     assert got["2020-01-02 00:00":].isna().all()  # no trajectory: left empty, not carried
-    assert {"traj_dist_km", "traj_n_endpoints"} <= _ticked(w)
+    # QC column (traj_n_endpoints) is joined into df_raw, but NOT auto-ticked as predictor
+    assert "traj_n_endpoints" in w.df_raw.columns
+    assert "traj_dist_km" in _ticked(w) and "traj_n_endpoints" not in _ticked(w)
 
     # Sent again, the columns are replaced rather than doubled into _x / _y.
     again = _features(SIX_HOURLY)
@@ -287,6 +290,66 @@ def test_cancel_stops_the_run_in_progress(studio, qapp, monkeypatch, tmp_path):
     del thread
 
 
+FAKE_SITE_HYTS = (
+    "#!" + sys.executable + "\n"
+    "from datetime import datetime, timedelta\n"
+    "from pathlib import Path\n"
+    "\n"
+    "lines = Path('CONTROL').read_text().splitlines()\n"
+    "parts = [int(x) for x in lines[0].split()[:4]]\n"
+    "yr = 2000 + parts[0] if parts[0] < 70 else 1900 + parts[0]\n"
+    "t0 = datetime(yr, parts[1], parts[2], parts[3])\n"
+    "la, lo, hh = (float(v) for v in lines[2].split()[:3])\n"
+    "name = lines[-1].strip()\n"
+    "out = [\n"
+    "    '     1     1',\n"
+    "    '    GDAS    20    10     1     0     0',\n"
+    "    '     1 BACKWARD OMEGA',\n"
+    "    f'     1    20    10     1     0 {la:8.3f} {lo:8.3f} {hh:7.1f}',\n"
+    "    '     1 PRESSURE',\n"
+    "]\n"
+    "for a in range(3):\n"
+    "    ts = t0 - timedelta(hours=a)\n"
+    "    out.append(\n"
+    "        '     1     1 '\n"
+    "        + f'{ts.year % 100:2d} {ts.month:5d} {ts.day:5d} {ts.hour:5d}'\n"
+    "        + '     0     0 '\n"
+    "        + f'{-a:7.1f} {la - 0.2 * a:8.3f} {lo - 0.4 * a:8.3f} {hh + 10 * a:8.1f}    990.0'\n"
+    "    )\n"
+    "Path(name).write_text('\\n'.join(out) + '\\n')\n"
+)
+
+
+def test_each_receptor_keeps_its_own_tdumps(studio, qapp, tmp_path):
+    """Two receptor rows must not overwrite each other's timestamp-named tdumps."""
+    exe = tmp_path / "exec" / "hyts_std"
+    exe.parent.mkdir()
+    exe.write_text(FAKE_SITE_HYTS)
+    exe.chmod(0o755)
+    studio.hysplit_exec_edit.setText(str(exe))
+    names = ["gdas1.jan20.w1", "gdas1.jan20.w2"]
+    for n in names:
+        (tmp_path / n).write_text("")
+    studio._set_met_files([str(tmp_path / n) for n in names], "chosen")
+    studio.receptor_table.add_row("south", 51.5, -0.13)
+    studio.receptor_table.add_row("north", 40.0, -0.13)
+    studio.hours_back_spin.setValue(24)
+    studio.time_res_spin.setValue(6)  # one receptor time -> one tdump per site
+    studio.offer_main_data(_panel("2020-01-10 00:00", hours=6))
+
+    studio._run_hysplit()
+    _wait(qapp, studio.runner)
+
+    assert studio.features is not None
+    assert sorted(studio.features["site"].unique()) == ["north", "south"]
+    tdumps = studio._active_tdumps()
+    assert len(tdumps) == 2  # one per site, not one site overwriting the other
+    from normet import read_trajectory_endpoints
+
+    ep = read_trajectory_endpoints(tdumps)
+    assert sorted(ep["start_lat"].unique()) == [40.0, 51.5]
+
+
 def test_closing_the_window_stops_the_run(studio, qapp, monkeypatch, tmp_path):
     _ready_to_run(studio, tmp_path, monkeypatch, ["gdas1.jan20.w1", "gdas1.jan20.w2"])
     studio._run_hysplit()
@@ -303,3 +366,67 @@ def test_closing_the_main_window_closes_transport_studio(main_win):
     assert shown.isVisible()
     main_win.close()
     assert not shown.isVisible()
+
+
+def test_transport_studio_layer1_physics_dateline_and_layer2_analysis(main_win, qapp, tmp_path):
+    """Test BLH/decay/scavenging/horizons controls, dateline wrap opt-in, and
+    Analysis page (WCWT map, clustering, footprint inversion) on bundled tdumps."""
+    # Opt-in dateline wrap on SourceRegionTable
+    from normet.gui.trajectory_window import TrajectoryWindow
+
+    s = TrajectoryWindow(main_win)
+    try:
+        # Prepare main window with synthetic hourly PM2.5 covering example traj dates (Jan 1-2 2020)
+        main_win._ingest(_panel("2019-12-31 18:00", hours=72), "MY1 synthetic")
+
+        t = s.region_table
+        t.add_row("pac", (170.0, -10.0, -170.0, 10.0))
+        with pytest.raises(ValueError, match="lon_min must be less than lon_max"):
+            t.regions()
+        s.dateline_check.setChecked(True)
+        assert s.region_table.regions(allow_dateline_wrap=True) == {
+            "pac": (170.0, -10.0, -170.0, 10.0)
+        }
+        t.removeRow(0)
+        s.dateline_check.setChecked(False)
+
+        # Region in the SW/Europe sector covered by bundled example tdumps (lon -5..5, lat 47..53)
+        t.add_row("eu", (-5.0, 47.0, 5.0, 53.0))
+        s._tdump_paths = [str(p) for p in _example_tdumps(tmp_path, n=6)]
+        s._sync_enabled()
+        assert s.receptor_btn.isEnabled() and s.cluster_btn.isEnabled() and s.inv_btn.isEnabled()
+
+        # Build features with physics controls & horizons enabled
+        s.decay_spin.setValue(48)
+        s.scav_spin.setValue(0.1)
+        s.horizons_check.setChecked(True)
+        s._run_build()
+        _wait(qapp, s.runner)
+        assert s.features is not None
+        assert "traj_footprint_eu" in s.features.columns
+        assert "traj_footprint_eu_0_12h" in s.features.columns
+
+        # Run WCWT receptor map
+        s.receptor_method.setCurrentText("wcwt")
+        s._run_receptor_grid()
+        _wait(qapp, s.runner)
+        assert s.tabs.currentWidget() is s.tab_receptor
+        # The tab really drew the map: a canvas exists and its axes carry data
+        # (a stale/broken figure path that still switched tabs used to pass).
+        assert s.tab_receptor.canvas is not None
+        assert any(ax.has_data() for ax in s.tab_receptor.canvas.figure.axes)
+        assert s.tab_receptor._verdict is not None
+        assert "WCWT mapped" in s.tab_receptor._verdict.text()
+
+        # Run trajectory clustering (k=2)
+        s.cluster_k_spin.setValue(2)
+        s._run_clusters()
+        _wait(qapp, s.runner)
+        assert s.tabs.currentWidget() is s.tab_clusters
+
+        # Run source footprint inversion
+        s._run_inversion()
+        _wait(qapp, s.runner)
+        assert s.tabs.currentWidget() is s.tab_inversion
+    finally:
+        s.close()

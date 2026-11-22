@@ -35,6 +35,9 @@ __all__ = [
     "time_series_plot",
     "cycle_profiles",
     "profile_axes",
+    "plot_receptor_grid",
+    "plot_trajectory_clusters",
+    "plot_footprint_inversion",
 ]
 
 
@@ -1010,4 +1013,314 @@ def cycle_profiles(
         axes[0].set_ylabel(ylabel)
     if len(cols) > 1:
         S.legend(axes[0], loc="best")
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Cross-regional transport & trajectory receptor plots
+# ---------------------------------------------------------------------------
+@styled
+def plot_receptor_grid(
+    grid: Any,
+    *,
+    weighted: bool = True,
+    cmap: str = "magma_r",
+    regions: dict[str, Any] | None = None,
+    title: str | None = None,
+    ax: Any | None = None,
+) -> Any:
+    """Visualise a gridded trajectory receptor map (:func:`normet.wpscf` / :func:`normet.wcwt`).
+
+    Parameters
+    ----------
+    grid : ReceptorGridResult
+        Output from :func:`normet.wpscf`, :func:`normet.wcwt`, or
+        :func:`normet.gridded_receptor_model`.
+    weighted : bool, default True
+        Show Polissar-weighted field (``grid.weighted``) if True, else raw
+        ``grid.field``.
+    cmap : str, default "magma_r"
+        Matplotlib colormap name.
+    regions : mapping, optional
+        Optional ``{name: region}`` source bounding boxes or Shapely geometries
+        to outline on top of the receptor grid.
+    title : str, optional
+        Panel title.
+    ax : matplotlib.axes.Axes, optional
+        Existing axes to draw onto; creates a new figure when omitted.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Rectangle
+
+    from .io.trajectory import _is_bbox, _lon_segments
+
+    Z = np.asarray(grid.weighted if weighted else grid.field, dtype=float)
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(6.2, 4.4), layout="constrained")
+    else:
+        fig = ax.figure
+
+    mesh = ax.pcolormesh(
+        grid.lon_edges,
+        grid.lat_edges,
+        Z,
+        cmap=cmap,
+        shading="flat",
+        rasterized=True,
+    )
+    cbar_label = "Weighted probability" if grid.method == "wpscf" else "Weighted concentration"
+    S.colorbar(fig, mesh, ax, label=cbar_label)
+
+    ax.plot(
+        grid.receptor_lon,
+        grid.receptor_lat,
+        marker="*",
+        ms=10,
+        mfc="white",
+        mec=S.INK,
+        mew=0.9,
+        zorder=5,
+        label="Receptor",
+    )
+
+    if regions:
+        for name, region in regions.items():
+            if _is_bbox(region):
+                x0, y0, x1, y1 = (float(v) for v in region)
+                for seg_idx, (lo, hi) in enumerate(_lon_segments(x0, x1)):
+                    rect = Rectangle(
+                        (lo, y0),
+                        hi - lo,
+                        y1 - y0,
+                        fill=False,
+                        ec=S.INK,
+                        lw=1.0,
+                        ls="--",
+                        zorder=4,
+                    )
+                    ax.add_patch(rect)
+                    if seg_idx == 0:
+                        ax.text(
+                            0.5 * (lo + hi),
+                            0.5 * (y0 + y1),
+                            str(name),
+                            ha="center",
+                            va="center",
+                            fontsize=S.SMALL_SIZE,
+                            color=S.INK,
+                            zorder=4,
+                        )
+            else:
+                geoms = getattr(region, "geoms", [region])
+                for geom in geoms:
+                    if hasattr(geom, "exterior"):
+                        xs, ys = geom.exterior.xy
+                        ax.plot(xs, ys, color=S.INK, lw=1.0, ls="--", zorder=4)
+                c_pt = getattr(region, "centroid", None)
+                if c_pt is not None:
+                    ax.text(
+                        float(c_pt.x),
+                        float(c_pt.y),
+                        str(name),
+                        ha="center",
+                        va="center",
+                        fontsize=S.SMALL_SIZE,
+                        color=S.INK,
+                        zorder=4,
+                    )
+
+    mean_lat = float(np.mean(grid.lat_centers)) if len(grid.lat_centers) else 0.0
+    ax.set_aspect(1.0 / max(float(np.cos(np.radians(mean_lat))), 0.15))
+    ax.set_xlabel("Longitude (°)")
+    ax.set_ylabel("Latitude (°)")
+    if title:
+        ax.set_title(title)
+    else:
+        tag = f"({grid.n_matched_trajectories} trajectories)"
+        ax.set_title(f"{grid.method.upper()} transport source map {tag}")
+    S.grid(ax)
+    return fig
+
+
+@styled
+def plot_trajectory_clusters(
+    clusters: Any,
+    *,
+    show_tsv: bool = False,
+    title: str | None = None,
+    figsize: tuple[float, float] | None = None,
+) -> Any:
+    """Visualise clustered back-trajectory centroids alongside height or TSV curve.
+
+    Parameters
+    ----------
+    clusters : TrajectoryClusterResult
+        Output of :func:`normet.cluster_trajectories`.
+    show_tsv : bool, default False
+        If True, the right panel shows Total Spatial Variance (TSV) vs *k* to
+        inspect the cluster-count elbow; otherwise shows mean transport height
+        vs backward age by cluster.
+    title : str, optional
+        Figure suptitle.
+    figsize : (float, float), optional
+        Figure size in inches; defaults to ``(9.4, 3.8)``.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+    """
+    import matplotlib.pyplot as plt
+
+    fig, (ax_map, ax_r) = plt.subplots(1, 2, figsize=figsize or (9.4, 3.8), layout="constrained")
+    cents = clusters.centroids
+    summ = clusters.summary.set_index("cluster")
+    has_target = "target_mean" in summ.columns
+
+    for idx_c, cid in enumerate(sorted(cents["cluster"].unique())):
+        sub = cents[cents["cluster"] == cid].sort_values("age_h", ascending=False)
+        color = S.PALETTE[idx_c % len(S.PALETTE)]
+        freq = float(sub["freq"].iloc[0])
+        lw = 1.2 + 2.0 * freq
+        lbl = f"C{int(cid)} ({100.0 * freq:.1f}%)"
+        if has_target and np.isfinite(summ.loc[cid, "target_mean"]):
+            lbl += f" [{summ.loc[cid, 'target_mean']:.1f}]"
+        ax_map.plot(sub["lon"], sub["lat"], color=color, lw=lw, label=lbl)
+        ax_map.plot(sub["lon"].iloc[-1], sub["lat"].iloc[-1], "o", ms=4, color=color)
+        if not show_tsv:
+            ax_r.plot(sub["age_h"], sub["height"], color=color, lw=1.4, label=f"C{int(cid)}")
+
+    lat0 = (
+        float(cents[cents["age_h"] == 0.0]["lat"].median())
+        if (cents["age_h"] == 0.0).any()
+        else float(cents["lat"].iloc[0])
+    )
+    lon0 = (
+        float(cents[cents["age_h"] == 0.0]["lon"].median())
+        if (cents["age_h"] == 0.0).any()
+        else float(cents["lon"].iloc[0])
+    )
+    ax_map.plot(lon0, lat0, marker="*", ms=10, mfc="white", mec=S.INK, mew=0.9, zorder=5)
+    ax_map.set_aspect(1.0 / max(float(np.cos(np.radians(lat0))), 0.15))
+    ax_map.set_xlabel("Longitude (°)")
+    ax_map.set_ylabel("Latitude (°)")
+    ax_map.set_title(f"Cluster centroids (k={clusters.n_clusters})")
+    S.grid(ax_map)
+    S.legend(ax_map, loc="best")
+
+    if show_tsv:
+        tsv = clusters.tsv
+        ax_r.plot(tsv["k"], tsv["tsv"], marker="o", ms=4, color=S.COMPONENT, lw=1.5)
+        ax_r.axvline(clusters.n_clusters, color=S.INK, lw=0.9, ls="--")
+        ax_r.set_xlabel("Number of clusters (k)")
+        ax_r.set_ylabel("Total spatial variance")
+        ax_r.set_title("TSV elbow diagnostic")
+        S.grid(ax_r)
+    else:
+        ax_r.set_xlabel("Trajectory age (h)")
+        ax_r.set_ylabel("Altitude (m AGL)")
+        ax_r.set_title("Vertical transport profile")
+        S.grid(ax_r)
+
+    if title:
+        fig.suptitle(title)
+    return fig
+
+
+@styled
+def plot_footprint_inversion(
+    inv: Any,
+    *,
+    title: str | None = None,
+    figsize: tuple[float, float] = (9.2, 3.6),
+) -> Any:
+    """Visualise region source-footprint inversion estimates and time series.
+
+    Left panel ranks regions by mean concentration contribution (with block-
+    bootstrap 95% confidence intervals when available). Right panel shows either
+    sliding-window :math:`\\beta_g(t)` trends (when ``inv.rolling_beta`` is
+    present) or observed vs. predicted + background series.
+
+    Parameters
+    ----------
+    inv : FootprintInversionResult
+        Output of :func:`normet.invert_source_footprints`.
+    title : str, optional
+        Figure suptitle.
+    figsize : (float, float), default (9.2, 3.6)
+        Output figure dimensions in inches.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+    """
+    import matplotlib.pyplot as plt
+
+    reg = inv.regions.sort_values("mean_contribution", ascending=True).reset_index(drop=True)
+    fig, (ax_l, ax_r) = plt.subplots(1, 2, figsize=figsize, layout="constrained")
+
+    y_pos = np.arange(len(reg))
+    contrib = reg["mean_contribution"].to_numpy(dtype=float)
+    bars = ax_l.barh(y_pos, contrib, color=S.COMPONENT, height=0.62)
+    ax_l.set_yticks(y_pos, reg["region"].astype(str))
+    if (
+        "beta_ci_low" in reg.columns
+        and "beta_ci_high" in reg.columns
+        and reg["beta_ci_low"].notna().any()
+    ):
+        fp = reg["mean_footprint"].to_numpy(dtype=float)
+        c_lo = np.maximum(0.0, contrib - reg["beta_ci_low"].to_numpy(dtype=float) * fp)
+        c_hi = np.maximum(0.0, reg["beta_ci_high"].to_numpy(dtype=float) * fp - contrib)
+        ax_l.errorbar(
+            contrib,
+            y_pos,
+            xerr=np.vstack([c_lo, c_hi]),
+            fmt="none",
+            ecolor=S.INK,
+            elinewidth=1.0,
+            capsize=2.5,
+        )
+    for bar, share in zip(bars, reg["share_of_transport"], strict=True):
+        if np.isfinite(share):
+            ax_l.text(
+                bar.get_width(),
+                bar.get_y() + bar.get_height() / 2.0,
+                f" {100.0 * float(share):.1f}%",
+                va="center",
+                ha="left",
+                fontsize=S.SMALL_SIZE,
+                color=S.INK,
+            )
+    ax_l.set_xlabel("Mean contribution")
+    ax_l.set_title(f"Region contributions (R²={inv.r2:.2f}, RMSE={inv.rmse:.2f})")
+    ax_l.margins(x=0.18)
+    S.grid(ax_l, axis="x")
+
+    if inv.rolling_beta is not None and not inv.rolling_beta.empty:
+        rb = inv.rolling_beta
+        rcols = [c for c in rb.columns if c not in ("n_obs", "intercept", "r2")]
+        for i, col in enumerate(rcols):
+            ax_r.plot(rb.index, rb[col], lw=1.4, color=S.PALETTE[i % len(S.PALETTE)], label=col)
+        ax_r.set_ylabel("Unit footprint intensity (beta)")
+        ax_r.set_title("Rolling upwind source intensity")
+    else:
+        cdf = inv.contributions
+        ax_r.plot(
+            cdf.index, cdf["observed"], lw=0.9, color=S.OBSERVED, alpha=0.65, label="Observed"
+        )
+        ax_r.plot(cdf.index, cdf["predicted"], lw=1.2, color=S.MODELLED, label="Predicted")
+        ax_r.plot(
+            cdf.index, cdf["background"], lw=1.0, ls="--", color=S.NEUTRAL, label="Background"
+        )
+        ax_r.set_ylabel("Concentration")
+        ax_r.set_title("Footprint fit & background")
+    S.format_time_axis(ax_r)
+    S.grid(ax_r)
+    S.legend(ax_r, loc="best")
+
+    if title:
+        fig.suptitle(title)
     return fig

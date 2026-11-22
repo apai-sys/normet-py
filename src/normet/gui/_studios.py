@@ -110,7 +110,7 @@ class StudiosMixin(QMainWindow):
             )
             return 0
         from normet.io.tables import utc_to_clock
-        from normet.io.trajectory import join_trajectory_features
+        from normet.io.trajectory import is_trajectory_qc_column, join_trajectory_features
 
         # The trajectories arrive on UTC; the table is on the window's clock.
         features = features.copy()
@@ -157,7 +157,8 @@ class StudiosMixin(QMainWindow):
         self._ingest(merged, f"{self.file_label.text().splitlines()[0]} + transport features")
         for i in range(self.feature_list.count()):
             item = self.feature_list.item(i)
-            if item.text() in traj_cols:
+            name = item.text()
+            if name in traj_cols and not is_trajectory_qc_column(name):
                 item.setCheckState(Qt.CheckState.Checked)
         log.info(
             "Joined %d transport feature column(s) onto the dataset: %d of %d row(s) took a "

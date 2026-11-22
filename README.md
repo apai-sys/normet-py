@@ -35,7 +35,8 @@ MCP server for AI assistants and a desktop app build on the same API.
 |---|---|
 | `nm.prepare_data` | Imputation, date-feature engineering, train/test splitting |
 | `nm.train_model` / `nm.build_model` | AutoML via FLAML or tuned LightGBM |
-| `nm.normalise` | Monte Carlo meteorological normalisation (deweathering) |
+| `nm.normalise` | Monte Carlo meteorological normalisation (deweathering, with optional `stratify_by` conditional resampling) |
+| `nm.wpscf` / `nm.wcwt` / `nm.invert_source_footprints` / `nm.cluster_trajectories` / `nm.screen_donor_transport` | Physical BLH-coupled Lagrangian receptor mapping, regularized source-footprint inversion, TSV trajectory clustering, and SCM spillover screening |
 | `nm.decompose` | Split time series into emission-driven and met-driven components |
 | `nm.rolling` | Rolling-window normalisation for trend analysis |
 | `nm.run_scm` / `nm.scm` | Synthetic Control Method with selectable backends: `scm` (default, ridge-augmented), `abadie` (classic simplex), `did`, `mcnnm` (nuclear-norm matrix completion), `robust` and `mlscm`; several treated units each with its own cutoff via `nm.run_scm_staggered` (staggered adoption: per-unit effects and placebo p-values, plus the pooled mean and median, with the cross-unit permutation test on the mean — rolling-out schemes such as the UK ULEZ expansion) |
@@ -53,7 +54,7 @@ MCP server for AI assistants and a desktop app build on the same API.
 | `nm.crps_from_quantiles` / `nm.crps_from_samples` / `nm.pinball_loss` / `nm.crps_observed` | Probabilistic skill scores (Gneiting & Raftery 2005): CRPS for quantile and ensemble forecasts, the pinball loss, and a point forecast's CRPS reference |
 | `nm.decompose_uncertainty` | Attribute a de-weathered estimate's total spread to its source — weather (met resampling) vs model form vs their interaction — via an additive per-date variance decomposition |
 | `nm.detect_events` / `nm.anomaly_scores` | Event detection on normalised residuals |
-| `nm.normalise_plot` / `nm.decomposition_stack` / `nm.scm_dashboard` | Plotting helpers for normalisation, decomposition, and SCM results |
+| `nm.normalise_plot` / `nm.decomposition_stack` / `nm.scm_dashboard` / `nm.plot_receptor_grid` / `nm.plot_trajectory_clusters` / `nm.plot_footprint_inversion` | Plotting helpers for normalisation, decomposition, SCM, and back-trajectory receptor / inversion / cluster results |
 | `nm.bayesian_scm` / `nm.plot_bayesian_scm` | Bayesian (PyMC) posterior SCM with credible bands — **optional**, needs `normet[bayes]` |
 | `nm.scm_diagnostics` / `nm.pre_trend_test` / `nm.plot_event_study` / `nm.loo_weight_stability` / `nm.conformal_effect_interval` | SCM fit diagnostics, pre-period parallel-trends test and its event-study figure, donor-weight stability, conformal intervals |
 | `nm.donor_spatial_summary` / `nm.spatial_summary` | Where the donor pool sits around the treated unit: per-donor distance, compass bearing and sector, the pool's centroid offset and sector coverage (a reading, not a fit input) |
@@ -64,7 +65,7 @@ MCP server for AI assistants and a desktop app build on the same API.
 | `nm.silhouette_curve` / `nm.embedding_projection` / `nm.plot_embedding_diagnostics` | Diagnostics for choosing how to use site embeddings — the silhouette against the number of groups, a 2-D projection, and the two-panel figure. No cluster labels, no recommended k — the UMAP projection needs `umap-learn`; the rest uses core dependencies |
 | `nm.make_run` / `nm.save_run` / `nm.generate_html_report` / `nm.report_to_markdown` | Provenance tracking and auto-generated HTML/Markdown run reports |
 | `nm.make_memory` | On-disk caching for expensive pipelines |
-| `normet.io` | Data adapters for ERA5, EEA, OpenAQ, Open-Meteo and the UK air-quality networks; NOAA GDAS1 downloads; HYSPLIT back-trajectory features and runs (`read_trajectory_tdump`, `trajectory_features`, `build_trajectory_features`, `join_trajectory_features`, `run_back_trajectories`, `load_source_regions`); table-file readers |
+| `normet.io` | Data adapters for ERA5, EEA, OpenAQ, Open-Meteo and the UK air-quality networks; NOAA GDAS1 downloads; HYSPLIT back-trajectory endpoints, BLH-coupled physical footprint features, and parallel runs (`read_trajectory_tdump`, `read_trajectory_endpoints`, `trajectory_endpoint_weights`, `trajectory_features`, `build_trajectory_features`, `join_trajectory_features`, `run_back_trajectories`, `load_source_regions`); table-file readers |
 
 ---
 

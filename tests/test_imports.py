@@ -38,6 +38,23 @@ def test_top_level_symbols_present():
         "detect_trend_breaks",
         "TrendBreaks",
         "normalise_in_context",
+        "read_trajectory_endpoints",
+        "trajectory_endpoint_weights",
+        "is_trajectory_qc_column",
+        "TRAJ_QC_SUFFIXES",
+        "ReceptorGridResult",
+        "FootprintInversionResult",
+        "TrajectoryClusterResult",
+        "gridded_receptor_model",
+        "wpscf",
+        "wcwt",
+        "build_footprint_matrix",
+        "invert_source_footprints",
+        "cluster_trajectories",
+        "screen_donor_transport",
+        "plot_receptor_grid",
+        "plot_trajectory_clusters",
+        "plot_footprint_inversion",
     }
     missing = must_have - set(nm.__all__)
     assert not missing, f"Missing top-level exports: {sorted(missing)}"

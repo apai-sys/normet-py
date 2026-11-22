@@ -5,6 +5,18 @@ from .events import anomaly_scores, detect_events
 from .normalise import NormaliseConfig, normalise, normalise_auto
 from .pdp import pdp
 from .rolling import RollingConfig, rolling, window_columns
+from .transport import (
+    FootprintInversionResult,
+    ReceptorGridResult,
+    TrajectoryClusterResult,
+    build_footprint_matrix,
+    cluster_trajectories,
+    gridded_receptor_model,
+    invert_source_footprints,
+    screen_donor_transport,
+    wcwt,
+    wpscf,
+)
 from .trend import (
     TrendBreaks,
     TrendResult,
@@ -42,6 +54,16 @@ __all__ = [
     "window_columns",
     "detect_events",
     "anomaly_scores",
+    "ReceptorGridResult",
+    "FootprintInversionResult",
+    "TrajectoryClusterResult",
+    "gridded_receptor_model",
+    "wpscf",
+    "wcwt",
+    "build_footprint_matrix",
+    "invert_source_footprints",
+    "cluster_trajectories",
+    "screen_donor_transport",
     "crps_from_quantiles",
     "crps_from_samples",
     "crps_observed",

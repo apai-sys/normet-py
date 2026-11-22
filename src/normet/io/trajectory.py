@@ -53,7 +53,8 @@ import subprocess
 import tempfile
 import threading
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from glob import glob
 from pathlib import Path
 from typing import Any, cast
@@ -70,13 +71,41 @@ log = get_logger(__name__)
 
 __all__ = [
     "read_trajectory_tdump",
+    "read_trajectory_endpoints",
+    "trajectory_endpoint_weights",
     "trajectory_features",
     "build_trajectory_features",
     "join_trajectory_features",
     "run_back_trajectories",
     "load_source_regions",
+    "is_trajectory_qc_column",
+    "TRAJ_QC_SUFFIXES",
     "ALL_DIAGNOSTICS",
 ]
+
+#: Quality-control suffix names emitted alongside transport descriptors.
+TRAJ_QC_SUFFIXES = ("n_endpoints", "age_max_h")
+
+
+def is_trajectory_qc_column(column: str, *, prefix: str = "traj_") -> bool:
+    """Return True if *column* is a trajectory quality-control column rather than a predictor."""
+    name = str(column)
+    if not name.startswith(prefix):
+        return False
+    rest = name[len(prefix) :]
+    if rest in TRAJ_QC_SUFFIXES:
+        return True
+    for s in TRAJ_QC_SUFFIXES:
+        tag = f"{s}_"
+        if rest.startswith(tag) and rest.endswith("m"):
+            height_part = rest[len(tag) : -1]
+            try:
+                float(height_part)
+                return True
+            except ValueError:
+                continue
+    return False
+
 
 # HYSPLIT diagnostic variables -> normet-friendly short names.
 _DIAG_RENAME = {
@@ -167,6 +196,7 @@ def _haversine_km(lat1: Any, lon1: Any, lat2: Any, lon2: Any) -> Any:
     dphi = np.radians(np.asarray(lat2, dtype=float) - lat1)
     dl = np.radians(np.asarray(lon2, dtype=float) - lon1)
     a = np.sin(dphi / 2) ** 2 + np.cos(p1) * np.cos(p2) * np.sin(dl / 2) ** 2
+    a = np.clip(a, 0.0, 1.0)
     return 2 * r * np.arcsin(np.sqrt(a))
 
 
@@ -178,6 +208,19 @@ def _bearing_deg(lat0: float, lon0: float, lat1: float, lon1: float) -> float:
         np.radians(lat1)
     ) * np.cos(dl)
     return float((np.degrees(np.arctan2(y, x)) + 360) % 360)
+
+
+def _bearings_unit_vec(
+    lat0: float, lon0: float, lat1: np.ndarray, lon1: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Vectorised ``(sin(bearing), cos(bearing))`` from receptor ``(lat0, lon0)``."""
+    p0 = np.radians(lat0)
+    p1 = np.radians(np.asarray(lat1, dtype=float))
+    dl = np.radians(np.asarray(lon1, dtype=float) - lon0)
+    y = np.sin(dl) * np.cos(p1)
+    x = np.cos(p0) * np.sin(p1) - np.sin(p0) * np.cos(p1) * np.cos(dl)
+    theta = np.arctan2(y, x)
+    return np.sin(theta), np.cos(theta)
 
 
 def _is_bbox(region: Any) -> bool:
@@ -312,6 +355,28 @@ def load_source_regions(path: str | Path) -> dict[str, Any]:
     return _load_regions_geojson(path)
 
 
+def _endpoint_dt_hours(age_h: Any) -> np.ndarray:
+    """Positive duration (hours) represented by each endpoint in a sorted trajectory."""
+    a = np.asarray(age_h, dtype=float)
+    n = a.size
+    if n == 0:
+        return np.empty(0, dtype=float)
+    if n < 2 or not np.all(np.isfinite(a)):
+        return np.ones(n, dtype=float)
+    steps = np.abs(np.diff(a))
+    pos = steps > 0
+    if not np.all(pos):
+        med = float(np.median(steps[pos])) if np.any(pos) else 1.0
+        steps = np.where(pos, steps, med)
+    if np.allclose(steps, steps[0], rtol=1e-9, atol=1e-12):
+        return np.full(n, float(steps[0]), dtype=float)
+    w = np.empty_like(a)
+    w[0] = steps[0] / 2.0
+    w[-1] = steps[-1] / 2.0
+    w[1:-1] = (steps[1:] + steps[:-1]) / 2.0
+    return w
+
+
 def _endpoint_weights(age_h: Any) -> np.ndarray | None:
     """Per-endpoint time weights when the endpoints are unevenly spaced.
 
@@ -328,11 +393,139 @@ def _endpoint_weights(age_h: Any) -> np.ndarray | None:
     steps = np.abs(np.diff(a))
     if not np.all(steps > 0) or np.allclose(steps, steps[0], rtol=1e-9, atol=1e-12):
         return None
-    w = np.empty_like(a)
-    w[0] = steps[0] / 2.0
-    w[-1] = steps[-1] / 2.0
-    w[1:-1] = (steps[1:] + steps[:-1]) / 2.0
-    return w
+    return _endpoint_dt_hours(a)
+
+
+def trajectory_endpoint_weights(
+    traj: pd.DataFrame,
+    *,
+    blh_coupled: bool = True,
+    blh_factor: float = 1.0,
+    min_blh_m: float = 100.0,
+    fallback_height_m: float | None = 1500.0,
+    decay_hours: float | None = None,
+    scavenging_coeff: float | None = None,
+    exclude_receptor: bool = True,
+) -> np.ndarray:
+    """Compute physical surface-exposure weights per endpoint of one trajectory.
+
+    Models surface sensitivity along the trajectory via four physical terms:
+
+    1. **Time integration** (:math:`\\Delta t_k` in hours), handling uniform or
+       irregular endpoint spacing.
+    2. **PBL coupling and inverse-mixing-depth dilution** (when ``blh_coupled=True``):
+       endpoints above ``blh_factor * max(blh, min_blh_m)`` are decoupled from
+       surface emissions (weight 0), while coupled endpoints scale as
+       ``1000 / max(blh, min_blh_m)`` (1-km-BLH-equivalent sensitivity, or binary
+       height screening against ``fallback_height_m`` when ``blh`` is absent).
+    3. **Exponential removal** (when ``decay_hours`` is set):
+       :math:`\\exp(-|\\text{age}_k| / \\tau)`.
+    4. **Strictly causal wet-scavenging survival** (when ``scavenging_coeff`` > 0
+       and ``rainfall`` is present): integrates precipitation occurring strictly
+       *after* the air parcel passed endpoint *k* toward the receptor
+       (:math:`t_k < t_j \\le 0`), so upwind rain *before* passing a source does
+       not spuriously attenuate that source's emissions.
+
+    Parameters
+    ----------
+    traj : pandas.DataFrame
+        One trajectory with ``age_h`` and ``height`` (plus optional ``blh`` and
+        ``rainfall``). Rows may be in any order; output aligns 1-to-1 with
+        ``traj``'s row order.
+    blh_coupled : bool, default True
+        Gate exposure by boundary-layer height (or ``fallback_height_m`` when
+        ``blh`` is missing) and weight by ``1000 / max(blh, min_blh_m)``.
+    blh_factor : float, default 1.0
+        Multiplier applied to ``max(blh, min_blh_m)`` for coupling cutoff.
+    min_blh_m : float, default 100.0
+        Lower clamp (metres) on boundary-layer height to prevent blow-up under
+        thin nocturnal inversions.
+    fallback_height_m : float, optional, default 1500.0
+        Altitude cutoff (m AGL) used when ``blh_coupled=True`` and ``blh`` is
+        absent or NaN. Pass ``None`` to skip altitude cutoff without ``blh``.
+    decay_hours : float, optional
+        First-order chemical/dry-deposition e-folding lifetime (hours).
+    scavenging_coeff : float, optional
+        Wet-scavenging coefficient (``mm^-1``) applied causally to cumulative
+        downstream rainfall between each endpoint and the receptor.
+    exclude_receptor : bool, default True
+        Zero out the receptor origin endpoint (``age_h == 0``) when the
+        trajectory contains more than one point.
+
+    Returns
+    -------
+    numpy.ndarray
+        Non-negative float weights of shape ``(len(traj),)``.
+    """
+    if traj is None or traj.empty:
+        return np.empty(0, dtype=float)
+    if float(blh_factor) <= 0.0:
+        raise ValueError(f"blh_factor must be positive, got {blh_factor}")
+    if float(min_blh_m) <= 0.0:
+        raise ValueError(f"min_blh_m must be positive, got {min_blh_m}")
+    if decay_hours is not None and float(decay_hours) <= 0.0:
+        raise ValueError(f"decay_hours must be positive, got {decay_hours}")
+    if scavenging_coeff is not None and float(scavenging_coeff) < 0.0:
+        raise ValueError(f"scavenging_coeff must be non-negative, got {scavenging_coeff}")
+
+    n = len(traj)
+    age_raw = pd.to_numeric(traj["age_h"], errors="coerce").to_numpy(dtype=float)
+    # Sort descending by age_h so index 0 is receptor (0) and increasing index is older.
+    sort_key = np.where(np.isfinite(age_raw), -age_raw, np.inf)
+    order = np.argsort(sort_key, kind="stable")
+    age_s = age_raw[order]
+    dt = _endpoint_dt_hours(age_s)
+
+    h_s = pd.to_numeric(traj["height"], errors="coerce").to_numpy(dtype=float)[order]
+    if blh_coupled:
+        if "blh" in traj.columns:
+            blh_s = pd.to_numeric(traj["blh"], errors="coerce").to_numpy(dtype=float)[order]
+            has_blh = np.isfinite(blh_s) & np.isfinite(h_s)
+            h_eff = np.maximum(np.where(has_blh, blh_s, float(min_blh_m)), float(min_blh_m))
+            coupled_blh = has_blh & (h_s <= float(blh_factor) * h_eff)
+            sens = np.where(coupled_blh, 1000.0 / h_eff, 0.0)
+            missing_blh = (~np.isfinite(blh_s)) & np.isfinite(h_s)
+            if missing_blh.any():
+                if fallback_height_m is not None:
+                    sens = np.where(
+                        missing_blh,
+                        np.where(h_s <= float(fallback_height_m), 1.0, 0.0),
+                        sens,
+                    )
+                else:
+                    sens = np.where(missing_blh, 1.0, sens)
+        elif fallback_height_m is not None:
+            sens = np.where(np.isfinite(h_s) & (h_s <= float(fallback_height_m)), 1.0, 0.0)
+        else:
+            sens = np.ones(n, dtype=float)
+    else:
+        sens = np.ones(n, dtype=float)
+
+    if decay_hours is not None:
+        decay = np.where(np.isfinite(age_s), np.exp(-np.abs(age_s) / float(decay_hours)), 0.0)
+    else:
+        decay = np.ones(n, dtype=float)
+
+    if (
+        scavenging_coeff is not None
+        and float(scavenging_coeff) > 0.0
+        and "rainfall" in traj.columns
+    ):
+        rain_s = pd.to_numeric(traj["rainfall"], errors="coerce").to_numpy(dtype=float)[order]
+        rain_mm = np.maximum(0.0, np.nan_to_num(rain_s, nan=0.0)) * dt
+        # Rainfall at index j occurs *after* emissions picked up at older index k > j.
+        cum_rain_after = np.concatenate(([0.0], np.cumsum(rain_mm[:-1])))
+        scav = np.exp(-float(scavenging_coeff) * cum_rain_after)
+    else:
+        scav = np.ones(n, dtype=float)
+
+    w_sorted = np.where(np.isfinite(age_s), dt * sens * decay * scav, 0.0)
+    if exclude_receptor and n > 1:
+        w_sorted = np.where(age_s == 0.0, 0.0, w_sorted)
+
+    out = np.empty(n, dtype=float)
+    out[order] = np.maximum(0.0, w_sorted)
+    return out
 
 
 def trajectory_features(
@@ -340,7 +533,15 @@ def trajectory_features(
     *,
     source_regions: Mapping[str, tuple[float, float, float, float] | Any] | None = None,
     prefix: str = "traj_",
+    physics: bool = False,
     min_hours: float | None = None,
+    blh_coupled: bool = True,
+    blh_factor: float = 1.0,
+    min_blh_m: float = 100.0,
+    fallback_height_m: float | None = 1500.0,
+    decay_hours: float | None = None,
+    scavenging_coeff: float | None = None,
+    horizons_h: Sequence[tuple[float, float]] | None = None,
 ) -> dict[str, float]:
     """Collapse one back-trajectory into a fixed-length feature dict.
 
@@ -355,16 +556,20 @@ def trajectory_features(
         ``(lon_min, lat_min, lon_max, lat_max)`` bounding box, or a shapely
         polygon/multipolygon (e.g. from :func:`load_source_regions`)
         for exact point-in-polygon residence time. A box whose ``lon_min``
-        exceeds ``lon_max`` wraps the dateline. For each, the fraction of
-        trajectory time spent inside is returned as ``{prefix}resid_{name}``;
-        endpoints are weighted by the time they represent when their spacing
-        is uneven (the hourly tdump ``hyts_std`` writes is evenly spaced, so
-        the plain endpoint fraction is the time fraction).
-        An endpoint inside several overlapping regions counts towards each, so
-        the fractions are only shares of the trajectory when the regions do not
-        overlap; :func:`build_trajectory_features` warns when they do.
+        exceeds ``lon_max`` wraps the dateline. For each, returns the plain 2D
+        time residence fraction ``{prefix}resid_{name}`` and, with
+        ``physics=True``, the physically weighted BLH/decay/scavenging
+        exposure ``{prefix}footprint_{name}``.
     prefix : str, default ``"traj_"``
         Prefix for every feature name.
+    physics : bool, default False
+        Emit the Layer-1 physical-transport descriptors: path straightness,
+        the inflow and mean-bearing unit-vector components, BLH contact
+        fraction, integrated rain, and the BLH/decay/scavenging-weighted
+        ``{prefix}footprint_{name}`` region exposures. ``False`` (default)
+        keeps the historical column set, so an existing script that trains on
+        every ``traj_*`` column gives bit-identical features; the Transport
+        Studio's physics panel passes ``True``.
     min_hours : float, optional
         Minimum backward reach (hours) a trajectory must have to be trusted.
         A trajectory whose span is shorter -- HYSPLIT stopped early because the
@@ -372,79 +577,335 @@ def trajectory_features(
         except the two quality columns set to NaN, rather than passing off a
         truncated path as a short-range one. ``None`` (default) keeps every
         trajectory, leaving detection to ``{prefix}age_max_h``.
+    blh_coupled, blh_factor, min_blh_m, fallback_height_m, decay_hours, scavenging_coeff :
+        Physical exposure parameters forwarded to
+        :func:`trajectory_endpoint_weights` for ``{prefix}footprint_*`` and
+        ``{prefix}blh_contact_frac``.
+    horizons_h : sequence of (float, float), optional
+        Optional backward age windows ``[(h_start, h_end), ...]`` (e.g.
+        ``[(0, 12), (12, 36), (36, 72)]``) for multi-scale path/height/
+        precipitation/footprint breakdown (suffixed ``_{h0:g}_{h1:g}h``).
+        The precipitation and footprint slices are emitted with
+        ``physics=True`` (they are Layer-1 quantities).
 
     Returns
     -------
     dict
-        Quality descriptors ``{prefix}n_endpoints`` and ``{prefix}age_max_h``
-        (hours the trajectory actually reached back), then transport
-        descriptors: straight-line reach, path length, mean transport
-        speed, the initial bearing from the receptor toward the air's origin
-        (``inflow_deg`` -- where the air came from, not the local arrival
-        direction at the receptor), mean/min height, per-region residence
-        fractions, and — only if the ``tdump`` run wrote them — along-path
-        rainfall sum, mean boundary-layer height, mean relative humidity,
-        mean pressure, and mean air temperature.
+        Quality descriptors ``{prefix}n_endpoints`` and ``{prefix}age_max_h``,
+        transport geometry (``dist_km``, ``pathlen_km``, ``speed_kmh``,
+        ``inflow_deg``), altitude metrics, per-region ``resid_<name>``,
+        optional horizon slices, and along-path diagnostics when present in
+        ``tdump``. With ``physics=True`` also ``straightness``,
+        ``inflow_sin``/``inflow_cos``, ``mean_bearing_sin``/
+        ``mean_bearing_cos``, ``blh_contact_frac``, ``rain_mm`` and the
+        physical ``footprint_<name>`` exposures.
     """
     if traj is None or traj.empty:
         return {}
+    if horizons_h is not None:
+        for pair in horizons_h:
+            if len(pair) != 2 or not (0.0 <= float(pair[0]) < float(pair[1])):
+                raise ValueError(f"Each horizon window must satisfy 0 <= h0 < h1, got {pair!r}")
+
     # age_h is 0 at the receptor and negative going back, so sort descending to
     # put the receptor first and the oldest endpoint (air origin) last.
     t = traj.sort_values("age_h", ascending=False)
-    lat0, lon0 = float(t["lat"].iloc[0]), float(t["lon"].iloc[0])
-    latn, lonn = float(t["lat"].iloc[-1]), float(t["lon"].iloc[-1])
+    age_arr = pd.to_numeric(t["age_h"], errors="coerce").to_numpy(dtype=float)
+    lat_arr = pd.to_numeric(t["lat"], errors="coerce").to_numpy(dtype=float)
+    lon_arr = pd.to_numeric(t["lon"], errors="coerce").to_numpy(dtype=float)
+    h_arr = pd.to_numeric(t["height"], errors="coerce").to_numpy(dtype=float)
+    dt = _endpoint_dt_hours(age_arr)
 
-    step = _haversine_km(
-        t["lat"].to_numpy()[:-1],
-        t["lon"].to_numpy()[:-1],
-        t["lat"].to_numpy()[1:],
-        t["lon"].to_numpy()[1:],
-    )
+    lat0, lon0 = float(lat_arr[0]), float(lon_arr[0])
+    latn, lonn = float(lat_arr[-1]), float(lon_arr[-1])
+
+    step = _haversine_km(lat_arr[:-1], lon_arr[:-1], lat_arr[1:], lon_arr[1:])
     path_len = float(np.nansum(step))
-    span_h = float(abs(t["age_h"].iloc[-1] - t["age_h"].iloc[0]))
+    span_h = float(abs(age_arr[-1] - age_arr[0]))
+    dist_km = float(_haversine_km(lat0, lon0, latn, lonn))
+    inflow_deg = _bearing_deg(lat0, lon0, latn, lonn)
+    inflow_rad = float(np.radians(inflow_deg))
 
-    f = {
+    non_rec = age_arr != 0.0
+    if not non_rec.any():
+        non_rec = np.zeros_like(age_arr, dtype=bool)
+        if len(age_arr) > 1:
+            non_rec[1:] = True
+
+    if non_rec.any():
+        b_sin, b_cos = _bearings_unit_vec(lat0, lon0, lat_arr[non_rec], lon_arr[non_rec])
+        d_rec = np.asarray(
+            _haversine_km(lat0, lon0, lat_arr[non_rec], lon_arr[non_rec]), dtype=float
+        )
+        vw = dt[non_rec] * np.maximum(np.nan_to_num(d_rec, nan=0.0), 1e-6)
+        sx = float(np.nansum(vw * b_sin))
+        cx = float(np.nansum(vw * b_cos))
+        vec_norm = float(np.hypot(sx, cx))
+        mean_b_sin = sx / vec_norm if vec_norm > 0.0 else 0.0
+        mean_b_cos = cx / vec_norm if vec_norm > 0.0 else 0.0
+    else:
+        mean_b_sin, mean_b_cos = 0.0, 0.0
+
+    f: dict[str, float] = {
         f"{prefix}n_endpoints": float(len(t)),
         f"{prefix}age_max_h": span_h,
-        f"{prefix}dist_km": float(_haversine_km(lat0, lon0, latn, lonn)),
+        f"{prefix}dist_km": dist_km,
         f"{prefix}pathlen_km": path_len,
         f"{prefix}speed_kmh": path_len / span_h if span_h > 0 else np.nan,
-        f"{prefix}inflow_deg": _bearing_deg(lat0, lon0, latn, lonn),
+        f"{prefix}inflow_deg": inflow_deg,
         f"{prefix}height_mean": float(t["height"].mean()),
         f"{prefix}height_min": float(t["height"].min()),
     }
+    if physics:
+        # Layer-1 descriptors are opt-in: emitting them unconditionally added
+        # eight columns to the default output, silently changing the predictor
+        # set of any model trained on every traj_* column.
+        f[f"{prefix}straightness"] = (
+            float(np.clip(dist_km / path_len, 0.0, 1.0)) if path_len > 0.0 else 1.0
+        )
+        f[f"{prefix}inflow_sin"] = float(np.sin(inflow_rad)) if len(t) > 1 else 0.0
+        f[f"{prefix}inflow_cos"] = float(np.cos(inflow_rad)) if len(t) > 1 else 0.0
+        f[f"{prefix}mean_bearing_sin"] = mean_b_sin
+        f[f"{prefix}mean_bearing_cos"] = mean_b_cos
+
+    phys_w: np.ndarray | None = None
+    region_masks: dict[str, np.ndarray] = {}
+    if physics and (source_regions or horizons_h is not None):
+        phys_w = trajectory_endpoint_weights(
+            t,
+            blh_coupled=blh_coupled,
+            blh_factor=blh_factor,
+            min_blh_m=min_blh_m,
+            fallback_height_m=fallback_height_m,
+            decay_hours=decay_hours,
+            scavenging_coeff=scavenging_coeff,
+            exclude_receptor=True,
+        )
+
     if source_regions:
-        lon, lat = t["lon"].to_numpy(), t["lat"].to_numpy()
-        weights = _endpoint_weights(t["age_h"].to_numpy())
+        weights = _endpoint_weights(age_arr)
         for name, region in source_regions.items():
-            inside = np.asarray(_region_mask(region, lon, lat), dtype=bool)
+            inside = np.asarray(_region_mask(region, lon_arr, lat_arr), dtype=bool)
+            region_masks[name] = inside
             if weights is None:
                 f[f"{prefix}resid_{name}"] = float(inside.mean())
             else:
                 f[f"{prefix}resid_{name}"] = float(weights[inside].sum() / weights.sum())
+            if physics:
+                assert phys_w is not None
+                f[f"{prefix}footprint_{name}"] = float(phys_w[inside].sum())
+
     if "rainfall" in t:
+        rain_raw = pd.to_numeric(t["rainfall"], errors="coerce").to_numpy(dtype=float)
         f[f"{prefix}rain_sum"] = float(t["rainfall"].sum())
+        if physics:
+            rain_mask = non_rec & np.isfinite(rain_raw)
+            if rain_mask.any():
+                f[f"{prefix}rain_mm"] = float(
+                    np.sum(np.maximum(0.0, rain_raw[rain_mask]) * dt[rain_mask])
+                )
+            else:
+                f[f"{prefix}rain_mm"] = float(
+                    np.sum(np.maximum(0.0, np.nan_to_num(rain_raw, nan=0.0)) * dt)
+                )
+
     if "blh" in t:
+        blh_raw = pd.to_numeric(t["blh"], errors="coerce").to_numpy(dtype=float)
         f[f"{prefix}blh_mean"] = float(t["blh"].mean())
+        if physics:
+            c_mask = (
+                (non_rec if non_rec.any() else np.ones(len(t), dtype=bool))
+                & np.isfinite(blh_raw)
+                & np.isfinite(h_arr)
+            )
+            if c_mask.any():
+                h_eff = np.maximum(blh_raw[c_mask], float(min_blh_m))
+                coupled = h_arr[c_mask] <= float(blh_factor) * h_eff
+                w_c = dt[c_mask]
+                f[f"{prefix}blh_contact_frac"] = (
+                    float(w_c[coupled].sum() / w_c.sum()) if w_c.sum() > 0 else np.nan
+                )
+            else:
+                f[f"{prefix}blh_contact_frac"] = np.nan
+
     if "rh" in t:
         f[f"{prefix}rh_mean"] = float(t["rh"].mean())
     if "pressure" in t:
         f[f"{prefix}pressure_mean"] = float(t["pressure"].mean())
     if "temp" in t:
         f[f"{prefix}temp_mean"] = float(t["temp"].mean())
+
+    if horizons_h is not None:
+        abs_age = np.abs(age_arr)
+        for h0, h1 in horizons_h:
+            tag = f"{float(h0):g}_{float(h1):g}h"
+            band = np.isfinite(abs_age) & (abs_age > float(h0)) & (abs_age <= float(h1))
+            if band.any():
+                f[f"{prefix}pathlen_km_{tag}"] = (
+                    float(np.nansum(step[band[1:]])) if len(step) > 0 else 0.0
+                )
+                hm_mask = band & np.isfinite(h_arr)
+                f[f"{prefix}height_mean_{tag}"] = (
+                    float(np.average(h_arr[hm_mask], weights=dt[hm_mask]))
+                    if hm_mask.any() and dt[hm_mask].sum() > 0
+                    else np.nan
+                )
+                if "blh" in t:
+                    blh_vals = pd.to_numeric(t["blh"], errors="coerce").to_numpy(dtype=float)
+                    bm = band & np.isfinite(blh_vals)
+                    f[f"{prefix}blh_mean_{tag}"] = (
+                        float(np.average(blh_vals[bm], weights=dt[bm]))
+                        if bm.any() and dt[bm].sum() > 0
+                        else np.nan
+                    )
+                if physics and "rainfall" in t:
+                    r_vals = pd.to_numeric(t["rainfall"], errors="coerce").to_numpy(dtype=float)
+                    rm = band & np.isfinite(r_vals)
+                    f[f"{prefix}rain_mm_{tag}"] = (
+                        float(np.sum(np.maximum(0.0, r_vals[rm]) * dt[rm])) if rm.any() else 0.0
+                    )
+                if physics:
+                    assert phys_w is not None
+                    for name, inside in region_masks.items():
+                        f[f"{prefix}footprint_{name}_{tag}"] = float(phys_w[band & inside].sum())
+            else:
+                f[f"{prefix}pathlen_km_{tag}"] = np.nan
+                f[f"{prefix}height_mean_{tag}"] = np.nan
+                if "blh" in t:
+                    f[f"{prefix}blh_mean_{tag}"] = np.nan
+                if physics and "rainfall" in t:
+                    f[f"{prefix}rain_mm_{tag}"] = np.nan
+                if physics:
+                    for name in region_masks:
+                        f[f"{prefix}footprint_{name}_{tag}"] = np.nan
+
     if min_hours is not None and span_h < min_hours - 1e-6:
         quality = {f"{prefix}n_endpoints", f"{prefix}age_max_h"}
         f = {k: (v if k in quality else np.nan) for k, v in f.items()}
     return f
 
 
+def read_trajectory_endpoints(
+    tdumps: str | Iterable[str | Path],
+    *,
+    min_hours: float | None = None,
+    site: str | None = None,
+) -> pd.DataFrame:
+    """Read HYSPLIT ``tdump`` files into a tidy receptor-stamped endpoints table.
+
+    Unlike :func:`build_trajectory_features`, preserves every trajectory endpoint
+    (``lat``, ``lon``, ``height``, ``age_h``, diagnostics) for gridded receptor
+    modelling (:func:`~normet.analysis.wpscf`, :func:`~normet.analysis.wcwt`),
+    trajectory clustering (:func:`~normet.analysis.cluster_trajectories`), and
+    footprint matrix construction (:func:`~normet.analysis.build_footprint_matrix`).
+
+    Parameters
+    ----------
+    tdumps : str or iterable of path-like
+        Glob pattern or iterable of ``tdump`` file paths.
+    min_hours : float, optional
+        Drop trajectories whose backward reach is shorter than ``min_hours``.
+    site : str, optional
+        If provided, tag every row with ``site=str(site)``.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Tidy endpoint table sorted by ``(receptor_date, start_height, -age_h)``.
+        A trajectory read twice is kept once; the duplicate key covers the
+        start location and ``traj_id`` as well as the arrival time, height and
+        age, so trajectories from several start locations survive.
+    """
+    paths = sorted(glob(tdumps)) if isinstance(tdumps, str) else [str(p) for p in tdumps]
+    if not paths:
+        raise ValueError(f"No tdump files matched: {tdumps!r}")
+
+    chunks: list[pd.DataFrame] = []
+    n_short = 0
+    for p in paths:
+        try:
+            traj = read_trajectory_tdump(p)
+        except Exception as exc:
+            log.warning("Skipping trajectory file %s: %s", p, exc)
+            continue
+        for _, g in traj.groupby("traj"):
+            g_sorted = g.sort_values("age_h", ascending=False).copy()
+            age_vals = pd.to_numeric(g_sorted["age_h"], errors="coerce").to_numpy(dtype=float)
+            span_h = float(abs(age_vals[-1] - age_vals[0])) if len(age_vals) else 0.0
+            if min_hours is not None and span_h < float(min_hours) - 1e-6:
+                n_short += 1
+                continue
+            start_row = g_sorted.loc[g_sorted["age_h"].abs().idxmin()]
+            g_sorted["receptor_date"] = pd.Timestamp(cast(Any, start_row["datetime"]))
+            g_sorted["start_lat"] = float(start_row["lat"])
+            g_sorted["start_lon"] = float(start_row["lon"])
+            g_sorted["start_height"] = round(float(start_row["height"]), 1)
+            g_sorted["traj_id"] = int(start_row["traj"])
+            chunks.append(g_sorted)
+
+    if n_short:
+        log.warning("Dropped %d truncated trajectories reaching back < %g h.", n_short, min_hours)
+    if not chunks:
+        return pd.DataFrame()
+
+    raw = pd.concat(chunks, ignore_index=True)
+    # Keep the latest copy of a trajectory read twice (the same file listed
+    # more than once, or overlapping globs). The key has to identify the whole
+    # trajectory, not just its arrival time and release height: a tdump can
+    # hold several start locations and, without start_lat/start_lon/traj_id,
+    # all but the last were silently discarded.
+    raw = raw.drop_duplicates(
+        subset=[
+            "receptor_date",
+            "start_lat",
+            "start_lon",
+            "start_height",
+            "traj_id",
+            "age_h",
+        ],
+        keep="last",
+    )
+    if site is not None:
+        raw["site"] = str(site)
+    front = [
+        "receptor_date",
+        *(["site"] if site is not None else []),
+        "start_lat",
+        "start_lon",
+        "start_height",
+        "traj_id",
+        "datetime",
+        "age_h",
+        "lat",
+        "lon",
+        "height",
+    ]
+    diag_cols = [c for c in ("pressure", "rainfall", "blh", "rh", "temp") if c in raw.columns]
+    extra = [
+        c for c in raw.columns if c not in front and c not in diag_cols and c not in _BASE_COLS
+    ]
+    return (
+        raw[front + diag_cols + extra]
+        .sort_values(["receptor_date", "start_height", "age_h"], ascending=[True, True, False])
+        .reset_index(drop=True)
+    )
+
+
 def build_trajectory_features(
     tdumps: str | Iterable[str | Path],
     *,
-    source_regions: Mapping[str, tuple[float, float, float, float]] | None = None,
+    source_regions: Mapping[str, tuple[float, float, float, float] | Any] | None = None,
     prefix: str = "traj_",
+    physics: bool = False,
     date_col: str = "date",
     min_hours: float | None = None,
+    blh_coupled: bool = True,
+    blh_factor: float = 1.0,
+    min_blh_m: float = 100.0,
+    fallback_height_m: float | None = 1500.0,
+    decay_hours: float | None = None,
+    scavenging_coeff: float | None = None,
+    horizons_h: Sequence[tuple[float, float]] | None = None,
 ) -> pd.DataFrame:
     """Build a receptor-time feature table from many HYSPLIT ``tdump`` files.
 
@@ -455,9 +916,12 @@ def build_trajectory_features(
         ``tdump`` file paths. One back-trajectory run per receptor time is the
         typical layout; files holding multiple trajectories are split per
         ``traj`` index.
-    source_regions, prefix, min_hours
-        Forwarded to :func:`trajectory_features`. With ``min_hours`` set, the
-        number of trajectories nulled for being truncated is logged.
+    source_regions, prefix, physics, min_hours
+        Forwarded to :func:`trajectory_features`. ``physics=False`` (default)
+        keeps the historical column set, so an existing caller's features stay
+        bit-identical; pass ``True`` for the Layer-1 physics panel. With
+        ``min_hours`` set, the number of trajectories nulled for being
+        truncated is logged.
     date_col : str, default ``"date"``
         Name of the index column (receptor timestamp), so the result joins
         straight onto a date-indexed panel.
@@ -502,7 +966,18 @@ def build_trajectory_features(
             # The endpoint at age 0 is where (and when) the trajectory starts.
             start = g.loc[g["age_h"].abs().idxmin()]
             feats = trajectory_features(
-                g, source_regions=source_regions, prefix=prefix, min_hours=min_hours
+                g,
+                source_regions=source_regions,
+                prefix=prefix,
+                physics=physics,
+                min_hours=min_hours,
+                blh_coupled=blh_coupled,
+                blh_factor=blh_factor,
+                min_blh_m=min_blh_m,
+                fallback_height_m=fallback_height_m,
+                decay_hours=decay_hours,
+                scavenging_coeff=scavenging_coeff,
+                horizons_h=horizons_h,
             )
             rows.append(
                 {
@@ -879,7 +1354,7 @@ def _control_text(
     time: pd.Timestamp,
     lat: float,
     lon: float,
-    height_m: float,
+    height_m: float | Sequence[float],
     hours_back: int,
     met_files: list[str],
     tdump_name: str,
@@ -887,13 +1362,18 @@ def _control_text(
     top_of_model: float,
     vert_motion: int,
 ) -> str:
-    """Render a HYSPLIT ``CONTROL`` file for a single backward trajectory."""
+    """Render a HYSPLIT ``CONTROL`` file for one or more backward trajectory heights."""
     ts = pd.Timestamp(time)
+    heights = (
+        [float(h) for h in height_m]
+        if isinstance(height_m, Sequence) and not isinstance(height_m, (str, bytes))
+        else [float(height_m)]
+    )
     lines = [
         # start: YY MM DD HH (2-digit year), and MM only when it is not on the hour
         ts.strftime("%y %m %d %H %M" if ts.minute else "%y %m %d %H"),
-        "1",  # one starting location
-        f"{float(lat):.4f} {float(lon):.4f} {float(height_m):.1f}",
+        str(len(heights)),  # number of starting locations (heights)
+        *[f"{float(lat):.4f} {float(lon):.4f} {h:.1f}" for h in heights],
         str(-abs(int(hours_back))),  # negative run hours = BACKWARD
         str(int(vert_motion)),  # 0 = use met vertical velocity
         f"{float(top_of_model):.1f}",
@@ -988,14 +1468,24 @@ def run_back_trajectories(
     met_files: str | Iterable[str],
     hysplit_exec: str | Path,
     height_m: float = 500.0,
+    heights_m: Sequence[float] | None = None,
     hours_back: int = 72,
     work_dir: str | Path | None = None,
     top_of_model: float = 10000.0,
     vert_motion: int = 0,
     diagnostics: Iterable[str] = ALL_DIAGNOSTICS,
-    source_regions: Mapping[str, tuple[float, float, float, float]] | None = None,
+    source_regions: Mapping[str, tuple[float, float, float, float] | Any] | None = None,
     prefix: str = "traj_",
+    physics: bool = False,
     min_hours: float | None = None,
+    blh_coupled: bool = True,
+    blh_factor: float = 1.0,
+    min_blh_m: float = 100.0,
+    fallback_height_m: float | None = 1500.0,
+    decay_hours: float | None = None,
+    scavenging_coeff: float | None = None,
+    horizons_h: Sequence[tuple[float, float]] | None = None,
+    n_workers: int = 1,
     timeout: int = 600,
     stop: threading.Event | None = None,
 ) -> pd.DataFrame:
@@ -1048,10 +1538,12 @@ def run_back_trajectories(
         ``traj_rain_sum``/``traj_blh_mean``/``traj_rh_mean``/
         ``traj_pressure_mean``/``traj_temp_mean`` columns; pass fewer to
         skip the ones you don't need.
-    source_regions, prefix, min_hours
-        Forwarded to :func:`build_trajectory_features`. Pass
-        ``min_hours=hours_back`` to null trajectories that HYSPLIT ended early;
-        either way, truncated runs are counted in a warning.
+    source_regions, prefix, physics, min_hours
+        Forwarded to :func:`build_trajectory_features`. ``physics=False``
+        (default) keeps the historical feature columns; pass ``True`` for the
+        Layer-1 physics descriptors. Pass ``min_hours=hours_back`` to null
+        trajectories that HYSPLIT ended early; either way, truncated runs are
+        counted in a warning.
     timeout : int, default 600
         Per-run timeout (seconds) for ``hyts_std``.
     stop : threading.Event, optional
@@ -1077,6 +1569,18 @@ def run_back_trajectories(
     exe = os.path.abspath(os.path.expanduser(str(hysplit_exec)))
     if not os.access(exe, os.X_OK):
         raise FileNotFoundError(f"hyts_std not found or not executable: {exe}")
+
+    start_heights: float | list[float]
+    if heights_m is not None:
+        h_list = [float(h) for h in heights_m]
+        if not h_list or any((not np.isfinite(h) or h <= 0.0) for h in h_list):
+            raise ValueError(f"heights_m must contain positive finite altitudes, got {heights_m!r}")
+        start_heights = h_list[0] if len(h_list) == 1 else h_list
+    else:
+        start_heights = float(height_m)
+    workers = int(n_workers)
+    if workers < 1:
+        raise ValueError(f"n_workers must be >= 1, got {n_workers}")
 
     mets = [met_files] if isinstance(met_files, str | Path) else list(met_files)
     mets = [os.path.abspath(os.path.expanduser(str(m))) for m in mets]
@@ -1112,56 +1616,96 @@ def run_back_trajectories(
     uncovered: list[pd.Timestamp] = []
     stopped = False
     every = max(1, len(stamps) // 10)
-    for i, ts in enumerate(stamps, 1):
+
+    def _run_one(i: int, ts: pd.Timestamp, run_dir: Path, cleanup: bool) -> str | None:
+        nonlocal stopped
         if stop is not None and stop.is_set():
             stopped = True
-            break
-        progress.report(i - 1, len(stamps))
-        # Minutes in the name only off the hour, so on-the-hour names stay as they were.
+            return None
         name = "tdump_" + ts.strftime("%Y%m%d%H%M" if ts.minute else "%Y%m%d%H")
-        # Hand hyts_std only the files this run can touch: a multi-year archive is
-        # hundreds of weekly files, and every one would otherwise be listed in --
-        # and opened by -- each of the thousands of runs.
         run_mets = _filter_met_files(mets, ts - window, ts)
         if not run_mets:
             uncovered.append(ts)
-            continue
+            return None
         out = work / name
         out.unlink(missing_ok=True)  # else a run that fails would leave the last one's
-        (work / "CONTROL").write_text(
-            _control_text(
-                ts,
-                lat,
-                lon,
-                height_m,
-                hours_back,
-                run_mets,
-                name,
-                top_of_model=top_of_model,
-                vert_motion=vert_motion,
-            )
-        )
+        if cleanup:
+            run_dir.mkdir(parents=True, exist_ok=True)
+            for cfg_name in ("ASCDATA.CFG", "SETUP.CFG"):
+                src_cfg = work / cfg_name
+                if src_cfg.exists():
+                    shutil.copy(src_cfg, run_dir / cfg_name)
         try:
-            r = _run_hyts(exe, work, timeout, stop)
-        except subprocess.TimeoutExpired:
-            log.warning("hyts_std timed out (%ds) for receptor %s", timeout, ts)
-            continue
-        if r is None:
-            stopped = True
-            break
-
-        if r.returncode == 137:  # SIGKILL — almost always macOS Gatekeeper quarantine
-            raise RuntimeError(
-                "hyts_std was killed (exit 137) — likely macOS Gatekeeper quarantine. "
-                f"Clear it once with:\n  xattr -dr com.apple.quarantine {Path(exe).parents[1]}"
+            (run_dir / "CONTROL").write_text(
+                _control_text(
+                    ts,
+                    lat,
+                    lon,
+                    start_heights,
+                    hours_back,
+                    run_mets,
+                    name,
+                    top_of_model=top_of_model,
+                    vert_motion=vert_motion,
+                )
             )
-        if not out.exists():
-            msg = (r.stderr or r.stdout or "").strip().replace("\n", " ")[:200]
-            log.warning("No tdump for %s (hyts_std rc=%s): %s", ts, r.returncode, msg)
-            continue
-        tdumps.append(str(out))
-        if i % every == 0 and i < len(stamps):
-            log.info("hyts_std: %d of %d receptor times run", i, len(stamps))
+            try:
+                r = _run_hyts(exe, run_dir, timeout, stop)
+            except subprocess.TimeoutExpired:
+                log.warning("hyts_std timed out (%ds) for receptor %s", timeout, ts)
+                return None
+            if r is None:
+                stopped = True
+                return None
+            if r.returncode == 137:  # SIGKILL — almost always macOS Gatekeeper quarantine
+                raise RuntimeError(
+                    "hyts_std was killed (exit 137) — likely macOS Gatekeeper quarantine. "
+                    f"Clear it once with:\n  xattr -dr com.apple.quarantine {Path(exe).parents[1]}"
+                )
+            produced = run_dir / name
+            if not produced.exists():
+                msg = (r.stderr or r.stdout or "").strip().replace("\n", " ")[:200]
+                log.warning("No tdump for %s (hyts_std rc=%s): %s", ts, r.returncode, msg)
+                return None
+            if cleanup:
+                shutil.move(str(produced), str(out))
+            return str(out)
+        finally:
+            if cleanup:
+                shutil.rmtree(run_dir, ignore_errors=True)
+
+    if workers == 1 or len(stamps) <= 1:
+        for i, ts in enumerate(stamps, 1):
+            if stop is not None and stop.is_set():
+                stopped = True
+                break
+            progress.report(i - 1, len(stamps))
+            res_path = _run_one(i, ts, work, False)
+            if res_path is not None:
+                tdumps.append(res_path)
+            if i % every == 0 and i < len(stamps):
+                log.info("hyts_std: %d of %d receptor times run", i, len(stamps))
+    else:
+        progress.report(0, len(stamps))
+        ordered: list[str | None] = [None] * len(stamps)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futs = [
+                (
+                    i,
+                    pool.submit(
+                        _run_one,
+                        i + 1,
+                        ts,
+                        work / f".run_{i}",
+                        True,
+                    ),
+                )
+                for i, ts in enumerate(stamps)
+            ]
+            for done_cnt, (i, fut) in enumerate(futs, start=1):
+                ordered[i] = fut.result()
+                progress.report(done_cnt, len(stamps))
+        tdumps = [p for p in ordered if p is not None]
 
     if uncovered:
         spans = [sp for sp in map(_gdas1_file_range, mets) if sp is not None]
@@ -1191,7 +1735,18 @@ def run_back_trajectories(
         )
     log.info("Ran %d back-trajectories -> %s", len(tdumps), work)
     feats = build_trajectory_features(
-        tdumps, source_regions=source_regions, prefix=prefix, min_hours=min_hours
+        tdumps,
+        source_regions=source_regions,
+        prefix=prefix,
+        physics=physics,
+        min_hours=min_hours,
+        blh_coupled=blh_coupled,
+        blh_factor=blh_factor,
+        min_blh_m=min_blh_m,
+        fallback_height_m=fallback_height_m,
+        decay_hours=decay_hours,
+        scavenging_coeff=scavenging_coeff,
+        horizons_h=horizons_h,
     )
     age_col = f"{prefix}age_max_h"
     if min_hours is None and age_col in feats:

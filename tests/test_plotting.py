@@ -166,3 +166,58 @@ def test_usable_cycles_is_independent_of_datetime_resolution():
     coarse = pd.DatetimeIndex(pd.Series(np.array(ns, dtype="datetime64[s]")))
     assert usable_cycles(ns) == ["weekday", "month"]
     assert usable_cycles(coarse) == usable_cycles(ns)
+
+
+def test_transport_plots_render_cleanly():
+    import matplotlib.pyplot as plt
+
+    from normet.analysis import (
+        cluster_trajectories,
+        invert_source_footprints,
+        wcwt,
+    )
+    from normet.plotting import (
+        plot_footprint_inversion,
+        plot_receptor_grid,
+        plot_trajectory_clusters,
+    )
+
+    rng = np.random.default_rng(0)
+    times = pd.date_range("2023-01-01", periods=24, freq="6h")
+    ep_rows = []
+    obs_rows = []
+    for i, ts in enumerate(times):
+        obs_rows.append({"date": ts, "pm25": 20.0 + 30.0 * (i % 2)})
+        for age in (0, -3, -6):
+            ep_rows.append(
+                {
+                    "receptor_date": ts,
+                    "age_h": float(age),
+                    "lat": 51.5 + (0.4 * abs(age) if i % 2 else -0.3 * abs(age)),
+                    "lon": -0.1 + float(rng.normal(0.0, 0.05)),
+                    "height": 300.0,
+                    "blh": 800.0,
+                }
+            )
+    ep = pd.DataFrame(ep_rows)
+    obs = pd.DataFrame(obs_rows)
+    grid = wcwt(ep, obs, value_col="pm25", grid_res=0.8)
+    fig_g = plot_receptor_grid(grid, regions={"N": (-2.0, 52.0, 2.0, 54.0)})
+    assert fig_g is not None
+
+    cl = cluster_trajectories(ep, n_clusters=2, series=obs, value_col="pm25")
+    fig_c1 = plot_trajectory_clusters(cl, show_tsv=False)
+    fig_c2 = plot_trajectory_clusters(cl, show_tsv=True)
+    assert fig_c1 is not None and fig_c2 is not None
+
+    dates = pd.date_range("2023-01-01", periods=60, freq="D")
+    fp = pd.DataFrame({"A": rng.uniform(0, 3, 60), "B": rng.uniform(0, 3, 60)}, index=dates)
+    y = pd.Series(5.0 + 4.0 * fp["A"] + 2.0 * fp["B"] + rng.normal(0, 0.2, 60), index=dates)
+    inv_stat = invert_source_footprints(fp, y, n_bootstrap=15)
+    inv_roll = invert_source_footprints(
+        fp, y, n_bootstrap=10, window_days=25, step_days=10, min_window_obs=15
+    )
+    fig_i1 = plot_footprint_inversion(inv_stat)
+    fig_i2 = plot_footprint_inversion(inv_roll)
+    assert fig_i1 is not None and fig_i2 is not None
+    plt.close("all")
