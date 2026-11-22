@@ -48,7 +48,18 @@ from .trend import (
     trend,
 )
 from .uncertainty import UncDecomposition, decompose_uncertainty
-from .verification import crps_from_quantiles, crps_from_samples, crps_observed, pinball_loss
+from .verification import (
+    calibration_curve,
+    crps_from_quantiles,
+    crps_from_samples,
+    crps_observed,
+    crps_skill_score,
+    fair_crps_from_samples,
+    interval_coverage,
+    interval_score,
+    pinball_loss,
+    pit_diagnostics,
+)
 
 __all__ = [
     "TrendResult",
@@ -101,5 +112,11 @@ __all__ = [
     "crps_from_quantiles",
     "crps_from_samples",
     "crps_observed",
+    "fair_crps_from_samples",
+    "crps_skill_score",
+    "interval_score",
+    "interval_coverage",
+    "pit_diagnostics",
+    "calibration_curve",
     "pinball_loss",
 ]

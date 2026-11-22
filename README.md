@@ -33,8 +33,8 @@ MCP server for AI assistants and a desktop app build on the same API.
 
 | Module | What it does |
 |---|---|
-| `nm.prepare_data` | Imputation, date-feature engineering, train/test splitting |
-| `nm.train_model` / `nm.build_model` | AutoML via FLAML or tuned LightGBM |
+| `nm.prepare_data` | Imputation, date-feature engineering, train/test splitting — deduplication, strict covariates, split-local interpolation, UTC (default) or `local_time=` calendar features, and `freq=`-aligned lags/rollings via `nm.add_lag_features` / `nm.add_rolling_features` |
+| `nm.train_model` / `nm.build_model` | AutoML via FLAML or tuned LightGBM — `nm.model_feature_names` pins the training feature order, `nm.permutation_importance` scores importance on held-out rows, LightGBM takes native categoricals, objectives/metrics, `sample_weight` and a deterministic mode, and `nm.save_model(metadata=)` / `nm.load_model_metadata` round-trip a `*.meta.json` sidecar |
 | `nm.normalise` | Monte Carlo meteorological normalisation (deweathering, with optional `stratify_by` and `conditional_k` on-manifold resampling) |
 | `nm.wpscf` / `nm.wcwt` / `nm.invert_source_footprints` / `nm.cluster_trajectories` / `nm.screen_donor_transport` | Physical BLH-coupled Lagrangian receptor mapping, regularized source-footprint inversion, TSV trajectory clustering, and SCM spillover screening |
 | `nm.decompose` / `nm.decom_emi_shapley` / `nm.shapley_interactions` / `nm.cross_fit_decompose` / `nm.decom_met_treeshap` | Emission, meteorological, order-independent time-Shapley, 2nd-order Shapley interaction, multiplicative LMDI, temporally blocked cross-fitted, and TreeSHAP decompositions (`suggest_met_groups`, `compare_attributions`) |
@@ -48,10 +48,13 @@ MCP server for AI assistants and a desktop app build on the same API.
 | `nm.do_all_unc` | End-to-end pipeline with model-ensemble uncertainty bands |
 | `nm.do_all_multisite` | Parallel per-site pipelines |
 | `nm.pdp` / `nm.pdp_grid` | Partial-dependence values (`nm.pdp`) and their plot grid (`nm.pdp_grid`) |
-| `nm.modStats` | Model performance metrics (R², RMSE, MGE [mean absolute error], …) |
+| `nm.modStats` | Model performance metrics (R², RMSE, MGE [mean absolute error], …) with extended skill scores and `effective_n`; `nm.exceedance_stats` summarises threshold exceedances |
+| `nm.compare_models` / `nm.cv_score` / `nm.blocked_time_cv` | Model comparison with a circular moving-block bootstrap interval and a Newey–West Diebold–Mariano test for `score_b − score_a` (explicit `y_scale`), and blocked/embargoed cross-validation with out-of-fold predictions |
+| `nm.screen_aq_data` / `nm.add_met_physics_features` / `nm.analyze_lag` | Per-station QA/QC (flatline, Tukey-IQR, met bounds), meteorological physics features (ventilation, BLH, dew point), and prewhitened cross-correlation for choosing lags |
 | `nm.trend` / `nm.detect_trend_breaks` | Trend analyses with the block-bootstrap correction for autocorrelated records, plus the segmented (piecewise) trend for records whose level or slope changes part-way through |
 | `nm.mann_kendall` / `nm.theil_sen` | Classical Mann-Kendall test and Theil-Sen slope with its analytic interval — uncorrected for autocorrelation; the block-bootstrap versions are in `nm.trend` |
 | `nm.crps_from_quantiles` / `nm.crps_from_samples` / `nm.pinball_loss` / `nm.crps_observed` | Probabilistic skill scores (Gneiting & Raftery 2005): CRPS for quantile and ensemble forecasts, the pinball loss, and a point forecast's CRPS reference |
+| `nm.fair_crps_from_samples` / `nm.interval_score` / `nm.interval_coverage` / `nm.pit_diagnostics` / `nm.calibration_curve` | Finite-ensemble-corrected CRPS, interval score and coverage, PIT histograms, and calibration curves for probabilistic forecasts |
 | `nm.decompose_uncertainty` | Attribute a de-weathered estimate's total spread to its source — weather (met resampling) vs model form vs their interaction — via an additive per-date variance decomposition |
 | `nm.detect_events` / `nm.anomaly_scores` | Event detection on normalised residuals |
 | `nm.normalise_plot` / `nm.decomposition_stack` / `nm.plot_shapley_interactions` / `nm.plot_honest_did` / `nm.scm_dashboard` / `nm.plot_receptor_grid` / `nm.plot_trajectory_clusters` / `nm.plot_footprint_inversion` | Plotting helpers for normalisation, diverging decomposition stacks, Shapley interactions, HonestDiD sensitivity, SCM, and back-trajectory receptor / inversion / cluster results |

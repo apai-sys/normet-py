@@ -8,7 +8,7 @@ ordering — unlike random K-fold, no future data ever leaks into training.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from typing import Any
 
 import numpy as np
@@ -16,6 +16,7 @@ import pandas as pd
 
 from .logging import get_logger
 from .metrics import _DEFAULT_STATS, _stats_from_arrays
+from .prepare import compute_duan_smearing, impute_values, log1p_target
 
 log = get_logger(__name__)
 
@@ -192,19 +193,28 @@ def cv_score(
     covariates: list[str] | None = None,
     *,
     backend: str = "flaml",
+    strategy: str = "walk_forward",
     n_splits: int = 5,
     gap: int = 0,
+    embargo: int = 0,
     test_size: int | None = None,
     max_train_size: int | None = None,
     statistic: list[str] | None = None,
     model_config: dict[str, Any] | None = None,
+    impute: str = "none",
+    max_gap: int | None = 6,
+    circular_cols: Sequence[str] | None = None,
+    log_transform: bool = False,
+    back_transform: str = "arithmetic",
+    include_pooled: bool = False,
+    return_oof: bool = False,
     seed: int = 7_654_321,
     n_cores: int | None = None,
     verbose: bool = False,
     date_col: str = "date",
-) -> pd.DataFrame:
+) -> Any:
     """
-    Train + evaluate the configured AutoML backend across walk-forward folds.
+    Train + evaluate the configured AutoML backend across temporal CV folds.
 
     Parameters
     ----------
@@ -215,29 +225,63 @@ def cv_score(
         Target column name.
     covariates : list of str, optional
         Predictor columns. Must be non-empty.
-    backend : {"flaml"}, default "flaml"
+    backend : {"flaml", "lightgbm"}, default "flaml"
         AutoML backend.
+    strategy : {"walk_forward", "blocked"}, default "walk_forward"
+        Cross-validation splitter: forward-chaining ``walk_forward`` via
+        :func:`time_series_cv` or full-coverage ``blocked`` via :func:`blocked_time_cv`.
     n_splits, gap, test_size, max_train_size, date_col :
-        Forwarded to :func:`time_series_cv`.
+        Forwarded to :func:`time_series_cv` for the default
+        ``strategy="walk_forward"``. ``gap`` skips rows between the training
+        and validation slices.
+    embargo : int, default 0
+        Rows purged around each validation block for ``strategy="blocked"``
+        (forwarded to :func:`blocked_time_cv`); when 0, ``gap`` is used as
+        the purge width. Ignored by the walk-forward splitter, which has no
+        rows on the future side of its validation slice to purge.
     statistic : list of str, optional
         Metric keys (see :func:`normet.utils.metrics.modStats`). Defaults to
         the comprehensive set.
     model_config : dict, optional
         Backend-specific training config.
+    impute, max_gap, circular_cols :
+        When ``impute != "none"``, fit predictor imputation strictly within
+        each fold's training set to eliminate cross-fold leakage. The target
+        is never imputed: a missing validation target stays ``NaN`` in the
+        OOF frame and is excluded from that fold's metrics, so the ``n``
+        statistic counts observed pairs while ``n_test`` counts the fold's
+        rows. Training rows whose target is missing are dropped before the
+        fit rather than synthesized.
+    log_transform : bool, default False
+        If True, fit each fold on ``log1p(target)`` and evaluate OOF metrics
+        on original units using ``back_transform``.
+    back_transform : {"arithmetic", "smearing", "geometric"}, default "arithmetic"
+        Log-scale inversion rule when ``log_transform=True``.
+    include_pooled : bool, default False
+        If True, append a ``fold="pooled"`` summary row computed over all
+        concatenated out-of-fold predictions.
+    return_oof : bool, default False
+        If True, return ``(cv_table, oof_df)`` where ``oof_df`` carries
+        ``["date", "observed", "predicted", "fold"]``.
     seed, n_cores, verbose :
         Forwarded to the backend trainer.
 
     Returns
     -------
-    pandas.DataFrame
-        One row per fold (plus an optional pooled row), with metric columns
-        and metadata: ``fold``, ``train_start``, ``train_end``, ``test_start``,
-        ``test_end``, ``n_train``, ``n_test``.
+    pandas.DataFrame or (pandas.DataFrame, pandas.DataFrame)
+        Per-fold metric summary (plus optional pooled row and OOF predictions).
     """
     if not covariates:
         raise ValueError("`covariates` must be a non-empty list.")
     if target not in df.columns:
         raise ValueError(f"Target column '{target}' not found.")
+    strat_norm = str(strategy or "walk_forward").lower()
+    if strat_norm not in ("walk_forward", "blocked"):
+        raise ValueError(f"`strategy` must be 'walk_forward' or 'blocked', got {strategy!r}.")
+    if back_transform not in ("arithmetic", "smearing", "geometric"):
+        raise ValueError(
+            f"`back_transform` must be 'arithmetic', 'smearing', or 'geometric', got {back_transform!r}."
+        )
     stats_keys = statistic or _DEFAULT_STATS
 
     from ..model.predict import ml_predict
@@ -254,9 +298,15 @@ def cv_score(
             f"`{date_col}` must be present and datetime-like (or use a DatetimeIndex)."
         )
 
-    folds: list[pd.DataFrame] = []
-    for i, (tr_idx, te_idx) in enumerate(
-        time_series_cv(
+    splitter = (
+        blocked_time_cv(
+            work,
+            n_splits=n_splits,
+            embargo=embargo if embargo > 0 else gap,
+            date_col=date_col,
+        )
+        if strat_norm == "blocked"
+        else time_series_cv(
             work,
             n_splits=n_splits,
             gap=gap,
@@ -264,9 +314,52 @@ def cv_score(
             max_train_size=max_train_size,
             date_col=date_col,
         )
-    ):
-        df_tr = work.iloc[tr_idx]
-        df_te = work.iloc[te_idx]
+    )
+
+    folds: list[pd.DataFrame] = []
+    oof_dates: list[np.ndarray] = []
+    oof_obs: list[np.ndarray] = []
+    oof_pred: list[np.ndarray] = []
+    oof_fold: list[np.ndarray] = []
+
+    for i, (tr_idx, te_idx) in enumerate(splitter):
+        if impute != "none":
+            fold_work = work.copy()
+            labels = np.full(len(fold_work), "embargo", dtype=object)
+            labels[tr_idx] = "training"
+            labels[te_idx] = "testing"
+            fold_work["set"] = labels
+            # impute_values fills every numeric column, including the target.
+            # The truth is an observation, not a predictor: snapshot it and
+            # restore it after imputation so a validation-fold gap enters the
+            # OOF frame and metrics as NaN instead of as the training median.
+            target_before = fold_work[target].copy()
+            fold_work = impute_values(
+                fold_work,
+                dropna=False,
+                strategy=impute,
+                max_gap=max_gap,
+                circular_cols=circular_cols,
+            )
+            fold_work[target] = target_before
+            df_tr = fold_work.iloc[tr_idx].copy()
+            df_te = fold_work.iloc[te_idx].copy()
+        else:
+            df_tr = work.iloc[tr_idx].copy()
+            df_te = work.iloc[te_idx].copy()
+
+        # A missing target cannot supervise a fit, and synthesizing it would
+        # score the model against a value that was never observed. Drop those
+        # training rows; the validation gaps stay NaN and _stats_from_arrays
+        # excludes them from this fold's metrics.
+        df_tr = df_tr.loc[pd.to_numeric(df_tr[target], errors="coerce").notna()].copy()
+        if df_tr.empty:
+            raise ValueError(f"Fold {i} has no training rows with an observed target.")
+
+        y_true = pd.to_numeric(df_te[target], errors="coerce").to_numpy(dtype=float)
+        if log_transform:
+            df_tr = log1p_target(df_tr, target)
+
         model = train_model(
             df=df_tr,
             target=target,
@@ -277,8 +370,20 @@ def cv_score(
             n_cores=n_cores,
             verbose=verbose,
         )
-        y_pred = ml_predict(model, df_te)
-        y_true = df_te[target].to_numpy()
+        raw_pred = np.asarray(ml_predict(model, df_te), dtype=float)
+        if log_transform:
+            phi = 1.0
+            if back_transform == "smearing":
+                tr_raw = np.asarray(ml_predict(model, df_tr), dtype=float)
+                phi = compute_duan_smearing(df_tr[target], tr_raw)
+            y_pred = (
+                np.clip(phi * np.exp(raw_pred) - 1.0, 0.0, None)
+                if back_transform == "smearing"
+                else np.clip(np.expm1(raw_pred), 0.0, None)
+            )
+        else:
+            y_pred = raw_pred
+
         row = _stats_from_arrays(y_pred, y_true, stats_keys)
         row["fold"] = i
         row["train_start"] = df_tr[date_col].iloc[0]
@@ -289,10 +394,41 @@ def cv_score(
         row["n_test"] = len(df_te)
         folds.append(row)
 
+        oof_dates.append(df_te[date_col].to_numpy())
+        oof_obs.append(y_true)
+        oof_pred.append(y_pred)
+        oof_fold.append(np.full(len(df_te), i, dtype=int))
+
+    empty_oof = pd.DataFrame(columns=[date_col, "observed", "predicted", "fold"])
     if not folds:
-        return pd.DataFrame()
+        return (pd.DataFrame(), empty_oof) if return_oof else pd.DataFrame()
+
+    if include_pooled and oof_obs:
+        all_obs = np.concatenate(oof_obs)
+        all_pred = np.concatenate(oof_pred)
+        pooled_row = _stats_from_arrays(all_pred, all_obs, stats_keys)
+        pooled_row["fold"] = "pooled"
+        pooled_row["train_start"] = pd.concat([r["train_start"] for r in folds]).min()
+        pooled_row["train_end"] = pd.concat([r["train_end"] for r in folds]).max()
+        pooled_row["test_start"] = pd.concat([r["test_start"] for r in folds]).min()
+        pooled_row["test_end"] = pd.concat([r["test_end"] for r in folds]).max()
+        pooled_row["n_train"] = int(sum(int(r["n_train"].iloc[0]) for r in folds))
+        pooled_row["n_test"] = int(len(all_obs))
+        folds.append(pooled_row)
 
     out = pd.concat(folds, ignore_index=True)
     meta_cols = ["fold", "train_start", "train_end", "test_start", "test_end", "n_train", "n_test"]
     ordered = meta_cols + [c for c in out.columns if c not in meta_cols]
-    return out[ordered]
+    out_df = out[ordered]
+
+    if return_oof:
+        oof_df = pd.DataFrame(
+            {
+                date_col: np.concatenate(oof_dates),
+                "observed": np.concatenate(oof_obs),
+                "predicted": np.concatenate(oof_pred),
+                "fold": np.concatenate(oof_fold),
+            }
+        )
+        return out_df, oof_df
+    return out_df

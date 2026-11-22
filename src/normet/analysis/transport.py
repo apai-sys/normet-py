@@ -17,9 +17,6 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from scipy import optimize as sp_opt
-from scipy.cluster.hierarchy import fcluster, linkage
-from scipy.spatial.distance import squareform
 
 from ..io.trajectory import (
     _haversine_km,
@@ -553,6 +550,8 @@ def _solve_centered_ridge(
             b = np.concatenate([yc, np.zeros(p)])
         else:
             A, b = Fc, yc
+        from scipy import optimize as sp_opt
+
         beta, _ = sp_opt.nnls(A, b)
     else:
         gram = Fc.T @ Fc + (float(alpha) + 1e-12) * np.eye(p)
@@ -906,6 +905,9 @@ def cluster_trajectories(
         dz = (h_grid - h_grid[:, :1]) / 1000.0 * float(z_scale)
         parts.append(dz)
     X = np.hstack(parts)
+
+    from scipy.cluster.hierarchy import fcluster, linkage
+    from scipy.spatial.distance import squareform
 
     if metric == "euclidean":
         Z = linkage(X, method="ward")
