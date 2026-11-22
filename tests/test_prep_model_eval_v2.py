@@ -25,7 +25,7 @@ from normet.backends.flaml_backend import train_flaml
 from normet.backends.lgb_backend import LgbModel, train_lgb
 from normet.exceptions import DataError
 from normet.model.io import load_model, load_model_metadata, save_model
-from normet.model.predict import ml_predict
+from normet.model.predict import ml_predict, ml_predict_dask
 from normet.model.train import build_model, train_model
 from normet.utils.cv import cv_score
 from normet.utils.featureeng import (
@@ -183,16 +183,81 @@ def test_impute_time_interp_no_cross_split_or_boundary_or_oversize_leakage() -> 
     assert out_pert.loc[9, "x"] == pytest.approx(train_med)
 
 
-def test_add_date_variables_timezone_local_vs_utc_epoch() -> None:
+def test_prepare_data_time_interp_random_uses_full_series_and_ts_stays_leak_free() -> None:
+    n = 60
+    dates = pd.date_range("2023-01-01", periods=n, freq="h")
+    x = np.arange(n, dtype=float)
+    x[50:56] = np.nan
+    df = pd.DataFrame({"date": dates, "value": np.linspace(10.0, 20.0, n), "x": x})
+
+    # A random split alternates the set labels; the historical behaviour
+    # interpolates the whole sorted series, so the six-hour gap is still
+    # filled 50..55 rather than falling back to the median.
+    out_random = prepare_data(
+        df, "value", ["x"], split_method="random", impute="time_interp", max_gap=6, seed=5
+    )
+    x_random = out_random.sort_values("date")["x"].to_numpy()
+    assert np.allclose(x_random[50:56], np.arange(50.0, 56.0))
+
+    # A time split keeps per-set interpolation: a gap straddling the
+    # train/test boundary is not filled across it.
+    x_ts = x.copy()
+    x_ts[43:47] = np.nan
+    df_ts = pd.DataFrame({"date": dates, "value": np.linspace(10.0, 20.0, n), "x": x_ts})
+    out_ts = prepare_data(
+        df_ts, "value", ["x"], split_method="ts", impute="time_interp", max_gap=6
+    ).sort_values("date")
+    train_med = float(np.median(np.arange(43, dtype=float)))
+    for i in (43, 44, 45, 46):
+        assert float(out_ts.loc[out_ts["date"] == dates[i], "x"].iloc[0]) == pytest.approx(
+            train_med
+        )
+
+    # Perturbing the first finite testing value does not move training rows.
+    df_pert = df_ts.copy()
+    df_pert.loc[47, "x"] = 9999.0
+    out_pert = prepare_data(
+        df_pert, "value", ["x"], split_method="ts", impute="time_interp", max_gap=6
+    ).sort_values("date")
+    for i in (43, 44):
+        assert float(out_pert.loc[out_pert["date"] == dates[i], "x"].iloc[0]) == pytest.approx(
+            train_med
+        )
+
+
+def test_add_date_variables_timezone_utc_default_and_local_opt_in() -> None:
     ts_local = pd.DatetimeIndex([pd.Timestamp("2023-06-15 01:00:00", tz="Asia/Shanghai")])
     df = pd.DataFrame({"date": ts_local})
-    out = add_date_variables(df)
-
     expected_epoch = int(ts_local.tz_convert("UTC")[0].timestamp())
+
+    # Default restores the historical encoding: calendar features follow the
+    # UTC conversion, so hour/day_julian agree with date_unix.
+    out = add_date_variables(df)
     assert int(out.loc[0, "date_unix"]) == expected_epoch
-    assert int(out.loc[0, "hour"]) == 1
-    assert int(out.loc[0, "day_julian"]) == pd.Timestamp("2023-06-15").dayofyear
-    assert int(out.loc[0, "weekday"]) == 4
+    assert int(out.loc[0, "hour"]) == 17
+    assert int(out.loc[0, "day_julian"]) == pd.Timestamp("2023-06-14").dayofyear
+    assert int(out.loc[0, "weekday"]) == 3  # Wednesday, 1=Mon..7=Sun
+
+    # Opt-in: local civil time for the calendar features; epoch stays UTC.
+    local = add_date_variables(df, local_time=True)
+    assert int(local.loc[0, "date_unix"]) == expected_epoch
+    assert int(local.loc[0, "hour"]) == 1
+    assert int(local.loc[0, "day_julian"]) == pd.Timestamp("2023-06-15").dayofyear
+    assert int(local.loc[0, "weekday"]) == 4  # Thursday
+
+    # prepare_data forwards the opt-in.
+    raw = df.assign(value=1.0, ws=2.0)
+    prep_local = prepare_data(
+        raw,
+        "value",
+        ["ws"],
+        split_method="ts",
+        impute="none",
+        local_time=True,
+    )
+    assert int(prep_local.loc[0, "hour"]) == 1
+    prep_utc = prepare_data(raw, "value", ["ws"], split_method="ts", impute="none")
+    assert int(prep_utc.loc[0, "hour"]) == 17
 
 
 def test_time_aware_lag_rolling_and_analyze_lag_with_gaps() -> None:
@@ -295,6 +360,43 @@ def test_screen_aq_data_and_met_physics_features() -> None:
     assert (phys_c["rh_derived"] > 0).all() and (phys_c["rh_derived"] <= 100.0).all()
 
 
+def test_screen_aq_data_group_col_isolates_stations() -> None:
+    dates = pd.date_range("2023-01-01", periods=48, freq="h")
+    station = np.tile(["A", "B"], 24)
+    a_rows = station == "A"
+    value = np.where(a_rows, 10.0, np.arange(48, dtype=float) + 100.0)
+    df = pd.DataFrame({"date": dates, "station": station, "value": value})
+
+    # A station held constant for all 24 rows: interleaving with B breaks
+    # every run in the global order, so only per-group screening sees it.
+    _, flags_global = screen_aq_data(df, "value", flatline_window=6, return_flags=True)
+    _, flags_grouped = screen_aq_data(
+        df, "value", flatline_window=6, group_col="station", return_flags=True
+    )
+    assert int(flags_global.loc[a_rows, "flag_flatline"].sum()) == 0
+    assert int(flags_grouped.loc[a_rows, "flag_flatline"].sum()) == int(a_rows.sum())
+
+    # IQR fences: A is ~10 with one 100 outlier, B is ~5000. Pooled
+    # quartiles swallow the outlier; per-station quartiles flag it.
+    value2 = np.empty(48)
+    a_idx = np.flatnonzero(a_rows)
+    b_idx = np.flatnonzero(~a_rows)
+    value2[a_idx] = np.where(np.arange(a_idx.size) % 2 == 0, 9.0, 11.0)
+    value2[b_idx] = np.where(np.arange(b_idx.size) % 2 == 0, 4999.0, 5001.0)
+    value2[a_idx[0]] = 100.0
+    df2 = pd.DataFrame({"date": dates, "station": station, "value": value2})
+
+    _, iqr_global = screen_aq_data(df2, "value", iqr_multiplier=3.0, return_flags=True)
+    _, iqr_grouped = screen_aq_data(
+        df2, "value", iqr_multiplier=3.0, group_col="station", return_flags=True
+    )
+    assert not bool(iqr_global.loc[a_idx[0], "flag_iqr_outlier"])
+    assert bool(iqr_grouped.loc[a_idx[0], "flag_iqr_outlier"])
+
+    with pytest.raises(ValueError, match="Group column"):
+        screen_aq_data(df, "value", group_col="site")
+
+
 # ---------------------------------------------------------------------------
 # Layer 2: Model feature order, backends, build_model, cache, IO
 # ---------------------------------------------------------------------------
@@ -354,6 +456,24 @@ def test_model_feature_names_ml_predict_strict_and_permutation_importance() -> N
         seed=7,
     )
     assert (imp_r2["metric"] == "R2").all()
+
+
+def test_ml_predict_dask_forwards_strict_features() -> None:
+    dd = pytest.importorskip("dask.dataframe")
+    df = _make_hourly_df(24)
+    model = _SimpleLinearModel(["ws", "temp"], np.array([1.0, 0.5]))
+
+    ddf = dd.from_pandas(df, npartitions=2)
+    preds = ml_predict_dask(model, ddf, strict_features=True).compute()
+    assert preds.shape == (24,)
+    assert np.isfinite(preds).all()
+
+    with pytest.raises(DataError):
+        ml_predict_dask(
+            model,
+            dd.from_pandas(df.drop(columns=["temp"]), npartitions=2),
+            strict_features=True,
+        ).compute()
 
 
 def test_lgb_backend_categoricals_objectives_deterministic_warning_and_weights(
@@ -436,6 +556,32 @@ def test_lgb_backend_categoricals_objectives_deterministic_warning_and_weights(
         seed=5,
     )
     assert np.isfinite(ml_predict(m_q, df)).all()
+
+
+def test_lgb_numeric_object_stays_numeric_and_string_object_is_categorical() -> None:
+    pytest.importorskip("lightgbm")
+    df = _make_hourly_df(80, seed=17)
+    df["x_num_obj"] = pd.Series(np.arange(len(df), dtype=float), dtype=object)
+    df["station_str"] = pd.Series(np.tile(["north", "south", "east", "west"], len(df) // 4))
+
+    m_num = train_lgb(
+        df,
+        target="value",
+        covariates=["ws", "x_num_obj"],
+        model_config={"n_trials": 1, "cv_folds": 2},
+        seed=4,
+    )
+    assert m_num.categorical_features == []
+    assert np.isfinite(ml_predict(m_num, df)).all()
+
+    m_cat = train_lgb(
+        df,
+        target="value",
+        covariates=["ws", "station_str"],
+        model_config={"n_trials": 1, "cv_folds": 2},
+        seed=4,
+    )
+    assert m_cat.categorical_features == ["station_str"]
 
 
 def test_flaml_backend_cv_strategy_and_sample_weight(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -729,6 +875,7 @@ def test_stats_and_modstats_extended_metrics_effective_n_weekday_and_log() -> No
         back_transform="smearing",
         smearing_factor=1.05,
         effective_n=True,
+        weekday_start=1,
     )
     assert {"1", "2", "3", "4", "5", "6", "7"}.issubset(set(ms_wd["weekday"].astype(str)))
 
@@ -787,6 +934,86 @@ def test_exceedance_stats_and_compare_models() -> None:
     # diff is score_b - score_a: positive when model A is better
     assert cmp_res["diff"] > 0
     assert cmp_res["dm_pvalue"] < 0.05
+
+
+def test_compare_models_explicit_truth_scale() -> None:
+    rng = np.random.default_rng(21)
+    n = 60
+    ws = rng.uniform(1.0, 10.0, n)
+    orig = 20.0 + 3.0 * ws
+    dates = pd.date_range("2023-05-01", periods=n, freq="h")
+
+    def _log_predictor(model: object, frame: pd.DataFrame) -> np.ndarray:
+        return np.log1p(orig)
+
+    def _orig_predictor(model: object, frame: pd.DataFrame) -> np.ndarray:
+        return orig
+
+    common: dict[str, Any] = {
+        "n_bootstrap": 20,
+        "block_size": 6,
+        "seed": 3,
+    }
+
+    # (a) Original-scale truth with both log flags: the truth must not be
+    # expm1'd. Back-transformed predictions are exactly the observations.
+    df_orig = pd.DataFrame({"date": dates, "value": orig, "ws": ws, "set": "testing"})
+    res_orig = compare_models(
+        df_orig,
+        object(),
+        object(),
+        log_transform_a=True,
+        log_transform_b=True,
+        y_scale="original",
+        predictor_a=_log_predictor,
+        predictor_b=_log_predictor,
+        **common,
+    )
+    assert res_orig["score_a"] == pytest.approx(0.0, abs=1e-6)
+    assert res_orig["score_b"] == pytest.approx(0.0, abs=1e-6)
+
+    # (b) Log1p-scale truth with only one log flag: expm1 the truth so it
+    # matches the back-transformed prediction.
+    df_log = df_orig.assign(value=np.log1p(orig))
+    res_log = compare_models(
+        df_log,
+        object(),
+        object(),
+        log_transform_a=True,
+        log_transform_b=False,
+        y_scale="log1p",
+        predictor_a=_log_predictor,
+        predictor_b=_orig_predictor,
+        **common,
+    )
+    assert res_log["score_a"] == pytest.approx(0.0, abs=1e-6)
+    assert res_log["score_b"] == pytest.approx(0.0, abs=1e-6)
+
+    # Declaring the wrong scale is now an explicit user error, not a silent
+    # magnitude guess: original-scale scoring of a log1p truth is far off.
+    res_wrong = compare_models(
+        df_log,
+        object(),
+        object(),
+        log_transform_a=True,
+        log_transform_b=False,
+        y_scale="original",
+        predictor_a=_log_predictor,
+        predictor_b=_orig_predictor,
+        **common,
+    )
+    assert res_wrong["score_a"] > 1.0
+
+    with pytest.raises(ValueError, match="y_scale"):
+        compare_models(
+            df_orig,
+            object(),
+            object(),
+            y_scale="raw",
+            predictor_a=_log_predictor,
+            predictor_b=_log_predictor,
+            n_bootstrap=10,
+        )
 
 
 def test_cv_score_blocked_embargo_impute_log_pooled_and_oof() -> None:
@@ -852,6 +1079,86 @@ def test_cv_score_blocked_embargo_impute_log_pooled_and_oof() -> None:
         assert (oof_df["predicted"] > 0).all()
     finally:
         backend_registry._backends.pop("cvrec", None)
+
+
+def test_cv_score_does_not_impute_the_validation_target() -> None:
+    df = _make_hourly_df(72, seed=13)
+    df["value"] = np.maximum(df["value"], 1.0)
+    # A gap in the final walk-forward validation tail (a missing observation,
+    # as in an AQ record), not in the predictors.
+    gap_mask = np.zeros(len(df), dtype=bool)
+    gap_mask[-8:] = True
+    gap_dates = set(df.loc[gap_mask, "date"])
+    original_values = dict(zip(df["date"], df["value"].to_numpy(dtype=float), strict=True))
+    df.loc[gap_mask, "value"] = np.nan
+
+    class _GapBackend:
+        name = "cvgap"
+
+        def train(
+            self,
+            df_train: pd.DataFrame,
+            target: str = "value",
+            covariates: list[str] | None = None,
+            variables: list[str] | None = None,
+            model_config: dict[str, Any] | None = None,
+            seed: int = 1,
+            verbose: bool = False,
+            n_cores: int | None = None,
+            **kwargs: Any,
+        ) -> _SimpleLinearModel:
+            covs = list(covariates or [])
+            # The fit must never see a synthesized truth.
+            assert df_train[target].notna().all()
+            assert not df_train[covs].isna().any().any()
+            return _SimpleLinearModel(
+                covs,
+                np.zeros(len(covs)),
+                intercept=float(df_train[target].mean()),
+                backend="cvgap",
+            )
+
+        def save(self, model: object, path: str = ".", filename: str = "automl.joblib") -> str:
+            return str(Path(path) / filename)
+
+        def load(self, path: str = ".", filename: str | None = None) -> object:
+            return {}
+
+    backend_registry.register(_GapBackend())
+    try:
+        scores_df, oof_df = cv_score(
+            df,
+            target="value",
+            covariates=["ws", "temp"],
+            backend="cvgap",
+            n_splits=3,
+            impute="train_median",
+            statistic=["n", "RMSE"],
+            return_oof=True,
+        )
+    finally:
+        backend_registry._backends.pop("cvgap", None)
+
+    # The validation-fold gap stays a missing observation in the OOF frame.
+    gap_oof = oof_df.loc[oof_df["date"].isin(gap_dates)]
+    assert int(gap_mask.sum()) == 8
+    assert len(gap_oof) == 8
+    assert gap_oof["observed"].isna().all()
+    assert np.isfinite(gap_oof["predicted"]).all()
+
+    # Observed values outside the gap are untouched.
+    finite_oof = oof_df.loc[~oof_df["date"].isin(gap_dates)]
+    expected = [original_values[d] for d in finite_oof["date"]]
+    assert np.allclose(finite_oof["observed"].to_numpy(dtype=float), expected)
+
+    # Metrics use only the observed pairs: each fold's `n` counts them,
+    # while `n_test` still counts every validation row.
+    observed_per_fold = oof_df.groupby("fold")["observed"].apply(lambda s: int(s.notna().sum()))
+    rows_per_fold = oof_df.groupby("fold")["observed"].apply(lambda s: int(s.size))
+    for _, row in scores_df.iterrows():
+        fold = int(row["fold"])
+        assert int(row["n"]) == int(observed_per_fold.loc[fold])
+        assert int(row["n_test"]) == int(rows_per_fold.loc[fold])
 
 
 def test_probabilistic_verification_suite() -> None:

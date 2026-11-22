@@ -42,6 +42,7 @@ def prepare_data(
     circular_cols: Sequence[str] | None = None,
     deduplicate: str | None = None,
     strict_covariates: bool = False,
+    local_time: bool = False,
 ) -> pd.DataFrame:
     """
     Clean, validate, and split the input DataFrame in a single pipeline.
@@ -98,6 +99,11 @@ def prepare_data(
     strict_covariates : bool, default False
         If True, raise ``ValueError`` when any non-builtin covariate in
         ``covariates`` is missing from ``df``.
+    local_time : bool, default False
+        Forwarded to :func:`add_date_variables`. By default the calendar
+        features (``day_julian``/``weekday``/``hour``) are derived from UTC
+        for tz-aware input, matching the historical encoding; pass True to
+        derive them from the frame's local civil time instead.
 
     Returns
     -------
@@ -147,7 +153,7 @@ def prepare_data(
                 n_dup,
             )
     df_out = (
-        df_out.pipe(add_date_variables)
+        df_out.pipe(add_date_variables, local_time=local_time)
         .pipe(
             split_into_sets,
             split_method=split_method,
@@ -161,6 +167,7 @@ def prepare_data(
             strategy=impute,
             max_gap=max_gap,
             circular_cols=circular_cols,
+            within_split=split_method != "random",
         )
         .reset_index(drop=True)
     )
@@ -424,6 +431,7 @@ def impute_values(
     strategy: str = "median",
     max_gap: int | None = 6,
     circular_cols: Sequence[str] | None = None,
+    within_split: bool = True,
 ) -> pd.DataFrame:
     """
     Impute or drop missing values in predictors and target.
@@ -455,6 +463,14 @@ def impute_values(
     circular_cols : sequence of str, optional
         Degree columns (e.g. wind direction ``"wd"``) to interpolate on the circle
         via ``sin``/``cos`` when ``strategy="time_interp"``.
+    within_split : bool, default True
+        When a ``"set"`` column is present and ``strategy="time_interp"``,
+        interpolate only inside contiguous runs of one split label, so a
+        testing value can never fill a training gap (and vice versa). Pass
+        False for a random split, where the labels alternate and fragment
+        nearly every run: the whole date-ordered series is then one segment,
+        which reproduces the historical behaviour. Time-based splits keep
+        the leak-free default.
 
     Returns
     -------
@@ -496,7 +512,12 @@ def impute_values(
         )
         limit_val = int(max_gap) if max_gap is not None else None
         if limit_val is None or limit_val > 0:
-            if "set" in out.columns:
+            # A random split alternates the labels, so contiguous same-label
+            # runs are mostly one or two rows long and interpolation would
+            # fall back to the median at nearly every gap. In that case
+            # (within_split=False) the whole sorted series is one segment,
+            # as it was before split-aware interpolation was introduced.
+            if "set" in out.columns and within_split:
                 split_series = out.loc[order_idx, "set"].astype(str).to_numpy()
                 segments: list[tuple[int, int]] = []
                 for split_label in dict.fromkeys(split_series):
@@ -539,7 +560,7 @@ def impute_values(
     return out
 
 
-def add_date_variables(df: pd.DataFrame) -> pd.DataFrame:
+def add_date_variables(df: pd.DataFrame, *, local_time: bool = False) -> pd.DataFrame:
     """
     Add basic date/time-derived features from ``date``.
 
@@ -566,6 +587,15 @@ def add_date_variables(df: pd.DataFrame) -> pd.DataFrame:
     ----------
     df : pandas.DataFrame
         Input dataset with column ``date``.
+    local_time : bool, default False
+        For tz-aware input, derive ``day_julian``/``weekday``/``hour`` from
+        the frame's local civil time. Default False derives them from UTC,
+        which is how the function has always behaved: a model whose
+        hour-of-day effect was fitted on that encoding keeps seeing the same
+        clock, and the calendar features agree with ``date_unix``. Pass True
+        when the analysis is deliberately about local wall-clock behaviour
+        (e.g. rush hour); the three features then shift by the UTC offset
+        and no longer line up with ``date_unix``.
 
     Returns
     -------
@@ -573,20 +603,24 @@ def add_date_variables(df: pd.DataFrame) -> pd.DataFrame:
         Copy of dataset with added time-derived variables.
     """
     out = df.copy()
-    dt_local = pd.DatetimeIndex(out["date"])
-    dt_utc = dt_local.tz_convert("UTC").tz_localize(None) if dt_local.tz is not None else dt_local
+    dt_in = pd.DatetimeIndex(out["date"])
+    if dt_in.tz is not None:
+        dt_utc = dt_in.tz_convert("UTC").tz_localize(None)
+        dt_cal = dt_in.tz_localize(None) if local_time else dt_utc
+    else:
+        dt_utc = dt_in
+        dt_cal = dt_in
 
     # astype("int64") counts in the index's own resolution, not nanoseconds:
     # pandas >= 2.0 keeps a series' unit (datetime64[s]/[ms]/[us], e.g. from
     # Parquet) through ``DatetimeIndex``, so without the explicit ns conversion
     # ``date_unix`` came out in seconds/ms/us -- 1.7e9 -> 1.7 for a s-resolution
     # column -- and the trend feature silently lost its scale.
-    # Calendar features (day_julian, weekday, hour) reflect local civil time,
-    # while date_unix records absolute UTC epoch seconds.
+    # ``date_unix`` always records absolute UTC epoch seconds.
     out["date_unix"] = dt_utc.as_unit("ns").astype("int64").to_numpy() // 10**9
-    out["day_julian"] = dt_local.dayofyear.to_numpy()
-    out["weekday"] = pd.Categorical(dt_local.weekday + 1)
-    out["hour"] = dt_local.hour.to_numpy()
+    out["day_julian"] = dt_cal.dayofyear.to_numpy()
+    out["weekday"] = pd.Categorical(dt_cal.weekday + 1)
+    out["hour"] = dt_cal.hour.to_numpy()
     return out
 
 

@@ -72,12 +72,24 @@ _METRIC_ALIASES: dict[str, tuple[str, ...]] = {
 
 
 def _is_categorical_series(s: pd.Series) -> bool:
-    """True for Categorical, object, or string series handled natively by LightGBM."""
-    return bool(
-        isinstance(s.dtype, pd.CategoricalDtype)
-        or pd.api.types.is_object_dtype(s.dtype)
-        or pd.api.types.is_string_dtype(s.dtype)
-    )
+    """True when a covariate needs LightGBM's categorical encoding.
+
+    A ``CategoricalDtype`` column always does. An object/string column does
+    only when it is genuinely non-numeric: at least one non-NA value must
+    fail ``pd.to_numeric``. Numeric-valued object columns (e.g. a CSV/Excel
+    import of numbers) otherwise stay numeric, matching the historical
+    whole-frame ``float`` coercion; treating each distinct number as a
+    category changed the splits, predictions and importances of existing
+    scripts.
+    """
+    if isinstance(s.dtype, pd.CategoricalDtype):
+        return True
+    if not (pd.api.types.is_object_dtype(s.dtype) or pd.api.types.is_string_dtype(s.dtype)):
+        return False
+    non_na = s.dropna()
+    if non_na.empty:
+        return False
+    return bool(pd.to_numeric(non_na, errors="coerce").isna().any())
 
 
 def _encode_frame_for_lgb(
@@ -392,8 +404,17 @@ def train_lgb(
     """Train a LightGBM model with random hyperparameter search + CV.
 
     Runs a random search over hyperparameters using ``lgb.cv`` for each
-    trial, picks the configuration with the lowest validation RMSE, then
-    trains a final model on all training data with those best parameters.
+    trial, picks the configuration with the lowest mean validation score of
+    the configured ``metric`` (RMSE by default; the objective's default
+    metric -- e.g. ``l1`` for MAE, ``huber`` for Huber -- when no metric is
+    given), then trains a final model on all training data with those best
+    parameters.
+
+    Categorical covariates: ``CategoricalDtype`` columns, and object/string
+    columns whose non-NA values are not all numeric, are passed to LightGBM
+    as categorical features (levels encoded as integer codes). A
+    numeric-valued object column (e.g. read from CSV/Excel) stays numeric
+    via ``pd.to_numeric``, as it did under the old float coercion.
 
     Parameters
     ----------
@@ -418,6 +439,20 @@ def train_lgb(
         - ``early_stopping_rounds`` : int (default 20)
         - ``num_leaves_min`` / ``num_leaves_max`` : int | None (auto-inferred)
         - ``learning_rate_min`` / ``learning_rate_max`` : float (0.01 – 0.3)
+        - ``objective`` : str (default "regression"). One of
+          ``regression``/``l2``, ``l1``/``mae``, ``huber``, ``fair``,
+          ``tweedie``, ``poisson``, ``quantile``.
+        - ``metric`` : str | None (default None). Early-stopping and
+          trial-selection metric; defaults to the objective's metric in
+          ``_OBJECTIVE_DEFAULT_METRIC``. ``mae`` is aliased to ``l1``.
+        - ``alpha`` : float | None (default None). Required for
+          ``objective="quantile"`` (defaults to 0.5, must be in (0, 1));
+          must be > 0 for ``objective="huber"``. Ignored otherwise.
+        - ``tweedie_variance_power`` : float | None (default None). Must
+          be in (1, 2) when ``objective="tweedie"``; ignored otherwise.
+        - ``deterministic`` : bool (default False). When True, requests
+          LightGBM's deterministic mode (and column-wise histogram
+          construction) for reproducible fits.
         - ``native_nan`` : bool (default False; see the parameter of the same
           name -- the config key is the route through ``build_model``)
 

@@ -382,8 +382,13 @@ def _season_from_month(m: int) -> str:
     return "SON"
 
 
-def _expand_time_token(df: pd.DataFrame, token: str) -> pd.Series:
-    """Derive a grouping series from `date` for time-based tokens."""
+def _expand_time_token(df: pd.DataFrame, token: str, *, weekday_start: int = 0) -> pd.Series:
+    """Derive a grouping series from `date` for time-based tokens.
+
+    ``weekday_start`` is the label given to Monday: 0 keeps the historical
+    0=Mon..6=Sun encoding, 1 gives 1=Mon..7=Sun (the encoding used by
+    :func:`normet.utils.prepare.add_date_variables`).
+    """
     if "date" not in df.columns:
         raise ValueError(f"`by='{token}'` requires a 'date' column.")
     dt = pd.to_datetime(df["date"])
@@ -394,7 +399,7 @@ def _expand_time_token(df: pd.DataFrame, token: str) -> pd.Series:
     if token == "hour":
         return dt.dt.hour.rename("hour")
     if token == "weekday":
-        return (dt.dt.weekday + 1).rename("weekday")
+        return (dt.dt.weekday + int(weekday_start)).rename("weekday")
     if token == "year":
         return dt.dt.year.rename("year")
     if token == "day_of_year":
@@ -461,6 +466,7 @@ def modStats(
     back_transform: str = "arithmetic",
     smearing_factor: float | None = None,
     effective_n: bool = False,
+    weekday_start: int = 0,
 ) -> pd.DataFrame:
     """
     Predict with a model on a DataFrame and compute statistics.
@@ -499,6 +505,12 @@ def modStats(
         rows when ``None`` and ``back_transform="smearing"``.
     effective_n : bool, default False
         Adjust correlation ``r`` significance for lag-1 serial autocorrelation.
+    weekday_start : {0, 1}, default 0
+        Label assigned to Monday when ``"weekday"`` is used in ``by``.
+        Default 0 preserves the historical 0=Mon..6=Sun grouping labels
+        that stored weekday tables are keyed by. Pass 1 for 1=Mon..7=Sun,
+        matching the ``weekday`` categorical built by
+        :func:`normet.utils.prepare.add_date_variables`.
 
     Returns
     -------
@@ -506,6 +518,8 @@ def modStats(
         Tidy DataFrame of metrics. Has either a ``set`` column (default) or
         one column per ``by`` key (when ``by`` is given).
     """
+    if weekday_start not in (0, 1):
+        raise ValueError(f"`weekday_start` must be 0 or 1, got {weekday_start!r}.")
     if statistic is None:
         statistic = _DEFAULT_STATS
 
@@ -544,7 +558,7 @@ def modStats(
         group_cols: list[str] = []
         for k in keys:
             if k in _TIME_GROUP_TOKENS:
-                work[k] = _expand_time_token(work, k).to_numpy()
+                work[k] = _expand_time_token(work, k, weekday_start=weekday_start).to_numpy()
                 group_cols.append(k)
             elif k in work.columns:
                 group_cols.append(k)
@@ -698,6 +712,7 @@ def compare_models(
     back_transform: str = "arithmetic",
     smearing_a: float = 1.0,
     smearing_b: float = 1.0,
+    y_scale: str = "original",
     predictor_a: Callable[[object, pd.DataFrame], np.ndarray] | None = None,
     predictor_b: Callable[[object, pd.DataFrame], np.ndarray] | None = None,
     seed: int = DEFAULT_SEED,
@@ -708,6 +723,60 @@ def compare_models(
     observations, a circular moving-block bootstrap confidence interval for
     ``score_b - score_a``, and a two-sided Diebold-Mariano test with Newey-West
     HAC variance estimation.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Frame containing ``target`` and the predictors the two models read.
+    model_a, model_b : object
+        Models accepted by ``predictor_a`` / ``predictor_b`` (by default
+        :func:`normet.model.predict.ml_predict`).
+    target : str, default "value"
+        Observation column. Its scale must match ``y_scale`` and the scale
+        of the predictions the predictors return.
+    subset : str or None, default "testing"
+        If ``df`` has a ``set`` column, evaluate only these rows; ``None``
+        or ``"all"`` uses every row.
+    metric : {"RMSE", "MGE", "MAE", "NSE", "R2", "KGE"}, default "RMSE"
+        Scalar skill score compared between the models.
+    block_size : int, default 24
+        Circular moving-block bootstrap block length in rows.
+    n_bootstrap : int, default 500
+        Number of bootstrap resamples.
+    confidence_level : float, default 0.95
+        Two-sided confidence level for the bootstrap interval of
+        ``score_b - score_a``.
+    log_transform_a, log_transform_b : bool, default False
+        If True, the corresponding predictor returns ``log1p``-scale values
+        and they are back-transformed before scoring (``expm1``, or the
+        ``back_transform`` rule). The truth is *not* transformed implicitly:
+        tell the function its scale with ``y_scale``.
+    back_transform : {"arithmetic", "smearing", "geometric"}, default "arithmetic"
+        Inversion rule used when a log flag is set.
+    smearing_a, smearing_b : float, default 1.0
+        Duan smearing multipliers for ``back_transform="smearing"``.
+    y_scale : {"original", "log1p"}, default "original"
+        Scale of the ``target`` column. ``"original"`` compares the truth
+        as stored with the returned predictions, which are in original units
+        whenever the corresponding log flag is set. ``"log1p"`` applies
+        ``expm1`` to the truth first, for callers whose target column has
+        already been log1p-transformed.
+
+        This is explicit because the scale cannot be recovered reliably
+        from the target's name or magnitude: an original-scale PM target
+        (median ~20) and a log1p-scale one (median ~1) both occur in
+        practice, and a silent guess scored one of them against the wrong
+        truth.
+    predictor_a, predictor_b : callable(model, df) -> ndarray, optional
+        Prediction functions; default :func:`ml_predict`.
+    seed : int, default 7654321
+        Seed for the bootstrap resampler.
+
+    Returns
+    -------
+    dict
+        Scores, bootstrap interval, Diebold-Mariano statistic and p-value,
+        and a human-readable summary.
     """
     from scipy import stats as _stats
 
@@ -733,6 +802,8 @@ def compare_models(
         raise ValueError(
             f"`back_transform` must be 'arithmetic', 'smearing', or 'geometric', got {back_transform!r}."
         )
+    if y_scale not in ("original", "log1p"):
+        raise ValueError(f"`y_scale` must be 'original' or 'log1p', got {y_scale!r}.")
     if target not in df.columns:
         raise ValueError(f"Target column '{target}' not found in DataFrame.")
 
@@ -764,16 +835,12 @@ def compare_models(
             if back_transform == "smearing"
             else np.clip(np.expm1(pb), 0.0, None)
         )
-    if (
-        log_transform_a
-        and log_transform_b
-        and "log1p" not in target
-        or (log_transform_a or log_transform_b)
-        and float(np.nanmedian(pa)) > 5.0 * max(1.0, float(np.nanmedian(y_raw)))
-    ):
-        y_eval = np.expm1(y_raw)
-    else:
-        y_eval = y_raw
+    # The truth is transformed only on explicit request: after a log flag the
+    # predictions are in original units, so a log1p-scale target must be
+    # expm1'd to match, while an original-scale one must not. Deriving this
+    # from the target's name or magnitude scored one of those two common
+    # layouts against a wrong-scale truth (see the docstring).
+    y_eval = np.expm1(y_raw) if y_scale == "log1p" else y_raw
 
     mask = np.isfinite(y_eval) & np.isfinite(pa) & np.isfinite(pb)
     yt = y_eval[mask]

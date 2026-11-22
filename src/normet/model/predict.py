@@ -147,6 +147,7 @@ def ml_predict_dask(
     ddf: Any,
     *,
     chunk_size: int | None = None,
+    strict_features: bool = False,
 ) -> Any:
     """
     Predict over a :class:`dask.dataframe.DataFrame` lazily.
@@ -162,11 +163,10 @@ def ml_predict_dask(
         Partitioned feature frame. Must contain the model's features.
     chunk_size : int, optional
         Forwarded to :func:`ml_predict` for each partition.
-
     strict_features : bool, default False
         If True, raise :class:`normet.exceptions.DataError` whenever any
-        trained model feature is missing from ``newdata`` instead of logging a
-        warning and continuing with the intersection.
+        trained model feature is missing from a partition of ``ddf`` instead
+        of logging a warning and continuing with the intersection.
 
     Returns
     -------
@@ -181,7 +181,7 @@ def ml_predict_dask(
     def _one(part: pd.DataFrame) -> np.ndarray:
         if len(part) == 0:
             return np.empty(0, dtype=float)
-        return ml_predict(model, part, chunk_size=chunk_size)
+        return ml_predict(model, part, chunk_size=chunk_size, strict_features=strict_features)
 
     # map_partitions returns a Series; pull to a numpy via to_dask_array
     series = ddf.map_partitions(lambda p: pd.Series(_one(p), index=p.index), meta=("yhat", "f8"))

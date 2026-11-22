@@ -230,8 +230,15 @@ def cv_score(
     strategy : {"walk_forward", "blocked"}, default "walk_forward"
         Cross-validation splitter: forward-chaining ``walk_forward`` via
         :func:`time_series_cv` or full-coverage ``blocked`` via :func:`blocked_time_cv`.
-    n_splits, gap, embargo, test_size, max_train_size, date_col :
-        Forwarded to the chosen CV splitter.
+    n_splits, gap, test_size, max_train_size, date_col :
+        Forwarded to :func:`time_series_cv` for the default
+        ``strategy="walk_forward"``. ``gap`` skips rows between the training
+        and validation slices.
+    embargo : int, default 0
+        Rows purged around each validation block for ``strategy="blocked"``
+        (forwarded to :func:`blocked_time_cv`); when 0, ``gap`` is used as
+        the purge width. Ignored by the walk-forward splitter, which has no
+        rows on the future side of its validation slice to purge.
     statistic : list of str, optional
         Metric keys (see :func:`normet.utils.metrics.modStats`). Defaults to
         the comprehensive set.
@@ -239,7 +246,12 @@ def cv_score(
         Backend-specific training config.
     impute, max_gap, circular_cols :
         When ``impute != "none"``, fit predictor imputation strictly within
-        each fold's training set to eliminate cross-fold leakage.
+        each fold's training set to eliminate cross-fold leakage. The target
+        is never imputed: a missing validation target stays ``NaN`` in the
+        OOF frame and is excluded from that fold's metrics, so the ``n``
+        statistic counts observed pairs while ``n_test`` counts the fold's
+        rows. Training rows whose target is missing are dropped before the
+        fit rather than synthesized.
     log_transform : bool, default False
         If True, fit each fold on ``log1p(target)`` and evaluate OOF metrics
         on original units using ``back_transform``.
@@ -317,6 +329,11 @@ def cv_score(
             labels[tr_idx] = "training"
             labels[te_idx] = "testing"
             fold_work["set"] = labels
+            # impute_values fills every numeric column, including the target.
+            # The truth is an observation, not a predictor: snapshot it and
+            # restore it after imputation so a validation-fold gap enters the
+            # OOF frame and metrics as NaN instead of as the training median.
+            target_before = fold_work[target].copy()
             fold_work = impute_values(
                 fold_work,
                 dropna=False,
@@ -324,11 +341,20 @@ def cv_score(
                 max_gap=max_gap,
                 circular_cols=circular_cols,
             )
+            fold_work[target] = target_before
             df_tr = fold_work.iloc[tr_idx].copy()
             df_te = fold_work.iloc[te_idx].copy()
         else:
             df_tr = work.iloc[tr_idx].copy()
             df_te = work.iloc[te_idx].copy()
+
+        # A missing target cannot supervise a fit, and synthesizing it would
+        # score the model against a value that was never observed. Drop those
+        # training rows; the validation gaps stay NaN and _stats_from_arrays
+        # excludes them from this fold's metrics.
+        df_tr = df_tr.loc[pd.to_numeric(df_tr[target], errors="coerce").notna()].copy()
+        if df_tr.empty:
+            raise ValueError(f"Fold {i} has no training rows with an observed target.")
 
         y_true = pd.to_numeric(df_te[target], errors="coerce").to_numpy(dtype=float)
         if log_transform:

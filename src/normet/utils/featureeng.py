@@ -394,6 +394,7 @@ def screen_aq_data(
     flatline_window: int | None = 6,
     bounds: Mapping[str, tuple[float | None, float | None]] | None = None,
     iqr_multiplier: float | None = None,
+    group_col: str | None = None,
     return_flags: bool = False,
 ) -> pd.DataFrame | tuple[pd.DataFrame, pd.DataFrame]:
     """Screen air-quality observations and meteorology for QA/QC anomalies.
@@ -403,11 +404,53 @@ def screen_aq_data(
     ``flatline_window``), robust Tukey IQR outliers, and out-of-range
     meteorological bounds.
 
-    Returns ``cleaned_df`` (or ``(cleaned_df, flags_df)`` when ``return_flags=True``)
-    without mutating the input DataFrame.
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Long-format observations. May hold several sites; see ``group_col``.
+    target : str
+        Observation column to screen and clean.
+    date_col : str, default "date"
+        Datetime column establishing temporal order. A DatetimeIndex is used
+        when the column is absent.
+    min_value, max_value : float or None
+        Fixed validity bounds for ``target``. Values below ``min_value``
+        (or above ``max_value``) are flagged; ``None`` disables that check.
+    negative_action : {"nan", "clip", "drop", "keep"}, default "nan"
+        What to do with below-``min_value`` values in the cleaned frame.
+    flatline_window : int or None, default 6
+        Minimum run length (in consecutive rows of the same group) for a
+        constant value to count as a stuck sensor. ``None`` disables.
+    bounds : mapping, optional
+        Extra columns mapped to ``(low, high)`` plausibility bounds (e.g.
+        ``DEFAULT_MET_BOUNDS``); out-of-range cells become NaN and are
+        flagged. Bounds are absolute, so they are unaffected by grouping.
+    iqr_multiplier : float or None, default None
+        Tukey fence multiplier: values outside
+        ``Q1 - m*IQR .. Q3 + m*IQR`` are flagged. The quartiles are computed
+        on the group's own distribution. ``None`` disables.
+    group_col : str or None, default None
+        Column identifying independent series (typically a station id).
+        When set, temporal ordering, flatline runs and IQR quartiles are
+        computed *within each group*, so a value from another site neither
+        breaks a stuck-sensor run nor widens the IQR fence. When None the
+        whole frame is treated as one series, as before. Without this,
+        a constant station in a multi-site panel is never flagged because
+        each of its rows is separated by another site in the global order.
+    return_flags : bool, default False
+        If True, return ``(cleaned_df, flags_df)``; otherwise just the
+        cleaned frame.
+
+    Returns
+    -------
+    pandas.DataFrame or tuple of pandas.DataFrame
+        Cleaned frame, and optionally a per-row boolean flag frame with the
+        same index as ``df``.
     """
     if target not in df.columns:
         raise ValueError(f"Target column '{target}' not found in DataFrame.")
+    if group_col is not None and group_col not in df.columns:
+        raise ValueError(f"Group column '{group_col}' not found in DataFrame.")
     if negative_action not in ("nan", "clip", "drop", "keep"):
         raise ValueError(
             f"`negative_action` must be 'nan', 'clip', 'drop', or 'keep', got {negative_action!r}."
@@ -440,11 +483,30 @@ def screen_aq_data(
         return (out, flags_empty) if return_flags else out
 
     if date_col in out.columns and pd.api.types.is_datetime64_any_dtype(out[date_col]):
-        order = np.argsort(out[date_col].to_numpy(), kind="stable")
+        date_values: np.ndarray | None = out[date_col].to_numpy()
     elif isinstance(out.index, pd.DatetimeIndex):
-        order = np.argsort(out.index.to_numpy(), kind="stable")
+        date_values = out.index.to_numpy()
     else:
-        order = np.arange(n, dtype=np.int64)
+        date_values = None
+
+    if group_col is None:
+        group_positions = [np.arange(n, dtype=np.int64)]
+    else:
+        # Factorize with a sentinel so rows with a missing group still form
+        # one group; factorize's -1 code would otherwise be skipped and
+        # those rows would never be screened.
+        groups = out[group_col].astype(object)
+        missing_group = groups.isna().to_numpy()
+        if missing_group.any():
+            groups = groups.copy()
+            groups.loc[missing_group] = "__normet_missing_group__"
+        codes = pd.factorize(groups, sort=False)[0]
+        group_positions = [np.flatnonzero(codes == code) for code in range(int(codes.max()) + 1)]
+
+    def _ordered_positions(positions: np.ndarray) -> np.ndarray:
+        if date_values is None:
+            return positions
+        return positions[np.argsort(date_values[positions], kind="stable")]
 
     vals = pd.to_numeric(out[target], errors="coerce").to_numpy(dtype=float)
     fin = np.isfinite(vals)
@@ -452,35 +514,44 @@ def screen_aq_data(
     flag_max = (vals > float(max_value)) & fin if max_value is not None else np.zeros(n, dtype=bool)
 
     flag_flat = np.zeros(n, dtype=bool)
-    if flatline_window is not None and n >= int(flatline_window):
+    if flatline_window is not None:
         w_min = int(flatline_window)
-        v_ord = vals[order]
-        f_ord = np.isfinite(v_ord)
-        flat_ord = np.zeros(n, dtype=bool)
-        i = 0
-        while i < n:
-            if not f_ord[i]:
-                i += 1
+        for positions in group_positions:
+            if positions.size < w_min:
                 continue
-            j = i + 1
-            while j < n and f_ord[j] and abs(v_ord[j] - v_ord[i]) <= 1e-12:
-                j += 1
-            if j - i >= w_min:
-                flat_ord[i:j] = True
-            i = j
-        flag_flat[order] = flat_ord
+            pos_ord = _ordered_positions(positions)
+            v_ord = vals[pos_ord]
+            f_ord = np.isfinite(v_ord)
+            n_ord = pos_ord.size
+            flat_ord = np.zeros(n_ord, dtype=bool)
+            i = 0
+            while i < n_ord:
+                if not f_ord[i]:
+                    i += 1
+                    continue
+                j = i + 1
+                while j < n_ord and f_ord[j] and abs(v_ord[j] - v_ord[i]) <= 1e-12:
+                    j += 1
+                if j - i >= w_min:
+                    flat_ord[i:j] = True
+                i = j
+            flag_flat[pos_ord] = flat_ord
 
     flag_iqr = np.zeros(n, dtype=bool)
     if iqr_multiplier is not None:
         m = float(iqr_multiplier)
-        base_valid = fin & (~flag_neg) & (~flag_max)
-        v_base = vals[base_valid]
-        if v_base.size >= 4:
+        for positions in group_positions:
+            base_valid = positions[fin[positions] & (~flag_neg[positions]) & (~flag_max[positions])]
+            v_base = vals[base_valid]
+            if v_base.size < 4:
+                continue
             q1, q3 = np.nanpercentile(v_base, [25.0, 75.0])
             iqr = float(q3 - q1)
             if iqr > 0.0:
                 lo_t, hi_t = float(q1) - m * iqr, float(q3) + m * iqr
-                flag_iqr = fin & ((vals < lo_t) | (vals > hi_t))
+                flag_iqr[positions] = fin[positions] & (
+                    (vals[positions] < lo_t) | (vals[positions] > hi_t)
+                )
 
     flag_bounds = np.zeros(n, dtype=bool)
     if bounds:

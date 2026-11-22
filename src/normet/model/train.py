@@ -51,6 +51,7 @@ def build_model(
     strict_covariates: bool = False,
     log_transform: bool = False,
     sample_weight: str | np.ndarray | pd.Series | None = None,
+    local_time: bool = False,
 ) -> tuple[pd.DataFrame, object]:
     """
     Prepare the data and train a model with the selected AutoML backend.
@@ -89,6 +90,42 @@ def build_model(
         keep whichever ones the caller listed. Use this as a blanket
         override; to select a specific subset of time features instead,
         simply list only those in ``covariates`` and leave this False.
+    n_cores : int, optional
+        Thread count forwarded to the backend.
+    cache : str or pathlib.Path, optional
+        Directory used by :func:`train_model` to memoize the fitted model
+        on the prepared data and configuration. Off by default.
+    impute : {"train_median", "median", "time_interp", "none"}, default "train_median"
+        Missing-value strategy forwarded to :func:`normet.utils.prepare.prepare_data`.
+        Predictors only: the pipeline fits statistics on training rows, so
+        test values never leak into the fills.
+    max_gap : int or None, default 6
+        Longest consecutive predictor gap filled by linear interpolation when
+        ``impute="time_interp"``; longer gaps fall back to the training median.
+    embargo : int, default 0
+        Adjacent training rows marked ``"embargo"`` around each testing block,
+        for autocorrelated series. Forwarded to
+        :func:`normet.utils.prepare.split_into_sets`.
+    circular_cols : sequence of str, optional
+        Angular degree columns (e.g. wind direction) interpolated on the
+        circle via ``sin``/``cos`` when ``impute="time_interp"``.
+    deduplicate : {"mean", "first", "last", "raise"} or None, default None
+        How to handle duplicate timestamps before splitting. ``None`` keeps
+        them and warns.
+    strict_covariates : bool, default False
+        If True, raise when a requested non-builtin covariate is absent from
+        ``df`` instead of silently dropping it.
+    log_transform : bool, default False
+        Fit on ``log1p(target)``; the returned prepared frame carries the
+        transformed target so later predictions can be back-transformed.
+    sample_weight : str, ndarray, or Series, optional
+        Observation weights: a column name (kept through preparation) or a
+        per-row array aligned with the input ``df``. Non-finite weights
+        warn and are dropped by the backend.
+    local_time : bool, default False
+        Forwarded to :func:`normet.utils.prepare.prepare_data`: derive
+        ``day_julian``/``weekday``/``hour`` from the frame's local civil
+        time for tz-aware input instead of the historical UTC encoding.
 
     Returns
     -------
@@ -151,6 +188,7 @@ def build_model(
         circular_cols=circular_cols,
         deduplicate=deduplicate,
         strict_covariates=strict_covariates,
+        local_time=local_time,
     )
     if _tmp_sw_col in df_prep.columns:
         sw_forward = df_prep.pop(_tmp_sw_col).to_numpy(dtype=float)
