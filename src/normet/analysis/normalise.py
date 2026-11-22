@@ -428,6 +428,7 @@ def _build_knn_indices(
             str(key): np.flatnonzero(pool_strata == key) for key in sorted(set(pool_strata))
         }
         full_tree: cKDTree | None = None
+        mapped: np.ndarray[Any, Any]
         for key in sorted(set(df_strata)):
             pos = np.flatnonzero(df_strata == key)
             cand = pool_idx_map.get(str(key))
