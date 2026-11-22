@@ -262,14 +262,15 @@ class NormaliseConfig:
     """
     back_transform: str = "geometric"
     """Retransformation mode when ``log_transform=True``:
-      - ``"geometric"`` (default): averages in ``log1p`` space and applies ``expm1``
-        once at the end. This is the legacy behaviour, kept as the default so
-        ``log_transform=True`` results from earlier releases stay bit-identical.
-      - ``"arithmetic"``: back-transform each resampled draw via ``expm1``
-        before averaging, estimating the meteorological arithmetic mean rather than
-        the biased geometric mean.
-      - ``"smearing"``: additionally applies Duan's (1983) nonparametric smearing
-        correction ``phi * exp(z_hat) - 1`` to remove training-residual Jensen bias.
+
+    - ``"geometric"`` (default): averages in ``log1p`` space and applies ``expm1``
+      once at the end. This is the legacy behaviour, kept as the default so
+      ``log_transform=True`` results from earlier releases stay bit-identical.
+    - ``"arithmetic"``: back-transform each resampled draw via ``expm1``
+      before averaging, estimating the meteorological arithmetic mean rather than
+      the biased geometric mean.
+    - ``"smearing"``: additionally applies Duan's (1983) nonparametric smearing
+      correction ``phi * exp(z_hat) - 1`` to remove training-residual Jensen bias.
     """
     smearing_factor: float | None = None
     """Optional explicit Duan smearing factor ``phi`` used when ``log_transform=True``
