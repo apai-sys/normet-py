@@ -29,7 +29,6 @@ from ..utils.features import extract_features
 from ..utils.logging import get_logger
 from ..utils.prepare import (
     add_date_variables,
-    impute_values,
     log1p_target,
     process_date,
 )
@@ -194,6 +193,10 @@ _MET_RESULT_COLUMNS = frozenset(
 )
 # Exact Shapley values need 2**k normalisations for k features or groups.
 _SHAPLEY_EXACT_MAX = 10
+#: Standard columns of :attr:`ShapleyInteractionResult.summary`, also emitted
+#: when the model has no meteorological feature and the table is empty (an
+#: empty frame without columns cannot be sorted by ``std``).
+_INTERACTION_SUMMARY_COLUMNS = ("term", "kind", "mean", "std", "mean_abs", "max_abs")
 
 #: Atmospheric-physics grouping taxonomy used by :func:`suggest_met_groups`.
 MET_PHYSICAL_GROUPS: dict[str, tuple[str, ...]] = {
@@ -1119,10 +1122,17 @@ def _analytic_base_value(
             raise DataError("`conditional_on` filter left no rows in the resample pool.")
     preds_base = ml_predict(model, base_pool, num_threads=n_cores_eff)
     if cfg.scale == "multiplicative":
+        # The Monte Carlo path aggregates the draws first and only then maps
+        # the aggregate to the log1p scale (decom_emi's
+        # ``np.log1p(np.maximum(vals, 0.0))``); so the analytic limit of the
+        # linear-space branch is ``log1p(mean(preds))``, not
+        # ``mean(log1p(preds))``. The latter is a different estimand with a
+        # Jensen gap that does not shrink with n_samples. A log-space model
+        # already predicts the transformed scale, so its mean is unchanged.
         scalar = (
             float(np.nanmean(preds_base))
             if is_log_space
-            else float(np.nanmean(np.log1p(np.maximum(preds_base, 0.0))))
+            else float(np.log1p(np.maximum(np.nanmean(preds_base), 0.0)))
         )
     elif cfg.log_transform:
         scalar = float(np.expm1(float(np.nanmean(preds_base))))
@@ -1172,9 +1182,11 @@ def _finalise_emission_scale(
 
     if scale == "additive":
         base_mean = float(np.mean(raw_base))
-        result["emi_total"] = raw_total
-        result["emi_base"] = base_mean
-        result["emi_noise"] = raw_base - base_mean
+        # Components first, then the totals, matching the pre-scale-option
+        # decom_emi column order (``observed``, calendar components,
+        # ``emi_total``, ``emi_noise``, ``emi_base``). Positional consumers
+        # of the default emission output -- e.g. ``out.columns[1:-3]`` for the
+        # components -- rely on it.
         for col in component_cols:
             result[col] = np.asarray(z_or_c_series[col], dtype=float)
         if main_effects is not None:
@@ -1183,6 +1195,9 @@ def _finalise_emission_scale(
         if pairwise is not None:
             for k, arr in pairwise.items():
                 result[k] = np.asarray(arr, dtype=float)
+        result["emi_total"] = raw_total
+        result["emi_noise"] = raw_base - base_mean
+        result["emi_base"] = base_mean
         return result
 
     def _to_z(arr: np.ndarray) -> np.ndarray:
@@ -1423,11 +1438,14 @@ def decom_emi_shapley(
     n_cores_eff = _effective_cores(_cfg.n_cores)
     norm_log_flag = bool(is_log_space and _cfg.scale != "multiplicative")
 
-    if not time_players:
-        # Delegate trivial zero-time-feature case cleanly to decom_emi.
-        return decom_emi(
-            df_work, model=model, config=_cfg, target="value", exact_base=use_exact_base
-        )
+    # A model with no time feature is a valid input (``time_players == []``)
+    # and is handled by the ordinary zero-player attribution below: the one
+    # coalition value its empty player set needs is enough. Do NOT delegate
+    # to decom_emi here: the frame was already log1p-transformed above when
+    # ``scale='multiplicative'`` was requested and the model is in log space,
+    # while a fresh decom_emi call would re-derive ``is_log_space`` from
+    # ``log_transform`` (False) and log1p the predictions a second time,
+    # reporting observations in log1p units.
 
     players: list[_Player] = [(t, [t]) for t in time_players]
     all_model_vars = [v for v in model_feats if v != "value"]
@@ -1529,6 +1547,14 @@ def _run_met_attribution(
     is_mult = cfg.scale == "multiplicative"
     norm_log_flag = bool(is_log_space and not is_mult)
 
+    def _output_scale(values: np.ndarray) -> np.ndarray:
+        """Map raw model outputs to the space the aggregate path reports."""
+        if norm_log_flag:
+            return np.expm1(values)
+        if is_mult and not is_log_space:
+            return np.log1p(np.maximum(values, 0.0))
+        return values
+
     def value_of(resample: list[str]) -> np.ndarray:
         df_norm = normalise(
             df=df_work,
@@ -1545,14 +1571,31 @@ def _run_met_attribution(
             conditional_on=cfg.conditional_on,
             stratify_by=cfg.stratify_by,
             conditional_k=cfg.conditional_k,
-            log_transform=norm_log_flag,
+            # The wide table is needed for per-seed draws; keep it on the
+            # model's native scale so the point estimate can be aggregated
+            # before the back-transform (see below), exactly as the
+            # aggregate=True path does.
+            log_transform=False if want_draws else norm_log_flag,
             memory_save=cfg.memory_save,
             cache=cfg.cache,
         )
         arr = _normet_draws_array(df_norm, result.index, want_draws=want_draws)
-        if is_mult and not is_log_space:
-            arr = np.log1p(np.maximum(arr, 0.0))
-        return arr
+        if not want_draws:
+            if is_mult and not is_log_space:
+                arr = np.log1p(np.maximum(arr, 0.0))
+            return arr
+        # ``return_uncertainty`` promises only to attach SE columns, so it
+        # must not move the point estimates. The aggregate path maps the mean
+        # of the raw draws to the output scale once; a wide table
+        # back-transformed per seed would instead average expm1(draw), a
+        # Jensen gap that survives more draws (measured ~7 % on emi_total).
+        # Shift every coalition's draw matrix by a constant so its mean is
+        # the aggregate-path point value; the spread across draws, and hence
+        # every MC/permutation SE, is unchanged.
+        raw = np.asarray(arr, dtype=float)
+        point = _output_scale(raw.mean(axis=1))
+        draws = _output_scale(raw)
+        return draws + (point - draws.mean(axis=1))[:, None]
 
     raw_emi, raw_contribs, raw_values, perm_se = _attribute_core(
         players,
@@ -1669,6 +1712,11 @@ def shapley_interactions(
 
     Exact closure holds row-wise:
     ``main_effects.sum(axis=1) + pairwise.sum(axis=1) == decomposition["met_explained"]``.
+
+    A model with only calendar features (no meteorological player) is valid:
+    ``main_effects`` and ``pairwise`` then have zero columns and ``summary``
+    is empty but still carries its standard columns (``term``, ``kind``,
+    ``mean``, ``std``, ``mean_abs``, ``max_abs``).
     """
     _cfg = _resolve_config(config=config, **kwargs)
     _cfg.n_samples = resolve_n_samples(_cfg.n_samples, _cfg.backend)
@@ -1742,11 +1790,11 @@ def shapley_interactions(
                 }
             )
 
-    summary_df = (
-        pd.DataFrame(summary_rows)
-        .sort_values(["std", "mean_abs"], ascending=[False, False])
-        .reset_index(drop=True)
-    )
+    summary_df = pd.DataFrame(summary_rows, columns=_INTERACTION_SUMMARY_COLUMNS)
+    if not summary_df.empty:
+        summary_df = summary_df.sort_values(
+            ["std", "mean_abs"], ascending=[False, False]
+        ).reset_index(drop=True)
     return ShapleyInteractionResult(
         decomposition=frame,
         main_effects=main_df,
@@ -1755,6 +1803,50 @@ def shapley_interactions(
         std_matrix=std_mat,
         summary=summary_df,
     )
+
+
+def _impute_from_train(train: pd.DataFrame, frames: Sequence[pd.DataFrame]) -> list[pd.DataFrame]:
+    """Fill predictor NaNs in ``frames`` with statistics learned on ``train``.
+
+    :func:`normet.utils.prepare.impute_values` computes every median (and
+    categorical mode) over the whole frame, so a temporally blocked
+    cross-fit fold's training rows were filled with a value computed from its
+    held-out block -- future information the split is meant to exclude, and
+    the test block's own NaNs were filled from statistics that included
+    themselves. Deriving the statistics from the training rows and applying
+    them to every frame of the fold closes both leaks. A column that is all
+    NaN in ``train`` keeps whatever fill pandas can do with a NaN median,
+    matching ``impute_values``'s behaviour for an all-NaN column.
+    """
+    medians: dict[str, float] = {}
+    for col in train.select_dtypes(include=[np.number]).columns:
+        if train[col].isna().any():
+            medians[str(col)] = float(train[col].median())
+    modes: dict[str, Any] = {}
+    for col in train.select_dtypes(include=["object", "category"]).columns:
+        if train[col].isna().any():
+            mode_series = train[col].mode(dropna=True)
+            if not mode_series.empty:
+                modes[str(col)] = mode_series.iloc[0]
+
+    filled: list[pd.DataFrame] = []
+    for frame in frames:
+        out = frame.copy()
+        for col, median in medians.items():
+            if col not in out.columns:
+                continue
+            try:
+                out[col] = out[col].fillna(median)
+            except (TypeError, ValueError):
+                # A nullable Int64 column only accepts a whole-number fill;
+                # the column has to become float to carry a fractional
+                # median (same handling as impute_values).
+                out[col] = out[col].astype(float).fillna(median)
+        for col, mode in modes.items():
+            if col in out.columns:
+                out[col] = out[col].fillna(mode)
+        filled.append(out)
+    return filled
 
 
 def cross_fit_decompose(
@@ -1822,7 +1914,9 @@ def cross_fit_decompose(
     use_covs = [c for c in use_covs if c in work.columns]
     if not use_covs:
         raise DataError("No requested covariates found in `df`.")
-    work = impute_values(work, dropna=True).reset_index(drop=True)
+    # Imputation happens per fold from the training rows only (see
+    # _impute_from_train); a whole-record median would leak each held-out
+    # block into every training fold.
 
     is_log_work = bool(_cfg.log_transform)
     work_fit = work.copy()
@@ -1869,8 +1963,18 @@ def cross_fit_decompose(
                 "reduce embargo_hours or increase data span."
             )
 
-        df_train = work_fit.iloc[train_mask].reset_index(drop=True)
-        df_test = work_fit.iloc[test_idx].reset_index(drop=True)
+        df_train_raw = work_fit.iloc[train_mask].reset_index(drop=True)
+        df_test_raw = work_fit.iloc[test_idx].reset_index(drop=True)
+        if _cfg.resample_df is not None:
+            # An external pool is used as given (the other decompositions do
+            # not impute it either); only the fold frames need filling.
+            df_train, df_test = _impute_from_train(df_train_raw, [df_train_raw, df_test_raw])
+            fold_pool = _cfg.resample_df
+        else:
+            pool_raw = work_fit if resample_pool == "full" else df_train_raw
+            df_train, df_test, fold_pool = _impute_from_train(
+                df_train_raw, [df_train_raw, df_test_raw, pool_raw]
+            )
         fold_model = train_model(
             df=df_train,
             target="value",
@@ -1881,11 +1985,6 @@ def cross_fit_decompose(
             verbose=_cfg.verbose,
             n_cores=n_cores_eff,
             cache=_cfg.cache,
-        )
-        fold_pool = (
-            _cfg.resample_df
-            if _cfg.resample_df is not None
-            else (work_fit if resample_pool == "full" else df_train)
         )
         fold_cfg = _resolve_config(
             config=_cfg,

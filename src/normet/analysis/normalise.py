@@ -924,7 +924,20 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
             df_out = gb_one[["observed", "normalised"]].mean()
             if _cfg.return_quantiles:
                 q_arr = sorted({float(q) for q in _cfg.return_quantiles})
-                q_df = gb_one["normalised"].quantile(np.asarray(q_arr)).unstack(level=-1)
+                # The resampling paths compute quantiles over their long
+                # per-seed table, where every input row appears n_samples
+                # times. With nothing resampled every seed predicts the same
+                # value, so replicating each row n_samples times reproduces
+                # that multiset exactly. Quantiling the raw rows instead
+                # changed the result whenever timestamps repeat: two rows at
+                # one timestamp predicting 6 and 7 gave 6.1 / 6.9 for the
+                # 10 % / 90 % quantiles instead of the slow path's 6 / 7.
+                q_source = df_one.iloc[np.repeat(np.arange(len(df_one)), _cfg.n_samples)]
+                q_df = (
+                    q_source.groupby("date", as_index=True)["normalised"]
+                    .quantile(np.asarray(q_arr))
+                    .unstack(level=-1)
+                )
                 q_df.columns = pd.Index([_format_quantile_name(float(q)) for q in q_df.columns])
                 df_out = df_out.join(q_df, how="left")
         else:

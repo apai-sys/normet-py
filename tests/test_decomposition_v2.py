@@ -238,12 +238,14 @@ def test_decom_emi_exact_base_and_calendar_stratify_by(monkeypatch):
 
 def test_decom_met_n_cores_and_chronos_guards(monkeypatch):
     seen_cores: list[int | None] = []
+    norm_cores: list[int | None] = []
 
     def fake_bm(df, **kw):
         seen_cores.append(kw.get("n_cores"))
         return df, _CountingLinearModel(["ws", "wd"], {"ws": 1.0, "wd": 0.5})
 
     def fake_norm(df, model, **kw):
+        norm_cores.append(kw.get("n_cores"))
         d = df.set_index("date")
         return pd.DataFrame({"observed": d["value"], "normalised": np.zeros(len(d))}, index=d.index)
 
@@ -259,6 +261,9 @@ def test_decom_met_n_cores_and_chronos_guards(monkeypatch):
     )
     decom_met(df, None, covariates=["ws", "wd"], backend="flaml", n_cores=3, n_samples=2)
     assert seen_cores == [3]
+    # The per-coalition normalise calls (the decomposition's dominant cost)
+    # must receive the thread count too: one base plus one per feature.
+    assert norm_cores == [3, 3, 3]
 
     df_ch = df.rename(columns={"value": "PM2.5"})
     for bad_kw in (
@@ -569,6 +574,38 @@ def test_multiplicative_lmdi_closure_for_met_and_emi():
     np.testing.assert_allclose(res_emi["observed"], np.expm1(df_log["value"]), atol=1e-10)
     np.testing.assert_allclose(res_emi["emi_base"], res_emi["emi_total"], atol=1e-10)
 
+    # A model carrying a calendar feature exercises the multiplicative
+    # component and ``_factor`` construction. The model_lin above has only
+    # ws/blh, so present_time_vars == ["base"], its components are empty and
+    # the closure assertions are true by construction.
+    model_trend = _CountingLinearModel(
+        ["ws", "blh", "date_unix"],
+        {"ws": -0.1, "blh": -0.0005, "date_unix": 1e-9},
+        bias=3.0,
+    )
+    res_trend = decom_emi(
+        df_log,
+        model_trend,
+        scale="multiplicative",
+        log_transform=True,
+        exact_base=True,
+        n_samples=6,
+    )
+    assert "date_unix_factor" in res_trend.columns
+    assert float(res_trend["date_unix"].std()) > 0.0
+    np.testing.assert_allclose(
+        res_trend["emi_base"] + res_trend["date_unix"] + res_trend["emi_noise"],
+        res_trend["emi_total"],
+        atol=1e-8,
+    )
+    # The LMDI factor is the exact multiplicative ratio implied by the
+    # component; a wrong weight or a missing _factor column would break this.
+    np.testing.assert_allclose(
+        res_trend["date_unix_factor"],
+        (1.0 + res_trend["emi_total"]) / (1.0 + res_trend["emi_base"]),
+        rtol=1e-10,
+    )
+
 
 def test_cross_fit_decompose_embargo_folds_and_stitching(monkeypatch):
     dates = pd.date_range("2024-01-01", periods=40, freq="D")
@@ -737,3 +774,282 @@ def test_conditional_k_on_manifold_parity_and_cache(tmp_path):
     cond = decom_met_treeshap(df2, tree_m)
     cmp = compare_attributions(inter, cond)
     assert "ood_discrepancy" in cmp.columns and len(cmp) == 2
+
+
+def test_decom_emi_shapley_no_time_players_keeps_original_units(monkeypatch):
+    """The zero-time-feature path must not double-log the already-log1p frame.
+
+    With ``model=None`` and ``scale='multiplicative'`` the shared prepare step
+    log1p-trains the target and returns a log-space model. Delegating that
+    state to ``decom_emi`` -- whose own prepare re-derives ``is_log_space``
+    from ``log_transform=False`` -- log1p'd the predictions a second time and
+    reported ``observed`` in log1p units.
+    """
+    dates = pd.date_range("2024-01-01", periods=60, freq="D")
+    ws = np.linspace(1.0, 6.0, 60)
+    df = pd.DataFrame({"date": dates, "ws": ws, "value": 40.0 + 3.0 * ws})
+
+    def fake_bm(df, **kw):
+        return df, _CountingLinearModel(["ws"], {"ws": 0.2}, bias=2.0)
+
+    monkeypatch.setattr(dmod, "build_model", fake_bm)
+    common = dict(
+        model=None,
+        covariates=["ws"],
+        backend="flaml",
+        scale="multiplicative",
+        n_samples=6,
+    )
+    shap = decom_emi_shapley(df, **common)
+    direct = decom_emi(df, **common)
+
+    np.testing.assert_allclose(shap["observed"], df["value"], atol=1e-10)
+    np.testing.assert_allclose(shap["observed"].mean(), df["value"].mean(), atol=1e-10)
+    assert float(shap["observed"].mean()) > 10.0  # concentrations, not log1p units
+    np.testing.assert_allclose(shap["emi_total"], direct["emi_total"], atol=1e-10)
+    np.testing.assert_allclose(shap["emi_base"], direct["emi_base"], atol=1e-10)
+    assert set(shap.columns) == set(direct.columns)
+
+
+def test_decom_met_return_uncertainty_keeps_the_default_point_estimates():
+    """SE columns must not move the estimator.
+
+    ``return_uncertainty=True`` used to request ``aggregate=False`` and
+    average ``expm1(draw)``, while the default averages the log-space draws
+    and expm1s once -- a Jensen gap that survives more draws.
+    """
+    rng = np.random.default_rng(31)
+    n = 48
+    df = pd.DataFrame(
+        {
+            "date": pd.date_range("2024-01-01", periods=n, freq="h"),
+            "ws": rng.uniform(1.0, 6.0, n),
+            "t2m": rng.normal(10.0, 4.0, n),
+        }
+    )
+    log_model = _CountingLinearModel(["ws", "t2m"], {"ws": 0.15, "t2m": -0.04}, bias=3.0)
+    df_log = df.copy()
+    df_log["value"] = log_model.predict(df_log)  # already on the log1p scale
+
+    point = decom_met(df_log, log_model, log_transform=True, n_samples=32)
+    wide = decom_met(df_log, log_model, log_transform=True, n_samples=32, return_uncertainty=True)
+    assert {"emi_total_se", "ws_se", "t2m_se"} <= set(wide.columns)
+    for col in ("observed", "emi_total", "ws", "t2m", "met_total", "met_base", "met_noise"):
+        np.testing.assert_allclose(wide[col], point[col], rtol=1e-12, atol=1e-12)
+    assert (wide[["emi_total_se", "ws_se", "t2m_se"]] >= 0.0).all().all()
+
+    # The same guarantee on the multiplicative LMDI path (linear-space model).
+    lin_model = _CountingLinearModel(["ws", "t2m"], {"ws": -0.4, "t2m": 0.6}, bias=22.0)
+    df_lin = df.copy()
+    df_lin["value"] = np.maximum(1.0, lin_model.predict(df_lin))
+    point_m = decom_met(df_lin, lin_model, scale="multiplicative", n_samples=32)
+    wide_m = decom_met(
+        df_lin, lin_model, scale="multiplicative", n_samples=32, return_uncertainty=True
+    )
+    assert {"emi_total_se", "ws_se", "t2m_se"} <= set(wide_m.columns)
+    for col in ("emi_total", "ws", "t2m", "met_total", "met_base", "met_noise"):
+        np.testing.assert_allclose(wide_m[col], point_m[col], rtol=1e-12, atol=1e-12)
+
+
+def test_shapley_interactions_time_only_model_returns_empty_summary():
+    """No meteorological player is valid input, not a KeyError on 'std'."""
+    n = 48
+    dates = pd.date_range("2024-01-01", periods=n, freq="h")
+    df = pd.DataFrame(
+        {
+            "date": dates,
+            "date_unix": (dates.astype("int64") // 10**9).to_numpy(dtype=float),
+            "hour": dates.hour.to_numpy(dtype=float),
+        }
+    )
+    model = _CountingLinearModel(["date_unix", "hour"], {"date_unix": 2e-7, "hour": 0.05}, bias=3.0)
+    df["value"] = model.predict(df)
+
+    si = shapley_interactions(df, model, n_samples=2)
+    assert list(si.summary.columns) == [
+        "term",
+        "kind",
+        "mean",
+        "std",
+        "mean_abs",
+        "max_abs",
+    ]
+    assert si.summary.empty
+    assert si.main_effects.shape == (n, 0)
+    assert si.pairwise.shape == (n, 0)
+    assert {"observed", "emi_total", "met_total", "met_base", "met_noise"} <= set(
+        si.decomposition.columns
+    )
+
+    # decom_met accepts the same input; shapley_interactions must too.
+    met = decom_met(df, model, n_samples=2)
+    assert {"observed", "emi_total", "met_total", "met_base", "met_noise"} <= set(met.columns)
+
+
+def test_decom_emi_default_column_order_matches_the_base_branch():
+    """Default additive output must keep components first and totals last.
+
+    ``decom_emi`` used to write ``emi_total``/``emi_base``/``emi_noise``
+    before the calendar components, silently breaking positional consumers
+    (``out.columns[1:-3]`` no longer selected the components).
+    """
+    n = 40
+    dates = pd.date_range("2024-01-01", periods=n, freq="h")
+    df = pd.DataFrame(
+        {
+            "date": dates,
+            "ws": np.sin(np.arange(n) / 3.0) + 4.0,
+            "date_unix": (dates.astype("int64") // 10**9).to_numpy(dtype=float),
+            "hour": dates.hour.to_numpy(dtype=float),
+        }
+    )
+    model = _CountingLinearModel(
+        ["ws", "date_unix", "hour"],
+        {"ws": 1.0, "date_unix": 1e-7, "hour": 0.1},
+        bias=10.0,
+    )
+    df["value"] = model.predict(df)
+
+    res = decom_emi(df, model, n_samples=4)
+    assert list(res.columns) == [
+        "observed",
+        "date_unix",
+        "hour",
+        "emi_total",
+        "emi_noise",
+        "emi_base",
+    ]
+    np.testing.assert_allclose(
+        res["emi_base"] + res["date_unix"] + res["hour"] + res["emi_noise"],
+        res["emi_total"],
+        atol=1e-10,
+    )
+
+
+def test_zero_resample_quantiles_match_the_per_seed_long_table():
+    """The fast path must reproduce the resampling path's quantiles.
+
+    Quantiles are computed over the long per-seed table, where each input
+    row appears ``n_samples`` times. With nothing resampled every seed
+    predicts the same value, so two equal-date rows predicting 6 and 7 have
+    pooled quantiles 6 / 7 at 10 % / 90 %, not 6.1 / 6.9 from the two raw
+    rows.
+    """
+    ts = pd.Timestamp("2024-01-01 00:00")
+    df = pd.DataFrame(
+        {
+            "date": [ts, ts],
+            "value": [5.0, 5.0],
+            "ws": [0.0, 1.0],
+            "dummy": [0.0, 1.0],
+        }
+    )
+    model = _CountingLinearModel(["ws"], {"ws": 1.0}, bias=6.0)
+    fast = normalise(
+        df,
+        model,
+        covariates=["ws"],
+        variables_resample=[],
+        n_samples=4,
+        return_quantiles=(0.1, 0.9),
+    )
+    slow = normalise(
+        df,
+        model,
+        covariates=["ws", "dummy"],
+        variables_resample=["dummy"],
+        n_samples=4,
+        return_quantiles=(0.1, 0.9),
+        batch_size=0,
+    )
+    assert len(fast) == len(slow) == 1
+    np.testing.assert_allclose(fast["q100"], [6.0])
+    np.testing.assert_allclose(fast["q900"], [7.0])
+    pd.testing.assert_frame_equal(
+        fast[["observed", "normalised", "q100", "q900"]],
+        slow[["observed", "normalised", "q100", "q900"]],
+    )
+
+
+def test_multiplicative_exact_base_converges_to_the_monte_carlo_limit():
+    """``exact_base`` must be the noise-free limit of the MC path, not a
+    different estimand: for a linear-space model the baseline is
+    ``log1p(mean(preds))``, not ``mean(log1p(preds))`` (a Jensen gap that
+    does not shrink with n_samples)."""
+    n = 60
+    df = pd.DataFrame(
+        {
+            "date": pd.date_range("2024-01-01", periods=n, freq="D"),
+            "date_unix": np.linspace(-30.0, 30.0, n),
+            "value": 30.0,
+        }
+    )
+    model = _CountingLinearModel(["date_unix"], {"date_unix": 0.05}, bias=2.0)
+
+    exact = decom_emi(df, model, scale="multiplicative", n_samples=1000, exact_base=True)
+    mc = decom_emi(df, model, scale="multiplicative", n_samples=1000, exact_base=False)
+
+    expected_base = float(np.mean(model.predict(df)))
+    np.testing.assert_allclose(exact["emi_base"].iloc[0], expected_base, rtol=1e-12)
+    np.testing.assert_allclose(exact["emi_base"].iloc[0], mc["emi_base"].iloc[0], rtol=1e-2)
+    np.testing.assert_allclose(mc["emi_base"].iloc[0], expected_base, rtol=1e-2)
+    # The same base shift is subtracted from every time component:
+    # a different estimand moves the whole date_unix series, not just noise.
+    np.testing.assert_allclose(
+        exact["date_unix"].mean(), mc["date_unix"].mean(), rtol=0.0, atol=0.05
+    )
+    np.testing.assert_allclose(exact["date_unix"], mc["date_unix"], atol=0.2)
+
+
+def test_cross_fit_decompose_imputes_from_training_rows_only(monkeypatch):
+    """A fold's training medians must not see the held-out block.
+
+    The old whole-record ``impute_values`` filled training NaNs with a
+    median that included the test block (and filled the test block's NaNs
+    with a statistic that included their own values).
+    """
+    n = 40
+    dates = pd.date_range("2024-01-01", periods=n, freq="D")
+    ws = np.r_[np.full(19, 100.0), np.nan, np.linspace(1.0, 2.0, 19), np.nan]
+    df = pd.DataFrame({"date": dates, "ws": ws, "value": 20.0 + np.linspace(0.0, 5.0, n)})
+
+    train_frames: list[pd.DataFrame] = []
+    test_frames: list[pd.DataFrame] = []
+
+    def spy_train(*, df, covariates, **kw):
+        train_frames.append(df.copy())
+        return _CountingLinearModel(list(covariates), {"ws": 1.0}, bias=10.0)
+
+    real_decom_met = dmod.decom_met
+
+    def spy_decom_met(df, model=None, **kw):
+        test_frames.append(df.copy())
+        return real_decom_met(df, model=model, **kw)
+
+    monkeypatch.setattr(dmod, "train_model", spy_train)
+    monkeypatch.setattr(dmod, "decom_met", spy_decom_met)
+
+    out = cross_fit_decompose(
+        df,
+        covariates=["ws"],
+        backend="flaml",
+        method="meteorology",
+        n_folds=2,
+        n_samples=4,
+    )
+    assert len(out) == n
+    # Fold 0 trains on rows 20..39 and holds out rows 0..19, whose values
+    # are ~100. The training-only median is ~1.5; the full-record median is
+    # ~50, so the leak is easy to distinguish.
+    expected_fill = float(np.nanmedian(ws[20:40]))
+    full_fill = float(np.nanmedian(ws))
+    assert abs(full_fill - expected_fill) > 10.0
+
+    fold0_train = train_frames[0]
+    assert float(fold0_train.loc[fold0_train["date"] == dates[39], "ws"].iloc[0]) == (
+        pytest.approx(expected_fill)
+    )
+    fold0_test = test_frames[0]
+    assert float(fold0_test.loc[fold0_test["date"] == dates[19], "ws"].iloc[0]) == (
+        pytest.approx(expected_fill)
+    )
