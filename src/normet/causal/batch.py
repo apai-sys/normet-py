@@ -5,6 +5,8 @@ with the same worker pool pattern."""
 
 from __future__ import annotations
 
+import itertools
+import math
 from typing import Any
 
 import numpy as np
@@ -146,6 +148,113 @@ def _staggered_cutoffs(
     return pairs
 
 
+_NS_PER_DAY = 86_400_000_000_000.0
+
+
+def _panel_step_days(dates: pd.Series | pd.Index) -> float:
+    """Median spacing between distinct panel dates, in days.
+
+    Event time is measured in panel periods, not dataframe rows: a shared
+    date gap must add its length to the event index instead of consuming one
+    row, or units whose cutoff sits at a different distance from the gap are
+    pooled at different calendar lags. The median spacing is robust both to an
+    occasional gap and to the ragged lengths of a monthly panel.
+    """
+    index = pd.DatetimeIndex(pd.unique(pd.to_datetime(dates)))
+    ns = np.asarray(index, dtype="datetime64[ns]").astype(np.int64)
+    uniq = np.unique(np.sort(ns))
+    if uniq.size < 2:
+        return 1.0
+    diffs = np.diff(uniq).astype(float) / _NS_PER_DAY
+    positive = diffs[diffs > 0]
+    if positive.size == 0:
+        return 1.0
+    step = float(np.median(positive))
+    return step if step > 0.0 else 1.0
+
+
+def _period_positions(index: pd.DatetimeIndex, step_days: float) -> np.ndarray:
+    """Integer panel-period position of each sorted date.
+
+    Consecutive dates advance by ``round(gap / step_days)`` periods, so a
+    daily panel with an eleven-day gap advances eleven periods. Accumulating
+    whole periods (rather than dividing each date's distance from an origin)
+    keeps monthly panels aligned despite their 28-31 day spacings.
+    """
+    ns = np.diff(np.asarray(index, dtype="datetime64[ns]").astype(np.int64)).astype(float)
+    counts = np.rint(ns / (_NS_PER_DAY * float(step_days))).astype(int)
+    counts = np.maximum(counts, 0)
+    return np.concatenate(([0], np.cumsum(counts)))
+
+
+def _rel_event_series(
+    syn: pd.DataFrame, cutoff_ts: pd.Timestamp, step_days: float = 1.0
+) -> pd.Series:
+    """Re-index an effect path onto event time in panel periods (``0 = anchor``).
+
+    The anchor is the first observed post-cutoff date, as before; from there
+    dates are labelled by calendar/period distance rather than row count, so a
+    shared date gap does not shift the labels of later events.
+    """
+    s = syn.sort_index()
+    idx = pd.to_datetime(s.index)
+    post_pos = np.nonzero(np.asarray(idx >= cutoff_ts, dtype=bool))[0]
+    if post_pos.size == 0:
+        return pd.Series(dtype=float, name="effect")
+    t0 = int(post_pos[0])
+    pos = _period_positions(idx, step_days)
+    rel_idx = pd.Index((pos - pos[t0]).astype(int), name="event_time")
+    return pd.Series(s["effect"].to_numpy(dtype=float), index=rel_idx, name="effect")
+
+
+def _donor_perm_tuples(
+    donor_pool: list[str],
+    n_slots: int,
+    *,
+    max_permutations: int,
+    random_state: int,
+) -> list[tuple[str, ...]]:
+    """Build distinct ``n_slots``-tuples of donors for the cross-unit permutation test."""
+    n_donors = len(donor_pool)
+    if n_slots == 1:
+        return [(u,) for u in donor_pool]
+    if n_donors >= n_slots:
+        total = math.perm(n_donors, n_slots)
+        if total <= int(max_permutations):
+            return list(itertools.permutations(donor_pool, n_slots))
+        rng = np.random.default_rng(random_state)
+        arr = np.asarray(donor_pool, dtype=object)
+        seen: set[tuple[str, ...]] = set()
+        tuples_out: list[tuple[str, ...]] = []
+        max_tries = int(max_permutations) * 4
+        tries = 0
+        while len(tuples_out) < int(max_permutations) and tries < max_tries:
+            tries += 1
+            cand = tuple(str(x) for x in arr[rng.choice(n_donors, size=n_slots, replace=False)])
+            if cand not in seen:
+                seen.add(cand)
+                tuples_out.append(cand)
+        return tuples_out
+
+    log.warning(
+        "run_scm_staggered: fewer donors (%d) than treated units (%d); "
+        "sampling cross-unit permutation tuples with replacement.",
+        n_donors,
+        n_slots,
+    )
+    if n_donors == 1:
+        return [(donor_pool[0],) * n_slots]
+    total_rep = n_donors**n_slots
+    if total_rep <= int(max_permutations):
+        return list(itertools.product(donor_pool, repeat=n_slots))
+    rng = np.random.default_rng(random_state)
+    arr = np.asarray(donor_pool, dtype=object)
+    return [
+        tuple(str(x) for x in arr[rng.integers(0, n_donors, size=n_slots)])
+        for _ in range(int(max_permutations))
+    ]
+
+
 def run_scm_staggered(
     df: pd.DataFrame,
     *,
@@ -157,91 +266,47 @@ def run_scm_staggered(
     donors: list[str] | None = None,
     scm_backend: str = "scm",
     post_agg: str = "mean",
+    include_not_yet_treated: bool = False,
+    horizon: int | None = None,
+    max_permutations: int = 2000,
+    random_state: int = 7_654_321,
     n_cores: int | None = None,
     **kwargs: Any,
 ) -> pd.DataFrame:
     """Fit a staggered design: several treated units, each with its own cutoff.
 
-    Every treated unit gets its own :func:`run_scm` fit — on its own pre-period
-    and its own post-period — with the *other treated units excluded from every
-    run's donor pool*, so one unit's intervention cannot leak into another
-    unit's synthetic control (the same exclusion :func:`placebo_in_space`
-    applies to the single treated unit). The runs are dispatched in parallel
-    with the :mod:`joblib` pool :func:`scm_all` uses.
+    Every treated unit gets its own :func:`run_scm` fit on its own pre- and
+    post-period with later-treated units either excluded (default) or safely
+    admitted only when still untreated throughout the focal evaluation window
+    (``include_not_yet_treated=True`` with optional ``horizon``).
 
-    Each unit's effect is the post-cutoff mean (or ``sum``) of its effect path,
-    and each unit is ranked against its own placebo-in-space distribution:
-    every donor in turn takes the unit's role at the unit's own cutoff, and the
-    permutation ``p_value`` is the usual ``(count + 1) / (n + 1)``. Each
-    placebo fit needs a valid pool of its own — with the default ``scm``
-    backend that is at least three donors (its ridge-augmented path), so a
-    smaller pool yields NaN p-values while the effects are still read.
+    The ``mean`` summary row's ``p_value`` uses the cross-unit ``G``-tuple
+    permutation test (drawing ``G`` distinct donors without replacement across
+    the ``G`` treated cutoffs rather than reusing a single donor ``G`` times,
+    which previously over-estimated the null variance by ~sqrt(G)). A dynamic
+    event-study trajectory ATT(e) with cross-unit permutation CIs and
+    p-values is attached at ``result.attrs["event_study"]`` (and per-unit fit
+    frames at ``result.attrs["unit_effects"]``).
 
-    The summary rows aggregate the units' effects (mean and median). The
-    ``mean`` row's ``p_value`` is the cross-unit permutation test: each donor
-    in turn is assigned every treated unit's role (the full set of cutoffs) and
-    its pseudo-effects are averaged the same way the real units' are; a donor
-    with no intervention is a clean draw from the null, while the real treated
-    units are deliberately *not* permuted into the reference — their data
-    already carries the intervention, and giving one of them a later cutoff
-    would pour its real effect into its own "pre-period". The reference is
-    therefore donor-only, which keeps the null honest in a staggered design
-    where permuting treated identities is contaminated.
-
-    Typical use: a scheme that rolls out city by city (the UK ULEZ 2021
-    expansion, staggered driving restrictions across cities) — one row per
-    adopting city, one pooled reading for the programme as a whole.
-
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        Long-format panel with at least {date_col, unit_col, outcome_col}.
-    treated_units : list of str
-        The units that received the intervention, in the order the summary
-        rows are read.
-    cutoff_dates : list of str, or dict
-        The cutoff of each treated unit: a list aligned with ``treated_units``
-        or a dict ``{unit: "YYYY-MM-DD"}``.
-    date_col, unit_col, outcome_col : str
-        Column names in the panel.
-    donors : list of str, optional
-        The donor pool. If None, every unit that is not treated. Treated units
-        in an explicit list are an error; units absent from the panel are
-        dropped (as in :func:`placebo_in_space`).
-    scm_backend : str, optional
-        Backend forwarded to :func:`run_scm` (default "scm").
-    post_agg : {"mean", "sum"}, optional
-        How a unit's post-cutoff effect path is read into its effect (and how
-        the units' effects are aggregated in the summary rows).
-    n_cores : int | None, optional
-        Parallel workers for the combined pool of real and placebo runs;
-        defaults to all cores - 1, as in :func:`scm_all`.
-    **kwargs
-        Forwarded to :func:`run_scm`.
-
-    Returns
-    -------
-    pandas.DataFrame
-        One row per treated unit — ``unit``, ``cutoff_date``, ``n_pre``,
-        ``n_post``, ``pre_r2`` (the pre-period fit of that unit), ``effect``
-        (post-cutoff ``post_agg`` of the effect path) and ``p_value`` (that
-        unit's placebo-in-space permutation) — followed by two summary rows,
-        ``mean`` and ``median``, of the units' effects. The ``mean`` row
-        carries the cross-unit permutation ``p_value``; the ``median`` row's
-        is NaN, as the test is stated on the mean.
-
-    Raises
-    ------
-    ValueError
-        For empty or duplicate treated lists, units absent from the panel,
-        a misaligned ``cutoff_dates`` list, a treated unit inside ``donors``,
-        no donor units left, or a treated unit with no post-cutoff
-        observations.
+    Event time is measured in panel periods from the first observed
+    post-cutoff date, not in dataframe rows, and ``horizon`` likewise counts
+    periods. On a regular grid this is the familiar row alignment; on a panel
+    with a shared date gap it keeps event ``e`` at the same calendar lag for
+    every unit (otherwise the pooled ATT(e) mixes lags across units). When
+    ``include_not_yet_treated=True``, a placebo fit uses the same donor pool
+    as the real fit for its slot, minus the placebo unit itself, so the
+    permutation p-values and bands are a randomization test of the estimator
+    that produced the reported effect.
     """
     if not treated_units:
         raise ValueError("treated_units must not be empty.")
     if len(set(treated_units)) != len(treated_units):
         raise ValueError("treated_units must be unique.")
+    if horizon is not None and int(horizon) < 1:
+        raise ValueError(f"horizon must be >= 1 or None, got {horizon}")
+    if int(max_permutations) < 1:
+        raise ValueError(f"max_permutations must be >= 1, got {max_permutations}")
+
     d = df.copy()
     d[date_col] = to_datetime_coerced(d[date_col])
     all_units = [u for u in sorted(pd.unique(d[unit_col]))]
@@ -266,9 +331,8 @@ def run_scm_staggered(
         log.warning("Invalid post_agg=%s; falling back to 'mean'.", post_agg)
         post_agg = "mean"
 
-    # A treated unit whose cutoff falls after its last observation has no
-    # post-period to measure: say so before any fit is spent.
     unit_dates = {u: pd.to_datetime(sub).sort_values() for u, sub in d.groupby(unit_col)[date_col]}
+    panel_step_days = _panel_step_days(d[date_col])
     no_post = [u for u, c in pairs if not (unit_dates[u] >= c).any()]
     if no_post:
         raise ValueError(
@@ -286,18 +350,48 @@ def run_scm_staggered(
         n_cores_eff,
     )
 
-    def _read(syn: pd.DataFrame, c_ts: pd.Timestamp) -> tuple[float, int, int]:
-        post = syn[syn.index.to_series() >= c_ts]
-        pre = syn[syn.index.to_series() < c_ts]
+    slot_specs: list[tuple[str, pd.Timestamp, str, pd.Timestamp | None, list[str]]] = []
+    use_slice = bool(horizon is not None or include_not_yet_treated)
+    for unit, c_ts in pairs:
+        u_post = unit_dates[unit][unit_dates[unit] >= c_ts]
+        if horizon is not None:
+            # The horizon counts panel periods (events 0..H-1), matching the
+            # event-study labels; on a regular grid this is the H-th row.
+            post_pos = _period_positions(pd.DatetimeIndex(u_post), panel_step_days)
+            last = int(np.searchsorted(post_pos, int(horizon) - 1, side="right") - 1)
+            u_end = pd.Timestamp(u_post.iloc[max(last, 0)])
+        else:
+            u_end = pd.Timestamp(unit_dates[unit].iloc[-1])
+        pool_u = list(donor_pool)
+        if include_not_yet_treated:
+            nyt = [v for v, c_v in pairs if v != unit and c_v > u_end]
+            pool_u.extend(nyt)
+        slot_specs.append(
+            (unit, c_ts, c_ts.strftime("%Y-%m-%d"), u_end if use_slice else None, pool_u)
+        )
+
+    def _read(
+        syn: pd.DataFrame, c_ts: pd.Timestamp, end_ts: pd.Timestamp | None
+    ) -> tuple[float, int, int, pd.Series]:
+        syn_sub = syn[syn.index.to_series() <= end_ts] if end_ts is not None else syn
+        post = syn_sub[syn_sub.index.to_series() >= c_ts]
+        pre = syn_sub[syn_sub.index.to_series() < c_ts]
         stat = float(post["effect"].mean() if post_agg == "mean" else post["effect"].sum())
-        return stat, len(pre), len(post)
+        rel = _rel_event_series(syn_sub, c_ts, panel_step_days)
+        return stat, len(pre), len(post), rel
 
     def _one(
-        unit: str, cutoff: str, pool: list[str], kind: str
-    ) -> tuple[str, str, float, float, int, int] | None:
+        unit: str,
+        cutoff: str,
+        end_ts: pd.Timestamp | None,
+        pool: list[str],
+        kind: str,
+        key_tag: Any,
+    ) -> tuple[str, Any, float, float, int, int, pd.Series, pd.DataFrame | None] | None:
+        df_sub = d.loc[d[date_col] <= end_ts] if end_ts is not None else df
         try:
             syn = run_scm(
-                df=df,
+                df=df_sub,
                 date_col=date_col,
                 unit_col=unit_col,
                 outcome_col=outcome_col,
@@ -312,10 +406,12 @@ def run_scm_staggered(
                 "Staggered %s run failed for unit %s (cutoff %s): %s", kind, unit, cutoff, e
             )
             return None
-        stat, n_pre, n_post = _read(syn, pd.Timestamp(cutoff))
+        c_ts = pd.Timestamp(cutoff)
+        stat, n_pre, n_post, rel = _read(syn, c_ts, end_ts)
         if kind != "real":
-            return (unit, cutoff, stat, float("nan"), n_pre, n_post)
-        pre = syn[syn.index.to_series() < pd.Timestamp(cutoff)]
+            return (kind, key_tag, stat, float("nan"), n_pre, n_post, rel, None)
+        syn_eval = syn[syn.index.to_series() <= end_ts] if end_ts is not None else syn
+        pre = syn_eval[syn_eval.index.to_series() < c_ts]
         pre_r2 = float("nan")
         if len(pre) >= 2:
             y = pre["observed"].to_numpy(dtype=float)
@@ -323,78 +419,90 @@ def run_scm_staggered(
             ss_res = float(np.sum((y - x) ** 2))
             ss_tot = float(np.sum((y - y.mean()) ** 2))
             pre_r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
-        return (unit, cutoff, stat, pre_r2, n_pre, n_post)
+        return (kind, key_tag, stat, pre_r2, n_pre, n_post, rel, syn_eval)
 
     from joblib import Parallel, delayed
 
-    # One pool for the real runs and for every donor taking every treated
-    # unit's role — the cross-unit reference, and the material of each unit's
-    # own placebo-in-space test.
-    jobs = [delayed(_one)(u, c.strftime("%Y-%m-%d"), donor_pool, "real") for u, c in pairs]
-    jobs += [
-        delayed(_one)(u, c.strftime("%Y-%m-%d"), [x for x in donor_pool if x != u], "placebo")
-        for u in donor_pool
-        for _, c in pairs
+    jobs = [
+        delayed(_one)(u, c_str, end_ts, pool_u, "real", u)
+        for u, _c_ts, c_str, end_ts, pool_u in slot_specs
     ]
+    # Deduplicate placebo tasks that share identical (unit, cutoff_str, end_ts,
+    # donor pool). The pool is part of the key because include_not_yet_treated
+    # gives each slot its own pool.
+    unique_plc_keys: dict[tuple[str, str, pd.Timestamp | None, tuple[str, ...]], list[int]] = {}
+    for s_idx, (_u, _c_ts, c_str, end_ts, pool_u) in enumerate(slot_specs):
+        for pu in donor_pool:
+            unique_plc_keys.setdefault((pu, c_str, end_ts, tuple(pool_u)), []).append(s_idx)
+
+    plc_specs = list(unique_plc_keys.items())
+    for idx_k, ((pu, c_str, end_ts, pool_key), _s_indices) in enumerate(plc_specs):
+        # The placebo must refit the same design as the real slot, excluding
+        # only the unit now playing the treated role; otherwise the permutation
+        # null is for a different (smaller) donor pool.
+        jobs.append(
+            delayed(_one)(pu, c_str, end_ts, [x for x in pool_key if x != pu], "placebo", idx_k)
+        )
+
     results = Parallel(n_jobs=n_cores_eff, batch_size=dispatch_batch_size(len(jobs), n_cores_eff))(
         jobs
     )
 
-    real: dict[str, tuple[float, float]] = {}
-    placebo: dict[tuple[str, str], float] = {}
+    real: dict[str, tuple[float, float, int, int, pd.Series, pd.DataFrame]] = {}
+    placebo: dict[tuple[str, int], float] = {}
+    plc_rel: dict[tuple[str, int], pd.Series] = {}
     for r in results:
         if r is None:
             continue
-        unit, cutoff, stat, pre_r2, _, _ = r
-        key = (unit, cutoff)
-        if unit in treated_set:
-            real[unit] = (stat, pre_r2)
-        else:
-            placebo[key] = stat
+        kind, tag, stat, pre_r2, n_pre_r, n_post_r, rel, syn_eval = r
+        if kind == "real" and syn_eval is not None:
+            real[str(tag)] = (stat, pre_r2, n_pre_r, n_post_r, rel, syn_eval)
+        elif kind == "placebo":
+            (pu, _c_str, _end_ts, _pool_key), s_indices = plc_specs[int(tag)]
+            for s_idx in s_indices:
+                placebo[(pu, s_idx)] = stat
+                plc_rel[(pu, s_idx)] = rel
+
     if len(real) != len(pairs):
         failed = [u for u, _ in pairs if u not in real]
         raise RuntimeError(f"Staggered fits failed for treated units: {failed}")
 
-    slot_dates = [c.strftime("%Y-%m-%d") for _, c in pairs]
-
     def _perm_p(obs: float, refs: list[float]) -> float:
-        refs = [r for r in refs if np.isfinite(r)]
-        if not refs or not np.isfinite(obs):
+        refs_f = [r for r in refs if np.isfinite(r)]
+        if not refs_f or not np.isfinite(obs):
             return float("nan")
-        return float((np.sum(np.abs(np.asarray(refs)) >= np.abs(obs)) + 1) / (len(refs) + 1))
+        return float((np.sum(np.abs(np.asarray(refs_f)) >= np.abs(obs)) + 1) / (len(refs_f) + 1))
 
     rows = []
     unit_stats: list[float] = []
-    for unit, c in pairs:
-        stat, pre_r2 = real[unit]
-        # n_pre/n_post read from the panel: the runs agree on the dates a unit
-        # has, so the cheaper reading is the panel's own.
-        dates = unit_dates[unit]
-        n_pre = int((dates < c).sum())
-        n_post = int((dates >= c).sum())
-        refs = [
-            placebo[(u, c.strftime("%Y-%m-%d"))]
-            for u in donor_pool
-            if (u, c.strftime("%Y-%m-%d")) in placebo
-        ]
+    unit_effect_frames: dict[str, pd.DataFrame] = {}
+    for s_idx, (unit, c_ts, c_str, _end_ts, _pool_u) in enumerate(slot_specs):
+        stat, pre_r2, n_pre_u, n_post_u, _rel, syn_eval = real[unit]
+        unit_effect_frames[unit] = syn_eval
+        refs = [placebo[(pu, s_idx)] for pu in donor_pool if (pu, s_idx) in placebo]
         rows.append(
             {
                 "unit": unit,
-                "cutoff_date": c.strftime("%Y-%m-%d"),
-                "n_pre": n_pre,
-                "n_post": n_post,
+                "cutoff_date": c_str,
+                "n_pre": n_pre_u,
+                "n_post": n_post_u,
                 "pre_r2": pre_r2,
                 "effect": stat,
                 "p_value": _perm_p(stat, refs),
             }
         )
         unit_stats.append(stat)
+
     stat_obs = float(np.mean(unit_stats) if post_agg == "mean" else np.sum(unit_stats))
-    pooled = []
-    for u in donor_pool:
-        refs_u = [placebo[(u, s)] for s in slot_dates if (u, s) in placebo]
-        if refs_u:
-            pooled.append(float(np.mean(refs_u) if post_agg == "mean" else np.sum(refs_u)))
+    perm_tuples = _donor_perm_tuples(
+        donor_pool, len(pairs), max_permutations=max_permutations, random_state=random_state
+    )
+    pooled: list[float] = []
+    for tup in perm_tuples:
+        vals_t = [placebo[(tup[k], k)] for k in range(len(pairs)) if (tup[k], k) in placebo]
+        if len(vals_t) == len(pairs):
+            pooled.append(float(np.mean(vals_t) if post_agg == "mean" else np.sum(vals_t)))
+
     rows.append(
         {
             "unit": "mean",
@@ -417,6 +525,74 @@ def run_scm_staggered(
             "p_value": float("nan"),
         }
     )
-    return pd.DataFrame(
+
+    out_df = pd.DataFrame(
         rows, columns=["unit", "cutoff_date", "n_pre", "n_post", "pre_r2", "effect", "p_value"]
     )
+
+    # Dynamic Event-Study ATT(e) aligned around e = 0.
+    real_rel_list = [real[u][4] for u, _ in pairs]
+    all_e = sorted({int(e) for s in real_rel_list for e in s.index})
+    if all_e:
+        e_index = pd.Index(all_e, name="event_time")
+        real_mat = np.column_stack(
+            [s.reindex(e_index).to_numpy(dtype=float) for s in real_rel_list]
+        )
+        u_to_col = {u: i for i, u in enumerate(donor_pool)}
+        n_slots = len(pairs)
+        m_plc = np.full((n_slots, len(all_e), len(donor_pool)), np.nan, dtype=float)
+        for (pu, s_idx), rel_s in plc_rel.items():
+            if pu in u_to_col and not rel_s.empty:
+                m_plc[s_idx, :, u_to_col[pu]] = rel_s.reindex(e_index).to_numpy(dtype=float)
+
+        perm_idx = (
+            np.array([[u_to_col[u] for u in tup] for tup in perm_tuples], dtype=int)
+            if perm_tuples
+            else np.empty((0, n_slots), dtype=int)
+        )
+        es_rows: list[dict[str, Any]] = []
+        for ei, e_val in enumerate(all_e):
+            r_row = real_mat[ei]
+            active = np.flatnonzero(np.isfinite(r_row))
+            if active.size == 0:
+                continue
+            r_act = r_row[active]
+            att_e = float(np.mean(r_act))
+            n_u = int(active.size)
+            se_e = float(np.std(r_act, ddof=1) / np.sqrt(n_u)) if n_u >= 2 else float("nan")
+
+            if perm_idx.shape[0] > 0:
+                p_vals_act = np.column_stack([m_plc[k, ei, perm_idx[:, k]] for k in active])
+                valid_p = np.all(np.isfinite(p_vals_act), axis=1)
+                perm_e = p_vals_act[valid_p].mean(axis=1)
+            else:
+                perm_e = np.empty(0, dtype=float)
+
+            if perm_e.size > 0:
+                p_e = float((np.sum(np.abs(perm_e) >= abs(att_e)) + 1.0) / (perm_e.size + 1.0))
+                ci_lo = float(att_e - np.quantile(perm_e, 0.975))
+                ci_hi = float(att_e - np.quantile(perm_e, 0.025))
+            else:
+                p_e = float("nan")
+                ci_lo = att_e - 1.96 * se_e if np.isfinite(se_e) else float("nan")
+                ci_hi = att_e + 1.96 * se_e if np.isfinite(se_e) else float("nan")
+
+            es_rows.append(
+                {
+                    "event_time": int(e_val),
+                    "att": att_e,
+                    "se": se_e,
+                    "ci_low": ci_lo,
+                    "ci_high": ci_hi,
+                    "p_value": p_e,
+                    "n_units": n_u,
+                }
+            )
+        es_df = pd.DataFrame(es_rows).set_index("event_time")
+    else:
+        es_df = pd.DataFrame(columns=["att", "se", "ci_low", "ci_high", "p_value", "n_units"])
+        es_df.index.name = "event_time"
+
+    out_df.attrs["event_study"] = es_df
+    out_df.attrs["unit_effects"] = unit_effect_frames
+    return out_df

@@ -168,9 +168,12 @@ def scm(
       ``pre_r2`` -0.05 from 5 donors, 0.69 from 20 and 0.997 from 53. Refit
       with the treated pre-period shuffled to see what a design gives for
       nothing, and judge the effect with :func:`normet.placebo_in_space` and
-      against :func:`normet.scm_abadie` or :func:`normet.scm_robust`. The
-      weights balance the ridge residuals only, so their concentration
-      (``hhi``) does not describe which donors the synthetic unit is made of.
+      against :func:`normet.scm_abadie` or :func:`normet.scm_robust`. For the
+      leak-free Ben-Michael, Feller & Rothstein (2021) Ridge ASCM using
+      contiguous time-blocked CV, prefer :func:`normet.scm_ascm` (or
+      ``scm_backend="ascm"``). The weights balance the ridge residuals only, so
+      their concentration (``hhi``) does not describe which donors the synthetic
+      unit is made of.
     """
     t0 = time.time()
 

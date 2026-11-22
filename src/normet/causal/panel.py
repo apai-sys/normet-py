@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 from ..exceptions import DataError
@@ -12,6 +13,41 @@ from ..utils.logging import get_logger
 log = get_logger(__name__)
 
 __all__ = ["prepare_panel"]
+
+
+def _mask_long_gaps(na: np.ndarray, max_gap: int) -> np.ndarray:
+    """Return a boolean mask of NaN positions inside runs longer than ``max_gap``."""
+    out = np.zeros_like(na, dtype=bool)
+    n = na.size
+    i = 0
+    while i < n:
+        if not na[i]:
+            i += 1
+            continue
+        j = i
+        while j < n and na[j]:
+            j += 1
+        if (j - i) > max_gap:
+            out[i:j] = True
+        i = j
+    return out
+
+
+def _interpolate_segment(seg: pd.DataFrame, max_gap: int | None) -> pd.DataFrame:
+    """Linearly interpolate a pre- or post-cutoff block, respecting ``max_gap``."""
+    if max_gap is None:
+        return seg.interpolate(method="linear", limit_direction="both")
+    if max_gap == 0:
+        return seg.copy()
+    filled = seg.interpolate(method="linear", limit_direction="both")
+    for col in seg.columns:
+        na = seg[col].isna().to_numpy(dtype=bool)
+        too_long = _mask_long_gaps(na, max_gap)
+        if too_long.any():
+            vals = filled[col].to_numpy(dtype=float, copy=True)
+            vals[too_long] = np.nan
+            filled[col] = vals
+    return filled
 
 
 def prepare_panel(
@@ -27,6 +63,8 @@ def prepare_panel(
     date_to: str | None = None,
     freq: str = "D",
     max_donor_ratio: float = 0.3,
+    max_gap: int | None = None,
+    split_interpolation: bool = True,
 ) -> pd.DataFrame:
     """
     Screen, densify, and reshape a ragged long panel for :func:`normet.run_scm`
@@ -75,6 +113,15 @@ def prepare_panel(
         Resampling frequency for the dense grid (pandas offset alias).
     max_donor_ratio : float, default 0.3
         Warn when ``n_donors / n_pre_period_rows`` exceeds this.
+    max_gap : int, optional
+        Maximum contiguous missing-value run length (in ``freq`` steps) allowed
+        to be linearly interpolated. Runs strictly longer than ``max_gap`` remain
+        NaN (dropping incomplete donors or raising for the treated unit).
+        ``None`` (default) interpolates all gaps.
+    split_interpolation : bool, default True
+        When ``True``, interpolate the pre-cutoff and post-cutoff periods
+        independently so post-intervention shifts cannot bleed backwards across
+        ``cutoff_date`` into pre-cutoff gaps (or vice versa).
 
     Returns
     -------
@@ -83,6 +130,10 @@ def prepare_panel(
         missing values, ready for :func:`normet.run_scm`. Coverage and
         donor-ratio diagnostics are attached to ``result.attrs``.
     """
+    if max_gap is not None and int(max_gap) < 0:
+        raise ValueError(f"max_gap must be non-negative or None, got {max_gap}")
+    max_gap_eff = int(max_gap) if max_gap is not None else None
+
     d = df[[date_col, unit_col, outcome_col]].copy()
     d[date_col] = to_datetime_coerced(d[date_col])
     if d[date_col].isna().any():
@@ -137,7 +188,12 @@ def prepare_panel(
         )
     wide = wide.loc[:, keep[keep].index]
 
-    wide = wide.interpolate(method="linear", limit_direction="both")
+    if split_interpolation:
+        pre_seg = _interpolate_segment(wide.loc[pre_mask], max_gap_eff)
+        post_seg = _interpolate_segment(wide.loc[post_mask], max_gap_eff)
+        wide = pd.concat([pre_seg, post_seg], axis=0).reindex(wide.index)
+    else:
+        wide = _interpolate_segment(wide, max_gap_eff)
     still_missing = wide.columns[wide.isna().any()]
     if treated_unit is not None and treated_unit in still_missing:
         raise DataError(
@@ -177,6 +233,8 @@ def prepare_panel(
     long_panel.attrs["n_donors"] = n_donors
     long_panel.attrs["n_pre_period_rows"] = n_pre
     long_panel.attrs["donor_ratio"] = donor_ratio
+    long_panel.attrs["split_interpolation"] = bool(split_interpolation)
+    long_panel.attrs["max_gap"] = max_gap_eff
     log.info(
         "prepare_panel: %d units (%d donors%s), %d rows/unit, donor_ratio=%.2f.",
         wide.shape[1],

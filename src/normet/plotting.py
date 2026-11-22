@@ -39,6 +39,7 @@ __all__ = [
     "plot_trajectory_clusters",
     "plot_footprint_inversion",
     "plot_shapley_interactions",
+    "plot_honest_did",
 ]
 
 
@@ -1468,3 +1469,105 @@ def plot_shapley_interactions(
             )
     ax.set_title(title or f"Shapley interactions ({stat}; diag = main effect)")
     return fig
+
+
+@styled
+def plot_honest_did(
+    res: Any,
+    *,
+    title: str | None = None,
+    ax: Any | None = None,
+) -> Any:
+    """Visualise Rambachan & Roth (2023) sensitivity bounds across ``M``.
+
+    Parameters
+    ----------
+    res : HonestDiDResult or pandas.DataFrame
+        Output of :func:`normet.honest_did_bounds` (or its ``.table`` DataFrame).
+    title : str, optional
+        Panel title.
+    ax : matplotlib.axes.Axes, optional
+        Existing axes to draw onto; creates a new figure when omitted.
+
+    Returns
+    -------
+    matplotlib.axes.Axes
+    """
+    import matplotlib.pyplot as plt
+
+    if hasattr(res, "table") and isinstance(res.table, pd.DataFrame):
+        df = res.table.copy()
+        method = str(getattr(res, "method", "relative_magnitude"))
+        ci_level = float(getattr(res, "ci_level", 0.95))
+        breakdown_m = float(getattr(res, "breakdown_m", np.nan))
+    elif isinstance(res, pd.DataFrame):
+        df = res.copy()
+        method = "relative_magnitude"
+        ci_level = 0.95
+        breakdown_m = float("nan")
+    else:
+        raise ValueError("Expected an HonestDiDResult or a DataFrame with M/id/ci columns.")
+
+    required = {"M", "id_low", "id_high", "ci_low", "ci_high"}
+    if not required <= set(df.columns):
+        raise ValueError(
+            f"Missing required HonestDiD columns: {sorted(required - set(df.columns))}"
+        )
+
+    df = df.sort_values("M").reset_index(drop=True)
+    ms = df["M"].to_numpy(dtype=float)
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=(6.4, 3.4), layout="constrained")
+
+    ci_lo = df["ci_low"].to_numpy(dtype=float)
+    ci_hi = df["ci_high"].to_numpy(dtype=float)
+    id_lo = df["id_low"].to_numpy(dtype=float)
+    id_hi = df["id_high"].to_numpy(dtype=float)
+    mid = 0.5 * (id_lo + id_hi)
+
+    span = float(np.ptp(ms)) if ms.size > 1 else 1.0
+    cap = 0.018 * max(span, 1e-6)
+
+    ax.vlines(
+        ms,
+        ci_lo,
+        ci_hi,
+        color=S.MODELLED,
+        lw=1.4,
+        label=f"{int(round(ci_level * 100))}% robust CI",
+    )
+    ax.hlines(ci_lo, ms - cap, ms + cap, color=S.MODELLED, lw=1.2)
+    ax.hlines(ci_hi, ms - cap, ms + cap, color=S.MODELLED, lw=1.2)
+    ax.vlines(ms, id_lo, id_hi, color=S.INK, lw=4.0, alpha=0.85, label="Identified set")
+    ax.scatter(ms, mid, s=18, color="white", edgecolor=S.INK, linewidth=0.9, zorder=4)
+
+    S.zero_line(ax)
+    if (
+        np.isfinite(breakdown_m)
+        and breakdown_m > 0.0
+        and float(ms.min()) <= breakdown_m <= float(ms.max())
+    ):
+        ax.axvline(
+            breakdown_m,
+            ls=":",
+            lw=1.1,
+            color=S.NEUTRAL,
+            label=f"Breakdown M* = {breakdown_m:.2g}",
+        )
+
+    xlabel_map = {
+        "relative_magnitude": "M (relative magnitude)",
+        "level_magnitude": "M (level magnitude)",
+        "smoothness": "M (smoothness bound)",
+    }
+    ax.set_xlabel(xlabel_map.get(method, "M"))
+    ax.set_ylabel("ATT bound")
+    default_title = f"HonestDiD sensitivity ({method.replace('_', ' ')})"
+    if np.isfinite(breakdown_m):
+        default_title = f"{default_title} — M* = {breakdown_m:.2g}"
+    ax.set_title(title or default_title)
+    ax.margins(x=0.06)
+    S.grid(ax)
+    S.legend(ax)
+    return ax

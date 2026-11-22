@@ -78,6 +78,8 @@ DONOR_COLOR = S.NEUTRAL
 
 BACKEND_TIPS = {
     "scm": "Augmented SCM (ridge) — the recommended default.",
+    "ascm": "Ridge ASCM (Ben-Michael 2021) — leak-free time-blocked CV.",
+    "sdid": "Synthetic DiD (Arkhangelsky 2021) — unit + time weights.",
     "mlscm": "ML-augmented SCM (AutoML) — experimental, slower.",
     "abadie": "Classic Abadie SCM (simplex weights).",
     "did": "Difference-in-differences baseline.",
