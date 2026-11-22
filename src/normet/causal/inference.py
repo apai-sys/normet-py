@@ -103,6 +103,7 @@ def conformal_effect_interval(
     resid = all_vals.copy()
     resid[(eff.index.to_series() >= cutoff_ts).to_numpy()] -= att
 
+    starts: np.ndarray[Any, Any]
     if circular:
         resid2 = np.concatenate([resid, resid])
         n_want = max(1, int(n_perm))
@@ -324,6 +325,7 @@ def conformal_inference(
     post_pos = np.flatnonzero(post_mask)
     rng = np.random.default_rng(random_state)
 
+    shifts: np.ndarray[Any, Any]
     if perm_mode == "circular":
         if n_perm is None or int(n_perm) >= T:
             shifts = np.arange(T, dtype=int)
