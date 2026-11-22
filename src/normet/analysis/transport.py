@@ -337,6 +337,7 @@ def gridded_receptor_model(
         raise ValueError("No finite trajectory coordinates available.")
 
     res_deg = float(grid_res)
+    x_edges: np.ndarray[Any, Any]
     if lon_edges is None:
         lo_x = np.floor((float(np.min(lon_ep[fin])) - float(pad_deg)) / res_deg) * res_deg
         hi_x = np.ceil((float(np.max(lon_ep[fin])) + float(pad_deg)) / res_deg) * res_deg
@@ -345,6 +346,7 @@ def gridded_receptor_model(
             x_edges = np.array([lo_x, lo_x + res_deg], dtype=float)
     else:
         x_edges = np.asarray(lon_edges, dtype=float)
+    y_edges: np.ndarray[Any, Any]
     if lat_edges is None:
         lo_y = max(
             -90.0, np.floor((float(np.min(lat_ep[fin])) - float(pad_deg)) / res_deg) * res_deg
@@ -362,7 +364,7 @@ def gridded_receptor_model(
         raise ValueError("lon_edges and lat_edges must each have at least 2 boundary points.")
 
     # Compute physical weights per individual trajectory, preserving ep_m's index order.
-    w_all = np.zeros(len(ep_m), dtype=float)
+    w_all: np.ndarray[Any, Any] = np.zeros(len(ep_m), dtype=float)
     for _, g in ep_m.groupby("_traj_idx", sort=False):
         w_all[g.index.to_numpy()] = trajectory_endpoint_weights(
             g,
