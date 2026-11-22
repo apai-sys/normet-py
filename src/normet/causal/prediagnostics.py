@@ -334,12 +334,14 @@ def honest_did_bounds(
         Treatment cutoff date.
     method : {"relative_magnitude", "level_magnitude", "smoothness"}, default "relative_magnitude"
         Restriction class on post-treatment trend violations ``delta``:
+
         - ``"relative_magnitude"``: post-period first differences bounded by
           ``M * max_{t in pre} |delta e_t|``.
         - ``"level_magnitude"``: post-period level biases bounded by
           ``M * max_{t in pre} |e_t|``.
         - ``"smoothness"``: second differences bounded by ``M``, anchored around
           extrapolation of the pre-period residual slope.
+
     m_grid : sequence of float, optional
         Grid of ``M`` values to evaluate. Sensible defaults depend on ``method``.
     ci_level : float, default 0.95

@@ -322,8 +322,10 @@ def uncertainty_bands(
         Backend used in `run_scm` (e.g. "scm", "abadie", "mlscm", "robust").
     method : {"bootstrap", "jackknife"}, default="jackknife"
         Uncertainty estimation method:
-          - "bootstrap": donor subsampling (and optional block time resampling).
-          - "jackknife": leave-one-donor-out jackknife variance estimation.
+
+        - "bootstrap": donor subsampling (and optional block time resampling).
+        - "jackknife": leave-one-donor-out jackknife variance estimation.
+
     B : int, default=200
         Number of bootstrap replications (ignored if `method="jackknife"`).
     random_state : int, default=7654321
@@ -332,6 +334,7 @@ def uncertainty_bands(
         Fraction of donor pool to sample in each bootstrap replicate.
     bootstrap_mode : {"subsample", "replace"}, default="subsample"
         How donor units are resampled when ``method="bootstrap"``:
+
         - ``"subsample"``: draw ``k < J`` donors without replacement and apply the
           finite-population subsampling variance rescaling ``sqrt(k / (J - k))``
           around the point estimate so bands do not shrink when ``donor_frac`` is
@@ -339,6 +342,7 @@ def uncertainty_bands(
           ``time_block_days`` is also set.
         - ``"replace"``: true nonparametric donor bootstrap with replacement,
           cloning duplicate draws so ``run_scm`` preserves donor multiplicity.
+
     time_block_days : int, optional
         If provided, pre-treatment time is resampled in moving blocks of this
         length (days) with replacement and re-indexed onto sequential pre-cutoff
