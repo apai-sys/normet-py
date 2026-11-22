@@ -17,6 +17,14 @@ from .run_scm import run_scm
 
 log = get_logger(__name__)
 
+# Moving-block length (days) used when the donor pool is at the three-unit
+# minimum and the caller requested no usable time block. Three donors cannot be
+# subsampled without reusing the same design, so the time dimension is the only
+# source of bootstrap variability left. One week is long enough to retain
+# serial dependence yet short enough to leave several blocks in a typical
+# pre-period.
+_SMALL_POOL_BLOCK_DAYS = 7
+
 
 def _eff_cores(n_cores: int | None) -> int:
     """Resolve worker count: explicit value, else the allocation minus one."""
@@ -327,7 +335,8 @@ def uncertainty_bands(
         - ``"subsample"``: draw ``k < J`` donors without replacement and apply the
           finite-population subsampling variance rescaling ``sqrt(k / (J - k))``
           around the point estimate so bands do not shrink when ``donor_frac`` is
-          close to 1.
+          close to 1. The rescaling is applied whether or not
+          ``time_block_days`` is also set.
         - ``"replace"``: true nonparametric donor bootstrap with replacement,
           cloning duplicate draws so ``run_scm`` preserves donor multiplicity.
     time_block_days : int, optional
@@ -335,6 +344,13 @@ def uncertainty_bands(
         length (days) with replacement and re-indexed onto sequential pre-cutoff
         dates so block multiplicity is preserved. Post-treatment period is always
         kept intact. Ignored if ``method="jackknife"``.
+
+        When the donor pool has the minimum three units and no usable time block
+        was requested, moving-block time resampling is enabled automatically with
+        a 7-day block (clipped to leave at least two blocks). Resampling three
+        donors cannot change the fitted design -- every draw must contain all of
+        them -- so without time resampling the bands would collapse to
+        numerical zero.
     ci_level : float, default=0.95
         Confidence interval level (e.g., 0.95 for 95% bands).
     n_cores : int, optional
@@ -444,6 +460,17 @@ def uncertainty_bands(
             )
             else 0
         )
+        if block_len == 0 and n_base <= 3 and len(pre_days) >= 2:
+            # With three donors every draw must contain all three, so donor
+            # resampling alone refits the same design and yields a zero-width
+            # band. Fall back to moving-block time resampling explicitly.
+            block_len = min(_SMALL_POOL_BLOCK_DAYS, len(pre_days) - 1)
+            log.warning(
+                "uncertainty_bands: %d donors cannot vary across donor resamples; "
+                "using moving-block time resampling (block=%d days).",
+                n_base,
+                block_len,
+            )
         do_time_block = block_len > 0
         day_groups: dict[pd.Timestamp, pd.DataFrame] = (
             {pd.Timestamp(day): grp.copy() for day, grp in df_pre_raw.groupby(pre_norm, sort=False)}
@@ -461,9 +488,13 @@ def uncertainty_bands(
         elif bmode == "subsample":
             pure_time_mbb = False
             if n_base <= 3 and not do_time_block:
+                # Only reachable when the pre-period has a single day, where no
+                # time resampling is possible either; the fit is then degenerate
+                # by construction.
                 log.warning(
-                    "uncertainty_bands: bootstrap_mode='subsample' with %d donors cannot "
-                    "subsample below 3; falling back to bootstrap_mode='replace'.",
+                    "uncertainty_bands: bootstrap_mode='subsample' with %d donors and "
+                    "a one-day pre-period cannot resample; falling back to "
+                    "bootstrap_mode='replace'.",
                     n_base,
                 )
                 bmode_eff = "replace"
@@ -472,14 +503,12 @@ def uncertainty_bands(
             else:
                 bmode_eff = "subsample"
                 k = min(k_req, n_base - 1) if n_base > 3 else n_base
-                scale = (
-                    float(np.sqrt(k / (n_base - k))) if (not do_time_block and n_base > k) else 1.0
-                )
+                scale = float(np.sqrt(k / (n_base - k))) if n_base > k else 1.0
         else:
             pure_time_mbb = False
             bmode_eff = "replace"
             k = k_req
-            scale = float(np.sqrt(k / n_base)) if (not do_time_block and k != n_base) else 1.0
+            scale = float(np.sqrt(k / n_base)) if k != n_base else 1.0
 
         # Per-replicate child seeds so the parallel run is reproducible.
         seeds = rng.integers(0, 2**32 - 1, size=int(B))

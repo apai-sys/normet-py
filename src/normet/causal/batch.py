@@ -148,15 +148,62 @@ def _staggered_cutoffs(
     return pairs
 
 
-def _rel_event_series(syn: pd.DataFrame, cutoff_ts: pd.Timestamp) -> pd.Series:
-    """Re-index a synthetic-control effect path onto integer event time ``0 = cutoff``."""
+_NS_PER_DAY = 86_400_000_000_000.0
+
+
+def _panel_step_days(dates: pd.Series | pd.Index) -> float:
+    """Median spacing between distinct panel dates, in days.
+
+    Event time is measured in panel periods, not dataframe rows: a shared
+    date gap must add its length to the event index instead of consuming one
+    row, or units whose cutoff sits at a different distance from the gap are
+    pooled at different calendar lags. The median spacing is robust both to an
+    occasional gap and to the ragged lengths of a monthly panel.
+    """
+    index = pd.DatetimeIndex(pd.unique(pd.to_datetime(dates)))
+    ns = np.asarray(index, dtype="datetime64[ns]").astype(np.int64)
+    uniq = np.unique(np.sort(ns))
+    if uniq.size < 2:
+        return 1.0
+    diffs = np.diff(uniq).astype(float) / _NS_PER_DAY
+    positive = diffs[diffs > 0]
+    if positive.size == 0:
+        return 1.0
+    step = float(np.median(positive))
+    return step if step > 0.0 else 1.0
+
+
+def _period_positions(index: pd.DatetimeIndex, step_days: float) -> np.ndarray:
+    """Integer panel-period position of each sorted date.
+
+    Consecutive dates advance by ``round(gap / step_days)`` periods, so a
+    daily panel with an eleven-day gap advances eleven periods. Accumulating
+    whole periods (rather than dividing each date's distance from an origin)
+    keeps monthly panels aligned despite their 28-31 day spacings.
+    """
+    ns = np.diff(np.asarray(index, dtype="datetime64[ns]").astype(np.int64)).astype(float)
+    counts = np.rint(ns / (_NS_PER_DAY * float(step_days))).astype(int)
+    counts = np.maximum(counts, 0)
+    return np.concatenate(([0], np.cumsum(counts)))
+
+
+def _rel_event_series(
+    syn: pd.DataFrame, cutoff_ts: pd.Timestamp, step_days: float = 1.0
+) -> pd.Series:
+    """Re-index an effect path onto event time in panel periods (``0 = anchor``).
+
+    The anchor is the first observed post-cutoff date, as before; from there
+    dates are labelled by calendar/period distance rather than row count, so a
+    shared date gap does not shift the labels of later events.
+    """
     s = syn.sort_index()
     idx = pd.to_datetime(s.index)
     post_pos = np.nonzero(np.asarray(idx >= cutoff_ts, dtype=bool))[0]
     if post_pos.size == 0:
         return pd.Series(dtype=float, name="effect")
     t0 = int(post_pos[0])
-    rel_idx = pd.Index(np.arange(len(s), dtype=int) - t0, name="event_time")
+    pos = _period_positions(idx, step_days)
+    rel_idx = pd.Index((pos - pos[t0]).astype(int), name="event_time")
     return pd.Series(s["effect"].to_numpy(dtype=float), index=rel_idx, name="effect")
 
 
@@ -240,6 +287,16 @@ def run_scm_staggered(
     event-study trajectory ATT(e) with cross-unit permutation CIs and
     p-values is attached at ``result.attrs["event_study"]`` (and per-unit fit
     frames at ``result.attrs["unit_effects"]``).
+
+    Event time is measured in panel periods from the first observed
+    post-cutoff date, not in dataframe rows, and ``horizon`` likewise counts
+    periods. On a regular grid this is the familiar row alignment; on a panel
+    with a shared date gap it keeps event ``e`` at the same calendar lag for
+    every unit (otherwise the pooled ATT(e) mixes lags across units). When
+    ``include_not_yet_treated=True``, a placebo fit uses the same donor pool
+    as the real fit for its slot, minus the placebo unit itself, so the
+    permutation p-values and bands are a randomization test of the estimator
+    that produced the reported effect.
     """
     if not treated_units:
         raise ValueError("treated_units must not be empty.")
@@ -275,6 +332,7 @@ def run_scm_staggered(
         post_agg = "mean"
 
     unit_dates = {u: pd.to_datetime(sub).sort_values() for u, sub in d.groupby(unit_col)[date_col]}
+    panel_step_days = _panel_step_days(d[date_col])
     no_post = [u for u, c in pairs if not (unit_dates[u] >= c).any()]
     if no_post:
         raise ValueError(
@@ -297,7 +355,11 @@ def run_scm_staggered(
     for unit, c_ts in pairs:
         u_post = unit_dates[unit][unit_dates[unit] >= c_ts]
         if horizon is not None:
-            u_end = pd.Timestamp(u_post.iloc[min(int(horizon), len(u_post)) - 1])
+            # The horizon counts panel periods (events 0..H-1), matching the
+            # event-study labels; on a regular grid this is the H-th row.
+            post_pos = _period_positions(pd.DatetimeIndex(u_post), panel_step_days)
+            last = int(np.searchsorted(post_pos, int(horizon) - 1, side="right") - 1)
+            u_end = pd.Timestamp(u_post.iloc[max(last, 0)])
         else:
             u_end = pd.Timestamp(unit_dates[unit].iloc[-1])
         pool_u = list(donor_pool)
@@ -315,7 +377,7 @@ def run_scm_staggered(
         post = syn_sub[syn_sub.index.to_series() >= c_ts]
         pre = syn_sub[syn_sub.index.to_series() < c_ts]
         stat = float(post["effect"].mean() if post_agg == "mean" else post["effect"].sum())
-        rel = _rel_event_series(syn_sub, c_ts)
+        rel = _rel_event_series(syn_sub, c_ts, panel_step_days)
         return stat, len(pre), len(post), rel
 
     def _one(
@@ -365,16 +427,21 @@ def run_scm_staggered(
         delayed(_one)(u, c_str, end_ts, pool_u, "real", u)
         for u, _c_ts, c_str, end_ts, pool_u in slot_specs
     ]
-    # Deduplicate placebo tasks that share identical (unit, cutoff_str, end_ts).
-    unique_plc_keys: dict[tuple[str, str, pd.Timestamp | None], list[int]] = {}
-    for s_idx, (_u, _c_ts, c_str, end_ts, _pool_u) in enumerate(slot_specs):
+    # Deduplicate placebo tasks that share identical (unit, cutoff_str, end_ts,
+    # donor pool). The pool is part of the key because include_not_yet_treated
+    # gives each slot its own pool.
+    unique_plc_keys: dict[tuple[str, str, pd.Timestamp | None, tuple[str, ...]], list[int]] = {}
+    for s_idx, (_u, _c_ts, c_str, end_ts, pool_u) in enumerate(slot_specs):
         for pu in donor_pool:
-            unique_plc_keys.setdefault((pu, c_str, end_ts), []).append(s_idx)
+            unique_plc_keys.setdefault((pu, c_str, end_ts, tuple(pool_u)), []).append(s_idx)
 
     plc_specs = list(unique_plc_keys.items())
-    for idx_k, ((pu, c_str, end_ts), _s_indices) in enumerate(plc_specs):
+    for idx_k, ((pu, c_str, end_ts, pool_key), _s_indices) in enumerate(plc_specs):
+        # The placebo must refit the same design as the real slot, excluding
+        # only the unit now playing the treated role; otherwise the permutation
+        # null is for a different (smaller) donor pool.
         jobs.append(
-            delayed(_one)(pu, c_str, end_ts, [x for x in donor_pool if x != pu], "placebo", idx_k)
+            delayed(_one)(pu, c_str, end_ts, [x for x in pool_key if x != pu], "placebo", idx_k)
         )
 
     results = Parallel(n_jobs=n_cores_eff, batch_size=dispatch_batch_size(len(jobs), n_cores_eff))(
@@ -391,7 +458,7 @@ def run_scm_staggered(
         if kind == "real" and syn_eval is not None:
             real[str(tag)] = (stat, pre_r2, n_pre_r, n_post_r, rel, syn_eval)
         elif kind == "placebo":
-            (pu, _c_str, _end_ts), s_indices = plc_specs[int(tag)]
+            (pu, _c_str, _end_ts, _pool_key), s_indices = plc_specs[int(tag)]
             for s_idx in s_indices:
                 placebo[(pu, s_idx)] = stat
                 plc_rel[(pu, s_idx)] = rel

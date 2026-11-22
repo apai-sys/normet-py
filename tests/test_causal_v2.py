@@ -277,7 +277,9 @@ def test_effect_bands_space_pivotal_inversion_direction():
 
 
 def test_uncertainty_bands_bootstrap_rescaling_replace_and_mbb(scm_panel):
-    # Replace bootstrap preserves donor multiplicity and does not collapse on 3 donors
+    # Replace bootstrap on the minimum three-donor pool must not collapse: every
+    # draw contains all three donors, so the auto moving-block fallback supplies
+    # the uncertainty.
     out_rep = uncertainty_bands(
         scm_panel,
         date_col="date",
@@ -285,7 +287,7 @@ def test_uncertainty_bands_bootstrap_rescaling_replace_and_mbb(scm_panel):
         outcome_col="value",
         treated_unit="T",
         cutoff_date="2023-05-01",
-        donors=DONORS,
+        donors=DONORS[:3],
         scm_backend="abadie",
         method="bootstrap",
         bootstrap_mode="replace",
@@ -293,7 +295,9 @@ def test_uncertainty_bands_bootstrap_rescaling_replace_and_mbb(scm_panel):
         random_state=42,
         n_cores=1,
     )
-    assert out_rep["low"] is not None and (out_rep["low"] <= out_rep["high"] + 1e-9).all()
+    assert out_rep["low"] is not None
+    width_rep = (out_rep["high"] - out_rep["low"]).dropna()
+    assert float(width_rep.max()) > 1e-6
 
     # Subsample rescaling at donor_frac=0.8 gives non-shrunk bands & moving-block works
     out_mbb = uncertainty_bands(
@@ -315,6 +319,60 @@ def test_uncertainty_bands_bootstrap_rescaling_replace_and_mbb(scm_panel):
     assert (out_mbb["low"] <= out_mbb["high"] + 1e-9).all()
     post_mask = out_mbb["low"].index >= pd.Timestamp("2023-05-01")
     assert (out_mbb["high"][post_mask] > out_mbb["low"][post_mask]).any()
+
+
+def test_uncertainty_bands_three_donor_auto_time_block_is_not_degenerate(scm_panel):
+    # Three is the accepted minimum; the documented fallback forces a 7-day
+    # moving-block resample of the pre-period, so the bands must be genuinely
+    # wider than zero and must match an explicit time_block_days=7 request.
+    kw = {
+        "date_col": "date",
+        "unit_col": "ID",
+        "outcome_col": "value",
+        "treated_unit": "T",
+        "cutoff_date": "2023-05-01",
+        "donors": DONORS[:3],
+        "scm_backend": "abadie",
+        "method": "bootstrap",
+        "B": 12,
+        "random_state": 7,
+        "n_cores": 1,
+    }
+    auto = uncertainty_bands(scm_panel, **kw)
+    explicit = uncertainty_bands(scm_panel, **kw, time_block_days=7)
+    pd.testing.assert_series_equal(auto["low"], explicit["low"])
+    pd.testing.assert_series_equal(auto["high"], explicit["high"])
+    width = (auto["high"] - auto["low"]).dropna()
+    assert float(width.max()) > 1e-6
+
+    # Explicit replace mode on three donors uses the same fallback.
+    replaced = uncertainty_bands(scm_panel, **kw, bootstrap_mode="replace")
+    width_rep = (replaced["high"] - replaced["low"]).dropna()
+    assert float(width_rep.max()) > 1e-6
+
+
+def test_uncertainty_bands_subsample_scale_applies_with_time_blocks(scm_panel):
+    # The finite-population sqrt(k / (J - k)) rescaling is part of the
+    # documented contract and must not be dropped when time blocks are used.
+    kw = {
+        "date_col": "date",
+        "unit_col": "ID",
+        "outcome_col": "value",
+        "treated_unit": "T",
+        "cutoff_date": "2023-05-01",
+        "donors": DONORS,
+        "scm_backend": "abadie",
+        "method": "bootstrap",
+        "time_block_days": 10,
+        "B": 15,
+        "random_state": 42,
+        "n_cores": 1,
+    }
+    sub = uncertainty_bands(scm_panel, **kw, donor_frac=0.8)
+    full = uncertainty_bands(scm_panel, **kw, donor_frac=1.0)
+    w_sub = float((sub["high"] - sub["low"]).dropna().mean())
+    w_full = float((full["high"] - full["low"]).dropna().mean())
+    assert w_sub > w_full
 
 
 def test_run_scm_staggered_not_yet_treated_horizon_and_event_study():
@@ -363,6 +421,130 @@ def test_run_scm_staggered_not_yet_treated_horizon_and_event_study():
     assert {"att", "se", "ci_low", "ci_high", "p_value", "n_units"} <= set(es.columns)
     assert abs(float(es.loc[es.index < 0, "att"].mean())) < 0.5
     assert abs(float(es.loc[es.index >= 0, "att"].mean()) - 6.0) < 0.5
+
+
+def test_run_scm_staggered_placebo_uses_the_real_slot_donor_pool(monkeypatch):
+    # With include_not_yet_treated=True the real fit admits later-treated units
+    # as donors; each placebo must use that same pool minus the placebo unit,
+    # otherwise the permutation null belongs to a different estimator.
+    import importlib
+
+    dates = pd.date_range("2023-01-01", periods=160, freq="D")
+    t = np.arange(len(dates))
+    rng = np.random.default_rng(9)
+    donors = ["D1", "D2", "D3", "D4", "D5"]
+    base = {
+        d: 15.0 + 4.0 * np.sin(2 * np.pi * t / (25 + 3 * i)) + rng.normal(0, 0.2, len(t))
+        for i, d in enumerate(donors)
+    }
+    common = 0.5 * base["D1"] + 0.5 * base["D2"]
+    series = {
+        "T1": common + 6.0 * (t >= 40),
+        "T2": common + 6.0 * (t >= 70),
+        "T3": common + 6.0 * (t >= 120),
+        **base,
+    }
+    df = pd.DataFrame(
+        [
+            {"date": d, "ID": u, "value": float(vals[i])}
+            for u, vals in series.items()
+            for i, d in enumerate(dates)
+        ]
+    )
+    cutoffs = {"T1": "2023-02-10", "T2": "2023-03-12", "T3": "2023-05-01"}
+
+    batch_mod = importlib.import_module("normet.causal.batch")
+    real_run = batch_mod.run_scm
+    calls: list[tuple[str, str, tuple[str, ...]]] = []
+
+    def spy(**kwargs):
+        calls.append(
+            (
+                str(kwargs["treated_unit"]),
+                str(kwargs["cutoff_date"]),
+                tuple(kwargs["donors"]),
+            )
+        )
+        return real_run(**kwargs)
+
+    monkeypatch.setattr(batch_mod, "run_scm", spy)
+    run_scm_staggered(
+        df,
+        treated_units=["T1", "T2", "T3"],
+        cutoff_dates=cutoffs,
+        date_col="date",
+        unit_col="ID",
+        outcome_col="value",
+        scm_backend="abadie",
+        include_not_yet_treated=True,
+        horizon=20,
+        max_permutations=50,
+        n_cores=1,
+    )
+    real_pools = {c: pool for unit, c, pool in calls if unit in cutoffs}
+    assert {"T2", "T3"} <= set(real_pools["2023-02-10"])
+    assert "T3" in set(real_pools["2023-03-12"])
+    placebos = [(unit, c, pool) for unit, c, pool in calls if unit not in cutoffs]
+    assert placebos
+    for unit, c, pool in placebos:
+        assert set(pool) == set(real_pools[c]) - {unit}
+
+
+def test_staggered_event_time_uses_calendar_periods_across_shared_gap():
+    # A ten-day gap shared by every unit must advance event time by ten
+    # periods, not consume one row. Both units then keep the same calendar
+    # alignment (event e is e days after that unit's own cutoff), and the
+    # horizon counts periods rather than observed rows.
+    from normet.causal.batch import _panel_step_days, _rel_event_series
+
+    dates = pd.date_range("2023-01-01", "2023-01-31", freq="D").append(
+        pd.date_range("2023-02-11", "2023-02-28", freq="D")
+    )
+    step = _panel_step_days(pd.Series(dates))
+    assert step == pytest.approx(1.0)
+    frame = pd.DataFrame({"effect": np.arange(len(dates), dtype=float)}, index=dates)
+    for cutoff in ("2023-01-26", "2023-01-28"):
+        rel = _rel_event_series(frame, pd.Timestamp(cutoff), step)
+        lags = (dates - pd.Timestamp(cutoff)).days.to_numpy()
+        assert np.array_equal(rel.index.to_numpy(), lags)
+
+    t = np.arange(len(dates))
+    donors = ["D1", "D2", "D3", "D4"]
+    base = {
+        d: 5.0 + j + 3.0 * np.sin(2 * np.pi * t / (30 - 4 * j) + j) for j, d in enumerate(donors)
+    }
+    common = 0.5 * base["D1"] + 0.5 * base["D2"]
+    series = {
+        "T1": common + 5.0 * (dates >= pd.Timestamp("2023-01-26")),
+        "T2": common + 5.0 * (dates >= pd.Timestamp("2023-01-28")),
+        **base,
+    }
+    df = pd.DataFrame(
+        [
+            {"date": d, "ID": u, "value": float(vals[i])}
+            for u, vals in series.items()
+            for i, d in enumerate(dates)
+        ]
+    )
+    kw = {
+        "treated_units": ["T1", "T2"],
+        "cutoff_dates": {"T1": "2023-01-26", "T2": "2023-01-28"},
+        "date_col": "date",
+        "unit_col": "ID",
+        "outcome_col": "value",
+        "donors": donors,
+        "scm_backend": "abadie",
+        "max_permutations": 20,
+        "n_cores": 1,
+    }
+    full = run_scm_staggered(df, **kw)
+    labels = set(full.attrs["event_study"].index)
+    assert {6, 7, 8, 9, 10, 11, 12, 13}.isdisjoint(labels)
+    assert {14, 15, 16} <= labels
+
+    horizon = run_scm_staggered(df, horizon=5, **kw).set_index("unit")
+    assert horizon.loc["T1", "n_post"] == 5  # Jan 26-30
+    assert horizon.loc["T2", "n_post"] == 4  # Jan 28-31; Feb 2 is inside the gap
 
 
 # ---------------------------------------------------------------------------
@@ -611,7 +793,6 @@ def test_conformal_inference_cwz_refitting_across_backends(scm_panel, backend):
         n_perm=40,
         grid_points=13,
     )
-    assert ci["refit"] is True
     assert 8.0 < ci["att"] < 12.0
     assert ci["low"] <= ci["att"] <= ci["high"]
     assert ci["p_value"] < 0.05
@@ -638,6 +819,68 @@ def test_conformal_inference_cwz_refitting_across_backends(scm_panel, backend):
     )
     assert ci_null["p_value"] > 0.2
     assert ci_null["low"] <= 0.0 <= ci_null["high"]
+
+
+def test_conformal_inference_refits_with_tau_shifted_outcomes(scm_panel, monkeypatch):
+    # ``refit: True`` is a literal in the result dict, so it cannot detect a
+    # broken refit path. Spy on the backend instead: each candidate tau must
+    # reach run_scm as a different treated post-outcome vector on the symmetric
+    # full-horizon cutoff.
+    import importlib
+
+    run_scm_mod = importlib.import_module("normet.causal.run_scm")
+    real_run = run_scm_mod.run_scm
+    seen: list[tuple[str, np.ndarray]] = []
+
+    def spy(**kwargs):
+        df_arg = kwargs["df"]
+        is_post = (df_arg["ID"] == "T") & (
+            pd.to_datetime(df_arg["date"]) >= pd.Timestamp("2023-05-01")
+        )
+        seen.append(
+            (str(kwargs["cutoff_date"]), df_arg.loc[is_post, "value"].to_numpy(dtype=float))
+        )
+        return real_run(**kwargs)
+
+    monkeypatch.setattr(run_scm_mod, "run_scm", spy)
+    conformal_inference(
+        scm_panel,
+        date_col="date",
+        unit_col="ID",
+        outcome_col="value",
+        treated_unit="T",
+        cutoff_date="2023-05-01",
+        donors=DONORS,
+        scm_backend="scm",
+        n_perm=12,
+        grid_points=11,
+    )
+    original = [v for c, v in seen if c == "2023-05-01"]
+    refits = [v for c, v in seen if c != "2023-05-01"]
+    assert original and len(refits) >= 2
+    assert any(not np.allclose(v, original[0]) for v in refits)
+
+
+def test_conformal_inference_sdid_treats_none_zeta_omega_as_auto(scm_panel):
+    # zeta_omega=None is sdid's documented default ("auto"); forwarding it must
+    # give the same fit as omitting it, not float(None).
+    kw = {
+        "date_col": "date",
+        "unit_col": "ID",
+        "outcome_col": "value",
+        "treated_unit": "T",
+        "cutoff_date": "2023-05-01",
+        "donors": DONORS,
+        "scm_backend": "sdid",
+        "n_perm": 8,
+        "grid_points": 9,
+    }
+    absent = conformal_inference(scm_panel, **kw)
+    explicit = conformal_inference(scm_panel, **kw, zeta_omega=None)
+    assert explicit["att"] == pytest.approx(absent["att"], rel=1e-12)
+    assert explicit["low"] == pytest.approx(absent["low"], rel=1e-12)
+    assert explicit["high"] == pytest.approx(absent["high"], rel=1e-12)
+    assert explicit["p_value"] == pytest.approx(absent["p_value"], rel=1e-12)
 
 
 def test_honest_did_bounds_all_methods_and_plot(scm_panel):

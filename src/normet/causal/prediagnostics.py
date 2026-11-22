@@ -133,7 +133,7 @@ def _synthetic_frame(scm_result: Any) -> pd.DataFrame:
     return synth
 
 
-def _insufficient(n: int, min_periods: int, se_type: str = "hac") -> PreTrend:
+def _insufficient(n: int, min_periods: int, se_type: str = "ols") -> PreTrend:
     return PreTrend(
         slope=float("nan"),
         p_slope=float("nan"),
@@ -166,7 +166,7 @@ def pre_trend_test(
     *,
     alpha: float = 0.05,
     min_periods: int = _DEFAULT_MIN_PERIODS,
-    se_type: str = "hac",
+    se_type: str = "ols",
     maxlags: int | None = None,
 ) -> PreTrend:
     """Test whether the pre-period of a synthetic-control fit was parallel.
@@ -186,11 +186,14 @@ def pre_trend_test(
         Fewer finite pre-period points than this cannot support the test; the
         result is then all-NaN with an ``insufficient`` verdict rather than a
         p-value computed from two degrees of freedom.
-    se_type : {"hac", "ols"}, default "hac"
-        Standard-error estimator for the pre-period residual trend. ``"hac"``
-        (default) uses Newey–West (1987) Bartlett-kernel HAC standard errors so
-        serially correlated air-quality residuals do not inflate false positives;
-        ``"ols"`` uses classical i.i.d. OLS standard errors.
+    se_type : {"hac", "ols"}, default "ols"
+        Standard-error estimator for the pre-period residual trend. ``"ols"``
+        (default) uses classical i.i.d. OLS standard errors, preserving the
+        p-values and verdicts of existing callers such as
+        :func:`~normet.causal.scm_diagnostics`; ``"hac"`` opts into
+        Newey–West (1987) Bartlett-kernel HAC standard errors, which avoid
+        inflated false positives when air-quality residuals are serially
+        correlated.
     maxlags : int, optional
         Lag truncation parameter for Newey–West HAC (defaults to the
         Newey–West 1994 automatic rule ``floor(4 * (n / 100)^(2/9))``).
@@ -201,7 +204,7 @@ def pre_trend_test(
         ``slope``, ``p_slope``, ``rmpe_drift``, ``n_periods``, ``verdict``,
         ``se_slope``, ``se_type``, and ``hac_lags`` (see :class:`PreTrend`).
     """
-    se_mode = (se_type or "hac").lower()
+    se_mode = (se_type or "ols").lower()
     if se_mode not in {"hac", "ols"}:
         raise ValueError(f"se_type must be 'hac' or 'ols', got {se_type!r}")
 

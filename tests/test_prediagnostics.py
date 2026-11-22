@@ -179,6 +179,30 @@ def test_pre_trend_slope_p_matches_the_textbook_ols_t_test():
     assert pt.p_slope == pytest.approx(ref_pvalue, rel=1e-10, abs=1e-15)
 
 
+def test_pre_trend_test_defaults_to_ols_with_hac_opt_in():
+    """The default must stay classical OLS so existing verdicts are unchanged."""
+    rng = np.random.default_rng(23)
+    n = 80
+    z = np.empty(n, dtype=float)
+    z[0] = rng.normal()
+    for t in range(1, n):
+        z[t] = 0.85 * z[t - 1] + rng.normal(0.0, 0.5)
+    idx = pd.date_range("2023-01-01", periods=n + 5, freq="D")
+    frame = pd.DataFrame({"observed": np.r_[z, np.zeros(5)], "synthetic": 0.0}, index=idx)
+    cutoff = idx[n].strftime("%Y-%m-%d")
+
+    dflt = pre_trend_test(frame, cutoff)
+    ols = pre_trend_test(frame, cutoff, se_type="ols")
+    hac = pre_trend_test(frame, cutoff, se_type="hac")
+
+    assert dflt.se_type == "ols"
+    assert dflt.p_slope == ols.p_slope
+    assert dflt.se_slope == ols.se_slope
+    assert dflt.verdict == ols.verdict
+    assert hac.se_type == "hac"
+    assert hac.se_slope != dflt.se_slope  # serially correlated residuals
+
+
 def test_run_scm_result_feeds_the_test(scm_panel):
     res = run_scm(
         df=scm_panel,

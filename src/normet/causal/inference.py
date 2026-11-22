@@ -317,9 +317,12 @@ def conformal_inference(
         y_tr_all_orig = panel_all[treated_unit].to_numpy(dtype=float)
         finite_all = np.all(np.isfinite(Y_co_all), axis=1) & np.isfinite(y_tr_all_orig)
         Y_co_c_all = Y_co_all[finite_all] - Y_co_all[finite_all].mean(axis=0, keepdims=True)
-        sdid_l2 = float(finite_all.sum()) * (
-            float(base_kw.get("zeta_omega", zeta_omega_sdid or 0.0)) ** 2
-        )
+        # ``zeta_omega=None`` is sdid's documented "auto" rule, so an explicit
+        # None in the forwarded kwargs must not shadow the fitted value: a plain
+        # dict.get default is only used when the key is absent.
+        zeta_kw = base_kw.get("zeta_omega")
+        zeta_eff = float(zeta_omega_sdid or 0.0) if zeta_kw is None else float(zeta_kw)
+        sdid_l2 = float(finite_all.sum()) * (zeta_eff**2)
 
     T = len(dates_all)
     post_pos = np.flatnonzero(post_mask)
