@@ -43,7 +43,7 @@ def build_model(
     drop_time_features: bool = False,
     n_cores: int | None = None,
     cache: str | Path | None = None,
-    impute: str = "train_median",
+    impute: str = "median",
     max_gap: int | None = 6,
     embargo: int = 0,
     circular_cols: Sequence[str] | None = None,
@@ -95,10 +95,12 @@ def build_model(
     cache : str or pathlib.Path, optional
         Directory used by :func:`train_model` to memoize the fitted model
         on the prepared data and configuration. Off by default.
-    impute : {"train_median", "median", "time_interp", "none"}, default "train_median"
+    impute : {"median", "train_median", "time_interp", "none"}, default "median"
         Missing-value strategy forwarded to :func:`normet.utils.prepare.prepare_data`.
-        Predictors only: the pipeline fits statistics on training rows, so
-        test values never leak into the fills.
+        ``"median"`` (the default, and the behaviour before the strategy was
+        configurable) fills from the full-frame median; ``"train_median"``
+        fits the statistics on training rows only, so test values never leak
+        into the fills.
     max_gap : int or None, default 6
         Longest consecutive predictor gap filled by linear interpolation when
         ``impute="time_interp"``; longer gaps fall back to the training median.
