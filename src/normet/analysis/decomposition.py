@@ -1926,6 +1926,7 @@ def cross_fit_decompose(
         work_fit = log1p_target(work_fit, "value")
         is_log_work = True
 
+    folds: list[np.ndarray[Any, Any]]
     if block_freq is not None:
         folds = [
             grp.index.to_numpy(dtype=int)
