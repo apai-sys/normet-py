@@ -756,8 +756,12 @@ def _draw_rows_knn_balanced(
     cycle_cache: dict[tuple[Any, ...], Any] | None = None,
 ) -> np.ndarray:
     """Balanced cyclic draw over each row's ``k_eff`` nearest pool neighbours."""
-    n_rows = nbr_idx.shape[0]
-    width = nbr_idx.shape[1]
+    # ``shape`` entries are ``Any`` under the bare ndarray annotation; typing
+    # them as int picks the array-returning ``integers`` overload instead of
+    # the scalar one (numpy >= 2.4 stubs), which mypy otherwise chooses.
+    n_rows = int(nbr_idx.shape[0])
+    width = int(nbr_idx.shape[1])
+    offsets: np.ndarray[Any, Any]
     if valid_counts is None:
         cycle = int(sample_pos) // width
         pos_in_cycle = int(sample_pos) % width
