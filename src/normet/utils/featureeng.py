@@ -489,6 +489,10 @@ def screen_aq_data(
     else:
         date_values = None
 
+    # ``flatnonzero`` (intp) and ``arange(dtype=int64)`` produce different
+    # numpy shape/dtype spellings; annotate the list so the two branches
+    # agree under numpy 2.2's stricter shape inference.
+    group_positions: list[np.ndarray[Any, Any]]
     if group_col is None:
         group_positions = [np.arange(n, dtype=np.int64)]
     else:
