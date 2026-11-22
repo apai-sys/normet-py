@@ -43,12 +43,15 @@ EMI_COMPONENTS = [
 _META_COLS = {
     "date",
     "observed",
+    "predicted",
     "emi_total",
     "emi_base",
     "emi_noise",
     "met_total",
+    "met_explained",
     "met_base",
     "met_noise",
+    "residual",
 }
 _EMI_COMP_COLS = {c for c, _ in EMI_COMPONENTS}
 
@@ -63,7 +66,10 @@ def met_contribution_columns(res: pd.DataFrame) -> list[str]:
     return [
         c
         for c in res.columns
-        if c not in _META_COLS and c not in _EMI_COMP_COLS and pd.api.types.is_numeric_dtype(res[c])
+        if c not in _META_COLS
+        and c not in _EMI_COMP_COLS
+        and not str(c).endswith(("_se", "_ci_low", "_ci_high", "_factor"))
+        and pd.api.types.is_numeric_dtype(res[c])
     ]
 
 

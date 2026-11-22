@@ -1,6 +1,19 @@
 """Core analysis routines: normalisation, decomposition, rolling, PDP, events."""
 
-from .decomposition import DecomposeConfig, decom_emi, decom_met, decompose
+from .decomposition import (
+    MET_PHYSICAL_GROUPS,
+    DecomposeConfig,
+    ShapleyInteractionResult,
+    compare_attributions,
+    cross_fit_decompose,
+    decom_emi,
+    decom_emi_shapley,
+    decom_met,
+    decom_met_treeshap,
+    decompose,
+    shapley_interactions,
+    suggest_met_groups,
+)
 from .events import anomaly_scores, detect_events
 from .normalise import NormaliseConfig, normalise, normalise_auto
 from .pdp import pdp
@@ -42,13 +55,21 @@ __all__ = [
     "UncDecomposition",
     "decompose_uncertainty",
     "DecomposeConfig",
+    "MET_PHYSICAL_GROUPS",
+    "ShapleyInteractionResult",
     "NormaliseConfig",
     "RollingConfig",
     "normalise",
     "normalise_auto",
     "decom_emi",
+    "decom_emi_shapley",
     "decom_met",
+    "decom_met_treeshap",
     "decompose",
+    "shapley_interactions",
+    "suggest_met_groups",
+    "cross_fit_decompose",
+    "compare_attributions",
     "pdp",
     "rolling",
     "window_columns",

@@ -38,6 +38,7 @@ __all__ = [
     "plot_receptor_grid",
     "plot_trajectory_clusters",
     "plot_footprint_inversion",
+    "plot_shapley_interactions",
 ]
 
 
@@ -422,7 +423,7 @@ def decomposition_stack(
     decomp_df: pd.DataFrame,
     *,
     observed_col: str = "observed",
-    exclude: Iterable[str] = ("observed", "model_pred", "residual", "base"),
+    exclude: Iterable[str] | None = None,
     cmap: str = "tab20",
     title: str | None = None,
     ax: Any | None = None,
@@ -431,7 +432,9 @@ def decomposition_stack(
     Stacked-area visualisation of a decomposition output.
 
     Suitable for the nested-normalisation
-    decompositions in :mod:`normet.analysis.decomposition`.
+    decompositions in :mod:`normet.analysis.decomposition`. Automatically
+    switches to a diverging positive/negative stacked layout when components
+    take both positive and negative values (e.g. meteorological anomalies).
 
     Parameters
     ----------
@@ -440,8 +443,12 @@ def decomposition_stack(
         feature contribution.
     observed_col : str, default "observed"
         Overlay the observed series as a black line on top of the stack.
-    exclude : iterable of str
-        Column names to skip (defaults handle the SHAP convention).
+    exclude : iterable of str, optional
+        Column names to skip. When omitted, summary/diagnostic columns
+        (``observed``, ``predicted``, ``met_total``, ``met_explained``,
+        ``residual``, ``*_se``, ``*_factor``; plus ``emi_total`` for emission
+        decompositions) are excluded automatically so totals and components
+        are never double-stacked.
     cmap : str, default "tab20"
         Kept for compatibility; the contributions take the style's palette.
     title : str, optional
@@ -458,7 +465,39 @@ def decomposition_stack(
 
     if observed_col not in decomp_df.columns:
         raise ValueError(f"`{observed_col}` not in decomp_df.")
-    contrib_cols = [c for c in decomp_df.columns if c not in set(exclude)]
+
+    if exclude is not None:
+        excl = set(exclude)
+        contrib_cols = [
+            c
+            for c in decomp_df.columns
+            if c not in excl and pd.api.types.is_numeric_dtype(decomp_df[c])
+        ]
+    else:
+        excl = {
+            "observed",
+            "model_pred",
+            "predicted",
+            "residual",
+            "base",
+            "met_total",
+            "met_explained",
+            observed_col,
+        }
+        is_emission_frame = (
+            "emi_total" in decomp_df.columns and "met_total" not in decomp_df.columns
+        )
+        if is_emission_frame:
+            excl.add("emi_total")
+        contrib_cols = [
+            c
+            for c in decomp_df.columns
+            if c not in excl
+            and not str(c).endswith(("_se", "_ci_low", "_ci_high", "_factor"))
+            and not (is_emission_frame and (str(c).endswith("_main") or ":" in str(c)))
+            and pd.api.types.is_numeric_dtype(decomp_df[c])
+        ]
+
     if not contrib_cols:
         raise ValueError("No contribution columns found to stack.")
 
@@ -466,8 +505,36 @@ def decomposition_stack(
         _, ax = plt.subplots(figsize=(8, 3), layout="constrained")
     idx = decomp_df.index
     Y = decomp_df[contrib_cols].to_numpy(dtype=float).T
+    Y_clean = np.where(np.isfinite(Y), Y, 0.0)
     colours = [S.PALETTE[i % len(S.PALETTE)] for i in range(len(contrib_cols))]
-    ax.stackplot(idx, Y, labels=contrib_cols, colors=colours, alpha=0.85, lw=0)
+
+    if float(np.min(Y_clean)) < 0.0:
+        pos_cum = np.zeros(len(idx), dtype=float)
+        neg_cum = np.zeros(len(idx), dtype=float)
+        for col, row, colour in zip(contrib_cols, Y_clean, colours, strict=True):
+            pos = np.clip(row, 0.0, None)
+            neg = np.clip(row, None, 0.0)
+            next_pos = pos_cum + pos
+            next_neg = neg_cum + neg
+            has_pos = bool(np.any(pos > 0.0))
+            if has_pos or not np.any(neg < 0.0):
+                ax.fill_between(idx, pos_cum, next_pos, color=colour, alpha=0.85, lw=0, label=col)
+            if np.any(neg < 0.0):
+                ax.fill_between(
+                    idx,
+                    next_neg,
+                    neg_cum,
+                    color=colour,
+                    alpha=0.85,
+                    lw=0,
+                    label=None if has_pos else col,
+                )
+            pos_cum = next_pos
+            neg_cum = next_neg
+        S.zero_line(ax)
+    else:
+        ax.stackplot(idx, Y_clean, labels=contrib_cols, colors=colours, alpha=0.85, lw=0)
+
     ax.plot(idx, decomp_df[observed_col].to_numpy(), color=S.INK, lw=0.8, label=observed_col)
     ax.set_title(title or "Decomposition")
     ax.set_ylabel("Contribution")
@@ -1323,4 +1390,81 @@ def plot_footprint_inversion(
 
     if title:
         fig.suptitle(title)
+    return fig
+
+
+@styled
+def plot_shapley_interactions(
+    result: Any,
+    *,
+    stat: str = "std",
+    title: str | None = None,
+    cmap: str | None = None,
+    ax: Any | None = None,
+) -> Any:
+    """Visualise main effects (diagonal) and pairwise Shapley interactions (off-diagonal).
+
+    Parameters
+    ----------
+    result : ShapleyInteractionResult
+        Output of :func:`normet.shapley_interactions`.
+    stat : {"std", "mean"}, default "std"
+        Show temporal standard deviation (``std_matrix``) or signed mean
+        (``mean_matrix``).
+    title : str, optional
+        Panel title.
+    cmap : str, optional
+        Colormap name; defaults to ``"viridis"`` for ``stat="std"`` and
+        ``"RdBu_r"`` for ``stat="mean"``.
+    ax : matplotlib.axes.Axes, optional
+        Existing axes to draw onto; creates a new figure when omitted.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+    """
+    import matplotlib.pyplot as plt
+
+    if stat not in ("std", "mean"):
+        raise ValueError(f"`stat` must be 'std' or 'mean', got {stat!r}.")
+    mat = result.std_matrix if stat == "std" else result.mean_matrix
+    arr = mat.to_numpy(dtype=float)
+    labels = [str(c) for c in mat.columns]
+    n = len(labels)
+
+    if ax is None:
+        side = max(4.2, 0.72 * n + 1.8)
+        fig, ax = plt.subplots(figsize=(side, max(3.8, side - 0.3)), layout="constrained")
+    else:
+        fig = ax.figure
+
+    vmax = float(np.nanmax(np.abs(arr))) if arr.size else 1.0
+    vmax = max(vmax, 1e-12)
+    if stat == "mean":
+        eff_cmap = cmap or "RdBu_r"
+        im = ax.imshow(arr, cmap=eff_cmap, vmin=-vmax, vmax=vmax, aspect="equal")
+        cbar_lbl = "Mean effect / interaction"
+    else:
+        eff_cmap = cmap or "viridis"
+        im = ax.imshow(arr, cmap=eff_cmap, vmin=0.0, vmax=vmax, aspect="equal")
+        cbar_lbl = "Temporal σ"
+
+    S.colorbar(fig, im, ax, label=cbar_lbl)
+    ax.set_xticks(np.arange(n), labels, rotation=30, ha="right")
+    ax.set_yticks(np.arange(n), labels)
+    for i in range(n):
+        for j in range(n):
+            val = arr[i, j]
+            norm_v = abs(val) / vmax if stat == "mean" else val / vmax
+            txt_color = "white" if norm_v > 0.6 else S.INK
+            ax.text(
+                j,
+                i,
+                f"{val:.2f}",
+                ha="center",
+                va="center",
+                fontsize=S.SMALL_SIZE,
+                color=txt_color,
+            )
+    ax.set_title(title or f"Shapley interactions ({stat}; diag = main effect)")
     return fig
