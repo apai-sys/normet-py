@@ -244,10 +244,12 @@ def _log_run(**kw) -> pd.DataFrame:
 
 
 def test_log_transform_inverts_point_and_quantiles():
-    """Verify arithmetic (default) vs geometric log1p inversion and quantile equivariance."""
+    """Verify arithmetic vs geometric log1p inversion and quantile equivariance."""
     df_orig, _ = _log_frame()
     lin = _log_run(return_quantiles=[0.1, 0.5, 0.9])
-    log_arith = _log_run(log_transform=True, return_quantiles=[0.1, 0.5, 0.9])
+    log_arith = _log_run(
+        log_transform=True, back_transform="arithmetic", return_quantiles=[0.1, 0.5, 0.9]
+    )
     log_geom = _log_run(
         log_transform=True, back_transform="geometric", return_quantiles=[0.1, 0.5, 0.9]
     )
@@ -271,6 +273,59 @@ def test_log_transform_default_is_bit_identical():
     plain = _run()
     explicit = _run(log_transform=False)
     pd.testing.assert_frame_equal(plain, explicit)
+
+
+def test_log_transform_default_back_transform_is_geometric():
+    """The default must stay the legacy expm1-of-the-mean inversion.
+
+    Existing ``log_transform=True`` results were produced that way; changing
+    the default to arithmetic (per-draw expm1 before averaging) would move
+    every stored result without an opt-in.
+    """
+    default = _log_run(log_transform=True)
+    geometric = _log_run(log_transform=True, back_transform="geometric")
+    pd.testing.assert_frame_equal(default, geometric)
+
+
+def test_cache_distinguishes_train_test_split_for_auto_smearing(tmp_path):
+    """The cache key must include ``set``: the automatic Duan factor is fit on it."""
+    n = 48
+    w = np.tile([0.0, 1.0, 2.0], n // 3)
+    z_pred = 0.5 + 0.2 * w
+    residual = np.concatenate([np.full(24, 0.05), np.full(24, 0.6)])
+    df = pd.DataFrame(
+        {
+            "date": pd.date_range("2024-01-01", periods=n, freq="h"),
+            "value": z_pred + residual,
+            "w": w,
+        }
+    )
+    # Same date/value/w in both frames; only the split labels differ, which
+    # selects a different residual subset (and so a different phi).
+    df_a = df.assign(set=["training"] * 24 + ["testing"] * 24)
+    df_b = df.assign(set=["testing"] * 24 + ["training"] * 24)
+    kw = dict(
+        model=_LogModel(),
+        covariates=["w"],
+        n_samples=8,
+        seed=3,
+        n_cores=1,
+        log_transform=True,
+        back_transform="smearing",
+        smearing_factor=None,
+    )
+
+    def _run_frame(frame: pd.DataFrame, cache: str | None) -> pd.DataFrame:
+        return normalise(frame, cache=cache, **kw)
+
+    cached_a = _run_frame(df_a, str(tmp_path))
+    cached_b = _run_frame(df_b, str(tmp_path))
+    direct_a = _run_frame(df_a, None)
+    direct_b = _run_frame(df_b, None)
+
+    pd.testing.assert_frame_equal(cached_a, direct_a)
+    pd.testing.assert_frame_equal(cached_b, direct_b)
+    assert not np.allclose(cached_a["normalised"], cached_b["normalised"])
 
 
 def test_log_transform_aggregate_false_wide_table_inverts():

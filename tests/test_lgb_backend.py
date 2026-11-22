@@ -44,6 +44,13 @@ class _StubBooster:
         return [1.0] * len(self._feature_names)
 
 
+class _EchoBooster(_StubBooster):
+    """Booster that returns its first predictor, so the input is observable."""
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        return np.asarray(X[:, 0], dtype=float)
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -91,6 +98,21 @@ class TestLgbModel:
         X = np.array([[1.0, np.nan], [np.inf, 3.0], [-np.inf, 5.0]])
         result = model.predict(X)
         assert result.shape == (3,)
+
+    def test_default_predict_zero_fills_like_the_parent(self) -> None:
+        """The default policy is the legacy one: every non-finite value -> 0.0."""
+        model = LgbModel(_EchoBooster(["x1", "x2"]), ["x1", "x2"])
+        X = np.array([[np.nan, 0.0], [np.inf, 0.0], [-np.inf, 0.0], [2.0, 0.0]])
+        assert model.native_nan is False
+        np.testing.assert_array_equal(model.predict(X), [0.0, 0.0, 0.0, 2.0])
+
+    def test_native_nan_predict_keeps_nan_and_maps_inf(self) -> None:
+        model = LgbModel(_EchoBooster(["x1", "x2"]), ["x1", "x2"], native_nan=True)
+        X = np.array([[np.nan, 0.0], [np.inf, 0.0], [-np.inf, 0.0], [2.0, 0.0]])
+        assert model.native_nan is True
+        out = model.predict(X)
+        assert np.isnan(out[:3]).all()
+        assert out[3] == pytest.approx(2.0)
 
     def test_feature_name(self, stub_booster: _StubBooster) -> None:
         model = LgbModel(stub_booster, ["x1", "x2"])
@@ -182,6 +204,47 @@ class TestTrainLgbIntegration:
                 seed=42,
             )
 
+    def test_default_nan_routing_matches_parent_zero_fill(self, sample_df: pd.DataFrame) -> None:
+        """Default training+prediction equals training after NaN -> 0.0.
+
+        This is the parent branch's behaviour, so stored workflows that feed
+        missing covariates must not move unless ``native_nan=True`` opts in.
+        """
+        cfg = {
+            "n_trials": 2,
+            "cv_folds": 2,
+            "nrounds": 10,
+            "early_stopping_rounds": 0,
+        }
+        df_nan = sample_df.copy()
+        df_nan.loc[5, "x1"] = np.nan
+        df_zero = df_nan.copy()
+        df_zero["x1"] = df_zero["x1"].fillna(0.0)
+
+        m_nan = train_lgb(
+            df_nan, target="value", covariates=["x1", "x2"], model_config=cfg, seed=42, n_cores=1
+        )
+        m_zero = train_lgb(
+            df_zero, target="value", covariates=["x1", "x2"], model_config=cfg, seed=42, n_cores=1
+        )
+        assert m_nan.native_nan is False
+        probe = pd.DataFrame({"x1": [np.nan, np.inf, -np.inf, 0.5], "x2": [0.0, 0.0, 0.0, 1.0]})
+        np.testing.assert_array_equal(m_nan.predict(probe), m_zero.predict(probe))
+
+    def test_native_nan_trains_and_is_stored(self, sample_df: pd.DataFrame) -> None:
+        cfg = {
+            "n_trials": 1,
+            "cv_folds": 2,
+            "nrounds": 5,
+            "early_stopping_rounds": 0,
+            "native_nan": True,
+        }
+        model = train_lgb(
+            sample_df, target="value", covariates=["x1", "x2"], model_config=cfg, seed=42
+        )
+        assert model.native_nan is True
+        assert np.isnan(model._prepare_array(np.array([[np.nan, 1.0]]))[0, 0])
+
     def test_default_backend_string(self) -> None:
         assert _LgbBackend.name == "lightgbm"
 
@@ -201,6 +264,15 @@ class TestSaveLoadLgb:
         assert isinstance(loaded, LgbModel)
         assert loaded.backend == "lightgbm"
         assert loaded.feature_names == ["x1", "x2"]
+        assert loaded.native_nan is False
+
+    def test_save_and_load_native_nan_flag(self, tmp_path, stub_booster: _StubBooster) -> None:
+        from normet.backends.lgb_backend import load_lgb, save_lgb
+
+        model = LgbModel(stub_booster, ["x1", "x2"], native_nan=True)
+        save_lgb(model, path=str(tmp_path), filename="native.joblib")
+        loaded = load_lgb(path=str(tmp_path), filename="native.joblib")
+        assert loaded.native_nan is True
 
     def test_load_auto_pick(self, tmp_path, stub_booster: _StubBooster) -> None:
         model = LgbModel(stub_booster, ["x1", "x2"])

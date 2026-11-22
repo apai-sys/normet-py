@@ -96,6 +96,27 @@ class _FakeICLPipeline:
         return (intercept + Xf @ w).astype(np.float64)
 
 
+class _FixedBackend:
+    """Registered backend returning a caller-supplied deterministic model.
+
+    Lets the pipeline tests (cross-fit, embargo, log transform) run without
+    training anything, so they stay fast and bit-reproducible.
+    """
+
+    def __init__(self, name: str, fn: Any) -> None:
+        self.name = name
+        self._fn = fn
+
+    def train(self, frame: pd.DataFrame, **kw: Any) -> _StubModel:
+        return _StubModel(list(kw.get("covariates") or []), self._fn)
+
+    def save(self, model: Any, path: str = ".", filename: str = "x") -> str:
+        return str(path)
+
+    def load(self, path: str = ".", filename: str | None = None) -> None:
+        return None
+
+
 # ===========================================================================
 # Layer 1: Log Back-Transform, Auto-Convergence, Batch Reduce, Imputation, EMS
 # ===========================================================================
@@ -360,9 +381,14 @@ def test_prepare_data_and_impute_leak_free_circular_and_embargo():
     """Verify train_median leak freedom, circular wd interp, max_gap, none, and blocked+embargo."""
     n = 40
     dates = pd.date_range("2024-05-01", periods=n, freq="h")
-    ws = np.full(n, 5.0)
-    ws[2] = np.nan  # in training
-    ws[35] = 1_000_000.0  # huge outlier strictly in testing block
+    # Training values are 1.0 and test values 100.0, with one NaN in the
+    # training block: the training median is 1.0 while the full-frame median
+    # is 100.0 (20 hundreds outnumber 19 ones), so the two strategies give
+    # different fills and the assertion below can tell them apart.
+    ws = np.full(n, 1.0)
+    ws[20:] = 100.0
+    ws[2] = np.nan  # in training: must become 1.0, not the full-frame 100.0
+    ws[39] = 1_000_000.0  # test-only outlier must not leak into the fill
 
     wd = np.full(n, 90.0)
     wd[3] = 350.0
@@ -393,13 +419,21 @@ def test_prepare_data_and_impute_leak_free_circular_and_embargo():
         embargo=2,
     )
     assert "embargo" in set(prep_ts["set"].unique())
-    assert prep_ts.loc[2, "ws"] == pytest.approx(5.0)
-    assert (prep_ts.loc[prep_ts["set"] == "training", "ws"] < 100.0).all()
-    assert prep_ts.loc[35, "set"] == "testing" and prep_ts.loc[35, "ws"] > 100.0
+    assert prep_ts.loc[2, "ws"] == pytest.approx(1.0)
+    assert (prep_ts.loc[prep_ts["set"] == "training", "ws"] <= 100.0).all()
+    assert prep_ts.loc[35, "set"] == "testing" and prep_ts.loc[35, "ws"] == pytest.approx(100.0)
+
+    # The default stays the legacy full-frame median (100.0 here), so
+    # existing prepare_data()/do_all() results with missing covariates do not
+    # change; train_median above is the opt-in.
+    prep_default = prepare_data(
+        df, target="pm", covariates=["ws", "wd"], split_method="ts", train_fraction=0.75
+    )
+    assert prep_default.loc[2, "ws"] == pytest.approx(100.0)
 
     # 2. time_interp circular_cols + max_gap
     df_gap = df.copy()
-    df_gap.loc[10:15, "ws"] = np.nan  # 6-row gap > max_gap=2 -> falls back to training median (5.0)
+    df_gap.loc[10:15, "ws"] = np.nan  # 6-row gap > max_gap=2 -> falls back to training median (1.0)
     df_gap["set"] = ["training"] * 30 + ["testing"] * 10
     interp = impute_values(
         df_gap,
@@ -410,7 +444,7 @@ def test_prepare_data_and_impute_leak_free_circular_and_embargo():
     )
     mid_wd = float(interp.loc[4, "wd"]) % 360.0
     assert min(mid_wd, 360.0 - mid_wd) < 1.0  # ~0/360, not 180!
-    assert np.allclose(interp.loc[10:15, "ws"], 5.0)
+    assert np.allclose(interp.loc[10:15, "ws"], 1.0)
 
     # 3. strategy="none" drops NA targets but preserves predictor NaN
     df_na_t = df.copy()
@@ -424,7 +458,7 @@ def test_prepare_data_and_impute_leak_free_circular_and_embargo():
 
 @needs_lgb
 def test_lgb_preserves_nan_and_replaces_inf_plus_blocked_cv():
-    """LgbModel._prepare_array preserves np.nan and maps +-inf -> np.nan; blocked cv trains."""
+    """LgbModel._prepare_array with native_nan keeps NaN and maps +-inf -> NaN."""
     rng = np.random.default_rng(7)
     n = 120
     df = pd.DataFrame(
@@ -443,7 +477,9 @@ def test_lgb_preserves_nan_and_replaces_inf_plus_blocked_cv():
         model_config={**FAST_LGB, "cv_strategy": "blocked", "cv_embargo": 4},
         seed=42,
         n_cores=1,
+        native_nan=True,
     )
+    assert model.native_nan is True
     assert isinstance(model, LgbModel)
     probe = pd.DataFrame({"ws": [np.nan, np.inf, -np.inf, 3.0], "t2m": [10.0, 12.0, 14.0, 15.0]})
     prepared = model._prepare_array(probe)
@@ -860,6 +896,165 @@ def test_do_all_forwards_layer1_2_3_and_chronos_icn():
     assert est_c.context_length == 48
 
 
+def test_do_all_default_back_transform_is_geometric():
+    """do_all's default must reproduce the legacy expm1-of-the-mean result."""
+    rng = np.random.default_rng(23)
+    n = 80
+    w = rng.normal(0.0, 1.0, n)
+    df = pd.DataFrame(
+        {
+            "date": pd.date_range("2024-01-01", periods=n, freq="h"),
+            "pm": 20.0 + 3.0 * w + rng.uniform(0.5, 1.5, n),
+            "w": w,
+        }
+    )
+    be = _FixedBackend("mock_geom", lambda X: 2.0 + 0.4 * X["w"].to_numpy(float))
+    backend_registry._backends["mock_geom"] = be
+    try:
+        common = dict(
+            target="pm",
+            backend="mock_geom",
+            covariates=["w"],
+            variables_resample=["w"],
+            n_samples=8,
+            seed=5,
+            n_cores=1,
+            log_transform=True,
+        )
+        out_default, _, _ = do_all(df, **common)
+        out_geom, _, _ = do_all(df, back_transform="geometric", **common)
+    finally:
+        backend_registry._backends.pop("mock_geom", None)
+    pd.testing.assert_frame_equal(out_default, out_geom)
+
+
+def test_do_all_cross_fit_embargo_default_and_explicit_zero():
+    """cross_fit defaults to its 24-row purge; embargo=0 still means no purge."""
+    rng = np.random.default_rng(29)
+    n = 120
+    w = rng.normal(0.0, 1.0, n)
+    df = pd.DataFrame(
+        {
+            "date": pd.date_range("2024-01-01", periods=n, freq="h"),
+            "pm": 20.0 + 2.0 * w + rng.normal(0.0, 0.2, n),
+            "w": w,
+        }
+    )
+    be = _FixedBackend("mock_emb", lambda X: 20.0 + 2.0 * X["w"].to_numpy(float))
+    backend_registry._backends["mock_emb"] = be
+    try:
+        common = dict(
+            target="pm",
+            backend="mock_emb",
+            covariates=["w"],
+            variables_resample=["w"],
+            cross_fit=True,
+            cv_folds=5,
+            n_samples=3,
+            seed=4,
+            n_cores=1,
+        )
+        _, cf_default, _ = do_all(df, **common)
+        _, cf_zero, _ = do_all(df, embargo=0, **common)
+        assert cf_default.embargo == 24
+        assert cf_zero.embargo == 0
+        nt_default = int(cf_default.oof_metrics.iloc[0]["n_train"])
+        nt_zero = int(cf_zero.oof_metrics.iloc[0]["n_train"])
+        assert nt_default < nt_zero
+
+        # do_all_unc's crossfit_ensemble path must use the same default.
+        unc_common = dict(
+            target="pm",
+            backend="mock_emb",
+            covariates=["w"],
+            variables_resample=["w"],
+            unc_method="crossfit_ensemble",
+            cv_folds=3,
+            n_models=1,
+            n_samples=2,
+            seed=6,
+            n_cores=1,
+        )
+        _, stats_default = do_all_unc(df, **unc_common)
+        _, stats_zero = do_all_unc(df, embargo=0, **unc_common)
+    finally:
+        backend_registry._backends.pop("mock_emb", None)
+
+    fold0_default = stats_default.loc[stats_default["fold"].astype(str) == "0"]
+    fold0_zero = stats_zero.loc[stats_zero["fold"].astype(str) == "0"]
+    assert int(fold0_default["n_train"].iloc[0]) < int(fold0_zero["n_train"].iloc[0])
+
+
+def test_icn_spread_columns_follow_level_units_under_log_transform():
+    """anchor_spread/mc_spread must be rescaled with the expm1'd level.
+
+    ICN computes its spreads on the frame it receives (log1p here). Returning
+    them unchanged beside original-unit levels left a log-scale SD next to a
+    level in the tens; the delta method for ``y = expm1(z)`` multiplies by
+    ``1 + y``.
+    """
+    from normet.foundation import to_indexed_frame
+    from normet.foundation.in_context import ICNDesign
+
+    rng = np.random.default_rng(31)
+    n = 200
+    df = pd.DataFrame(
+        {
+            "date": pd.date_range("2024-01-01", periods=n, freq="h"),
+            "pm": np.expm1(4.0 + 0.8 * rng.normal(size=n)),
+            "w": rng.normal(size=n),
+        }
+    )
+    design_kw = {"block_h": 24, "stride": 24, "min_context": 24}
+    common = dict(
+        target="pm",
+        backend="chronos-2",
+        chronos_mode="icn",
+        covariates=["w"],
+        variables_resample=["w"],
+        n_samples=4,
+        seed=2,
+        model_config={
+            "pipeline": _FakeICLPipeline(),
+            "context_length": 48,
+            "prediction_length": 24,
+            **design_kw,
+        },
+    )
+    out_log, est, prep = do_all(df, log_transform=True, **common)
+
+    # Reproduce the pre-conversion spread from a direct ICN run on the same
+    # log1p frame, so the expected factor is exact, not eyeballed.
+    indexed = to_indexed_frame(prep)
+    design = ICNDesign(n_resamples=4, seed=2, context_length=48, **design_kw)
+    est._check_index(indexed.index)
+    icn = est.normalise_in_context(
+        indexed,
+        "value",
+        design=design,
+        pipeline=_FakeICLPipeline(),
+        met_features=["w"],
+        schema="normet",
+    )
+    factor = 1.0 + out_log["normalised"].to_numpy(dtype=float)
+    np.testing.assert_allclose(
+        out_log["mc_spread"].to_numpy(dtype=float),
+        factor * icn.spread_by_source["mc"].to_numpy(dtype=float),
+        rtol=1e-12,
+        equal_nan=True,
+    )
+    np.testing.assert_allclose(
+        out_log["anchor_spread"].to_numpy(dtype=float),
+        factor * icn.spread_by_source["anchor"].to_numpy(dtype=float),
+        rtol=1e-12,
+        equal_nan=True,
+    )
+    # The conversion is not cosmetic: the log-scale SD is far below the
+    # original-unit one, and the rescaled spread stays below the level.
+    assert np.nanmedian(out_log["mc_spread"]) > 10.0 * np.nanmedian(icn.spread_by_source["mc"])
+    assert np.nanmedian(out_log["mc_spread"]) < np.nanmedian(out_log["normalised"])
+
+
 # ===========================================================================
 # Layer 3: Balanced Sampling, Block Trajectory, Uncertainty, Rolling, Multisite, ALE
 # ===========================================================================
@@ -1135,15 +1330,35 @@ def test_multisite_pooled_pool_and_error_handling():
             n_cores=1,
             reference_pool="pooled",
         )
+        # A caller-supplied DataFrame pool must reach the same branch as
+        # 'pooled'; the old truth test evaluated `DataFrame == "pooled"` and
+        # raised before any site ran.
+        shared_pool = pd.DataFrame({"w": np.linspace(0.0, 12.0, 60)})
+        res_pool_df = do_all_multisite(
+            df,
+            "site",
+            "pm",
+            backend="mock_ms",
+            covariates=["w"],
+            variables_resample=["w"],
+            n_samples=40,
+            seed=1,
+            n_cores=1,
+            reference_pool=shared_pool,
+        )
         # Under pooled reference meteorology both sites share the same weather range (~0..12 -> mean w ~6),
         # so normalised predictions match (~22), whereas local keeps cold low (~12) and warm high (~32)!
         c_local = res_local.loc[res_local["site"] == "cold", "normalised"].mean()
         w_local = res_local.loc[res_local["site"] == "warm", "normalised"].mean()
         c_pool = res_pooled.loc[res_pooled["site"] == "cold", "normalised"].mean()
         w_pool = res_pooled.loc[res_pooled["site"] == "warm", "normalised"].mean()
+        c_df = res_pool_df.loc[res_pool_df["site"] == "cold", "normalised"].mean()
+        w_df = res_pool_df.loc[res_pool_df["site"] == "warm", "normalised"].mean()
         assert abs(w_local - c_local) > 15.0
         assert abs(w_pool - c_pool) < 5.0
+        assert abs(w_df - c_df) < 5.0
         assert res_pooled.attrs["failed_sites"] == {}
+        assert res_pool_df.attrs["failed_sites"] == {}
     finally:
         backend_registry._backends.pop("mock_ms", None)
 

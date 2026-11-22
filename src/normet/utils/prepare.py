@@ -36,7 +36,7 @@ def prepare_data(
     train_fraction: float = 0.75,
     seed: int = 7_654_321,
     *,
-    impute: str = "train_median",
+    impute: str = "median",
     max_gap: int | None = 6,
     embargo: int = 0,
     circular_cols: Sequence[str] | None = None,
@@ -49,7 +49,8 @@ def prepare_data(
       2) Validate target and covariates (and drop NA targets before splitting when ``dropna=True``).
       3) Add derived date variables (unix, julian day, weekday, hour).
       4) Split into training/testing sets (with optional ``embargo`` around test blocks).
-      5) Impute missing predictor values using training-set statistics only (no test leakage).
+      5) Impute missing predictor values (see ``impute``; ``"train_median"``
+         restricts the statistics to the training rows).
 
     Parameters
     ----------
@@ -70,9 +71,13 @@ def prepare_data(
         Training fraction for data splitting.
     seed : int, default 7654321
         Random seed for reproducibility.
-    impute : {"train_median","median","time_interp","none"}, default "train_median"
-        Missing-value handling applied *after* splitting so test rows never leak into
-        training medians/modes.
+    impute : {"median","train_median","time_interp","none"}, default "median"
+        Missing-value handling applied *after* splitting.
+        ``"median"`` (the default, and the behaviour before the strategy was
+        configurable) fills numeric NAs from the full-frame median and
+        categorical NAs from the full-frame mode; ``"train_median"`` opts into
+        training-set-only statistics, so test rows never leak into the fill
+        values.
     max_gap : int or None, default 6
         Maximum consecutive missing steps filled by linear temporal interpolation
         when ``impute="time_interp"``. Larger gaps fall back to training medians.
@@ -298,9 +303,10 @@ def impute_values(
     """
     Impute or drop missing values in predictors and target.
 
-    When a ``"set"`` column carrying ``"training"`` rows is present, summary
-    statistics (medians/modes) are estimated strictly from the training rows so
-    held-out test distributions never leak into training.
+    ``"train_median"`` (and the fallback used by ``"time_interp"``) estimates
+    summary statistics strictly from the ``"training"`` rows of a frame
+    carrying a ``"set"`` column, so held-out test distributions never leak into
+    the fill values. ``"median"`` is the legacy full-frame fill.
 
     Parameters
     ----------
@@ -309,8 +315,10 @@ def impute_values(
     dropna : bool, default True
         If True, drop rows with NA in target ``value``.
     strategy : {"median", "train_median", "time_interp", "none"}, default "median"
-        - ``"median"`` / ``"train_median"``: fill numeric NAs with (training-set)
-          median and categorical NAs with (training-set) mode.
+        - ``"median"``: fill numeric NAs with the full-frame median and
+          categorical NAs with the full-frame mode (legacy behaviour).
+        - ``"train_median"``: the same fill, but the median/mode is fit on the
+          ``"training"`` rows only (opt-in leak-free behaviour).
         - ``"time_interp"``: temporally interpolate numeric predictors over short
           gaps up to ``max_gap`` rows (using ``sin``/``cos`` interpolation for
           ``circular_cols``), then fill any remaining gaps with training medians.
@@ -349,7 +357,11 @@ def impute_values(
         return out
 
     has_train = "set" in out.columns and bool((out["set"] == "training").any())
-    ref_mask = (out["set"] == "training").to_numpy() if has_train else np.ones(len(out), dtype=bool)
+    # Only the opt-in strategies restrict their statistics to the training
+    # rows; plain "median" must keep the legacy full-frame fill, otherwise
+    # existing prepare_data()/do_all() results change without an opt-in.
+    use_train = has_train and strategy in ("train_median", "time_interp")
+    ref_mask = (out["set"] == "training").to_numpy() if use_train else np.ones(len(out), dtype=bool)
     exclude_interp = {"value", "date_unix", "day_julian", "hour"}
     circular_set = set(circular_cols or ())
 

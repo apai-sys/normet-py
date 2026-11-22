@@ -228,7 +228,15 @@ def do_all_multisite(
         raise ValueError("`reference_pool` must be a DataFrame, 'pooled', or None.")
 
     call_kw = dict(do_all_kwargs)
-    if reference_pool == "pooled" and "resample_df" not in call_kw:
+    # Test the string *before* comparing: `reference_pool == "pooled"` on a
+    # DataFrame returns an elementwise frame, and evaluating that in an `if`
+    # raises "The truth value of a DataFrame is ambiguous", so the DataFrame
+    # branch below was unreachable.
+    if (
+        isinstance(reference_pool, str)
+        and reference_pool == "pooled"
+        and "resample_df" not in call_kw
+    ):
         shared = df.drop(columns=[site_col]).copy()
         shared = process_date(shared)
         shared = add_date_variables(shared)

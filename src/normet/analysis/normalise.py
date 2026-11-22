@@ -35,6 +35,12 @@ from ..utils.prepare import (
 
 log = get_logger(__name__)
 
+#: Default purge width (rows) around each out-of-fold validation block.
+#: One day of hourly data, enough to separate adjacent hours whose target and
+#: weather are autocorrelated. Exposed so ``do_all(cross_fit=True)`` can use
+#: the same default instead of duplicating the number.
+_CROSSFIT_DEFAULT_EMBARGO = 24
+
 _TIME_VARS_EXACT: frozenset[str] = frozenset(
     {
         "date_unix",
@@ -216,15 +222,26 @@ class NormaliseConfig:
 
     True says the caller fitted the model on ``log1p(value)`` and hands the
     frame in that space -- what :func:`normet.do_all` does with
-    ``log_transform=True``. The resampling, the predictions and their
-    aggregation all happen on that scale (which is the point: an error then
-    counts in relative rather than absolute terms, so a fixed relative miss
-    maps to a bounded error at every level while its absolute error grows
-    without bound), and the finished frame is returned in the original units
-    via ``expm1``, so
-    ``observed``, ``normalised`` and the quantile columns are all comparable
-    with the input the user gave. False, the default, leaves the result
-    untouched.
+    ``log_transform=True``. The resampling and the model evaluation happen
+    on that scale (which is the point: an error then counts in relative
+    rather than absolute terms, so a fixed relative miss maps to a bounded
+    error at every level while its absolute error grows without bound). How
+    the per-draw predictions are returned to the units of the input is
+    chosen by :attr:`back_transform`:
+
+    - ``"geometric"`` (the default) averages on the ``log1p`` scale and
+      applies ``expm1`` once at the end -- the legacy behaviour, kept as the
+      default so results produced before the option existed stay
+      bit-identical;
+    - ``"arithmetic"`` applies ``expm1`` to every draw before averaging, so
+      the estimate targets the arithmetic mean rather than the geometric
+      one (the two differ by Jensen's inequality whenever the draws vary);
+    - ``"smearing"`` applies Duan's (1983) residual-correction factor to
+      that arithmetic mean.
+
+    In every mode ``observed``, ``normalised`` and the quantile columns
+    come back in the units of the input. False, the default, leaves the
+    result untouched.
     """
     stratify_by: str | Sequence[str] | None = None
     """Optional stratum column(s) (e.g. ``"month"``, ``"season"``, ``"hour"``,
@@ -243,15 +260,16 @@ class NormaliseConfig:
     with ``stratify_by`` to search nearest neighbours within the same stratum.
     Not available on the chronos-2 backend.
     """
-    back_transform: str = "arithmetic"
+    back_transform: str = "geometric"
     """Retransformation mode when ``log_transform=True``:
-      - ``"arithmetic"`` (default): back-transform each resampled draw via ``expm1``
+      - ``"geometric"`` (default): averages in ``log1p`` space and applies ``expm1``
+        once at the end. This is the legacy behaviour, kept as the default so
+        ``log_transform=True`` results from earlier releases stay bit-identical.
+      - ``"arithmetic"``: back-transform each resampled draw via ``expm1``
         before averaging, estimating the meteorological arithmetic mean rather than
         the biased geometric mean.
       - ``"smearing"``: additionally applies Duan's (1983) nonparametric smearing
         correction ``phi * exp(z_hat) - 1`` to remove training-residual Jensen bias.
-      - ``"geometric"``: averages in ``log1p`` space and applies ``expm1`` once at the
-        end (legacy behaviour).
     """
     smearing_factor: float | None = None
     """Optional explicit Duan smearing factor ``phi`` used when ``log_transform=True``
@@ -1158,6 +1176,11 @@ def normalise(
     key_cols = sorted(set(_cfg.covariates) | {"value", "date"})
     df_dated_key = process_date(df.copy())
     df_keyed = check_data(df_dated_key, _cfg.covariates, "value")
+    # The automatic Duan smearing factor is estimated from the rows labelled
+    # ``set == "testing"`` (``_resolve_smearing_factor``), so two frames with
+    # identical date/value/covariates but a different split produce different
+    # results and must not share a cache entry.
+    set_key = dataframe_hash(df_dated_key[["set"]]) if "set" in df_dated_key.columns else None
     resample_pool = df_keyed if _cfg.resample_df is None else _cfg.resample_df
     # `month`/`season` strata are derived from a pool's own `date` column, so
     # changing the pool's date composition changes which rows serve each
@@ -1219,6 +1242,7 @@ def normalise(
             if _cfg.log_transform
             else []
         ),
+        *([("set", set_key)] if set_key is not None else []),
         *([("mc_se", True)] if _cfg.return_mc_se else []),
         *([("paired", _cfg.paired, float(_cfg.paired_floor))] if _cfg.paired else []),
         *([("sampling", _cfg.sampling)] if _cfg.sampling != "iid" else []),
@@ -1547,9 +1571,7 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
                 # The quantile is taken on the model's scale, then inverted
                 # once (a monotone transform commutes with the quantile).
                 df_one_raw = pd.DataFrame({"date": df["date"].to_numpy(), "normalised": preds})
-                q_source = df_one_raw.iloc[
-                    np.repeat(np.arange(len(df_one_raw)), _cfg.n_samples)
-                ]
+                q_source = df_one_raw.iloc[np.repeat(np.arange(len(df_one_raw)), _cfg.n_samples)]
                 q_df = (
                     q_source.groupby("date", as_index=True)["normalised"]
                     .quantile(np.asarray(q_arr))
@@ -2035,7 +2057,7 @@ def normalise_auto(
 
     call_kwargs = dict(normalise_kwargs)
     is_log = bool(call_kwargs.get("log_transform", False))
-    bt_mode = str(call_kwargs.get("back_transform", "arithmetic"))
+    bt_mode = str(call_kwargs.get("back_transform", "geometric"))
     if bt_mode not in ("arithmetic", "smearing", "geometric"):
         raise ConfigError(
             f"`back_transform` must be 'arithmetic', 'smearing', or 'geometric', got {bt_mode!r}."
@@ -2259,12 +2281,12 @@ def crossfit_normalise(
     backend: str = "lightgbm",
     model_config: dict[str, Any] | None = None,
     n_splits: int = 5,
-    embargo: int = 24,
+    embargo: int = _CROSSFIT_DEFAULT_EMBARGO,
     paired: bool | str = "log_ratio",
     paired_floor: float = 1e-6,
     n_samples: int = 300,
     log_transform: bool = False,
-    back_transform: str = "arithmetic",
+    back_transform: str = "geometric",
     stratify_by: str | Sequence[str] | None = None,
     conditional_k: int | None = None,
     conditional_on: Mapping[str, Any] | None = None,
@@ -2375,10 +2397,15 @@ def crossfit_normalise(
         set_labels[tr_idx] = "training"
         set_labels[te_idx] = "testing"
         df_fold["set"] = set_labels
+        # Every fold must impute from its own training rows alone. The plain
+        # "median" strategy is a full-frame fill, which would mix the held-out
+        # block (and the embargo) into the fill values, so it means train-only
+        # statistics here.
+        fold_impute = "train_median" if impute == "median" else impute
         df_fold = impute_values(
             df_fold,
             dropna=False,
-            strategy=impute,
+            strategy=fold_impute,
             max_gap=max_gap,
             circular_cols=circular_cols,
         )

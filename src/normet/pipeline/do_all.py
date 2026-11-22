@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 
 from ..analysis.normalise import (
+    _CROSSFIT_DEFAULT_EMBARGO,
     CrossFitNormaliseResult,
     _back_transform_values,
     crossfit_normalise,
@@ -72,12 +73,12 @@ class SingleConfig:
     raw-scale variance on high hours; fitting on the log scale makes errors
     count in relative terms, so a fixed relative miss maps to a bounded error
     at every level while its absolute error grows without bound. With
-    ``back_transform="arithmetic"`` (default), resampled log predictions are
-    back-transformed per draw before averaging; ``"smearing"`` adds Duan's
-    residual correction; ``"geometric"`` averages on the log scale before
-    ``expm1``.
+    ``back_transform="geometric"`` (the default, legacy behaviour), resampled
+    log predictions are averaged on the log scale before a single ``expm1``;
+    ``"arithmetic"`` back-transforms each draw before averaging; ``"smearing"``
+    adds Duan's residual correction to that arithmetic mean.
     """
-    back_transform: str = "arithmetic"
+    back_transform: str = "geometric"
     smearing_factor: float | None = None
     paired: bool | str = False
     paired_floor: float = 1e-6
@@ -90,9 +91,21 @@ class SingleConfig:
     sampling: str = "iid"
     block_hours: int | None = None
     cache: str | Path | None = None
-    impute: str = "train_median"
+    impute: str = "median"
+    """Missing-covariate strategy forwarded to :func:`prepare_data`.
+
+    ``"median"`` (the default) fills from the full-frame median, matching the
+    behaviour before the strategy was configurable; ``"train_median"`` opts
+    into training-set-only statistics (leak-free for the test block).
+    """
     max_gap: int | None = 6
-    embargo: int = 0
+    embargo: int | None = None
+    """Rows purged around a testing block.
+
+    ``None`` (the default) means 0 for the ordinary split and
+    :func:`crossfit_normalise`'s own 24-row default when ``cross_fit=True``;
+    an explicit value (including ``0``) is used as given.
+    """
     cross_fit: bool = False
     cv_folds: int = 5
     chronos_mode: str = "deweather"
@@ -169,7 +182,7 @@ def _do_all_zero_shot(
         seed=cfg.seed,
         impute=cfg.impute,
         max_gap=cfg.max_gap,
-        embargo=cfg.embargo,
+        embargo=_prepare_embargo(cfg.embargo),
     )
     if cfg.log_transform:
         df_prep = log1p_target(df_prep)
@@ -202,18 +215,28 @@ def _do_all_zero_shot(
         obs = indexed["value"].reindex(icn_res.level.index).to_numpy(dtype=float)
         norm = icn_res.level.to_numpy(dtype=float)
         pair = icn_res.paired.to_numpy(dtype=float)
+        anchor_spread = icn_res.spread_by_source["anchor"].to_numpy(dtype=float)
+        mc_spread = icn_res.spread_by_source["mc"].to_numpy(dtype=float)
         if cfg.log_transform:
             obs = np.expm1(obs)
             norm = np.expm1(norm)
             pair = np.expm1(pair)
+            # ICN reports its spreads on the input frame's scale, which here
+            # is log1p. Convert with the delta method for y = expm1(z),
+            # dy/dz = exp(z) = 1 + y, so the columns stay in the same units
+            # as `normalised`; leaving log-scale SDs beside expm1'd levels
+            # made a +/- 2 SD band invisible.
+            scale = 1.0 + norm
+            anchor_spread = anchor_spread * scale
+            mc_spread = mc_spread * scale
         out = pd.DataFrame(
             {
                 "observed": obs,
                 "normalised": norm,
                 "paired": pair,
                 "weather_effect": obs - norm,
-                "anchor_spread": icn_res.spread_by_source["anchor"].to_numpy(dtype=float),
-                "mc_spread": icn_res.spread_by_source["mc"].to_numpy(dtype=float),
+                "anchor_spread": anchor_spread,
+                "mc_spread": mc_spread,
                 "hour_contrib": icn_res.hour_contrib.to_numpy(dtype=int),
             },
             index=pd.Index(icn_res.level.index, name="date"),
@@ -250,6 +273,16 @@ def _do_all_zero_shot(
         seeded,
     )
     return out, estimator, df_prep
+
+
+def _prepare_embargo(embargo: int | None) -> int:
+    """Map :attr:`SingleConfig.embargo`'s ``None`` sentinel to 0 for ``prepare_data``.
+
+    ``None`` only means "the caller did not choose"; the ordinary split has
+    never purged rows by default, whereas cross-fitting uses
+    :data:`~normet.analysis.normalise._CROSSFIT_DEFAULT_EMBARGO`.
+    """
+    return 0 if embargo is None else int(embargo)
 
 
 def _resolve_single_config(config: SingleConfig | None = None, **kwargs: Any) -> SingleConfig:
@@ -351,7 +384,9 @@ def do_all(
     or :func:`~normet.foundation.in_context.normalise_in_context` (``chronos_mode="icn"``).
     With ``cross_fit=True`` on AutoML backends, runs blocked embargoed out-of-fold
     normalisation via :func:`crossfit_normalise` and returns
-    ``(result_df, CrossFitNormaliseResult, df_prep)``.
+    ``(result_df, CrossFitNormaliseResult, df_prep)``. Leaving ``embargo`` at
+    its (``None``) default there uses ``crossfit_normalise``'s 24-row purge;
+    passing ``embargo=0`` explicitly requests no purge.
 
     Parameters
     ----------
@@ -369,7 +404,8 @@ def do_all(
     log_transform : bool or None, default=None
         Fit on ``log1p(value)`` instead of the raw target. With it on, the model
         trains on the log scale and results return in original units according to
-        ``back_transform`` (``"arithmetic"`` / ``"smearing"`` / ``"geometric"``);
+        ``back_transform`` (``"geometric"``, the default and legacy behaviour /
+        ``"arithmetic"`` / ``"smearing"``);
         the prepared frame returned as the third tuple item carries ``log1p(value)``.
     **kwargs
         Any additional keyword arguments are forwarded to
@@ -459,7 +495,7 @@ def do_all(
             backend=_cfg.backend,
             model_config=_cfg.model_config,
             n_splits=int(_cfg.cv_folds),
-            embargo=int(_cfg.embargo),
+            embargo=(_CROSSFIT_DEFAULT_EMBARGO if _cfg.embargo is None else int(_cfg.embargo)),
             paired=paired_opt,
             paired_floor=float(_cfg.paired_floor),
             n_samples=int(_cfg.n_samples),
@@ -505,7 +541,7 @@ def do_all(
         seed=_cfg.seed,
         impute=_cfg.impute,
         max_gap=_cfg.max_gap,
-        embargo=_cfg.embargo,
+        embargo=_prepare_embargo(_cfg.embargo),
     )
     if _cfg.log_transform:
         df_prep = log1p_target(df_prep)
@@ -727,10 +763,14 @@ def do_all_unc(
             df_eval_raw = df_base.copy().reset_index(drop=True)
             df_eval_raw["set"] = "testing"
             combined = pd.concat([df_boot_raw, df_eval_raw], ignore_index=True)
+            # The combined frame labels the bootstrap sample "training" and
+            # the out-of-bag rows "testing"; the fill statistics must come
+            # from the former, so the full-frame "median" strategy maps to
+            # the training-only one here.
             imputed = impute_values(
                 combined,
                 dropna=False,
-                strategy=_cfg.impute,
+                strategy="train_median" if _cfg.impute == "median" else _cfg.impute,
                 max_gap=_cfg.max_gap,
             )
             df_boot_tr = imputed.iloc[:n].copy().reset_index(drop=True)
@@ -821,7 +861,7 @@ def do_all_unc(
                 backend=_cfg.backend,
                 model_config=_cfg.model_config,
                 n_splits=int(_cfg.cv_folds),
-                embargo=int(_cfg.embargo),
+                embargo=(_CROSSFIT_DEFAULT_EMBARGO if _cfg.embargo is None else int(_cfg.embargo)),
                 paired=paired_opt_cf,
                 paired_floor=float(_cfg.paired_floor),
                 n_samples=int(_cfg.n_samples),

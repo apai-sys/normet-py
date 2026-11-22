@@ -107,7 +107,7 @@ def pdp(
     grid_points: int = 50,
     quantile_range: tuple[float, float] = (0.01, 0.99),
     log_transform: bool = False,
-    back_transform: str = "arithmetic",
+    back_transform: str = "geometric",
     smearing_factor: float = 1.0,
     verbose: bool = False,
 ) -> pd.DataFrame:
@@ -139,12 +139,13 @@ def pdp(
     log_transform : bool, default False
         If True, ``model`` predicts ``log1p(y)`` and results are inverted back
         to original concentration units.
-    back_transform : {"arithmetic", "smearing", "geometric"}, default "arithmetic"
+    back_transform : {"arithmetic", "smearing", "geometric"}, default "geometric"
         How to invert log-space predictions when ``log_transform=True``:
-        ``"arithmetic"`` applies ``expm1`` before averaging across the sample;
-        ``"smearing"`` uses ``smearing_factor * exp(z) - 1`` before averaging;
-        ``"geometric"`` takes ``expm1(mean_z)`` and delta-method SD
-        ``exp(mean_z) * std_z``.
+        ``"geometric"`` (the default) takes ``expm1(mean_z)`` and the
+        delta-method SD ``exp(mean_z) * std_z``, matching normalise's legacy
+        inversion; ``"arithmetic"`` applies ``expm1`` before averaging across
+        the sample; ``"smearing"`` uses ``smearing_factor * exp(z) - 1``
+        before averaging.
     smearing_factor : float, default 1.0
         Duan (1983) residual smearing factor used when ``log_transform=True``
         and ``back_transform="smearing"``.
@@ -259,7 +260,7 @@ def ale(
     n_bins: int = 20,
     quantile_range: tuple[float, float] = (0.01, 0.99),
     log_transform: bool = False,
-    back_transform: str = "arithmetic",
+    back_transform: str = "geometric",
     smearing_factor: float = 1.0,
     n_cores: int | None = None,
     verbose: bool = False,
@@ -289,8 +290,9 @@ def ale(
     log_transform : bool, default False
         If True, invert predictions from ``log1p`` space before computing local
         effects.
-    back_transform : {"arithmetic", "smearing", "geometric"}, default "arithmetic"
-        Inversion rule when ``log_transform=True``.
+    back_transform : {"arithmetic", "smearing", "geometric"}, default "geometric"
+        Inversion rule when ``log_transform=True``; ``"geometric"`` is the
+        legacy ``expm1``-of-the-mean behaviour.
     smearing_factor : float, default 1.0
         Duan (1983) smearing factor used when ``back_transform="smearing"``.
     n_cores : int or None, default None

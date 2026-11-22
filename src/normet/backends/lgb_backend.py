@@ -72,14 +72,22 @@ class LgbModel:
         Predictor column names the model was trained on.
     booster : lightgbm.Booster
         The underlying trained booster.
+    native_nan : bool
+        Whether the model was trained with LightGBM's native missing-value
+        routing. False (the default) reproduces the legacy behaviour: every
+        non-finite predictor, NaN included, is replaced by 0.0 at train and
+        predict time.
     """
 
-    __slots__ = ("_booster", "backend", "feature_names")
+    __slots__ = ("_booster", "backend", "feature_names", "native_nan")
 
-    def __init__(self, booster: Any, feature_names: list[str]) -> None:
+    def __init__(self, booster: Any, feature_names: list[str], native_nan: bool = False) -> None:
         self._booster = booster
         self.backend = "lightgbm"
         self.feature_names = list(feature_names)
+        # Models pickled before the option existed have no slot value; the
+        # default keeps them predict-time compatible with their training.
+        self.native_nan = bool(native_nan)
 
     def __setstate__(self, state: object) -> None:
         # Models saved by older normet versions carry attributes that no
@@ -95,6 +103,8 @@ class LgbModel:
                 for k, v in src.items():
                     if k in type(self).__slots__:
                         object.__setattr__(self, k, v)
+        if not hasattr(self, "native_nan"):
+            object.__setattr__(self, "native_nan", False)
 
     @property
     def booster(self) -> object:
@@ -107,14 +117,27 @@ class LgbModel:
             # regardless of the order the caller passed them in.
             X = X.reindex(columns=self.feature_names)
         X_arr = np.asarray(X, dtype=float)
-        inf_mask = np.isinf(X_arr)
-        if np.any(inf_mask):
-            X_arr = X_arr.copy()
-            X_arr[inf_mask] = np.nan
+        if self.native_nan:
+            # LightGBM routes NaN down its learned default direction; ±inf is
+            # not a valid LightGBM input, so map it onto the same channel.
+            inf_mask = np.isinf(X_arr)
+            if np.any(inf_mask):
+                X_arr = X_arr.copy()
+                X_arr[inf_mask] = np.nan
+        else:
+            # Legacy behaviour: every non-finite value becomes 0.0.
+            non_finite = ~np.isfinite(X_arr)
+            if np.any(non_finite):
+                X_arr = X_arr.copy()
+                X_arr[non_finite] = 0.0
         return X_arr
 
     def predict(self, X: np.ndarray | pd.DataFrame, num_threads: int | None = None) -> np.ndarray:
-        """Predict on ``X``, converting ``±inf`` to ``NaN`` for native missing routing.
+        """Predict on ``X``, applying the model's stored missing-value policy.
+
+        With :attr:`native_nan` False (the default and the behaviour before
+        the option existed) NaN and ±inf are replaced by 0.0. With it True,
+        ``±inf`` is converted to ``NaN`` and LightGBM routes NaN natively.
 
         ``num_threads`` overrides LightGBM's OpenMP default for this call (its
         prediction is memory-bound: 300 resamples of the bundled MY1 record
@@ -254,6 +277,7 @@ def train_lgb(
     seed: int = DEFAULT_SEED,
     verbose: bool = False,
     n_cores: int | None = None,
+    native_nan: bool = False,
 ) -> LgbModel:
     """Train a LightGBM model with random hyperparameter search + CV.
 
@@ -284,17 +308,27 @@ def train_lgb(
         - ``early_stopping_rounds`` : int (default 20)
         - ``num_leaves_min`` / ``num_leaves_max`` : int | None (auto-inferred)
         - ``learning_rate_min`` / ``learning_rate_max`` : float (0.01 – 0.3)
+        - ``native_nan`` : bool (default False; see the parameter of the same
+          name -- the config key is the route through ``build_model``)
 
     seed : int, default=7654321
         Random seed for reproducibility.
     verbose : bool, default=False
         Whether to log progress messages.
+    native_nan : bool, default=False
+        If False (the default, and the behaviour before the option existed)
+        every non-finite predictor, NaN included, is replaced by 0.0 before
+        training and prediction. If True, ``±inf`` is mapped to ``NaN`` and
+        LightGBM's native missing-value routing is used instead. The setting
+        is stored on the returned :class:`LgbModel` so prediction follows the
+        training policy; a ``native_nan`` entry in ``model_config`` overrides
+        the argument (and lets callers reach it through ``build_model``).
 
     Returns
     -------
     LgbModel
-        Wrapped LightGBM Booster with ``.backend == "lightgbm"`` and
-        ``.feature_names`` set.
+        Wrapped LightGBM Booster with ``.backend == "lightgbm"``,
+        ``.feature_names`` and ``.native_nan`` set.
 
     Raises
     ------
@@ -334,6 +368,9 @@ def train_lgb(
     cfg = dict(_DEFAULT_CONFIG)
     if model_config:
         cfg.update(model_config)
+    # model_config is the only route through build_model/train_model, so it
+    # also wins over the direct argument when both are given.
+    native_nan = bool(cfg.get("native_nan", native_nan))
 
     cv_strategy = str(cfg.get("cv_strategy", "random")).lower()
     if cv_strategy not in ("random", "blocked"):
@@ -353,10 +390,17 @@ def train_lgb(
 
     if np.any(np.isnan(y_vec)):
         raise ValueError("Target column contains NA values.")
-    inf_mask = np.isinf(x_mat)
-    if np.any(inf_mask):
-        x_mat = x_mat.copy()
-        x_mat[inf_mask] = np.nan
+    if native_nan:
+        inf_mask = np.isinf(x_mat)
+        if np.any(inf_mask):
+            x_mat = x_mat.copy()
+            x_mat[inf_mask] = np.nan
+    else:
+        # Legacy policy, matching prediction: NaN and ±inf both become 0.0.
+        non_finite = ~np.isfinite(x_mat)
+        if np.any(non_finite):
+            x_mat = x_mat.copy()
+            x_mat[non_finite] = 0.0
 
     dtrain = lgb.Dataset(x_mat, label=y_vec)
 
@@ -467,7 +511,7 @@ def train_lgb(
         num_boost_round=best_nrounds,
     )
 
-    return LgbModel(booster, covariates)
+    return LgbModel(booster, covariates, native_nan=native_nan)
 
 
 class _LgbBackend:
@@ -485,6 +529,7 @@ class _LgbBackend:
         seed: int = DEFAULT_SEED,
         verbose: bool = False,
         n_cores: int | None = None,
+        native_nan: bool = False,
     ) -> LgbModel:
         return train_lgb(
             df,
@@ -495,6 +540,7 @@ class _LgbBackend:
             seed=seed,
             verbose=verbose,
             n_cores=n_cores,
+            native_nan=native_nan,
         )
 
     def save(

@@ -62,7 +62,7 @@ class RollingConfig:
     memory_save: bool = False
     verbose: bool = False
     log_transform: bool = False
-    back_transform: str = "arithmetic"
+    back_transform: str = "geometric"
     smearing_factor: float | None = None
     stratify_by: str | Sequence[str] | None = None
     conditional_k: int | None = None
