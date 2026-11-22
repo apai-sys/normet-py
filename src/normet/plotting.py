@@ -1117,6 +1117,7 @@ def plot_attention_attribution(
     if isinstance(tw, pd.DataFrame) and not tw.empty and "share" in tw.columns:
         y = tw["share"].to_numpy(dtype=float) * 100.0
         has_dates = "date" in tw.columns and bool(tw["date"].notna().any())
+        x_t: np.ndarray[Any, Any]
         if has_dates:
             x_t = pd.to_datetime(tw["date"]).to_numpy()
             S.format_time_axis(ax_t)
