@@ -343,6 +343,11 @@ def deweathered_scm(
                 seed=int(seed) + 31 * u_idx,
                 n_cores=n_cores,
                 verbose=verbose,
+                # `build_model` returns the frame already on the fitted scale,
+                # and `normalise` expects it that way (as `do_all` does), so
+                # the same flag must go to both; passing it to neither made
+                # `log_transform=True` silently fit and report in raw units.
+                log_transform=bool(log_transform),
             )
             res_u = normalise(
                 df_prep,
@@ -350,12 +355,13 @@ def deweathered_scm(
                 covariates=cov_list,
                 variables_resample=res_list,
                 n_samples=n_samples,
-                paired=True,
+                paired="log_ratio" if log_transform else True,
                 return_mc_se=True,
                 sampling="balanced",
                 seed=int(seed) + 31 * u_idx,
                 n_cores=n_cores,
                 verbose=verbose,
+                log_transform=bool(log_transform),
             )
 
         est_col = "paired" if (use_paired and "paired" in res_u.columns) else "normalised"
@@ -671,7 +677,18 @@ def transport_adjusted_scm(
             index=resolved_donors,
             name="weight",
         )
-    w_vec = weights_s.reindex(resolved_donors).fillna(0.0).to_numpy(dtype=np.float64)
+    w_vec = weights_s.reindex(resolved_donors).to_numpy(dtype=np.float64)
+    # `mcnnm` reports NaN weights by design (its fit has no donor-weight
+    # vector), and a partially missing index gives NaN here too. Filling those
+    # with 0 quietly zeroed the spillover correction -- all-zero weights made
+    # `spillover_component` vanish while the fit still looked successful.
+    # Missing/unusable weights mean "no donor weighting information", so fall
+    # back to the equal-weight synthetic control the backend implies.
+    if w_vec.size == 0 or not np.all(np.isfinite(w_vec)) or float(w_vec.sum()) <= 0.0:
+        w_vec = np.full(len(resolved_donors), 1.0 / len(resolved_donors), dtype=np.float64)
+        # Report the weights that were actually used rather than the backend's
+        # NaNs, so the result is usable and self-describing.
+        weights_s = pd.Series(w_vec, index=resolved_donors, name="weight")
 
     pre_mask = panel.index < cutoff_ts
     post_mask = panel.index >= cutoff_ts
@@ -686,9 +703,17 @@ def transport_adjusted_scm(
 
     # Within-timestamp demeaning across donors removes common regional/meteorological
     # shocks delta_t; single-donor fallback uses raw post-minus-pre deviations.
+    # Both variables must be centred over the same donors: demeaning Y over the
+    # donors that report while demeaning F over every donor (missing exposure
+    # was filled with 0) shifts one regressor relative to the other by the
+    # mean exposure of the missing Y rows, which biases gamma.
     if len(resolved_donors) >= 2:
-        dY_w = dY_post - np.nanmean(dY_post, axis=1, keepdims=True)
-        F_w = F_post - np.nanmean(F_post, axis=1, keepdims=True)
+        valid = np.isfinite(dY_post) & np.isfinite(F_post)
+        n_valid = np.maximum(valid.sum(axis=1, keepdims=True), 1)
+        dY_mean = np.where(valid, dY_post, 0.0).sum(axis=1, keepdims=True) / n_valid
+        F_mean = np.where(valid, F_post, 0.0).sum(axis=1, keepdims=True) / n_valid
+        dY_w = np.where(valid, dY_post - dY_mean, np.nan)
+        F_w = np.where(valid, F_post - F_mean, np.nan)
     else:
         dY_w = dY_post
         F_w = F_post

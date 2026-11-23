@@ -280,6 +280,7 @@ def make_synthetic_benchmark(
         target_col = "value"
     elif family == "F3_titration":
         # Molar units (ppb-equivalent): conserved Ox = O3 + NO2, NOx = NO + NO2.
+        mw_o3, mw_no2, mw_no = 48.0000, 46.0055, 30.0061
         ox_emi_mol = np.maximum(
             18.0,
             (46.0 + 10.0 * np.sin(2.0 * np.pi * (doy - 100.0) / 365.25) + 0.4 * diurnal)
@@ -290,9 +291,15 @@ def make_synthetic_benchmark(
             (38.0 + 0.6 * diurnal + weekly) * trend_factor * ev_mult,
         )
 
-        # Apply meteorological dilution to total Ox and NOx.
-        ox_mol_obs = np.maximum(2.0, ox_emi_mol * (0.75 + 0.25 * phi_dil) + rng.normal(0.0, 0.5, n))
-        nox_mol_obs = np.maximum(1.0, nox_emi_mol * phi_dil + rng.normal(0.0, 0.5, n))
+        # Apply meteorological dilution to total Ox and NOx. Observation noise
+        # enters the conserved totals, so the species still add up exactly:
+        # `noise_sd` is documented in target units (O3 ug/m3), and the same
+        # absolute noise on NOx is converted with its own molar mass. The old
+        # hard-coded 0.5 ppb ignored `noise_sd` entirely.
+        noise_ox_mol = eps / mw_o3
+        noise_nox_mol = rng.normal(0.0, float(noise_sd) / mw_no2, n)
+        ox_mol_obs = np.maximum(2.0, ox_emi_mol * (0.75 + 0.25 * phi_dil) + noise_ox_mol)
+        nox_mol_obs = np.maximum(1.0, nox_emi_mol * phi_dil + noise_nox_mol)
 
         def _f_no2(nox_v: np.ndarray, ssrd_v: np.ndarray, t_v: np.ndarray) -> np.ndarray:
             logit = -0.35 + 0.85 * np.log1p(nox_v / 15.0) - 0.0022 * ssrd_v - 0.025 * (t_v - 12.0)
@@ -303,19 +310,30 @@ def make_synthetic_benchmark(
         o3_mol_obs = np.maximum(0.0, ox_mol_obs - no2_mol_obs)
         no_mol_obs = np.maximum(0.0, nox_mol_obs - no2_mol_obs)
 
-        # True deweathered species under average meteorology (phi_dil = 1, mean met)
-        # evaluated at true emission totals (ox_emi_mol, nox_emi_mol).
-        f_dew_true = _f_no2(
-            nox_emi_mol,
-            np.full(n, float(np.mean(met["ssrd"]))),
-            np.full(n, float(np.mean(met["t2m"]))),
-        )
-        no2_mol_true = np.clip(f_dew_true * ox_emi_mol, 0.0, np.minimum(ox_emi_mol, nox_emi_mol))
-        o3_mol_true = np.maximum(0.0, ox_emi_mol - no2_mol_true)
-        no_mol_true = np.maximum(0.0, nox_emi_mol - no2_mol_true)
+        # Ground truth is the estimator's own estimand: the pool expectation
+        # E[O3 | emissions], i.e. the response averaged over resampled
+        # meteorology. The old plug-in at mean met / mean dilution is not the
+        # same quantity -- f_NO2 is nonlinear in NOx and downwelling radiation
+        # and correlated with the dilution factor, so Jensen and covariance
+        # terms shift it. Monte Carlo over the record's own met pool matches
+        # what `normalise` marginalises over. Observation noise is mean-zero
+        # and excluded (the model estimates its conditional mean).
+        truth_draws = 512
+        truth_rng = np.random.default_rng(int(seed) + 991)
+        pool_pos = truth_rng.integers(0, n, size=truth_draws)
+        phi_t = phi_dil[pool_pos]
+        ssrd_t = met["ssrd"][pool_pos]
+        t2m_t = met["t2m"][pool_pos]
+        ox_t = ox_emi_mol[:, None] * (0.75 + 0.25 * phi_t[None, :])
+        nox_t = nox_emi_mol[:, None] * phi_t[None, :]
+        f_t = _f_no2(nox_t, ssrd_t[None, :], t2m_t[None, :])
+        no2_t = np.clip(f_t * ox_t, 0.0, np.minimum(ox_t, nox_t))
+        o3_t = np.maximum(0.0, ox_t - no2_t)
+        o3_mol_true = o3_t.mean(axis=1)
+        no2_mol_true = no2_t.mean(axis=1)
+        no_mol_true = (nox_t - no2_t).mean(axis=1)
 
         # Convert ppb-equivalent -> ug/m3 (standard 48.0, 46.0055, 30.0061 g/mol)
-        mw_o3, mw_no2, mw_no = 48.0000, 46.0055, 30.0061
         df_out["O3"] = o3_mol_obs * mw_o3
         df_out["NO2"] = no2_mol_obs * mw_no2
         df_out["NO"] = no_mol_obs * mw_no

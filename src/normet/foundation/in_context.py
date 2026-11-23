@@ -576,17 +576,32 @@ class ICNDrawBank:
         in_path = Path(path)
         with gzip.open(in_path, "rt", encoding="utf-8") as fh:
             payload = json.load(fh)
-        if payload.get("index_freq") is not None:
+        index_name = payload.get("index_name")
+        index_freq = payload.get("index_freq")
+        index_tz = payload.get("index_tz")
+        if index_tz is not None:
+            # ISO strings carry each row's UTC offset; parsing them directly
+            # yields a fixed-offset (or object-dtype) index and drops the
+            # original zone, so a saved Europe/London bank came back as UTC.
+            # Parse in UTC and convert back to the recorded zone.
+            idx = pd.DatetimeIndex(pd.to_datetime(payload["index_iso"], utc=True))
+            idx = idx.tz_convert(index_tz).rename(index_name)
+        elif index_freq is not None:
             try:
                 idx = pd.DatetimeIndex(
                     payload["index_iso"],
-                    freq=payload["index_freq"],
-                    name=payload.get("index_name"),
+                    freq=index_freq,
+                    name=index_name,
                 )
             except Exception:
-                idx = pd.DatetimeIndex(payload["index_iso"], name=payload.get("index_name"))
+                idx = pd.DatetimeIndex(payload["index_iso"], name=index_name)
         else:
-            idx = pd.DatetimeIndex(payload["index_iso"], name=payload.get("index_name"))
+            idx = pd.DatetimeIndex(payload["index_iso"], name=index_name)
+        if index_tz is not None and index_freq is not None:
+            try:
+                idx = pd.DatetimeIndex(idx, freq=index_freq).rename(index_name)
+            except Exception:
+                pass
         obs = np.asarray(
             [float("nan") if v is None else float(v) for v in payload["observed"]],
             dtype=np.float64,
@@ -928,14 +943,29 @@ def _aggregate(
     if not np.all(np.isfinite(vals)):
         return float("nan")
     leads = np.asarray([float(lead) for _, lead in items], dtype=float)
-    w = np.exp(-leads / lead_tau) if lead_tau and lead_tau > 0 else np.ones_like(vals)
+    # Work in log space and subtract the maximum before exponentiating. The
+    # product of the two kernels underflows to exactly zero as soon as any
+    # surprise error exceeds a few tau, and the old `w_sum <= 0` fallback then
+    # replaced a strongly peaked weight set with uniform weights -- the gating
+    # silently switched itself off at the moment it was most needed. Anchors
+    # with a non-finite error keep the old "not gated" treatment.
+    log_w = np.zeros_like(vals)
+    if lead_tau and lead_tau > 0:
+        log_w = log_w - leads / float(lead_tau)
     if surprise_tau and surprise_tau > 0.0 and surprise_errors:
         n_err = len(surprise_errors)
         if n_err > 0 and len(items) % n_err == 0:
             k_rep = len(items) // n_err
             err_arr = np.repeat(np.asarray(surprise_errors, dtype=float), k_rep)
-            err_arr = np.where(np.isfinite(err_arr), err_arr, 0.0)
-            w = w * np.exp(-((err_arr / float(surprise_tau)) ** 2))
+            log_w = log_w + np.where(
+                np.isfinite(err_arr), -((err_arr / float(surprise_tau)) ** 2), 0.0
+            )
+    finite_lw = np.isfinite(log_w)
+    if bool(finite_lw.any()):
+        scaled = np.where(finite_lw, log_w - float(np.max(log_w[finite_lw])), -np.inf)
+        w = np.exp(scaled)
+    else:
+        w = np.ones_like(vals)
     w_sum = float(w.sum())
     if not np.isfinite(w_sum) or w_sum <= 0.0:
         w = np.ones_like(vals) / float(len(vals))
@@ -2368,6 +2398,7 @@ def icn_decompose(
     from math import factorial
 
     from ..analysis.decomposition import (
+        _MET_RESULT_COLUMNS,
         ShapleyInteractionResult,
         _compute_interaction_indices,
         _met_result,
@@ -2400,11 +2431,20 @@ def icn_decompose(
     if not met_cols:
         raise ValueError("icn_decompose requires at least one meteorological feature.")
 
-    players = (
-        _players_from_groups(groups, met_cols)
-        if groups is not None
-        else [(f, [f]) for f in met_cols]
-    )
+    if groups is not None:
+        players = _players_from_groups(groups, met_cols)
+    else:
+        # A one-feature player is named after its feature, and the
+        # contribution becomes a result column. A feature called
+        # "observed"/"met_total"/... would overwrite that column in place, so
+        # the default player set gets the same clash check as named groups.
+        reserved = [f for f in met_cols if f in _MET_RESULT_COLUMNS]
+        if reserved:
+            raise ValueError(
+                f"meteorological feature(s) {reserved} clash with result column names; "
+                "pass `groups` to give them different player names."
+            )
+        players = [(f, [f]) for f in met_cols]
     k_players = len(players)
     if method == "shapley" and n_permutations is None and k_players > 10:
         raise ValueError(

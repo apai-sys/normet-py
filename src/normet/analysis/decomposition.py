@@ -1691,21 +1691,25 @@ def _build_fused_coalition_evaluator(
     order_dates = np.argsort(dates_arr, kind="stable") if dates_unique else None
     sorted_idx = pd.Index(dates_arr[order_dates], name="date") if order_dates is not None else None
 
-    # Precompute base column tiles and picked resampled columns once per batch.
-    batch_base_tiles: list[dict[str, np.ndarray]] = []
-    batch_picked_cols: list[dict[str, np.ndarray]] = []
+    # Precompute only the draw plan: for each batch and resampling stream, the
+    # pool-row index of every (draw, row). Building the resampled columns here
+    # instead meant retaining one full panel tile per batch for the lifetime of
+    # the evaluator -- O(n_samples * n_rows * n_cols) up to 2x the batch budget
+    # -- while the indices that define the draws are O(n_samples * n_rows).
+    stream_specs: list[tuple[list[str], np.ndarray, int]] = [
+        (list(cols), pool[cols].to_numpy(), stream) for stream, cols, pool in draws_all
+    ]
+    batch_draw_idx: list[list[np.ndarray]] = []
     sample_offset = 0
     for batch_seeds in seeds_batched:
         b_size = len(batch_seeds)
         batch_positions = list(range(sample_offset, sample_offset + b_size))
         sample_offset += b_size
 
-        base_tile = {c: np.tile(df_checked[c].to_numpy(), b_size) for c in df_checked.columns}
-        picked_map: dict[str, np.ndarray] = {}
+        plans: list[np.ndarray] = []
         cycle_cache: dict[tuple[Any, ...], Any] = {}
-        for stream, cols, pool in draws_all:
+        for _cols, values, stream in stream_specs:
             p_strata = pool_strata_map.get(stream)
-            values = pool[cols].to_numpy()
             idx = np.empty((b_size, n_rows), dtype=np.int64)
             for i, (s, pos) in enumerate(zip(batch_seeds, batch_positions, strict=True)):
                 idx[i] = _draw_sample_indices(
@@ -1720,11 +1724,8 @@ def _build_fused_coalition_evaluator(
                     p_strata=p_strata,
                     cycle_cache=cycle_cache,
                 )
-            picked = values[idx.ravel()]
-            for j, c in enumerate(cols):
-                picked_map[c] = picked[:, j]
-        batch_base_tiles.append(base_tile)
-        batch_picked_cols.append(picked_map)
+            plans.append(idx)
+        batch_draw_idx.append(plans)
 
     zero_pass_cache: np.ndarray | None = None
 
@@ -1748,13 +1749,27 @@ def _build_fused_coalition_evaluator(
         sum_norm = np.zeros(n_rows, dtype=np.float64)
         n_completed = 0
         for b_idx, batch_seeds in enumerate(seeds_batched):
-            base_tile = batch_base_tiles[b_idx]
-            picked_map = batch_picked_cols[b_idx]
-            df_batch = pd.DataFrame(
-                {c: picked_map[c] if c in res_set else base_tile[c] for c in df_checked.columns}
-            )
-            batch_preds = ml_predict(model, df_batch, num_threads=n_cores_eff)
             b_size = len(batch_seeds)
+            parts: dict[str, np.ndarray] = {
+                c: np.tile(df_checked[c].to_numpy(), b_size)
+                for c in df_checked.columns
+                if c not in res_set
+            }
+            for s_idx, (cols, values, _stream) in enumerate(stream_specs):
+                needed = [j for j, c in enumerate(cols) if c in res_set]
+                if not needed:
+                    continue
+                picked = values[batch_draw_idx[b_idx][s_idx].ravel()]
+                for j in needed:
+                    parts[cols[j]] = picked[:, j]
+            # A requested column with no stream keeps its factual values, as
+            # before; build in the frame's column order so positional
+            # backends see the same feature order they were trained on.
+            for c in df_checked.columns:
+                if c not in parts:
+                    parts[c] = np.tile(df_checked[c].to_numpy(), b_size)
+            df_batch = pd.DataFrame({c: parts[c] for c in df_checked.columns})
+            batch_preds = ml_predict(model, df_batch, num_threads=n_cores_eff)
             sum_norm += batch_preds.reshape(b_size, n_rows).sum(axis=0)
             n_completed += b_size
 

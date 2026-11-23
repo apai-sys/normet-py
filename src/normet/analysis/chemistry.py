@@ -147,6 +147,10 @@ def _deweather_series(
             seed=seed,
             n_cores=n_cores,
             verbose=verbose,
+            # Mirror the DML/cross-fit branches: the fitted and evaluated
+            # frames must be on the same (log1p) scale, and `normalise`
+            # expects `build_model` to have applied the transform already.
+            log_transform=bool(log_transform),
         )
         res = normalise(
             df_prep,
@@ -154,11 +158,12 @@ def _deweather_series(
             covariates=covariates,
             variables_resample=variables_resample,
             n_samples=n_samples,
-            paired=True,
+            paired="log_ratio" if log_transform else True,
             sampling="balanced",
             seed=seed,
             n_cores=n_cores,
             verbose=verbose,
+            log_transform=bool(log_transform),
         )
     col = "paired" if (use_paired and "paired" in res.columns) else "normalised"
     return res, res[col].astype(float)
@@ -230,7 +235,14 @@ def normalise_ox_invariant(
     if not covariates:
         raise ConfigError("`covariates` must be non-empty.")
 
-    work = process_date(df.copy()) if "date" not in df.columns else df.copy()
+    # A `date` column that is a string is not a datetime axis: grouping and
+    # label-based reindexing then compare raw labels, and the `observed`
+    # columns come back all-NaN. Coerce whenever the column exists but is not
+    # already datetime64; a frame without the column is handled by
+    # `process_date` from its index.
+    work = df.copy()
+    if "date" not in work.columns or not pd.api.types.is_datetime64_any_dtype(work["date"]):
+        work = process_date(work)
     if "date" not in work.columns:
         raise DataError("`df` must contain a 'date' column or DatetimeIndex.")
     for req in (o3_col, no2_col):

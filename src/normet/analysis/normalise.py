@@ -41,6 +41,15 @@ log = get_logger(__name__)
 #: the same default instead of duplicating the number.
 _CROSSFIT_DEFAULT_EMBARGO = 24
 
+#: Time covariates kept out of the DML tree's split space. Each is monotone (or
+#: piecewise monotone) over a record, so a tree can use it to reproduce the
+#: smooth emission trajectory that ``m(t)`` is meant to carry: in-sample it
+#: then absorbs short events, and out-of-fold it extrapolates by clamping at the
+#: training boundary. ``day_julian`` is a linear day counter, not a cyclic
+#: calendar feature, so it belongs here beside ``date_unix`` and ``year``.
+#: Truly cyclic features (``hour``, ``weekday``, sine/cosine terms) stay in.
+_DML_SLOW_TIME_COVARIATES: frozenset[str] = frozenset({"date_unix", "year", "day_julian"})
+
 _TIME_VARS_EXACT: frozenset[str] = frozenset(
     {
         "date_unix",
@@ -1537,12 +1546,32 @@ def _aggregate_draws_frame(
 
         if _cfg.return_quantiles:
             q_arr = sorted({float(q) for q in _cfg.return_quantiles})
-            gb_raw = df_result.groupby("date", as_index=True)
-            q_df = gb_raw["normalised"].quantile(np.asarray(q_arr)).unstack(level=-1)
-            if _cfg.log_transform:
-                q_df = pd.DataFrame(
-                    np.expm1(q_df.to_numpy(dtype=float)), index=q_df.index, columns=q_df.columns
-                )
+            if "_cv_adj" in df_result.columns:
+                # Take the quantiles from the same adjusted draw values as
+                # the mean. `_cv_adj` moves every draw, so building the
+                # bands from the raw draws left them centred on a different
+                # level than `normalised` (and, for arithmetic
+                # back-transform, in a different space).
+                gb_raw = df_work.groupby("date", as_index=True)
+                q_df = gb_raw["normalised"].quantile(np.asarray(q_arr)).unstack(level=-1)
+                if is_log_geom:
+                    q_df = pd.DataFrame(
+                        np.expm1(q_df.to_numpy(dtype=float)),
+                        index=q_df.index,
+                        columns=q_df.columns,
+                    )
+            else:
+                # Without control variates keep the historical convention:
+                # quantiles of the raw fits, one inverse transform at the
+                # end (bit-identical to earlier releases).
+                gb_raw = df_result.groupby("date", as_index=True)
+                q_df = gb_raw["normalised"].quantile(np.asarray(q_arr)).unstack(level=-1)
+                if _cfg.log_transform:
+                    q_df = pd.DataFrame(
+                        np.expm1(q_df.to_numpy(dtype=float)),
+                        index=q_df.index,
+                        columns=q_df.columns,
+                    )
             q_df.columns = pd.Index([_format_quantile_name(float(q)) for q in q_df.columns])
             df_out = df_out.join(q_df, how="left")
         return df_out
@@ -1957,6 +1986,14 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
         q_buf: np.ndarray | None = (
             np.empty((_cfg.n_samples, n_rows), dtype=np.float64) if _cfg.return_quantiles else None
         )
+        # Control-variate adjustments are buffered beside the raw draws so the
+        # quantiles can be built from adjusted values; without control
+        # variates the raw-draw path is kept bit-identical to earlier releases.
+        q_adj_buf: np.ndarray | None = (
+            np.empty((_cfg.n_samples, n_rows), dtype=np.float64)
+            if (_cfg.return_quantiles and _cfg.control_variates and cv_spec is not None)
+            else None
+        )
 
         seeds_batched = [
             random_seeds[i : i + eff_batch_size] for i in range(0, _cfg.n_samples, eff_batch_size)
@@ -2003,6 +2040,8 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
             cv_adj = _cv_adjustment(df_batch_dict, b_size, n_rows)
             if cv_adj is not None:
                 batch_y_2d = batch_y_2d - cv_adj
+                if q_adj_buf is not None:
+                    q_adj_buf[sample_offset : sample_offset + b_size] = cv_adj
             sum_norm += batch_y_2d.sum(axis=0)
             sum_obs += np.broadcast_to(obs_arr, (b_size, n_rows)).sum(axis=0)
 
@@ -2066,9 +2105,25 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
                 df_out["mc_se"] = se_vals
             if q_buf is not None:
                 q_arr = sorted({float(q) for q in (_cfg.return_quantiles or ())})
-                q_mat = np.quantile(q_buf[:, order], q_arr, axis=0)
-                if _cfg.log_transform:
-                    q_mat = np.expm1(q_mat)
+                q_vals = q_buf[:, order]
+                if q_adj_buf is not None:
+                    # Adjusted draws, in the same space as `normalised`:
+                    # back-transform first for arithmetic/smearing, then
+                    # subtract the control-variate shift.
+                    if is_log_arith:
+                        q_vals = (
+                            _back_transform_values(q_vals, smearing_factor=phi)
+                            - q_adj_buf[:, order]
+                        )
+                        q_mat = np.quantile(q_vals, q_arr, axis=0)
+                    else:
+                        q_mat = np.quantile(q_vals - q_adj_buf[:, order], q_arr, axis=0)
+                        if _cfg.log_transform:
+                            q_mat = np.expm1(q_mat)
+                else:
+                    q_mat = np.quantile(q_vals, q_arr, axis=0)
+                    if _cfg.log_transform:
+                        q_mat = np.expm1(q_mat)
                 for qi, q_val in enumerate(q_arr):
                     df_out[_format_quantile_name(q_val)] = q_mat[qi]
         else:
@@ -2091,15 +2146,23 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
                 df_out["mc_se"] = se_vals
             if q_buf is not None:
                 q_arr = sorted({float(q) for q in (_cfg.return_quantiles or ())})
+                q_vals = q_buf
+                q_log_after = _cfg.log_transform
+                if q_adj_buf is not None:
+                    if is_log_arith:
+                        q_vals = _back_transform_values(q_buf, smearing_factor=phi) - q_adj_buf
+                        q_log_after = False
+                    else:
+                        q_vals = q_buf - q_adj_buf
                 q_src = pd.DataFrame(
-                    {"date": np.tile(dates_arr, n_completed), "_pred": q_buf.ravel()}
+                    {"date": np.tile(dates_arr, n_completed), "_pred": q_vals.ravel()}
                 )
                 q_df = (
                     q_src.groupby("date", as_index=True)["_pred"]
                     .quantile(np.asarray(q_arr))
                     .unstack(level=-1)
                 )
-                if _cfg.log_transform:
+                if q_log_after:
                     q_df = pd.DataFrame(
                         np.expm1(q_df.to_numpy(dtype=float)),
                         index=q_df.index,
@@ -2110,6 +2173,8 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
 
         if q_buf is not None:
             del q_buf
+            if q_adj_buf is not None:
+                del q_adj_buf
             gc.collect()
 
     # ── joblib threaded path: memory_save=True ─────────────────────────────
@@ -2861,10 +2926,10 @@ def dml_normalise(
 
     Separates smooth low-frequency emission trajectories from high-dimensional
     nonlinear meteorological responses via Neyman-orthogonal residualisation
-    (Robinson 1988; Chernozhukov et al. 2018), explicitly removing ``date_unix``
-    and ``year`` from the tree's split space so trees neither absorb short
-    emission events in-sample nor produce boundary-clamping step artefacts
-    out-of-fold.
+    (Robinson 1988; Chernozhukov et al. 2018), explicitly removing the slow
+    time covariates (``date_unix``, ``year``, ``day_julian``) from the tree's
+    split space so trees neither absorb short emission events in-sample nor
+    produce boundary-clamping step artefacts out-of-fold.
 
     Parameters
     ----------
@@ -2874,9 +2939,9 @@ def dml_normalise(
     target : str, default "value"
         Target concentration column in ``df``.
     covariates : list of str
-        Predictor columns. ``date_unix`` and ``year`` are used solely to build
-        the smooth temporal baseline and are excluded from the tree's split
-        features.
+        Predictor columns. ``date_unix``, ``year`` and ``day_julian`` are used
+        solely to build the smooth temporal baseline and are excluded from the
+        tree's split features.
     variables_resample : list of str, optional
         Variables to marginalise over; defaults to non-time predictors in
         ``covariates``.
@@ -2922,11 +2987,11 @@ def dml_normalise(
         raise ConfigError(f"`ridge_alpha` must be non-negative, got {ridge_alpha!r}.")
 
     cov_list = list(covariates)
-    tree_covs = [c for c in cov_list if c not in ("date_unix", "year")]
+    tree_covs = [c for c in cov_list if c not in _DML_SLOW_TIME_COVARIATES]
     if not tree_covs:
         raise ConfigError(
             "dml_normalise requires at least one meteorological or cyclical covariate "
-            "besides 'date_unix'/'year'."
+            "besides the slow time covariates ('date_unix', 'year', 'day_julian')."
         )
     paired_mode_resolved = _resolve_paired_mode(paired, log_transform=log_transform) or "none"
 
@@ -3058,7 +3123,16 @@ def dml_normalise(
             conditional_k=conditional_k,
             return_quantiles=return_quantiles,
             return_mc_se=return_mc_se,
-            log_transform=False,
+            # The draw-level target is 0, so log1p leaves it unchanged; setting
+            # log_transform here only asks `normalise` to aggregate the draws on
+            # the original (expm1) scale before averaging. Without it the fold
+            # returned the mean in log space and `back_transform` was a no-op,
+            # i.e. "arithmetic" silently produced the geometric level.
+            log_transform=bool(log_transform),
+            # Aggregate the raw draws on the expm1 scale. Smearing's Duan
+            # factor is applied once, when the fold is combined with the slow
+            # trend below; letting the fold apply it as well squared phi.
+            back_transform="arithmetic" if back_transform == "smearing" else str(back_transform),
             paired=False,
             sampling=sampling,
             control_variates=control_variates,
@@ -3138,7 +3212,14 @@ def dml_normalise(
             fact_orig = _back_transform_values(
                 m_te_aligned + g_fact_aligned, smearing_factor=smear_use
             )
-            norm_orig = _back_transform_values(m_te_aligned + g_norm, smearing_factor=smear_use)
+            # `g_norm` is the fold's draw aggregation on the expm1 scale (its
+            # arithmetic or geometric mean, depending on `back_transform`).
+            # log1p maps that residual level back to the additive log scale
+            # where the slow trend m(t) lives; combining before the inverse
+            # transform is what makes the two stages commute.
+            norm_orig = _back_transform_values(
+                m_te_aligned + np.log1p(g_norm), smearing_factor=smear_use
+            )
         else:
             obs_orig = obs_aligned
             fact_orig = m_te_aligned + g_fact_aligned
@@ -3151,15 +3232,29 @@ def dml_normalise(
         if return_mc_se and "mc_se" in g_norm_df.columns:
             mc_se_raw = g_norm_df["mc_se"].to_numpy(dtype=np.float64)
             if log_transform:
-                mc_se_raw = np.exp(m_te_aligned + g_norm) * mc_se_raw
+                # The fold already reports the residual-level MC SE on the
+                # expm1 scale (log-space SE scaled by the level, or the SE of
+                # the per-draw expm1 values). d(level)/d(residual) is exp(m),
+                # so the total's SE is phi * exp(m) times it -- not
+                # exp(m + g_norm), which applied that Jacobian twice.
+                mc_se_raw = smear_use * np.exp(m_te_aligned) * mc_se_raw
             fold_out["mc_se"] = mc_se_raw
         if return_quantiles:
             for q_val in sorted({float(q) for q in return_quantiles}):
                 q_col = _format_quantile_name(q_val)
                 if q_col in g_norm_df.columns:
-                    q_tot = m_te_aligned + g_norm_df[q_col].to_numpy(dtype=np.float64)
+                    q_res = g_norm_df[q_col].to_numpy(dtype=np.float64)
                     if log_transform:
-                        q_tot = np.expm1(q_tot)
+                        # Quantiles are equivariant under the monotone expm1:
+                        # the total's q-th quantile is expm1(m + q_z), and
+                        # q_z = log1p(q_res) because the fold's quantiles are
+                        # already back-transformed per draw. The same Duan
+                        # factor as the mean scales the smeared quantile.
+                        q_tot = _back_transform_values(
+                            m_te_aligned + np.log1p(q_res), smearing_factor=smear_use
+                        )
+                    else:
+                        q_tot = m_te_aligned + q_res
                     fold_out[q_col] = q_tot
 
         if paired is not False and paired is not None:

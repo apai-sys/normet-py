@@ -21,7 +21,7 @@ from normet.foundation import (
     build_icn_draw_bank,
     icn_decompose,
 )
-from normet.foundation.in_context import _design_hash
+from normet.foundation.in_context import _aggregate, _design_hash
 
 
 class _FakeICLPipeline:
@@ -191,6 +191,37 @@ def test_control_variates_reduces_mc_se_and_is_unbiased() -> None:
     assert np.allclose(cv_vec["normalised"].to_numpy(), cv_mem["normalised"].to_numpy(), atol=1e-10)
     assert np.allclose(cv_vec["mc_se"].to_numpy(), cv_mem["mc_se"].to_numpy(), atol=1e-10)
 
+    # The control-variate shift must move the quantile bands too: they are
+    # draws of the same adjusted distribution as `normalised`. The old code
+    # built them from the raw draws, so the bands stayed centred on the
+    # unadjusted level while the central line moved.
+    q_base = nm.normalise(
+        df_prep,
+        mdl,
+        covariates=bm.covariates,
+        variables_resample=bm.met_covariates,
+        n_samples=40,
+        return_quantiles=(0.1, 0.5, 0.9),
+        control_variates=False,
+        seed=123,
+        n_cores=1,
+    )
+    q_cv = nm.normalise(
+        df_prep,
+        mdl,
+        covariates=bm.covariates,
+        variables_resample=bm.met_covariates,
+        n_samples=40,
+        return_quantiles=(0.1, 0.5, 0.9),
+        control_variates=True,
+        seed=123,
+        n_cores=1,
+    )
+    q50_shifts = np.abs(q_cv["q500"].to_numpy() - q_base["q500"].to_numpy())
+    assert float(np.max(q50_shifts)) > 1e-6
+    assert (q_cv["q100"].to_numpy() <= q_cv["q500"].to_numpy() + 1e-9).all()
+    assert (q_cv["q500"].to_numpy() <= q_cv["q900"].to_numpy() + 1e-9).all()
+
 
 def test_markov_bridge_block_resampling_reduces_seam_jumps() -> None:
     rng = np.random.default_rng(77)
@@ -266,6 +297,21 @@ def test_icn_surprise_weighting_persistence_and_v1_hash(tmp_path: Path) -> None:
     res_loaded = loaded.aggregate(surprise_tau=0.2)
     pd.testing.assert_series_equal(res_surp.level, res_loaded.level)
     pd.testing.assert_series_equal(res_surp.paired, res_loaded.paired)
+
+    # A timezone-aware index must survive the round trip. `index_tz` was
+    # written but never read back, so a Europe/London bank silently became
+    # fixed-offset/UTC after loading and no longer matched the caller's frame.
+    tz_name = "Europe/London"
+    bank.index = bank.index.tz_localize(tz_name)
+    tz_path = tmp_path / "icn_bank_tz.json.gz"
+    bank.save(tz_path)
+    loaded_tz = ICNDrawBank.load(tz_path)
+    assert str(loaded_tz.index.tz) == tz_name
+    pd.testing.assert_index_equal(loaded_tz.index, bank.index)
+    pd.testing.assert_series_equal(
+        loaded_tz.aggregate(surprise_tau=0.2).level,
+        bank.aggregate(surprise_tau=0.2).level,
+    )
 
 
 def test_icn_decompose_groups_and_interactions() -> None:
@@ -583,3 +629,254 @@ def test_invert_multisite_footprints() -> None:
     assert np.allclose(est_beta, true_beta, atol=0.8)
     for site, b0 in intercepts_true.items():
         assert res.intercepts[site] == pytest.approx(b0, abs=1.2)
+
+
+def test_ode_memory_is_grouped_and_time_aware() -> None:
+    dates = pd.date_range("2023-01-01", periods=6, freq="D")
+    rows: list[dict[str, Any]] = []
+    for d in dates:
+        rows.append({"date": d, "site": "A", "blh": 500.0, "ws": 2.0, "ssrd": 0.0, "tp": 0.0})
+        rows.append({"date": d, "site": "B", "blh": 500.0, "ws": 2.0, "ssrd": 100.0, "tp": 0.0})
+    # Shuffle so index order cannot accidentally separate the sites.
+    panel = pd.DataFrame(rows).sample(frac=1.0, random_state=0).reset_index(drop=True)
+
+    grouped = nm.add_met_physics_features(panel, include_memory=True, group_col="site")
+    a = grouped[grouped["site"] == "A"].sort_values("date")
+    b = grouped[grouped["site"] == "B"].sort_values("date")
+    # Site A sees no radiation; an ungrouped EMA carries B's radiation into it.
+    assert np.allclose(a["photochemical_dose"].to_numpy(), 0.0, atol=1e-12)
+    assert np.allclose(b["photochemical_dose"].to_numpy(), 100.0, atol=1e-9)
+
+    single_a = nm.add_met_physics_features(
+        panel[panel["site"] == "A"].sort_values("date").drop(columns=["site"]),
+        include_memory=True,
+    )
+    assert np.allclose(
+        a["stagnation_memory"].to_numpy(), single_a["stagnation_memory"].to_numpy(), atol=1e-12
+    )
+    assert np.allclose(
+        a["wet_scavenging_memory"].to_numpy(),
+        single_a["wet_scavenging_memory"].to_numpy(),
+        atol=1e-12,
+    )
+
+    # Decay is per elapsed hour, not per row: a 100 W/m^2 impulse one day
+    # later is exp(-24/6) of it, versus exp(-1/6) for a one-hour step.
+    cols = {"blh": 500.0, "ws": 2.0, "tp": 0.0}
+    daily = nm.add_met_physics_features(
+        pd.DataFrame(
+            {
+                "date": pd.date_range("2023-01-01", periods=4, freq="D"),
+                "ssrd": [100.0, 0, 0, 0],
+                **cols,
+            }
+        ),
+        include_memory=True,
+    )
+    hourly = nm.add_met_physics_features(
+        pd.DataFrame(
+            {
+                "date": pd.date_range("2023-01-01", periods=4, freq="h"),
+                "ssrd": [100.0, 0, 0, 0],
+                **cols,
+            }
+        ),
+        include_memory=True,
+    )
+    assert daily["photochemical_dose"].iloc[1] == pytest.approx(100.0 * np.exp(-4.0), rel=1e-9)
+    assert hourly["photochemical_dose"].iloc[1] == pytest.approx(
+        100.0 * np.exp(-1.0 / 6.0), rel=1e-9
+    )
+
+    with pytest.raises(ValueError, match="not a column"):
+        nm.add_met_physics_features(panel, include_memory=True, group_col="nosuch")
+
+
+def test_dml_back_transform_aggregates_on_original_scale() -> None:
+    pytest.importorskip("lightgbm")
+    bm = nm.make_synthetic_benchmark("F2_multiplicative", n_days=60, seed=5)
+    common: dict[str, Any] = {
+        "target": bm.target,
+        "covariates": ["ws", "blh", "t2m", "day_julian", "hour"],
+        "variables_resample": ["ws", "blh", "t2m"],
+        "backend": "lightgbm",
+        "model_config": _fast_lgb_cfg(),
+        "cutoff_days": 20.0,
+        "n_splits": 3,
+        "embargo": 10,
+        "n_samples": 40,
+        "paired": "log_ratio",
+        "sampling": "balanced",
+        "return_mc_se": True,
+        "return_quantiles": (0.1, 0.9),
+        "seed": 5,
+        "n_cores": 1,
+        "log_transform": True,
+    }
+    geo = nm.dml_normalise(bm.df, back_transform="geometric", **common)
+    arith = nm.dml_normalise(bm.df, back_transform="arithmetic", **common)
+
+    # `day_julian` is a linear day counter and must stay out of the tree's
+    # split space alongside `date_unix` and `year`.
+    assert "day_julian" not in arith.fold_models[0].feature_names  # type: ignore[attr-defined]
+    assert "date_unix" not in arith.fold_models[0].feature_names  # type: ignore[attr-defined]
+
+    g = geo.normalised["normalised"].to_numpy(dtype=float)
+    a = arith.normalised["normalised"].to_numpy(dtype=float)
+    # Averaging expm1(m + z_i) is at least expm1(m + mean z_i) by Jensen. The
+    # old fold returned the log-space mean for both, so `back_transform` was
+    # a no-op and the two arrays were identical.
+    assert not np.allclose(a, g, atol=1e-9)
+    assert (a >= g - 1e-9).all()
+    assert float(np.mean(a - g)) > 1e-3
+
+    assert (arith.normalised["q100"].to_numpy() <= arith.normalised["q900"].to_numpy()).all()
+    assert np.isfinite(arith.normalised["mc_se"].to_numpy()).all()
+
+    # Smearing is the arithmetic level multiplied by the Duan factor exactly
+    # once: (level + 1) must scale by phi, per fold. The earlier combination
+    # applied phi in the fold aggregation and again when adding m(t), i.e.
+    # phi^2.
+    smear = nm.dml_normalise(bm.df, back_transform="smearing", **common)
+    phi_by_fold = {k: float(phi) for k, phi in enumerate(smear.smearing_factors)}
+    phi_rows = smear.normalised["fold"].map(phi_by_fold).to_numpy(dtype=float)
+    smear_vals = smear.normalised["normalised"].to_numpy(dtype=float)
+    arith_vals = arith.normalised["normalised"].to_numpy(dtype=float)
+    assert np.allclose(smear_vals + 1.0, phi_rows * (arith_vals + 1.0), rtol=1e-6, atol=1e-9)
+
+
+def test_icn_surprise_weights_stable_under_underflow() -> None:
+    items = [(10.0, 0), (10.0, 0), (20.0, 0)]
+    # Every anchor's Gaussian gate underflows to 0 here. The old code then
+    # replaced the peaked weights with a uniform average (13.33); the stable
+    # log-space form keeps the least-surprising anchors.
+    out = _aggregate(items, "mean", 0.0, surprise_errors=[30.0, 31.0, 32.0], surprise_tau=1.0)
+    assert out == pytest.approx(10.0, abs=1e-6)
+    out_lead = _aggregate(items, "mean", 5.0, surprise_errors=[30.0, 31.0, 32.0], surprise_tau=1.0)
+    assert np.isfinite(out_lead)
+    assert out_lead == pytest.approx(10.0, abs=1e-6)
+    assert _aggregate(items, "mean", 0.0) == pytest.approx(float(np.mean([10.0, 10.0, 20.0])))
+
+
+def test_icn_decompose_rejects_reserved_default_player_names() -> None:
+    rng = np.random.default_rng(5)
+    n = 400
+    idx = pd.date_range("2022-01-01", periods=n, freq="h")
+    w = rng.standard_normal(n)
+    df = pd.DataFrame({"y": 10.0 + 2.0 * w, "observed": w}, index=idx)
+    est = Chronos2Estimator()
+    est.fit(df[["observed"]], df["y"])
+    design = ICNDesign(
+        block_h=80,
+        stride=80,
+        direction="forward",
+        context_length=200,
+        aggregate="mean",
+        n_resamples=2,
+        seed=0,
+    )
+    with pytest.raises(ValueError, match="clash"):
+        icn_decompose(est, df, "y", design=design, pipeline=_FakeICLPipeline())
+
+
+def test_transport_adjusted_scm_nan_weights_and_matched_donor_mask(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import normet.causal.deweathered as dw
+
+    rng = np.random.default_rng(7)
+    n_days = 40
+    dates = pd.date_range("2023-01-01", periods=n_days, freq="D")
+    cutoff = "2023-01-21"
+    post = (dates >= pd.Timestamp(cutoff)).astype(float)
+    f = {
+        "D1": np.where(post > 0, rng.uniform(0.0, 1.5, n_days), 0.0),
+        "D2": np.where(post > 0, rng.uniform(0.0, 1.5, n_days), 0.0),
+        # Large, and its outcome is missing on every third post day, so the
+        # observed-donor mean and the all-donor mean of F differ.
+        "D3": np.where(post > 0, 3.0, 0.0),
+    }
+    common_shock = 2.0 * np.sin(2.0 * np.pi * np.arange(n_days) / 9.0)
+    rows: list[pd.DataFrame] = []
+    for unit, offset in (("T", 0.0), ("D1", -1.0), ("D2", 2.0), ("D3", 1.0)):
+        exposure = f.get(unit, np.zeros(n_days))
+        y = 30.0 + offset + common_shock - 5.0 * exposure * post
+        y = y + rng.normal(0.0, 0.01, n_days)
+        if unit == "D3":
+            y = np.where((post > 0) & (np.arange(n_days) % 3 == 0), np.nan, y)
+        rows.append(pd.DataFrame({"date": dates, "ID": unit, "value": y, "expo": exposure}))
+    panel = pd.concat(rows, ignore_index=True)
+
+    def fake_fit(df_panel: pd.DataFrame, **kw: Any) -> tuple[pd.DataFrame, pd.Series, None]:
+        idx = pd.DatetimeIndex(sorted(df_panel["date"].unique()))
+        syn = pd.DataFrame({"synthetic": 30.0, "observed": 30.0, "effect": 0.0}, index=idx)
+        # `mcnnm` reports NaN weights; the transport correction must fall back
+        # to equal weights rather than filling them with 0 and switching itself off.
+        nan_w = pd.Series(np.nan, index=list(kw["donors"]), dtype=float)
+        return syn, nan_w, None
+
+    monkeypatch.setattr(dw, "_fit_scm_with_weights", fake_fit)
+    res = nm.transport_adjusted_scm(
+        panel,
+        treated_unit="T",
+        cutoff_date=cutoff,
+        donors=["D1", "D2", "D3"],
+        spillover_exposure="expo",
+        scm_backend="ascm",
+    )
+    assert res.gamma == pytest.approx(-5.0, abs=0.3)
+    assert np.isfinite(res.weights.to_numpy(dtype=float)).all()
+    assert float(np.abs(res.synthetic["spillover_adjustment"]).max()) > 0.0
+
+
+def test_ox_invariant_string_dates_and_standard_log_transform() -> None:
+    pytest.importorskip("lightgbm")
+    bm = nm.make_synthetic_benchmark("F3_titration", n_days=30, seed=31)
+    common: dict[str, Any] = {
+        "o3_col": "O3",
+        "no2_col": "NO2",
+        "no_col": "NO",
+        "covariates": bm.covariates,
+        "variables_resample": bm.met_covariates,
+        "method": "standard",
+        "backend": "lightgbm",
+        "model_config": _fast_lgb_cfg(),
+        "n_samples": 12,
+        "seed": 31,
+        "n_cores": 1,
+    }
+    df_str = bm.df.copy()
+    df_str["date"] = df_str["date"].dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    logged = nm.normalise_ox_invariant(df_str, log_transform=True, **common)
+    reference = nm.normalise_ox_invariant(bm.df, log_transform=True, **common)
+    # A string `date` column must be coerced, not used as raw group labels
+    # (which left the observed columns all-NaN).
+    assert logged.species["O3_observed"].notna().all()
+    pd.testing.assert_series_equal(
+        logged.species["O3_normalised"], reference.species["O3_normalised"]
+    )
+
+    unlogged = nm.normalise_ox_invariant(bm.df, log_transform=False, **common)
+    # The standard branch must honour `log_transform` like dml/crossfit do.
+    assert not np.allclose(
+        reference.species["O3_normalised"].to_numpy(dtype=float),
+        unlogged.species["O3_normalised"].to_numpy(dtype=float),
+    )
+
+
+def test_f3_benchmark_noise_and_pool_expectation_truth() -> None:
+    quiet = nm.make_synthetic_benchmark("F3_titration", n_days=20, noise_sd=0.0, seed=5)
+    noisy = nm.make_synthetic_benchmark("F3_titration", n_days=20, noise_sd=4.0, seed=5)
+    # `noise_sd` must reach F3 (the old branch hard-coded a 0.5 ppb noise).
+    assert not np.allclose(quiet.df["O3"], noisy.df["O3"])
+    # Ground truth is the noise-free pool expectation, so it is unchanged by
+    # the observation-noise level.
+    np.testing.assert_allclose(
+        quiet.truth["emission_true"].to_numpy(dtype=float),
+        noisy.truth["emission_true"].to_numpy(dtype=float),
+    )
+    # Noise enters the conserved totals, so the species still add up exactly.
+    for bm in (quiet, noisy):
+        ox_rebuilt = bm.df["O3"] / 48.0000 + bm.df["NO2"] / 46.0055
+        np.testing.assert_allclose(ox_rebuilt.to_numpy(dtype=float), bm.df["Ox"] / 48.0, atol=1e-9)

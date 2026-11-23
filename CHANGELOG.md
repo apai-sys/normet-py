@@ -231,6 +231,47 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
     the default `traj_*` column set is unchanged; Transport Studio passes it.
 
 ### Fixed
+- **First-principles review of the v3 additions (`nm.dml_normalise`,
+  `nm.normalise`, `nm.decom_met`, `nm.shapley_interactions`,
+  `nm.add_met_physics_features`, `nm.normalise_ox_invariant`,
+  `nm.deweathered_scm`, `nm.transport_adjusted_scm`,
+  `nm.make_synthetic_benchmark`, `nm.ICNDrawBank`, `nm.icn_decompose`)**:
+  - `add_met_physics_features` takes `group_col` and accumulates the causal
+    memory features per group (a panel no longer feeds one site's air mass
+    into the next), with decay applied per elapsed hour
+    (`exp(-dt/tau)`) so hourly, daily and irregular records share the same
+    physical kernel.
+  - `dml_normalise` aggregates the fold draws on the requested
+    `back_transform` scale (arithmetic and smearing had been no-ops that
+    silently returned the geometric level), combines the fold with the slow
+    trend in log space, and scales `mc_se`/quantiles from the same adjusted
+    draws; `day_julian` joins `date_unix`/`year` outside the tree's split
+    space.
+  - Control-variate adjusted `normalise` quantiles (all aggregation paths)
+    are built from the adjusted draws, so the bands share the central
+    line's level.
+  - `ICN` surprise weighting is computed in log space, so an anchor set
+    whose Gaussian gates all underflow keeps its peaked weights instead of
+    reverting to a uniform average; `ICNDrawBank.load` restores the saved
+    timezone; `icn_decompose` rejects default player names that collide
+    with result columns.
+  - The `standard` branch of `normalise_ox_invariant` and
+    `deweathered_scm` forwards `log_transform` (and `paired="log_ratio"`),
+    matching the dml/cross-fit branches; `normalise_ox_invariant` coerces a
+    string `date` column instead of grouping on raw labels and returning
+    all-NaN `observed` columns.
+  - `transport_adjusted_scm` centres outcomes and exposure over the same
+    donor set and falls back to equal weights when a backend reports
+    non-finite/all-zero weights (previously filled with 0, zeroing the
+    spillover correction); it reports the weights actually used.
+  - The fused coalition evaluator stores draw indices rather than a full
+    panel tile per batch, keeping peak memory within the batch budget.
+  - `make_synthetic_benchmark` honours `noise_sd` in `F3_titration` (the
+    old branch hard-coded 0.5 ppb) and reports the pool expectation
+    `E[O3 | emissions]` as ground truth, the quantity Monte Carlo
+    normalisation actually estimates.
+  - `load_lgb` applies the macOS OpenMP coexistence guard before
+    unpickling a booster.
 - **Cache, conditioning and aggregation defects (`nm.normalise`,
   `nm.decom_emi_shapley`, `nm.decom_met`, `nm.shapley_interactions`,
   `nm.cross_fit_decompose`, `nm.cluster_trajectories`,
