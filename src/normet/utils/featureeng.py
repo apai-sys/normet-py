@@ -467,7 +467,7 @@ def add_met_physics_features(
         # whether the record is hourly, daily or irregular; one row per hour is
         # assumed only when no datetime axis exists. Duplicate timestamps get
         # dt = 0 (the state is carried forward, not advanced).
-        dt_hours = np.ones(n, dtype=np.float64)
+        dt_hours: np.ndarray = np.ones(n, dtype=np.float64)
         if date_idx is not None:
             ordered = pd.Series(date_idx[ord_idx])
             step = ordered.diff().dt.total_seconds().to_numpy(dtype=float) / 3600.0
