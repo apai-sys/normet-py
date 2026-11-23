@@ -299,6 +299,33 @@ def _magnus_es(temp_c: np.ndarray) -> np.ndarray:
         return 0.6108 * np.exp((17.27 * temp_c) / safe_denom)
 
 
+def _causal_ema(
+    values: np.ndarray, decay: np.ndarray | float, *, reset: np.ndarray | None = None
+) -> np.ndarray:
+    """First-order causal ODE exponential accumulation ``s[t] = d[t]*s[t-1] + (1-d[t])*x[t]``.
+
+    ``reset`` marks the first row of each independent segment (a site, a series).
+    Without it a panel is accumulated as one long record, so every row after the
+    first site starts at the previous site's level and the feature depends on
+    how the rows happen to be ordered.
+    """
+    n = len(values)
+    out = np.empty(n, dtype=np.float64)
+    if n == 0:
+        return out
+    d_arr = np.broadcast_to(np.asarray(decay, dtype=np.float64), (n,))
+    r_arr = np.zeros(n, dtype=bool) if reset is None else np.asarray(reset, dtype=bool)
+    acc = float("nan")
+    for t in range(n):
+        if t == 0 or r_arr[t]:
+            acc = float(values[t])
+        else:
+            d_t = float(d_arr[t])
+            acc = d_t * acc + (1.0 - d_t) * float(values[t])
+        out[t] = acc
+    return out
+
+
 def add_met_physics_features(
     df: pd.DataFrame,
     *,
@@ -308,7 +335,12 @@ def add_met_physics_features(
     temp_col: str | None = "t2m",
     rh_col: str | None = "rh",
     dewpoint_col: str | None = "d2m",
+    ssrd_col: str | None = "ssrd",
+    precip_col: str | None = "tp",
     temp_unit: str = "auto",
+    include_memory: bool = False,
+    residence_tau_hours: float = 12.0,
+    group_col: str | None = None,
 ) -> pd.DataFrame:
     """Derive physically meaningful boundary-layer and thermodynamic meteorological features.
 
@@ -316,10 +348,22 @@ def add_met_physics_features(
       - ``u_wind``, ``v_wind`` from ``ws_col`` & ``wd_col`` via :func:`wind_to_uv`
       - ``ventilation_coef = ws * blh`` from ``ws_col`` & ``blh_col``
       - ``vpd`` (vapour pressure deficit, kPa) and ``dewpoint_depression`` (deg C),
-        plus ``rh_derived`` (%) when ``dewpoint_col`` is present without ``rh_col``.
+        plus ``rh_derived`` (%) when ``dewpoint_col`` is present without ``rh_col``
+      - when ``include_memory=True``, causal first-order ODE residence integrals:
+        ``stagnation_memory``, ``photochemical_dose``, and ``wet_scavenging_memory``.
+
+    The memory integrals are causal and stateful, so a panel of several sites must
+    be accumulated per site: with ``group_col`` set, the state resets at each
+    group and rows are ordered by group then date. Without it the whole frame is
+    treated as one record, which mixes one site's air mass into the next site's
+    features. Decay is applied per elapsed hour (``exp(-dt / tau)``), so hourly,
+    daily and irregular records all correspond to the same physical kernel; when
+    no datetime column or index is available, one row is taken as one hour.
     """
     if temp_unit not in ("auto", "C", "K"):
         raise ValueError(f"`temp_unit` must be 'auto', 'C', or 'K', got {temp_unit!r}.")
+    if float(residence_tau_hours) <= 0.0:
+        raise ValueError(f"`residence_tau_hours` must be positive, got {residence_tau_hours!r}.")
 
     out = df.copy()
     if ws_col and wd_col and ws_col in out.columns and wd_col in out.columns:
@@ -379,6 +423,86 @@ def add_met_physics_features(
                 out["vpd"] = np.maximum(0.0, es_t - es_td)
                 with np.errstate(divide="ignore", invalid="ignore"):
                     out["rh_derived"] = 100.0 * np.clip(es_td / np.maximum(es_t, 1e-12), 0.0, 1.0)
+
+    if include_memory and len(out) > 0:
+        n = len(out)
+        date_idx: pd.DatetimeIndex | None = None
+        if "date" in out.columns and pd.api.types.is_datetime64_any_dtype(out["date"]):
+            date_idx = pd.DatetimeIndex(out["date"])
+        elif isinstance(out.index, pd.DatetimeIndex):
+            date_idx = out.index
+
+        # Integer sort keys for the datetime axis. `asi8` is not in the type
+        # stubs; converting to UTC datetime64 then int64 gives the same order
+        # for tz-aware and naive indexes alike.
+        date_codes = (
+            date_idx.to_numpy(dtype="datetime64[ns]").astype("int64")
+            if date_idx is not None
+            else None
+        )
+
+        reset_mask: np.ndarray | None = None
+        if group_col is not None:
+            if group_col not in out.columns:
+                raise ValueError(f"`group_col` {group_col!r} is not a column of `df`.")
+            groups_arr = out[group_col].to_numpy(dtype=object)
+            group_codes = pd.factorize(groups_arr)[0]
+            if date_codes is not None:
+                ord_idx = np.lexsort((date_codes, group_codes))
+            else:
+                ord_idx = np.argsort(group_codes, kind="stable")
+            groups_sorted = groups_arr[ord_idx]
+            reset_mask = np.empty(n, dtype=bool)
+            reset_mask[0] = True
+            reset_mask[1:] = groups_sorted[1:] != groups_sorted[:-1]
+        elif date_codes is not None:
+            ord_idx = np.argsort(date_codes, kind="stable")
+        else:
+            ord_idx = np.arange(n, dtype=np.int64)
+        inv_idx = np.empty(n, dtype=np.int64)
+        inv_idx[ord_idx] = np.arange(n, dtype=np.int64)
+
+        # Elapsed hours between consecutive rows within a segment. The kernel is
+        # then exp(-dt / tau) at every row, so the physical memory is the same
+        # whether the record is hourly, daily or irregular; one row per hour is
+        # assumed only when no datetime axis exists. Duplicate timestamps get
+        # dt = 0 (the state is carried forward, not advanced).
+        dt_hours: np.ndarray = np.ones(n, dtype=np.float64)
+        if date_idx is not None:
+            ordered = pd.Series(date_idx[ord_idx])
+            step = ordered.diff().dt.total_seconds().to_numpy(dtype=float) / 3600.0
+            step[0] = 1.0
+            if reset_mask is not None:
+                step[reset_mask] = 1.0
+            dt_hours = np.where(np.isfinite(step) & (step >= 0.0), step, 1.0)
+
+        tau_base = float(residence_tau_hours)
+        if blh_col and blh_col in out.columns:
+            blh_arr = pd.to_numeric(out[blh_col], errors="coerce").to_numpy(dtype=float)[ord_idx]
+            inv_blh = 1000.0 / np.maximum(np.where(np.isfinite(blh_arr), blh_arr, 500.0), 50.0)
+            if ws_col and ws_col in out.columns:
+                ws_arr = pd.to_numeric(out[ws_col], errors="coerce").to_numpy(dtype=float)[ord_idx]
+                ws_clean = np.maximum(np.where(np.isfinite(ws_arr), ws_arr, 2.0), 0.0)
+                tau_eff = tau_base / (1.0 + ws_clean / 3.0)
+            else:
+                tau_eff = np.full(n, tau_base, dtype=np.float64)
+            decay_stag = np.exp(-dt_hours / np.maximum(tau_eff, 0.25))
+            out["stagnation_memory"] = _causal_ema(inv_blh, decay_stag, reset=reset_mask)[inv_idx]
+
+        if ssrd_col and ssrd_col in out.columns:
+            rad_arr = pd.to_numeric(out[ssrd_col], errors="coerce").to_numpy(dtype=float)[ord_idx]
+            rad_clean = np.maximum(np.where(np.isfinite(rad_arr), rad_arr, 0.0), 0.0)
+            out["photochemical_dose"] = _causal_ema(
+                rad_clean, np.exp(-dt_hours / 6.0), reset=reset_mask
+            )[inv_idx]
+
+        if precip_col and precip_col in out.columns:
+            tp_arr = pd.to_numeric(out[precip_col], errors="coerce").to_numpy(dtype=float)[ord_idx]
+            tp_clean = np.maximum(np.where(np.isfinite(tp_arr), tp_arr, 0.0), 0.0)
+            decay_tp = np.exp(-dt_hours / max(tau_base, 0.5))
+            out["wet_scavenging_memory"] = _causal_ema(tp_clean, decay_tp, reset=reset_mask)[
+                inv_idx
+            ]
 
     return out
 

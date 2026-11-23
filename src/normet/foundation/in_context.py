@@ -24,10 +24,12 @@ without loading a checkpoint.
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any, NamedTuple, Protocol, runtime_checkable
 
 import numpy as np
@@ -47,6 +49,7 @@ __all__ = [
     "Chronos2MultivariateICLPipeline",
     "build_icn_draw_bank",
     "decompose_icn_uncertainty",
+    "icn_decompose",
     "normalise_in_context",
     "normalise_in_context_multivariate",
     "normalise_in_context_multisite",
@@ -196,6 +199,7 @@ class ICNDesign:
     min_context: int | None = None
     support_min_frac: float = 0.5
     log_transform: bool = False
+    surprise_tau: float = 0.0
 
     def __post_init__(self) -> None:
         if self.intervene not in ("future_only", "past_future"):
@@ -214,6 +218,8 @@ class ICNDesign:
             raise ValueError(f"min_context must be positive or None, got {self.min_context}")
         if not 0.0 <= self.support_min_frac <= 1.0:
             raise ValueError(f"support_min_frac must be in [0, 1], got {self.support_min_frac}")
+        if float(self.surprise_tau) < 0.0:
+            raise ValueError(f"surprise_tau must be >= 0, got {self.surprise_tau}")
 
     @classmethod
     def v1(cls, **overrides: Any) -> ICNDesign:
@@ -386,6 +392,7 @@ class _DirResult(NamedTuple):
     low_support: list[tuple[int, float]]
     quantile_draws: dict[float, dict[int, list[tuple[float, int]]]]
     paired_quantile_draws: dict[float, dict[int, list[tuple[float, int]]]]
+    factual_errors: dict[int, list[float]]
 
 
 @dataclass
@@ -498,19 +505,29 @@ class ICNDrawBank:
         direction: str | None = None,
         aggregate: str | None = None,
         lead_tau: float | None = None,
+        surprise_tau: float | None = None,
         schema: str | None = None,
     ) -> ICNResult:
         """Materialise an :class:`ICNResult` from cached draws under updated aggregation."""
         agg_eff = aggregate if aggregate is not None else self.design.aggregate
         tau_eff = float(lead_tau) if lead_tau is not None else self.design.lead_tau
+        surp_eff = float(surprise_tau) if surprise_tau is not None else self.design.surprise_tau
         schema_eff = schema if schema is not None else self.schema
         if agg_eff not in ("mean", "median", "trimmed", "quantile_mean"):
             raise ValueError(f"aggregate must be mean|median|trimmed, got {agg_eff!r}")
+        if surp_eff < 0.0:
+            raise ValueError(f"surprise_tau must be >= 0, got {surp_eff!r}")
         if schema_eff not in ("chronos", "normet"):
             raise ValueError(f"schema must be 'chronos' or 'normet', got {schema_eff!r}")
 
         dir_eff, merged = self._merged_dir(direction)
-        eff_design = replace(self.design, direction=dir_eff, aggregate=agg_eff, lead_tau=tau_eff)
+        eff_design = replace(
+            self.design,
+            direction=dir_eff,
+            aggregate=agg_eff,
+            lead_tau=tau_eff,
+            surprise_tau=surp_eff,
+        )
         return _assemble_icn_result(
             index=self.index,
             observed_arr=self.observed,
@@ -524,6 +541,169 @@ class ICNDrawBank:
     def decompose_uncertainty(self, *, direction: str | None = None) -> Any:
         """Partition cached ICN variance into weather and anchor sources (:func:`decompose_icn_uncertainty`)."""
         return decompose_icn_uncertainty(self, direction=direction)
+
+    def save(self, path: str | Path) -> Path:
+        """Persist raw :class:`ICNDrawBank` draws to a gzip-compressed JSON file.
+
+        Enables GPU-once / CPU-everywhere workflows: run Chronos-2 once, save
+        the draw bank, and sweep ``direction``, ``aggregate``, ``lead_tau``,
+        ``surprise_tau``, or uncertainty decompositions offline without torch.
+        """
+        out_path = Path(path)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "version": 1,
+            "index_iso": [ts.isoformat() for ts in self.index],
+            "index_tz": str(self.index.tz) if self.index.tz is not None else None,
+            "index_freq": self.index.freqstr,
+            "index_name": self.index.name,
+            "observed": [None if not np.isfinite(v) else float(v) for v in self.observed],
+            "target": self.target,
+            "design": dict(self.design.__dict__),
+            "forward": _dir_to_json(self.forward) if self.forward is not None else None,
+            "reverse": _dir_to_json(self.reverse) if self.reverse is not None else None,
+            "quantiles": list(self.quantiles) if self.quantiles is not None else None,
+            "external_pool": bool(self.external_pool),
+            "schema": self.schema,
+        }
+        with gzip.open(out_path, "wt", encoding="utf-8") as fh:
+            json.dump(payload, fh, allow_nan=False)
+        return out_path
+
+    @classmethod
+    def load(cls, path: str | Path) -> ICNDrawBank:
+        """Load an :class:`ICNDrawBank` previously written by :meth:`save`."""
+        in_path = Path(path)
+        with gzip.open(in_path, "rt", encoding="utf-8") as fh:
+            payload = json.load(fh)
+        index_name = payload.get("index_name")
+        index_freq = payload.get("index_freq")
+        index_tz = payload.get("index_tz")
+        if index_tz is not None:
+            # ISO strings carry each row's UTC offset; parsing them directly
+            # yields a fixed-offset (or object-dtype) index and drops the
+            # original zone, so a saved Europe/London bank came back as UTC.
+            # Parse in UTC and convert back to the recorded zone.
+            idx = pd.DatetimeIndex(pd.to_datetime(payload["index_iso"], utc=True))
+            idx = idx.tz_convert(index_tz).rename(index_name)
+        elif index_freq is not None:
+            try:
+                idx = pd.DatetimeIndex(
+                    payload["index_iso"],
+                    freq=index_freq,
+                    name=index_name,
+                )
+            except Exception:
+                idx = pd.DatetimeIndex(payload["index_iso"], name=index_name)
+        else:
+            idx = pd.DatetimeIndex(payload["index_iso"], name=index_name)
+        if index_tz is not None and index_freq is not None:
+            try:
+                idx = pd.DatetimeIndex(idx, freq=index_freq).rename(index_name)
+            except Exception:
+                pass
+        obs = np.asarray(
+            [float("nan") if v is None else float(v) for v in payload["observed"]],
+            dtype=np.float64,
+        )
+        design_dict = dict(payload["design"])
+        design = ICNDesign(**design_dict)
+        qs = tuple(float(q) for q in payload["quantiles"]) if payload.get("quantiles") else None
+        fwd = _dir_from_json(payload["forward"]) if payload.get("forward") is not None else None
+        rev = _dir_from_json(payload["reverse"]) if payload.get("reverse") is not None else None
+        return cls(
+            index=idx,
+            observed=obs,
+            target=str(payload["target"]),
+            design=design,
+            forward=fwd,
+            reverse=rev,
+            quantiles=qs,
+            external_pool=bool(payload.get("external_pool", False)),
+            schema=str(payload.get("schema", "chronos")),
+        )
+
+
+def _sanitise_float(v: float) -> float | None:
+    fv = float(v)
+    return fv if np.isfinite(fv) else None
+
+
+def _restore_float(v: Any) -> float:
+    return float("nan") if v is None else float(v)
+
+
+def _dir_to_json(r: _DirResult) -> dict[str, Any]:
+    return {
+        "level_draws": {
+            str(h): [[_sanitise_float(v), int(lead)] for v, lead in items]
+            for h, items in r.level_draws.items()
+        },
+        "paired_draws": {
+            str(h): [[_sanitise_float(v), int(lead)] for v, lead in items]
+            for h, items in r.paired_draws.items()
+        },
+        "anchor_count": {str(h): int(c) for h, c in r.anchor_count.items()},
+        "anchor_values": {
+            str(h): [_sanitise_float(v) for v in vals] for h, vals in r.anchor_values.items()
+        },
+        "mc_vars": {str(h): [_sanitise_float(v) for v in vals] for h, vals in r.mc_vars.items()},
+        "low_support": [[int(a), _sanitise_float(x)] for a, x in r.low_support],
+        "quantile_draws": {
+            str(q): {
+                str(h): [[_sanitise_float(v), int(lead)] for v, lead in items]
+                for h, items in hmap.items()
+            }
+            for q, hmap in r.quantile_draws.items()
+        },
+        "paired_quantile_draws": {
+            str(q): {
+                str(h): [[_sanitise_float(v), int(lead)] for v, lead in items]
+                for h, items in hmap.items()
+            }
+            for q, hmap in r.paired_quantile_draws.items()
+        },
+        "factual_errors": {
+            str(h): [_sanitise_float(v) for v in vals] for h, vals in r.factual_errors.items()
+        },
+    }
+
+
+def _dir_from_json(d: Mapping[str, Any]) -> _DirResult:
+    return _DirResult(
+        level_draws={
+            int(h): [(_restore_float(v), int(lead)) for v, lead in items]
+            for h, items in d["level_draws"].items()
+        },
+        paired_draws={
+            int(h): [(_restore_float(v), int(lead)) for v, lead in items]
+            for h, items in d["paired_draws"].items()
+        },
+        anchor_count={int(h): int(c) for h, c in d["anchor_count"].items()},
+        anchor_values={
+            int(h): [_restore_float(v) for v in vals] for h, vals in d["anchor_values"].items()
+        },
+        mc_vars={int(h): [_restore_float(v) for v in vals] for h, vals in d["mc_vars"].items()},
+        low_support=[(int(a), _restore_float(x)) for a, x in d["low_support"]],
+        quantile_draws={
+            float(q): {
+                int(h): [(_restore_float(v), int(lead)) for v, lead in items]
+                for h, items in hmap.items()
+            }
+            for q, hmap in d["quantile_draws"].items()
+        },
+        paired_quantile_draws={
+            float(q): {
+                int(h): [(_restore_float(v), int(lead)) for v, lead in items]
+                for h, items in hmap.items()
+            }
+            for q, hmap in d["paired_quantile_draws"].items()
+        },
+        factual_errors={
+            int(h): [_restore_float(v) for v in vals]
+            for h, vals in d.get("factual_errors", {}).items()
+        },
+    )
 
 
 def decompose_icn_uncertainty(bank: ICNDrawBank, *, direction: str | None = None) -> Any:
@@ -730,12 +910,23 @@ class Chronos2MultivariateICLPipeline:
 # --------------------------------------------------------------------------- #
 # Orchestration
 # --------------------------------------------------------------------------- #
-def _aggregate(items: list[tuple[float, int]], mode: str, lead_tau: float) -> float:
+def _aggregate(
+    items: list[tuple[float, int]],
+    mode: str,
+    lead_tau: float,
+    *,
+    surprise_errors: Sequence[float] | None = None,
+    surprise_tau: float = 0.0,
+) -> float:
     """Aggregate ``(value, lead)`` draws into one point estimate (D4 + D9).
 
     With ``lead_tau > 0`` each draw is weighted by ``exp(-lead / lead_tau)`` so an
-    hour is informed mostly by the anchor that sees it earliest. ``mode`` chooses
-    the central tendency of the (weighted) sample:
+    hour is informed mostly by the anchor that sees it earliest. When
+    ``surprise_tau > 0`` and ``surprise_errors`` are supplied, each anchor's
+    draws are additionally gated by ``exp(-(err / surprise_tau)**2)`` so anchors
+    whose factual forecast jumped across a step-event boundary do not smear
+    the pre/post-event edge. ``mode`` chooses the central tendency of the
+    (weighted) sample:
 
     - ``"mean"`` -- the weighted mean;
     - ``"median"`` -- the weighted median (first value whose cumulative weight
@@ -752,8 +943,34 @@ def _aggregate(items: list[tuple[float, int]], mode: str, lead_tau: float) -> fl
     if not np.all(np.isfinite(vals)):
         return float("nan")
     leads = np.asarray([float(lead) for _, lead in items], dtype=float)
-    w = np.exp(-leads / lead_tau) if lead_tau and lead_tau > 0 else np.ones_like(vals)
-    w = w / w.sum()
+    # Work in log space and subtract the maximum before exponentiating. The
+    # product of the two kernels underflows to exactly zero as soon as any
+    # surprise error exceeds a few tau, and the old `w_sum <= 0` fallback then
+    # replaced a strongly peaked weight set with uniform weights -- the gating
+    # silently switched itself off at the moment it was most needed. Anchors
+    # with a non-finite error keep the old "not gated" treatment.
+    log_w = np.zeros_like(vals)
+    if lead_tau and lead_tau > 0:
+        log_w = log_w - leads / float(lead_tau)
+    if surprise_tau and surprise_tau > 0.0 and surprise_errors:
+        n_err = len(surprise_errors)
+        if n_err > 0 and len(items) % n_err == 0:
+            k_rep = len(items) // n_err
+            err_arr = np.repeat(np.asarray(surprise_errors, dtype=float), k_rep)
+            log_w = log_w + np.where(
+                np.isfinite(err_arr), -((err_arr / float(surprise_tau)) ** 2), 0.0
+            )
+    finite_lw = np.isfinite(log_w)
+    if bool(finite_lw.any()):
+        scaled = np.where(finite_lw, log_w - float(np.max(log_w[finite_lw])), -np.inf)
+        w = np.exp(scaled)
+    else:
+        w = np.ones_like(vals)
+    w_sum = float(w.sum())
+    if not np.isfinite(w_sum) or w_sum <= 0.0:
+        w = np.ones_like(vals) / float(len(vals))
+    else:
+        w = w / w_sum
     if mode == "mean":
         return float(np.sum(w * vals))
     if mode == "median":
@@ -762,7 +979,7 @@ def _aggregate(items: list[tuple[float, int]], mode: str, lead_tau: float) -> fl
         return float(vals[order][np.searchsorted(cum, 0.5 - 1e-12, side="left")])
     lo, hi = np.percentile(vals, [10, 90])
     sel = (vals >= lo) & (vals <= hi)
-    if sel.sum() == 0:
+    if sel.sum() == 0 or float(w[sel].sum()) <= 0.0:
         return float(np.sum(w * vals))
     wsel = w[sel] / w[sel].sum()
     return float(np.sum(wsel * vals[sel]))
@@ -790,7 +1007,11 @@ class _PreparedSiteAnchor(NamedTuple):
 
 
 def _design_hash(design: ICNDesign) -> str:
-    payload = json.dumps(design.__dict__, sort_keys=True, default=str)
+    d = dict(design.__dict__)
+    # Preserve the frozen ICN-v1 hash when surprise_tau is at its default 0.0.
+    if float(d.get("surprise_tau", 0.0)) == 0.0:
+        d.pop("surprise_tau", None)
+    payload = json.dumps(d, sort_keys=True, default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
 
 
@@ -805,6 +1026,7 @@ def _empty_dir_result(quantiles: tuple[float, ...] | None) -> _DirResult:
         low_support=[],
         quantile_draws={q: {} for q in qs},
         paired_quantile_draws={q: {} for q in qs},
+        factual_errors={},
     )
 
 
@@ -824,6 +1046,7 @@ def _mirror_dir_result(r: _DirResult, n: int) -> _DirResult:
             q: {n - 1 - h: v for h, v in hmap.items()}
             for q, hmap in r.paired_quantile_draws.items()
         },
+        factual_errors={n - 1 - h: v for h, v in r.factual_errors.items()},
     )
 
 
@@ -841,6 +1064,7 @@ def _merge_dir_results(fwd: _DirResult, revr: _DirResult, n: int) -> _DirResult:
         q: {h: list(vals) for h, vals in hmap.items()}
         for q, hmap in fwd.paired_quantile_draws.items()
     }
+    f_errs = {h: list(fwd.factual_errors[h]) for h in fwd.factual_errors}
     # forward already keyed by original hours; reverse keyed by reversed-frame
     # hours, so map each reversed key r -> original hour n-1-r.
     for hr, lvals in revr.level_draws.items():
@@ -851,6 +1075,8 @@ def _merge_dir_results(fwd: _DirResult, revr: _DirResult, n: int) -> _DirResult:
         anchor_v.setdefault(n - 1 - hr, []).extend(avals)
     for hr, mvals in revr.mc_vars.items():
         mc_v.setdefault(n - 1 - hr, []).extend(mvals)
+    for hr, evals in revr.factual_errors.items():
+        f_errs.setdefault(n - 1 - hr, []).extend(evals)
     for q, hmap in revr.quantile_draws.items():
         dst = q_draws.setdefault(q, {})
         for hr, qvals in hmap.items():
@@ -873,6 +1099,7 @@ def _merge_dir_results(fwd: _DirResult, revr: _DirResult, n: int) -> _DirResult:
         low_support=low_support,
         quantile_draws=q_draws,
         paired_quantile_draws=pq_draws,
+        factual_errors=f_errs,
     )
 
 
@@ -883,6 +1110,9 @@ def _aggregate_quantile_map(
     index: pd.DatetimeIndex,
     aggregate_mode: str,
     lead_tau: float,
+    *,
+    factual_errors: dict[int, list[float]] | None = None,
+    surprise_tau: float = 0.0,
 ) -> pd.DataFrame:
     q_cols_data: dict[str, np.ndarray] = {}
     for q in req_qs:
@@ -890,7 +1120,14 @@ def _aggregate_quantile_map(
         qd = q_map.get(q, {})
         for h in range(n):
             if h in qd and qd[h]:
-                q_arr[h] = _aggregate(qd[h], aggregate_mode, lead_tau)
+                errs = factual_errors.get(h) if factual_errors is not None else None
+                q_arr[h] = _aggregate(
+                    qd[h],
+                    aggregate_mode,
+                    lead_tau,
+                    surprise_errors=errs,
+                    surprise_tau=surprise_tau,
+                )
         q_cols_data[_qname(q)] = q_arr
     return pd.DataFrame(q_cols_data, index=index)
 
@@ -911,27 +1148,54 @@ def _assemble_icn_result(
     mc_spread = np.full(n, np.nan)
     contrib_arr = np.zeros(n, dtype=int)
     for h in range(n):
+        errs_h = merged.factual_errors.get(h)
         if h in merged.level_draws and merged.level_draws[h]:
-            level_vals[h] = _aggregate(merged.level_draws[h], design.aggregate, design.lead_tau)
+            level_vals[h] = _aggregate(
+                merged.level_draws[h],
+                design.aggregate,
+                design.lead_tau,
+                surprise_errors=errs_h,
+                surprise_tau=design.surprise_tau,
+            )
             if h in merged.mc_vars and merged.mc_vars[h]:
                 # within-anchor resample spread, pooled over the anchors that
                 # cover the hour (their resamples are independent draws)
                 mc_spread[h] = float(np.sqrt(np.mean(merged.mc_vars[h])))
         if h in merged.paired_draws and merged.paired_draws[h]:
-            paired_vals[h] = _aggregate(merged.paired_draws[h], design.aggregate, design.lead_tau)
+            paired_vals[h] = _aggregate(
+                merged.paired_draws[h],
+                design.aggregate,
+                design.lead_tau,
+                surprise_errors=errs_h,
+                surprise_tau=design.surprise_tau,
+            )
         if h in merged.anchor_count:
             contrib_arr[h] = merged.anchor_count[h]
 
     q_frame = (
         _aggregate_quantile_map(
-            merged.quantile_draws, req_qs, n, index, design.aggregate, design.lead_tau
+            merged.quantile_draws,
+            req_qs,
+            n,
+            index,
+            design.aggregate,
+            design.lead_tau,
+            factual_errors=merged.factual_errors,
+            surprise_tau=design.surprise_tau,
         )
         if req_qs is not None
         else None
     )
     pq_frame = (
         _aggregate_quantile_map(
-            merged.paired_quantile_draws, req_qs, n, index, design.aggregate, design.lead_tau
+            merged.paired_quantile_draws,
+            req_qs,
+            n,
+            index,
+            design.aggregate,
+            design.lead_tau,
+            factual_errors=merged.factual_errors,
+            surprise_tau=design.surprise_tau,
         )
         if req_qs is not None
         else None
@@ -1143,11 +1407,21 @@ def _record_anchor_draws(
                 ratio = np.where(np.abs(pred_fact) > 1e-6, level_cf_mean / pred_fact, np.nan)
             paired = obs_seg * ratio
 
+    if design.log_transform:
+        err_seg = np.abs(pred_fact - z_obs_seg)
+    else:
+        fin_obs = obs_seg[np.isfinite(obs_seg)]
+        obs_sd = float(np.std(fin_obs)) if fin_obs.size else 1.0
+        scale_seg = np.maximum(np.maximum(np.abs(obs_seg), obs_sd), 1e-6)
+        err_seg = np.abs(pred_fact - obs_seg) / scale_seg
+    err_seg = np.where(np.isfinite(err_seg), err_seg, 0.0)
+
     for offset, h in enumerate(range(s, e)):
         acc.level_draws.setdefault(h, []).extend((float(v), offset) for v in cf_levels[:, offset])
         acc.paired_draws.setdefault(h, []).append((float(paired[offset]), offset))
         acc.anchor_values.setdefault(h, []).append(float(cf_levels[:, offset].mean()))
         acc.mc_vars.setdefault(h, []).append(float(cf_levels[:, offset].var()))
+        acc.factual_errors.setdefault(h, []).append(float(err_seg[offset]))
 
     if preds_q_cf is not None and quantiles is not None:
         for q in quantiles:
@@ -1877,3 +2151,471 @@ def _anchor_spread(anchor_values: dict[int, list[float]], n: int) -> np.ndarray:
         if len(vals) >= 2:
             out[h] = float(np.nanstd(vals))
     return out
+
+
+def _eval_icn_coalitions_dir(
+    df: pd.DataFrame,
+    target: str,
+    design: ICNDesign,
+    pipeline: ICLPipeline,
+    players: list[tuple[str, list[str]]],
+    coalitions: Sequence[frozenset[int]],
+    met_cols: list[str],
+    cols: list[str],
+    estimate: str,
+    external_pool: MetPool | None = None,
+) -> dict[frozenset[int], tuple[dict[int, list[tuple[float, int]]], dict[int, list[float]]]]:
+    """Evaluate all requested Shapley/sequential coalitions in one direction sharing CRN weather."""
+    n = len(df)
+    k_players = len(players)
+    all_fixed = frozenset(range(k_players))
+    rng = np.random.default_rng(design.seed)
+    obs_arr = df[target].to_numpy(dtype=float)
+    work_target = _transform_target_values(obs_arr, design.log_transform)
+    pool = external_pool if external_pool is not None else MetPool(df[met_cols], met_cols)
+
+    draws_by_c: dict[frozenset[int], dict[int, list[tuple[float, int]]]] = {
+        c: {} for c in coalitions
+    }
+    errs_by_c: dict[frozenset[int], dict[int, list[float]]] = {c: {} for c in coalitions}
+
+    # Precompute resampled column subsets for every non-trivial coalition.
+    coal_res_cols: list[tuple[frozenset[int], list[str]]] = []
+    for c in coalitions:
+        if c != all_fixed:
+            res_c = [f for i, (_name, feats) in enumerate(players) if i not in c for f in feats]
+            coal_res_cols.append((c, res_c))
+
+    can_batch = hasattr(pipeline, "forecast_batch")
+    est_bs = getattr(getattr(pipeline, "estimator", None), "batch_size", None)
+    base_bs = int(est_bs) if est_bs is not None else 32
+    items_per_anchor = 1 + len(coal_res_cols) * (design.n_resamples if met_cols else 0)
+    batch_limit = max(base_bs, items_per_anchor) if can_batch else 1
+
+    pending_anchors: list[
+        tuple[
+            int,
+            int,
+            tuple[np.ndarray, pd.DataFrame, pd.DataFrame],
+            list[tuple[frozenset[int], list[tuple[np.ndarray, pd.DataFrame, pd.DataFrame]]]],
+        ]
+    ] = []
+    pending_items = 0
+    pending_horizon: int | None = None
+
+    def _flush() -> None:
+        nonlocal pending_anchors, pending_items, pending_horizon
+        if not pending_anchors:
+            return
+        flat_items: list[tuple[np.ndarray, pd.DataFrame, pd.DataFrame]] = []
+        for _s, _e, fact_item, coal_blocks in pending_anchors:
+            flat_items.append(fact_item)
+            for _c, c_items in coal_blocks:
+                flat_items.extend(c_items)
+
+        preds_med, _ = _run_univariate_batch(pipeline, flat_items, cols, target, None, [], 0)
+        cursor = 0
+        for s, e, _fact_item, coal_blocks in pending_anchors:
+            pred_fact = preds_med[cursor]
+            cursor += 1
+            obs_seg = obs_arr[s:e]
+            z_obs_seg = work_target[s:e]
+            if design.log_transform:
+                err_seg = np.abs(pred_fact - z_obs_seg)
+                fact_level = np.maximum(np.expm1(pred_fact), 0.0)
+            else:
+                fin_obs = obs_seg[np.isfinite(obs_seg)]
+                obs_sd = float(np.std(fin_obs)) if fin_obs.size else 1.0
+                scale_seg = np.maximum(np.maximum(np.abs(obs_seg), obs_sd), 1e-6)
+                err_seg = np.abs(pred_fact - obs_seg) / scale_seg
+                fact_level = pred_fact
+            err_seg = np.where(np.isfinite(err_seg), err_seg, 0.0)
+
+            if all_fixed in draws_by_c:
+                vals_f = (
+                    np.where(np.isfinite(obs_seg), np.maximum(obs_seg, 0.0), np.nan)
+                    if (estimate == "paired" and design.log_transform)
+                    else (obs_seg.copy() if estimate == "paired" else fact_level)
+                )
+                for offset, h in enumerate(range(s, e)):
+                    draws_by_c[all_fixed].setdefault(h, []).append((float(vals_f[offset]), offset))
+                    errs_by_c[all_fixed].setdefault(h, []).append(float(err_seg[offset]))
+
+            for c, c_items in coal_blocks:
+                n_cf = len(c_items)
+                if n_cf > 0:
+                    pred_cf = preds_med[cursor : cursor + n_cf]
+                    cursor += n_cf
+                else:
+                    pred_cf = np.repeat(pred_fact[None, :], design.n_resamples, axis=0)
+                if design.log_transform:
+                    cf_levels = np.maximum(np.expm1(pred_cf), 0.0)
+                    paired = np.maximum(
+                        np.expm1(z_obs_seg + (pred_cf.mean(axis=0) - pred_fact)), 0.0
+                    )
+                else:
+                    cf_levels = pred_cf
+                    with np.errstate(divide="ignore", invalid="ignore"):
+                        ratio = np.where(
+                            np.abs(pred_fact) > 1e-6, cf_levels.mean(axis=0) / pred_fact, np.nan
+                        )
+                    paired = obs_seg * ratio
+                for offset, h in enumerate(range(s, e)):
+                    if estimate == "paired":
+                        draws_by_c[c].setdefault(h, []).append((float(paired[offset]), offset))
+                    else:
+                        draws_by_c[c].setdefault(h, []).extend(
+                            (float(v), offset) for v in cf_levels[:, offset]
+                        )
+                    errs_by_c[c].setdefault(h, []).append(float(err_seg[offset]))
+
+        pending_anchors = []
+        pending_items = 0
+        pending_horizon = None
+
+    for a in _anchor_range(n, design):
+        s = a
+        e = min(a + design.block_h, n)
+        horizon = e - s
+        if horizon <= 0:
+            continue
+        past_end = max(s - design.gap_h, 0)
+        ctx_start = max(0, past_end - design.context_length)
+        past = df.iloc[ctx_start:past_end]
+        hist = work_target[ctx_start:past_end]
+        future_index = df.index[s:e]
+        factual_met = df.iloc[s:e]
+
+        if design.support_min_frac > 0 and met_cols:
+            support, _ = pool.support_check(factual_met[met_cols])
+            if support < design.support_min_frac:
+                continue
+
+        past_cf = past
+        if design.intervene == "past_future":
+            past_cf = past.copy()
+            if met_cols:
+                pm = pool.sample_trajectory(len(past), rng)
+                past_cf[met_cols] = pm[met_cols].to_numpy()
+
+        cf_future_mets: list[pd.DataFrame] = []
+        if met_cols:
+            for _ in range(design.n_resamples):
+                if design.pool == "record_pointwise":
+                    cf_future_mets.append(pool.sample_pointwise(horizon, rng))
+                elif design.pool == "record_trajectory":
+                    cf_future_mets.append(pool.sample_trajectory(horizon, rng))
+                else:
+                    cf_future_mets.append(pool.sample_climatology(future_index[0], horizon, rng))
+
+        coal_blocks: list[
+            tuple[frozenset[int], list[tuple[np.ndarray, pd.DataFrame, pd.DataFrame]]]
+        ] = []
+        entry_items = 1
+        for c, res_c in coal_res_cols:
+            if not met_cols or not res_c:
+                c_items = (
+                    [(hist, past_cf, factual_met[cols])] * design.n_resamples if met_cols else []
+                )
+            else:
+                c_items = []
+                for fm in cf_future_mets:
+                    ff = factual_met.copy()
+                    ff[res_c] = fm[res_c].to_numpy()
+                    c_items.append((hist, past_cf, ff[cols]))
+            coal_blocks.append((c, c_items))
+            entry_items += len(c_items)
+
+        if pending_anchors and (
+            pending_horizon != horizon or pending_items + entry_items > batch_limit
+        ):
+            _flush()
+        pending_anchors.append((s, e, (hist, past, factual_met[cols]), coal_blocks))
+        pending_items += entry_items
+        pending_horizon = horizon
+        if not can_batch:
+            _flush()
+
+    _flush()
+    return {c: (draws_by_c[c], errs_by_c[c]) for c in coalitions}
+
+
+def icn_decompose(
+    estimator: Any,
+    df: pd.DataFrame,
+    target: str = "value",
+    *,
+    design: ICNDesign | None = None,
+    pipeline: ICLPipeline | None = None,
+    met_features: list[str] | None = None,
+    groups: Mapping[str, Sequence[str]] | None = None,
+    attribution: str | None = None,
+    n_permutations: int | None = None,
+    estimate: str = "level",
+    pool: MetPool | pd.DataFrame | None = None,
+    include_diagnostics: bool = False,
+    return_interactions: bool = False,
+) -> Any:
+    """In-context meteorological attribution and Shapley decomposition for Chronos-2.
+
+    Attributes ``predicted - emi_total`` across individual meteorological
+    variables or physical ``groups`` (e.g. from :func:`suggest_met_groups`)
+    under future-only intervention (:class:`ICNDesign`) using shared Common
+    Random Number weather draws across coalitions batched onto the GPU/pipeline.
+
+    Parameters
+    ----------
+    estimator : Chronos2Estimator
+        Fitted or zero-shot estimator.
+    df : pandas.DataFrame
+        Hourly DataFrame (DatetimeIndex or ``date`` column).
+    target : str, default "value"
+        Target column name.
+    design : ICNDesign, optional
+        ICN design specification; defaults to :meth:`ICNDesign.v1`.
+    pipeline : ICLPipeline, optional
+        Optional custom / fake pipeline for torch-free execution.
+    met_features : list of str, optional
+        Meteorological features to attribute. Defaults to numeric non-calendar
+        covariates resolved from ``estimator``.
+    groups : mapping, optional
+        Optional physical grouping ``{group_name: [features]}``.
+    attribution : {"sequential", "shapley"}, optional
+        Defaults to ``"shapley"`` when ``groups`` or ``return_interactions`` is
+        provided, else ``"sequential"``.
+    n_permutations : int, optional
+        Number of antithetic permutations for sampled Shapley when ``k`` is large.
+    estimate : {"level", "paired"}, default "level"
+        Decompose counterfactual levels or D11 paired estimates.
+    pool : MetPool or DataFrame, optional
+        Optional external counterfactual weather reservoir.
+    include_diagnostics : bool, default False
+        Include ``predicted``, ``met_explained``, and ``residual`` columns.
+    return_interactions : bool, default False
+        If True, compute exact second-order Grabisch–Roubens interactions and
+        return a :class:`~normet.analysis.decomposition.ShapleyInteractionResult`.
+    """
+    from math import factorial
+
+    from ..analysis.decomposition import (
+        _MET_RESULT_COLUMNS,
+        ShapleyInteractionResult,
+        _compute_interaction_indices,
+        _met_result,
+        _players_from_groups,
+    )
+    from .estimator import to_indexed_frame
+
+    if estimate not in ("level", "paired"):
+        raise ValueError(f"estimate must be 'level' or 'paired', got {estimate!r}")
+    method = (
+        attribution
+        if attribution is not None
+        else ("shapley" if (groups is not None or return_interactions) else "sequential")
+    )
+    if method not in ("sequential", "shapley"):
+        raise ValueError(f"attribution must be 'sequential' or 'shapley', got {attribution!r}")
+    if return_interactions and (method != "shapley" or n_permutations is not None):
+        raise ValueError("`return_interactions=True` requires exact Shapley (n_permutations=None).")
+
+    work = df.copy()
+    if not isinstance(work.index, pd.DatetimeIndex):
+        work = to_indexed_frame(work)
+    if target not in work.columns:
+        raise KeyError(f"target {target!r} absent from df")
+
+    design = design or ICNDesign.v1()
+    if hasattr(estimator, "_check_index"):
+        estimator._check_index(work.index)  # type: ignore[attr-defined]
+    cols, met_cols = _resolve_met_cols(estimator, work, target, met_features)
+    if not met_cols:
+        raise ValueError("icn_decompose requires at least one meteorological feature.")
+
+    if groups is not None:
+        players = _players_from_groups(groups, met_cols)
+    else:
+        # A one-feature player is named after its feature, and the
+        # contribution becomes a result column. A feature called
+        # "observed"/"met_total"/... would overwrite that column in place, so
+        # the default player set gets the same clash check as named groups.
+        reserved = [f for f in met_cols if f in _MET_RESULT_COLUMNS]
+        if reserved:
+            raise ValueError(
+                f"meteorological feature(s) {reserved} clash with result column names; "
+                "pass `groups` to give them different player names."
+            )
+        players = [(f, [f]) for f in met_cols]
+    k_players = len(players)
+    if method == "shapley" and n_permutations is None and k_players > 10:
+        raise ValueError(
+            f"exact Shapley over {k_players} features needs 2**{k_players} coalitions; "
+            "pass `groups` or `n_permutations`."
+        )
+
+    all_fixed = frozenset(range(k_players))
+    none_fixed: frozenset[int] = frozenset()
+    orders_sampled: list[list[int]] = []
+    if method == "sequential":
+        needed_set = {frozenset(range(i)) for i in range(k_players + 1)}
+    elif n_permutations is None:
+        needed_set = {
+            frozenset(i for i in range(k_players) if mask >> i & 1)
+            for mask in range(1 << k_players)
+        }
+    else:
+        rng_perm = np.random.default_rng(design.seed)
+        n_pairs = (int(n_permutations) + 1) // 2
+        needed_set = {none_fixed, all_fixed}
+        for _ in range(n_pairs):
+            perm = [int(i) for i in rng_perm.permutation(k_players)]
+            for order in (perm, perm[::-1]):
+                orders_sampled.append(order)
+                cur: frozenset[int] = none_fixed
+                for i in order:
+                    cur = cur | {i}
+                    needed_set.add(cur)
+
+    coalitions = sorted(needed_set, key=lambda s: (len(s), sorted(s)))
+    pipe = pipeline if pipeline is not None else Chronos2ICLPipeline(estimator)
+    ext_pool = _resolve_ext_pool(pool, met_cols)
+
+    fwd_map = None
+    rev_map = None
+    n = len(work)
+    if design.direction in ("forward", "bidirectional"):
+        fwd_map = _eval_icn_coalitions_dir(
+            work, target, design, pipe, players, coalitions, met_cols, cols, estimate, ext_pool
+        )
+    if design.direction in ("reverse", "bidirectional"):
+        rev_df = work.iloc[::-1].copy()
+        rev_df.index = work.index[::-1]
+        rev_pool = ext_pool.reversed() if ext_pool is not None else None
+        rev_map = _eval_icn_coalitions_dir(
+            rev_df, target, design, pipe, players, coalitions, met_cols, cols, estimate, rev_pool
+        )
+
+    coal_series: dict[frozenset[int], np.ndarray] = {}
+    for c in coalitions:
+        arr = np.full(n, np.nan, dtype=float)
+        for h in range(n):
+            draws_h: list[tuple[float, int]] = []
+            errs_h: list[float] = []
+            if fwd_map is not None:
+                draws_h.extend(fwd_map[c][0].get(h, ()))
+                errs_h.extend(fwd_map[c][1].get(h, ()))
+            if rev_map is not None:
+                draws_h.extend(rev_map[c][0].get(n - 1 - h, ()))
+                errs_h.extend(rev_map[c][1].get(n - 1 - h, ()))
+            if draws_h:
+                arr[h] = _aggregate(
+                    draws_h,
+                    design.aggregate,
+                    design.lead_tau,
+                    surprise_errors=errs_h,
+                    surprise_tau=design.surprise_tau,
+                )
+        coal_series[c] = arr
+
+    emi_total = coal_series[none_fixed]
+    contribs: dict[str, np.ndarray] = {name: np.zeros(n, dtype=float) for name, _ in players}
+    if method == "sequential":
+        prev = none_fixed
+        for idx, (name, _) in enumerate(players):
+            cur_s = prev | {idx}
+            contribs[name] = coal_series[cur_s] - coal_series[prev]
+            prev = cur_s
+    elif n_permutations is None:
+        weight = [
+            factorial(s) * factorial(k_players - s - 1) / factorial(k_players)
+            for s in range(k_players)
+        ]
+        for s_set in coalitions:
+            for idx, (name, _) in enumerate(players):
+                if idx not in s_set:
+                    contribs[name] += weight[len(s_set)] * (
+                        coal_series[s_set | {idx}] - coal_series[s_set]
+                    )
+    else:
+        for order in orders_sampled:
+            prev = none_fixed
+            for idx in order:
+                cur_s = prev | {idx}
+                name = players[idx][0]
+                contribs[name] += coal_series[cur_s] - coal_series[prev]
+                prev = cur_s
+        for name, _ in players:
+            contribs[name] /= float(len(orders_sampled))
+
+    obs_arr = work[target].to_numpy(dtype=float)
+    res_df = pd.DataFrame({"observed": obs_arr}, index=pd.DatetimeIndex(work.index, name="date"))
+    frame = _met_result(
+        res_df,
+        emi_total,
+        contribs,
+        include_diagnostics=bool(include_diagnostics or return_interactions),
+    )
+    if not return_interactions:
+        return frame
+
+    player_names = [p[0] for p in players]
+    main_dict, pair_dict = _compute_interaction_indices(player_names, coal_series, contribs)
+    main_df = pd.DataFrame(main_dict, index=frame.index)
+    pair_df = pd.DataFrame(pair_dict, index=frame.index)
+    mean_mat = pd.DataFrame(
+        np.zeros((k_players, k_players), dtype=float), index=player_names, columns=player_names
+    )
+    std_mat = pd.DataFrame(
+        np.zeros((k_players, k_players), dtype=float), index=player_names, columns=player_names
+    )
+    summary_rows: list[dict[str, Any]] = []
+    for i, name in enumerate(player_names):
+        arr = main_df[name].to_numpy(dtype=float)
+        fin = arr[np.isfinite(arr)]
+        m_val = float(np.mean(fin)) if fin.size else float("nan")
+        s_val = float(np.std(fin)) if fin.size else float("nan")
+        mean_mat.iloc[i, i] = m_val
+        std_mat.iloc[i, i] = s_val
+        summary_rows.append(
+            {
+                "term": name,
+                "kind": "main",
+                "mean": m_val,
+                "std": s_val,
+                "mean_abs": float(np.mean(np.abs(fin))) if fin.size else float("nan"),
+                "max_abs": float(np.max(np.abs(fin))) if fin.size else 0.0,
+            }
+        )
+    for i in range(k_players):
+        for j in range(i + 1, k_players):
+            pname = f"{player_names[i]}:{player_names[j]}"
+            arr = pair_df[pname].to_numpy(dtype=float)
+            fin = arr[np.isfinite(arr)]
+            m_val = float(np.mean(fin)) if fin.size else float("nan")
+            s_val = float(np.std(fin)) if fin.size else float("nan")
+            mean_mat.iloc[i, j] = mean_mat.iloc[j, i] = m_val
+            std_mat.iloc[i, j] = std_mat.iloc[j, i] = s_val
+            summary_rows.append(
+                {
+                    "term": pname,
+                    "kind": "interaction",
+                    "mean": m_val,
+                    "std": s_val,
+                    "mean_abs": float(np.mean(np.abs(fin))) if fin.size else float("nan"),
+                    "max_abs": float(np.max(np.abs(fin))) if fin.size else 0.0,
+                }
+            )
+    summary_df = pd.DataFrame(
+        summary_rows, columns=["term", "kind", "mean", "std", "mean_abs", "max_abs"]
+    )
+    if not summary_df.empty:
+        summary_df = summary_df.sort_values(
+            ["std", "mean_abs"], ascending=[False, False]
+        ).reset_index(drop=True)
+    return ShapleyInteractionResult(
+        decomposition=frame,
+        main_effects=main_df,
+        pairwise=pair_df,
+        mean_matrix=mean_mat,
+        std_matrix=std_mat,
+        summary=summary_df,
+    )

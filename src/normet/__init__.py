@@ -10,6 +10,7 @@ __version__ = _version("normet")
 
 # --- Exceptions ---
 from . import datasets
+from .benchmarks import SyntheticBenchmark, evaluate_benchmark, make_synthetic_benchmark
 from .exceptions import (
     CalibrationWarning,
     ConfigError,
@@ -102,12 +103,16 @@ except Exception:  # requests / cdsapi missing
 # --- Analysis ---
 from .analysis import (
     MET_PHYSICAL_GROUPS,
+    ConservedOxResult,
     CrossFitNormaliseResult,
     DecomposeConfig,
+    DMLNormaliseResult,
     FootprintInversionResult,
+    MultisiteInversionResult,
     NormalisationDiagnostics,
     NormaliseConfig,
     ReceptorGridResult,
+    RegimeConditionedResult,
     RollingConfig,
     ShapleyInteractionResult,
     TrajectoryClusterResult,
@@ -137,14 +142,18 @@ from .analysis import (
     detect_events,
     detect_trend_breaks,
     diagnose_normalisation,
+    dml_normalise,
     fair_crps_from_samples,
     gridded_receptor_model,
     interval_coverage,
     interval_score,
+    invert_multisite_footprints,
     invert_source_footprints,
     mann_kendall,
     normalise,
     normalise_auto,
+    normalise_ox_invariant,
+    normalise_regime_conditioned,
     pdp,
     pinball_loss,
     pit_diagnostics,
@@ -162,11 +171,14 @@ from .analysis import (
 
 # --- Synthetic control ---
 from .causal import (
+    DeweatheredSCMResult,
     HonestDiDResult,
+    TransportSCMResult,
     bayesian_scm,
     bearing,
     conformal_effect_interval,
     conformal_inference,
+    deweathered_scm,
     did_baseline,
     donor_spatial_summary,
     donut_hole_sensitivity,
@@ -196,6 +208,7 @@ from .causal import (
     screen_donors,
     sdid,
     spatial_summary,
+    transport_adjusted_scm,
     uncertainty_bands,
 )
 
@@ -226,6 +239,7 @@ from .foundation import (
     decompose_icn_uncertainty,
     detect_chronos_events,
     embedding_projection,
+    icn_decompose,
     normalise_in_context,
     normalise_in_context_multisite,
     normalise_in_context_multivariate,
@@ -267,8 +281,14 @@ __all__ = [
     "ShapleyInteractionResult",
     "NormaliseConfig",
     "CrossFitNormaliseResult",
+    "DMLNormaliseResult",
+    "ConservedOxResult",
+    "RegimeConditionedResult",
     "NormalisationDiagnostics",
     "RollingConfig",
+    "SyntheticBenchmark",
+    "make_synthetic_benchmark",
+    "evaluate_benchmark",
     "SingleConfig",
     "UncConfig",
     # --- Pipelines ---
@@ -283,6 +303,9 @@ __all__ = [
     "normalise",
     "normalise_auto",
     "crossfit_normalise",
+    "dml_normalise",
+    "normalise_ox_invariant",
+    "normalise_regime_conditioned",
     "diagnose_normalisation",
     "support_audit",
     "rolling",
@@ -324,12 +347,14 @@ __all__ = [
     # --- Transport & receptor models ---
     "ReceptorGridResult",
     "FootprintInversionResult",
+    "MultisiteInversionResult",
     "TrajectoryClusterResult",
     "gridded_receptor_model",
     "wpscf",
     "wcwt",
     "build_footprint_matrix",
     "invert_source_footprints",
+    "invert_multisite_footprints",
     "cluster_trajectories",
     "screen_donor_transport",
     # --- Synthetic control ---
@@ -368,6 +393,10 @@ __all__ = [
     "conformal_inference",
     "rmspe_ratio_test",
     "bayesian_scm",
+    "DeweatheredSCMResult",
+    "TransportSCMResult",
+    "deweathered_scm",
+    "transport_adjusted_scm",
     # --- Modelling ---
     "build_model",
     "train_model",
@@ -474,6 +503,7 @@ __all__ = [
     "select_donors_by_embedding",
     "ICNDrawBank",
     "build_icn_draw_bank",
+    "icn_decompose",
     "normalise_in_context",
     "normalise_in_context_multivariate",
     "normalise_in_context_multisite",

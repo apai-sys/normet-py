@@ -32,12 +32,14 @@ log = get_logger(__name__)
 __all__ = [
     "ReceptorGridResult",
     "FootprintInversionResult",
+    "MultisiteInversionResult",
     "TrajectoryClusterResult",
     "gridded_receptor_model",
     "wpscf",
     "wcwt",
     "build_footprint_matrix",
     "invert_source_footprints",
+    "invert_multisite_footprints",
     "cluster_trajectories",
     "screen_donor_transport",
 ]
@@ -103,6 +105,21 @@ class FootprintInversionResult:
     rmse: float
     n_obs: int
     rolling_beta: pd.DataFrame | None = None
+
+
+@dataclass
+class MultisiteInversionResult:
+    """Result of multi-receptor joint footprint inversion (:func:`invert_multisite_footprints`)."""
+
+    intercepts: dict[str, float]
+    regions: pd.DataFrame
+    site_metrics: pd.DataFrame
+    contributions: pd.DataFrame
+    alpha: float
+    spatial_alpha: float
+    r2: float
+    rmse: float
+    n_obs: int
 
 
 @dataclass
@@ -791,6 +808,371 @@ def invert_source_footprints(
         rmse=rmse,
         n_obs=n,
         rolling_beta=rolling_df,
+    )
+
+
+def _solve_joint_centered(
+    Fc: np.ndarray,
+    yc: np.ndarray,
+    alpha: float,
+    non_negative: bool,
+    spatial_reg: np.ndarray | None = None,
+) -> np.ndarray:
+    """Solve centered multi-receptor system ``Fc @ beta ~ yc`` with ridge + spatial penalty."""
+    p = Fc.shape[1]
+    if non_negative:
+        blocks_A = [Fc]
+        blocks_b = [yc]
+        if alpha > 0.0:
+            blocks_A.append(np.sqrt(float(alpha)) * np.eye(p))
+            blocks_b.append(np.zeros(p))
+        if spatial_reg is not None and spatial_reg.size > 0:
+            blocks_A.append(spatial_reg)
+            blocks_b.append(np.zeros(spatial_reg.shape[0]))
+        A = np.vstack(blocks_A) if len(blocks_A) > 1 else blocks_A[0]
+        b = np.concatenate(blocks_b) if len(blocks_b) > 1 else blocks_b[0]
+        from scipy import optimize as sp_opt
+
+        beta, _ = sp_opt.nnls(A, b)
+        return np.asarray(beta, dtype=float)
+
+    gram = Fc.T @ Fc + (float(alpha) + 1e-12) * np.eye(p)
+    if spatial_reg is not None and spatial_reg.size > 0:
+        gram = gram + spatial_reg.T @ spatial_reg
+    rhs = Fc.T @ yc
+    try:
+        beta = np.linalg.solve(gram, rhs)
+    except np.linalg.LinAlgError:
+        beta, *_ = np.linalg.lstsq(gram, rhs, rcond=None)
+    return np.asarray(beta, dtype=float)
+
+
+def _build_spatial_reg_factor(
+    region_names: Sequence[str],
+    display_names: Sequence[str],
+    region_coords: Mapping[str, tuple[float, float]] | pd.DataFrame | None,
+    spatial_alpha: float,
+    spatial_scale_km: float,
+) -> np.ndarray | None:
+    """Return ``sqrt(spatial_alpha) * B`` where ``B^T B = L`` (Haversine graph Laplacian)."""
+    if region_coords is None or float(spatial_alpha) <= 0.0:
+        return None
+    coord_map: dict[str, tuple[float, float]] = {}
+    if isinstance(region_coords, pd.DataFrame):
+        name_col = "region" if "region" in region_coords.columns else region_coords.columns[0]
+        for _, row in region_coords.iterrows():
+            coord_map[str(row[name_col])] = (float(row["lat"]), float(row["lon"]))
+    else:
+        for k, v in region_coords.items():
+            coord_map[str(k)] = (float(v[0]), float(v[1]))
+
+    p = len(region_names)
+    coords: list[tuple[float, float] | None] = []
+    for raw_n, disp_n in zip(region_names, display_names, strict=True):
+        coords.append(coord_map.get(disp_n) or coord_map.get(raw_n))
+
+    W = np.zeros((p, p), dtype=float)
+    scale = max(float(spatial_scale_km), 1e-3)
+    for i in range(p):
+        ci = coords[i]
+        if ci is None:
+            continue
+        for j in range(i + 1, p):
+            cj = coords[j]
+            if cj is None:
+                continue
+            d_km = float(_haversine_km(ci[0], ci[1], cj[0], cj[1]))
+            w_ij = float(np.exp(-d_km / scale))
+            W[i, j] = W[j, i] = w_ij
+    if float(W.sum()) <= 0.0:
+        return None
+    L = np.diag(W.sum(axis=1)) - W
+    eigvals, eigvecs = np.linalg.eigh(L)
+    keep = eigvals > 1e-12
+    if not np.any(keep):
+        return None
+    return np.sqrt(float(spatial_alpha) * eigvals[keep])[:, None] * eigvecs[:, keep].T
+
+
+def invert_multisite_footprints(
+    footprints_by_site: Mapping[str, pd.DataFrame],
+    series_by_site: Mapping[str, pd.Series | pd.DataFrame],
+    *,
+    value_col: str | None = None,
+    date_col: str = "date",
+    region_cols: Sequence[str] | None = None,
+    region_coords: Mapping[str, tuple[float, float]] | pd.DataFrame | None = None,
+    alpha: float | Sequence[float] | str = "auto",
+    spatial_alpha: float = 0.0,
+    spatial_scale_km: float = 100.0,
+    non_negative: bool = True,
+    n_bootstrap: int = 200,
+    block_length: int | None = None,
+    seed: int = 7_654_321,
+) -> MultisiteInversionResult:
+    """Joint multi-receptor Bayesian/regularized source-footprint inversion.
+
+    Estimates shared regional source intensities :math:`\\beta_g \\ge 0` across
+    multiple receptor stations while allowing each station its own local
+    background intercept :math:`\\beta_{0, s}`:
+
+    .. math::
+        y_s(t) \\approx \\beta_{0, s} + \\sum_g \\beta_g F_{s, g}(t)
+
+    Optionally enforces spatial smoothness across adjacent source regions via
+    a Haversine graph Laplacian penalty ``spatial_alpha * beta^T L beta``.
+    """
+    if not footprints_by_site or not series_by_site:
+        raise ValueError("`footprints_by_site` and `series_by_site` must be non-empty.")
+    if float(spatial_alpha) < 0.0:
+        raise ValueError(f"`spatial_alpha` must be non-negative, got {spatial_alpha}")
+
+    sites = [str(s) for s in footprints_by_site if str(s) in series_by_site]
+    if not sites:
+        raise ValueError(
+            "No overlapping site keys between `footprints_by_site` and `series_by_site`."
+        )
+
+    r_cols: list[str] | None = [str(c) for c in region_cols] if region_cols is not None else None
+    site_data: list[tuple[str, pd.DatetimeIndex, np.ndarray, np.ndarray]] = []
+
+    for site in sites:
+        fp_raw = footprints_by_site[site]
+        if not isinstance(fp_raw, pd.DataFrame) or fp_raw.empty:
+            continue
+        fp = fp_raw.copy()
+        if date_col in fp.columns:
+            fp_times = _naive_utc(fp[date_col])
+            fp = fp.drop(columns=[date_col])
+        elif isinstance(fp.index, pd.DatetimeIndex):
+            fp_times = _naive_utc(fp.index)
+        else:
+            raise KeyError(
+                f"`footprints_by_site[{site!r}]` has no {date_col!r} column or DatetimeIndex."
+            )
+        fp.index = pd.DatetimeIndex(fp_times.to_numpy(), name="date")
+        fp = fp.loc[np.asarray(fp_times.notna().to_numpy(), dtype=bool)].sort_index()
+
+        if r_cols is None:
+            fp_pref = [c for c in fp.columns if str(c).startswith("traj_footprint_")]
+            if fp_pref:
+                base_fp = [c for c in fp_pref if not _HORIZON_SUFFIX_RE.search(str(c))]
+                r_cols = base_fp or fp_pref
+            else:
+                r_cols = [
+                    str(c)
+                    for c in fp.columns
+                    if pd.api.types.is_numeric_dtype(fp[c]) and not is_trajectory_qc_column(str(c))
+                ]
+        missing_r = [c for c in r_cols if c not in fp.columns]
+        if missing_r:
+            raise KeyError(f"region_cols absent from site {site!r}: {missing_r}")
+
+        obs_df = _resolve_series_frame(series_by_site[site], value_col=value_col, date_col=date_col)
+        fp_num = fp[r_cols].apply(pd.to_numeric, errors="coerce").groupby(level=0).mean()
+        obs_s = pd.Series(obs_df["_y"].to_numpy(), index=pd.DatetimeIndex(obs_df["_t"]))
+        joined = fp_num.join(obs_s.rename("_y"), how="inner").dropna()
+        if joined.empty:
+            continue
+        site_data.append(
+            (
+                site,
+                pd.DatetimeIndex(joined.index),
+                joined[r_cols].to_numpy(dtype=float),
+                joined["_y"].to_numpy(dtype=float),
+            )
+        )
+
+    if not site_data or r_cols is None or not r_cols:
+        raise ValueError("No aligned multi-receptor observations available for inversion.")
+
+    p = len(r_cols)
+    stripped = [
+        c[len("traj_footprint_") :] if c.startswith("traj_footprint_") else c for c in r_cols
+    ]
+    display_names = stripped if len(set(stripped)) == len(stripped) else list(r_cols)
+    spatial_reg = _build_spatial_reg_factor(
+        r_cols, display_names, region_coords, float(spatial_alpha), float(spatial_scale_km)
+    )
+
+    Fc_parts: list[np.ndarray] = []
+    yc_parts: list[np.ndarray] = []
+    t_parts: list[pd.DatetimeIndex] = []
+    site_parts: list[np.ndarray] = []
+    F_raw_parts: list[np.ndarray] = []
+    y_raw_parts: list[np.ndarray] = []
+    site_means: dict[str, tuple[np.ndarray, float]] = {}
+
+    for site, idx_s, F_s, y_s in site_data:
+        f_mu = F_s.mean(axis=0)
+        y_mu = float(y_s.mean())
+        site_means[site] = (f_mu, y_mu)
+        Fc_parts.append(F_s - f_mu)
+        yc_parts.append(y_s - y_mu)
+        t_parts.append(idx_s)
+        site_parts.append(np.full(len(y_s), site, dtype=object))
+        F_raw_parts.append(F_s)
+        y_raw_parts.append(y_s)
+
+    Fc_all = np.vstack(Fc_parts)
+    yc_all = np.concatenate(yc_parts)
+    F_all = np.vstack(F_raw_parts)
+    y_all = np.concatenate(y_raw_parts)
+    t_all = np.concatenate([t.to_numpy() for t in t_parts])
+    s_all = np.concatenate(site_parts)
+    n_tot = len(y_all)
+    if n_tot < max(3, p + 1):
+        raise ValueError(f"Need at least {max(3, p + 1)} total aligned rows, got {n_tot}.")
+
+    # Sort stacked observations chronologically so blocked CV holds out contiguous time windows.
+    ord_t = np.argsort(t_all, kind="stable")
+    Fc_ord = Fc_all[ord_t]
+    yc_ord = yc_all[ord_t]
+
+    if isinstance(alpha, str):
+        if alpha.lower() != "auto":
+            raise ValueError(f"alpha string must be 'auto', got {alpha!r}")
+        scale = max(float(np.mean(np.var(Fc_all, axis=0))), 1e-6)
+        cand_alphas = scale * np.logspace(-3, 3, 13)
+    elif isinstance(alpha, Sequence):
+        cand_alphas = np.asarray([float(a) for a in alpha], dtype=float)
+        if cand_alphas.size == 0 or np.any(cand_alphas < 0.0):
+            raise ValueError("alpha sequence must contain non-negative floats.")
+    else:
+        cand_alphas = np.array([float(alpha)], dtype=float)
+        if cand_alphas[0] < 0.0:
+            raise ValueError(f"alpha must be non-negative, got {alpha}")
+
+    if len(cand_alphas) == 1:
+        chosen_alpha = float(cand_alphas[0])
+    else:
+        n_folds = min(5, max(2, n_tot // max(8, p + 2)))
+        if n_tot < 2 * n_folds:
+            chosen_alpha = float(cand_alphas[len(cand_alphas) // 2])
+        else:
+            splits = np.array_split(np.arange(n_tot), n_folds)
+            chosen_alpha = float(cand_alphas[0])
+            best_mse = np.inf
+            for a in cand_alphas:
+                sq_errs: list[np.ndarray] = []
+                for val_idx in splits:
+                    if val_idx.size == 0:
+                        continue
+                    tr_mask = np.ones(n_tot, dtype=bool)
+                    tr_mask[val_idx] = False
+                    if tr_mask.sum() <= p:
+                        continue
+                    b_cv = _solve_joint_centered(
+                        Fc_ord[tr_mask], yc_ord[tr_mask], float(a), non_negative, spatial_reg
+                    )
+                    sq_errs.append((yc_ord[val_idx] - Fc_ord[val_idx] @ b_cv) ** 2)
+                if sq_errs:
+                    mse = float(np.mean(np.concatenate(sq_errs)))
+                    if mse < best_mse:
+                        best_mse = mse
+                        chosen_alpha = float(a)
+
+    beta = _solve_joint_centered(Fc_all, yc_all, chosen_alpha, non_negative, spatial_reg)
+    intercepts = {
+        site: float(y_mu - float(f_mu @ beta)) for site, (f_mu, y_mu) in site_means.items()
+    }
+
+    pred_all = np.empty(n_tot, dtype=float)
+    b0_vec = np.empty(n_tot, dtype=float)
+    site_metric_rows: list[dict[str, Any]] = []
+    cursor = 0
+    for site, _idx_s, F_s, y_s in site_data:
+        m_s = len(y_s)
+        b0_s = intercepts[site]
+        p_s = b0_s + F_s @ beta
+        r_s = y_s - p_s
+        rmse_s = float(np.sqrt(np.mean(r_s * r_s)))
+        ss_t_s = float(np.sum((y_s - y_s.mean()) ** 2))
+        r2_s = float(1.0 - np.sum(r_s * r_s) / ss_t_s) if ss_t_s > 0.0 else float("nan")
+        pred_all[cursor : cursor + m_s] = p_s
+        b0_vec[cursor : cursor + m_s] = b0_s
+        site_metric_rows.append(
+            {
+                "site": site,
+                "n_obs": m_s,
+                "intercept": b0_s,
+                "rmse": rmse_s,
+                "r2": r2_s,
+            }
+        )
+        cursor += m_s
+
+    resid_all = y_all - pred_all
+    rmse_all = float(np.sqrt(np.mean(resid_all * resid_all)))
+    ss_tot_all = float(np.sum((y_all - y_all.mean()) ** 2))
+    r2_all = (
+        float(1.0 - np.sum(resid_all * resid_all) / ss_tot_all)
+        if ss_tot_all > 0.0
+        else float("nan")
+    )
+
+    ci_lo = np.full(p, np.nan, dtype=float)
+    ci_hi = np.full(p, np.nan, dtype=float)
+    if int(n_bootstrap) > 0 and n_tot >= 4:
+        L = min(
+            n_tot,
+            max(1, int(block_length) if block_length is not None else round(n_tot ** (1.0 / 3.0))),
+        )
+        max_start = max(1, n_tot - L + 1)
+        n_draws = int(np.ceil(n_tot / L))
+        rng = np.random.default_rng(int(seed))
+        boot_betas = np.empty((int(n_bootstrap), p), dtype=float)
+        for b_i in range(int(n_bootstrap)):
+            starts = rng.integers(0, max_start, size=n_draws)
+            idx_b = np.concatenate([np.arange(s, s + L) for s in starts])[:n_tot]
+            boot_betas[b_i] = _solve_joint_centered(
+                Fc_ord[idx_b], yc_ord[idx_b], chosen_alpha, non_negative, spatial_reg
+            )
+        ci_lo = np.percentile(boot_betas, 2.5, axis=0)
+        ci_hi = np.percentile(boot_betas, 97.5, axis=0)
+
+    mean_fp = F_all.mean(axis=0)
+    mean_contrib = beta * mean_fp
+    total_tr = float(np.sum(mean_contrib))
+    mean_y = float(np.mean(y_all))
+    reg_rows = [
+        {
+            "region": name,
+            "beta": float(beta[j]),
+            "beta_ci_low": float(ci_lo[j]),
+            "beta_ci_high": float(ci_hi[j]),
+            "mean_footprint": float(mean_fp[j]),
+            "mean_contribution": float(mean_contrib[j]),
+            "share_of_transport": float(mean_contrib[j] / total_tr) if total_tr != 0.0 else np.nan,
+            "share_of_total": float(mean_contrib[j] / mean_y) if mean_y != 0.0 else np.nan,
+        }
+        for j, name in enumerate(display_names)
+    ]
+
+    contrib_data: dict[str, Any] = {
+        "site": s_all,
+        "date": pd.DatetimeIndex(t_all),
+        "observed": y_all,
+        "predicted": pred_all,
+        "background": b0_vec,
+    }
+    comp_mat = F_all * beta[None, :]
+    for j, name in enumerate(display_names):
+        contrib_data[name] = comp_mat[:, j]
+    contrib_data["transport_total"] = comp_mat.sum(axis=1)
+    contrib_data["residual"] = resid_all
+    contrib_df = pd.DataFrame(contrib_data).sort_values(["site", "date"]).reset_index(drop=True)
+
+    return MultisiteInversionResult(
+        intercepts=intercepts,
+        regions=pd.DataFrame(reg_rows),
+        site_metrics=pd.DataFrame(site_metric_rows),
+        contributions=contrib_df,
+        alpha=float(chosen_alpha),
+        spatial_alpha=float(spatial_alpha),
+        r2=r2_all,
+        rmse=rmse_all,
+        n_obs=n_tot,
     )
 
 

@@ -32,8 +32,17 @@ from ..utils.prepare import (
     log1p_target,
     process_date,
 )
-from .normalise import _apply_conditional_filter, _parse_stratify_by, normalise
+from .normalise import (
+    _apply_conditional_filter,
+    _conditional_mask,
+    _draw_sample_indices,
+    _extract_strata,
+    _parse_stratify_by,
+    _split_across_pools,
+    normalise,
+)
 
+_DEFAULT_NORMALISE = normalise
 log = get_logger(__name__)
 
 
@@ -1596,6 +1605,197 @@ def decom_emi_shapley(
     )
 
 
+def _build_fused_coalition_evaluator(
+    df_work: pd.DataFrame,
+    model: object,
+    feat_sorted: list[str],
+    all_resample_vars: list[str],
+    cfg: DecomposeConfig,
+    target_index: pd.Index,
+    *,
+    norm_log_flag: bool,
+    is_mult: bool,
+    is_log_space: bool,
+    n_cores_eff: int,
+) -> Callable[[list[str]], np.ndarray]:
+    """Precompute pool indices and base-column tiles once across all coalitions.
+
+    Because Common Random Numbers depend only on ``seed`` and pool stream IDs
+    (not on which subset of variables is resampled), precomputing the batch
+    indices and base column tiles eliminates redundant ``process_date``,
+    ``check_data``, stratification, and RNG sampling across ``2**k`` coalitions
+    while producing predictions bit-identical to :func:`normalise`.
+    """
+    from ..utils.prepare import check_data
+
+    df_dated = process_date(df_work)
+    strat_cols = _parse_stratify_by(cfg.stratify_by)
+    df_strata = _extract_strata(df_dated, strat_cols, label="df") if strat_cols else None
+    df_checked = check_data(df_dated, feat_sorted, "value")
+    if "date" not in df_checked.columns:
+        raise DataError("`df` must contain a 'date' column.")
+
+    resample_df = df_checked if cfg.resample_df is None else cfg.resample_df
+    base_strata_source = df_dated if cfg.resample_df is None else resample_df
+    if cfg.conditional_on:
+        before = len(resample_df)
+        cond_mask = np.asarray(_conditional_mask(resample_df, cfg.conditional_on), dtype=bool)
+        resample_df = resample_df.loc[cond_mask]
+        base_strata_source = (
+            base_strata_source.loc[cond_mask] if cfg.resample_df is None else resample_df
+        )
+        if resample_df.empty:
+            raise DataError(
+                f"`conditional_on` filter left no rows in the resample pool (was {before}). "
+                "Loosen the condition or pass a wider resample_df."
+            )
+
+    for name, pool in (cfg.resample_pools or {}).items():
+        if isinstance(pool, pd.DataFrame) and not set(pool.columns) & set(feat_sorted):
+            raise ConfigError(
+                f"resample pool {name!r} has no covariate among its columns "
+                f"({list(pool.columns)[:6]}); a pool's columns name the variables drawn from it."
+            )
+
+    import zlib
+
+    draws_all = _split_across_pools(all_resample_vars, resample_df, cfg.resample_pools)
+    base_cols = draws_all[0][1] if draws_all and draws_all[0][0] == 0 else []
+    missing = [c for c in base_cols if c not in resample_df.columns]
+    if missing:
+        raise DataError(f"`resample_df` is missing columns required for resampling: {missing}")
+
+    pool_strata_map: dict[int, np.ndarray] = {}
+    if strat_cols:
+        pool_strata_map[0] = _extract_strata(base_strata_source, strat_cols, label="resample_df")
+        for name, pool in (cfg.resample_pools or {}).items():
+            if isinstance(pool, pd.DataFrame):
+                stream_id = zlib.crc32(str(name).encode("utf-8")) or 1
+                pool_strata_map[stream_id] = _extract_strata(
+                    pool, strat_cols, label=f"resample_pools[{name!r}]"
+                )
+
+    n_samples = int(cfg.n_samples or 300)
+    rng = np.random.default_rng(cfg.seed)
+    random_seeds = rng.choice(1_000_000, size=n_samples, replace=False)
+
+    n_rows = len(df_checked)
+    one_copy_bytes = int(df_checked.memory_usage(deep=True).sum())
+    eff_batch_size = int(max(1, min((400 * 1024**2) // max(one_copy_bytes, 1), n_samples)))
+    seeds_batched = [
+        random_seeds[i : i + eff_batch_size] for i in range(0, n_samples, eff_batch_size)
+    ]
+
+    dates_arr = df_checked["date"].to_numpy()
+    dates_unique = bool(pd.Index(dates_arr).is_unique)
+    order_dates = np.argsort(dates_arr, kind="stable") if dates_unique else None
+    sorted_idx = pd.Index(dates_arr[order_dates], name="date") if order_dates is not None else None
+
+    # Precompute only the draw plan: for each batch and resampling stream, the
+    # pool-row index of every (draw, row). Building the resampled columns here
+    # instead meant retaining one full panel tile per batch for the lifetime of
+    # the evaluator -- O(n_samples * n_rows * n_cols) up to 2x the batch budget
+    # -- while the indices that define the draws are O(n_samples * n_rows).
+    stream_specs: list[tuple[list[str], np.ndarray, int]] = [
+        (list(cols), pool[cols].to_numpy(), stream) for stream, cols, pool in draws_all
+    ]
+    batch_draw_idx: list[list[np.ndarray]] = []
+    sample_offset = 0
+    for batch_seeds in seeds_batched:
+        b_size = len(batch_seeds)
+        batch_positions = list(range(sample_offset, sample_offset + b_size))
+        sample_offset += b_size
+
+        plans: list[np.ndarray] = []
+        cycle_cache: dict[tuple[Any, ...], Any] = {}
+        for _cols, values, stream in stream_specs:
+            p_strata = pool_strata_map.get(stream)
+            idx = np.empty((b_size, n_rows), dtype=np.int64)
+            for i, (s, pos) in enumerate(zip(batch_seeds, batch_positions, strict=True)):
+                idx[i] = _draw_sample_indices(
+                    stream,
+                    int(s),
+                    base_seed=cfg.seed,
+                    sample_pos=int(pos),
+                    n_pool=len(values),
+                    n_rows=n_rows,
+                    replace=True,
+                    df_strata=df_strata,
+                    p_strata=p_strata,
+                    cycle_cache=cycle_cache,
+                )
+            plans.append(idx)
+        batch_draw_idx.append(plans)
+
+    zero_pass_cache: np.ndarray | None = None
+
+    def _eval_coalition(resample: list[str]) -> np.ndarray:
+        nonlocal zero_pass_cache
+        if not resample:
+            if zero_pass_cache is None:
+                preds = ml_predict(model, df_checked, num_threads=n_cores_eff)
+                s_zero = (
+                    pd.Series(preds, index=pd.Index(dates_arr, name="date")).groupby(level=0).mean()
+                )
+                vals_zero = s_zero.reindex(target_index).to_numpy(dtype=float)
+                if norm_log_flag:
+                    vals_zero = np.expm1(vals_zero)
+                if is_mult and not is_log_space:
+                    vals_zero = np.log1p(np.maximum(vals_zero, 0.0))
+                zero_pass_cache = vals_zero
+            return zero_pass_cache
+
+        res_set = set(resample)
+        sum_norm = np.zeros(n_rows, dtype=np.float64)
+        n_completed = 0
+        for b_idx, batch_seeds in enumerate(seeds_batched):
+            b_size = len(batch_seeds)
+            parts: dict[str, np.ndarray] = {
+                c: np.tile(df_checked[c].to_numpy(), b_size)
+                for c in df_checked.columns
+                if c not in res_set
+            }
+            for s_idx, (cols, values, _stream) in enumerate(stream_specs):
+                needed = [j for j, c in enumerate(cols) if c in res_set]
+                if not needed:
+                    continue
+                picked = values[batch_draw_idx[b_idx][s_idx].ravel()]
+                for j in needed:
+                    parts[cols[j]] = picked[:, j]
+            # A requested column with no stream keeps its factual values, as
+            # before; build in the frame's column order so positional
+            # backends see the same feature order they were trained on.
+            for c in df_checked.columns:
+                if c not in parts:
+                    parts[c] = np.tile(df_checked[c].to_numpy(), b_size)
+            df_batch = pd.DataFrame({c: parts[c] for c in df_checked.columns})
+            batch_preds = ml_predict(model, df_batch, num_threads=n_cores_eff)
+            sum_norm += batch_preds.reshape(b_size, n_rows).sum(axis=0)
+            n_completed += b_size
+
+        norm_raw_mean = sum_norm / float(n_completed)
+        if dates_unique:
+            assert order_dates is not None and sorted_idx is not None
+            norm_out = norm_raw_mean[order_dates]
+            if norm_log_flag:
+                norm_out = np.expm1(norm_out)
+            arr = pd.Series(norm_out, index=sorted_idx).reindex(target_index).to_numpy(dtype=float)
+        else:
+            s_out = (
+                pd.Series(norm_raw_mean, index=pd.Index(dates_arr, name="date"))
+                .groupby(level=0)
+                .mean()
+            )
+            if norm_log_flag:
+                s_out = pd.Series(np.expm1(s_out.to_numpy(dtype=float)), index=s_out.index)
+            arr = s_out.reindex(target_index).to_numpy(dtype=float)
+        if is_mult and not is_log_space:
+            arr = np.log1p(np.maximum(arr, 0.0))
+        return arr
+
+    return _eval_coalition
+
+
 def _run_met_attribution(
     df_work: pd.DataFrame,
     model: object,
@@ -1625,47 +1825,73 @@ def _run_met_attribution(
             return np.log1p(np.maximum(values, 0.0))
         return values
 
-    def value_of(resample: list[str]) -> np.ndarray:
-        df_norm = normalise(
-            df=df_work,
-            model=model,
-            covariates=feat_sorted,
-            variables_resample=resample,
-            n_samples=cfg.n_samples,
-            replace=True,
-            aggregate=not want_draws,
-            seed=cfg.seed,
-            n_cores=n_cores_eff,
-            resample_df=cfg.resample_df,
-            resample_pools=cfg.resample_pools,
-            conditional_on=cfg.conditional_on,
-            stratify_by=cfg.stratify_by,
-            conditional_k=cfg.conditional_k,
-            # The wide table is needed for per-seed draws; keep it on the
-            # model's native scale so the point estimate can be aggregated
-            # before the back-transform (see below), exactly as the
-            # aggregate=True path does.
-            log_transform=False if want_draws else norm_log_flag,
-            memory_save=cfg.memory_save,
-            cache=cfg.cache,
+    use_fused = (
+        cfg.cache is None
+        and cfg.conditional_k is None
+        and not want_draws
+        and not cfg.memory_save
+        and int(cfg.n_samples or 0) > 0
+        and normalise is _DEFAULT_NORMALISE
+        and callable(getattr(model, "predict", None))
+    )
+
+    if use_fused:
+        all_player_vars = [f for _, feats in players for f in feats]
+        value_of = _build_fused_coalition_evaluator(
+            df_work,
+            model,
+            feat_sorted,
+            all_player_vars,
+            cfg,
+            result.index,
+            norm_log_flag=norm_log_flag,
+            is_mult=is_mult,
+            is_log_space=is_log_space,
+            n_cores_eff=n_cores_eff,
         )
-        arr = _normet_draws_array(df_norm, result.index, want_draws=want_draws)
-        if not want_draws:
-            if is_mult and not is_log_space:
-                arr = np.log1p(np.maximum(arr, 0.0))
-            return arr
-        # ``return_uncertainty`` promises only to attach SE columns, so it
-        # must not move the point estimates. The aggregate path maps the mean
-        # of the raw draws to the output scale once; a wide table
-        # back-transformed per seed would instead average expm1(draw), a
-        # Jensen gap that survives more draws (measured ~7 % on emi_total).
-        # Shift every coalition's draw matrix by a constant so its mean is
-        # the aggregate-path point value; the spread across draws, and hence
-        # every MC/permutation SE, is unchanged.
-        raw = np.asarray(arr, dtype=float)
-        point = _output_scale(raw.mean(axis=1))
-        draws = _output_scale(raw)
-        return draws + (point - draws.mean(axis=1))[:, None]
+    else:
+
+        def value_of(resample: list[str]) -> np.ndarray:
+            df_norm = normalise(
+                df=df_work,
+                model=model,
+                covariates=feat_sorted,
+                variables_resample=resample,
+                n_samples=cfg.n_samples,
+                replace=True,
+                aggregate=not want_draws,
+                seed=cfg.seed,
+                n_cores=n_cores_eff,
+                resample_df=cfg.resample_df,
+                resample_pools=cfg.resample_pools,
+                conditional_on=cfg.conditional_on,
+                stratify_by=cfg.stratify_by,
+                conditional_k=cfg.conditional_k,
+                # The wide table is needed for per-seed draws; keep it on the
+                # model's native scale so the point estimate can be aggregated
+                # before the back-transform (see below), exactly as the
+                # aggregate=True path does.
+                log_transform=False if want_draws else norm_log_flag,
+                memory_save=cfg.memory_save,
+                cache=cfg.cache,
+            )
+            arr = _normet_draws_array(df_norm, result.index, want_draws=want_draws)
+            if not want_draws:
+                if is_mult and not is_log_space:
+                    arr = np.log1p(np.maximum(arr, 0.0))
+                return arr
+            # ``return_uncertainty`` promises only to attach SE columns, so it
+            # must not move the point estimates. The aggregate path maps the mean
+            # of the raw draws to the output scale once; a wide table
+            # back-transformed per seed would instead average expm1(draw), a
+            # Jensen gap that survives more draws (measured ~7 % on emi_total).
+            # Shift every coalition's draw matrix by a constant so its mean is
+            # the aggregate-path point value; the spread across draws, and hence
+            # every MC/permutation SE, is unchanged.
+            raw = np.asarray(arr, dtype=float)
+            point = _output_scale(raw.mean(axis=1))
+            draws = _output_scale(raw)
+            return draws + (point - draws.mean(axis=1))[:, None]
 
     raw_emi, raw_contribs, raw_values, perm_se = _attribute_core(
         players,

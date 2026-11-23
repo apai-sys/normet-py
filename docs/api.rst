@@ -15,6 +15,7 @@ The main sub-packages are also documented individually below.
    normet.model
    normet.foundation
    normet.counterfactual
+   normet.benchmarks
    normet.plotting
    normet.utils
    normet.io
@@ -37,6 +38,8 @@ are listed explicitly to give the classes and helpers their own pages.
    normet.analysis.trend.detect_trend_breaks
    normet.analysis.normalise.NormaliseConfig
    normet.analysis.normalise.normalise_auto
+   normet.analysis.normalise.DMLNormaliseResult
+   normet.analysis.normalise.dml_normalise
    normet.analysis.rolling.RollingConfig
    normet.analysis.rolling.window_columns
    normet.pipeline.do_all.SingleConfig

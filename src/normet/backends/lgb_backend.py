@@ -132,8 +132,26 @@ def _encode_frame_for_lgb(
     return np.column_stack(cols) if cols else np.empty((len(X), 0), dtype=float)
 
 
+def _guard_macos_openmp() -> None:
+    """Allow two libomp runtimes to coexist on macOS (best effort).
+
+    PyTorch and LightGBM each ship an ``libomp``; when both initialise in one
+    process the second can deadlock. The variable must be set before that
+    second runtime starts, so every entry point that can load LightGBM's
+    runtime -- importing the package or unpickling a saved booster -- calls
+    this first. LLVM's libomp ignores the Intel-KMP variable, so treat the
+    guard as advisory rather than a guarantee.
+    """
+    import os
+    import sys
+
+    if sys.platform == "darwin":
+        os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
+
 def _import_lightgbm() -> Any:
     """Dynamically import lightgbm."""
+    _guard_macos_openmp()
     lgb = require("lightgbm", hint="pip install lightgbm")
     return lgb
 
@@ -354,6 +372,9 @@ def load_lgb(
         If *joblib* is not installed.
     """
     joblib = require("joblib", hint="pip install joblib")
+    # Unpickling a booster starts LightGBM's OpenMP runtime without going
+    # through `_import_lightgbm`, so the import-path guard alone missed it.
+    _guard_macos_openmp()
     p = Path(path)
 
     if filename is None and p.is_file():

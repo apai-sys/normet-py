@@ -57,6 +57,11 @@ def resolve_n_samples(n_samples: int | None, backend: str | None) -> int:
 
 def _import_foundation() -> tuple[Any, Any]:
     """Return ``(torch, Chronos2Pipeline)`` or explain which extra is missing."""
+    import os
+    import sys
+
+    if sys.platform == "darwin":
+        os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
     try:
         import torch
         from chronos import Chronos2Pipeline
