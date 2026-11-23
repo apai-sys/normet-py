@@ -134,6 +134,12 @@ def _encode_frame_for_lgb(
 
 def _import_lightgbm() -> Any:
     """Dynamically import lightgbm."""
+    import os
+    import sys
+
+    # Prevent macOS libomp dual-runtime deadlock/abort when PyTorch and LightGBM share a process.
+    if sys.platform == "darwin":
+        os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
     lgb = require("lightgbm", hint="pip install lightgbm")
     return lgb
 

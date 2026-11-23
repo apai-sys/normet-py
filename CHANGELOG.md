@@ -7,6 +7,14 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ## [Unreleased]
 
 ### Added
+- **First-principles normalisation, chemical conservation, causal-transport coupling, and benchmarking**:
+  - Orthogonal partially linear Double-ML meteorological normalisation (`nm.dml_normalise`, `nm.DMLNormaliseResult`) separating low-frequency emission trajectories from nonlinear meteorological effects while excluding `date_unix`/`year` from tree split features.
+  - Variance-reduced Monte Carlo control variates (`NormaliseConfig(control_variates=True)`) and seam-free Markov-bridge trajectory block resampling (`NormaliseConfig(block_mode="markov")`).
+  - Edge-preserving surprise-weighted anchor aggregation (`ICNDesign(surprise_tau=...)` keeping `ICNDesign.v1()` hash unchanged), offline `ICNDrawBank.save()` / `ICNDrawBank.load()`, and batched in-context group Shapley decomposition (`nm.icn_decompose`).
+  - Photochemically conserved $\mathrm{O_x\text{–}NO_x}$ deweathering (`nm.normalise_ox_invariant`, `nm.ConservedOxResult`), precursor-regime-conditioned deweathering (`nm.normalise_regime_conditioned`, `nm.RegimeConditionedResult`), and causal ODE residence-time accumulation features (`add_met_physics_features(..., include_memory=True)`).
+  - Multi-coalition fused resampling in `decom_met` / `shapley_interactions` eliminating repeated data prep and RNG sampling across $2^k$ coalitions with bit-identical results.
+  - Two-stage uncertainty-propagated SCM (`nm.deweathered_scm`, `nm.DeweatheredSCMResult`), dynamic downwind plume spillover-adjusted SCM (`nm.transport_adjusted_scm`, `nm.TransportSCMResult`), and joint multi-receptor footprint inversion (`nm.invert_multisite_footprints`, `nm.MultisiteInversionResult`).
+  - Built-in synthetic ground-truth benchmarks (`nm.make_synthetic_benchmark`, `nm.evaluate_benchmark`, `nm.SyntheticBenchmark`) covering `F1_additive`, `F2_multiplicative`, `F3_titration`, `F4_nonstationary`, and `F5_transport`, plus a macOS `KMP_DUPLICATE_LIB_OK` OpenMP coexistence guard between LightGBM and PyTorch.
 - **Chronos-2 core primitives and first-principles operators** (`normet.foundation`):
   - `past_only_covariates` on `Chronos2Estimator` (constructor, `predict`,
     `predict_quantiles*`, `counterfactual`, `finetune`, `finetune_multisite`)

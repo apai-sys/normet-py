@@ -110,6 +110,22 @@ def test_top_level_symbols_present():
         "interval_coverage",
         "pit_diagnostics",
         "calibration_curve",
+        "DMLNormaliseResult",
+        "dml_normalise",
+        "ConservedOxResult",
+        "RegimeConditionedResult",
+        "normalise_ox_invariant",
+        "normalise_regime_conditioned",
+        "icn_decompose",
+        "DeweatheredSCMResult",
+        "TransportSCMResult",
+        "deweathered_scm",
+        "transport_adjusted_scm",
+        "MultisiteInversionResult",
+        "invert_multisite_footprints",
+        "SyntheticBenchmark",
+        "make_synthetic_benchmark",
+        "evaluate_benchmark",
     }
     missing = must_have - set(nm.__all__)
     assert not missing, f"Missing top-level exports: {sorted(missing)}"

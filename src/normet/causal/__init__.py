@@ -38,6 +38,12 @@ from .bands import (
 
 # --- Batch runner ------------------------------------------------------------
 from .batch import run_scm_staggered, scm_all
+from .deweathered import (
+    DeweatheredSCMResult,
+    TransportSCMResult,
+    deweathered_scm,
+    transport_adjusted_scm,
+)
 from .diagnostics import loo_weight_stability, scm_diagnostics
 from .inference import conformal_effect_interval, conformal_inference, rmspe_ratio_test
 from .prediagnostics import HonestDiDResult, PreTrend, honest_did_bounds, pre_trend_test
@@ -132,6 +138,10 @@ __all__ = [
     "conformal_inference",
     "rmspe_ratio_test",
     "bayesian_scm",
+    "DeweatheredSCMResult",
+    "TransportSCMResult",
+    "deweathered_scm",
+    "transport_adjusted_scm",
     # registry
     "BACKENDS",
 ]

@@ -299,6 +299,22 @@ def _magnus_es(temp_c: np.ndarray) -> np.ndarray:
         return 0.6108 * np.exp((17.27 * temp_c) / safe_denom)
 
 
+def _causal_ema(values: np.ndarray, decay: np.ndarray | float) -> np.ndarray:
+    """First-order causal ODE exponential accumulation ``s[t] = d[t]*s[t-1] + (1-d[t])*x[t]``."""
+    n = len(values)
+    out = np.empty(n, dtype=np.float64)
+    if n == 0:
+        return out
+    d_arr = np.broadcast_to(np.asarray(decay, dtype=np.float64), (n,))
+    acc = float(values[0])
+    out[0] = acc
+    for t in range(1, n):
+        d_t = float(d_arr[t])
+        acc = d_t * acc + (1.0 - d_t) * float(values[t])
+        out[t] = acc
+    return out
+
+
 def add_met_physics_features(
     df: pd.DataFrame,
     *,
@@ -308,7 +324,11 @@ def add_met_physics_features(
     temp_col: str | None = "t2m",
     rh_col: str | None = "rh",
     dewpoint_col: str | None = "d2m",
+    ssrd_col: str | None = "ssrd",
+    precip_col: str | None = "tp",
     temp_unit: str = "auto",
+    include_memory: bool = False,
+    residence_tau_hours: float = 12.0,
 ) -> pd.DataFrame:
     """Derive physically meaningful boundary-layer and thermodynamic meteorological features.
 
@@ -316,10 +336,14 @@ def add_met_physics_features(
       - ``u_wind``, ``v_wind`` from ``ws_col`` & ``wd_col`` via :func:`wind_to_uv`
       - ``ventilation_coef = ws * blh`` from ``ws_col`` & ``blh_col``
       - ``vpd`` (vapour pressure deficit, kPa) and ``dewpoint_depression`` (deg C),
-        plus ``rh_derived`` (%) when ``dewpoint_col`` is present without ``rh_col``.
+        plus ``rh_derived`` (%) when ``dewpoint_col`` is present without ``rh_col``
+      - when ``include_memory=True``, causal first-order ODE residence integrals:
+        ``stagnation_memory``, ``photochemical_dose``, and ``wet_scavenging_memory``.
     """
     if temp_unit not in ("auto", "C", "K"):
         raise ValueError(f"`temp_unit` must be 'auto', 'C', or 'K', got {temp_unit!r}.")
+    if float(residence_tau_hours) <= 0.0:
+        raise ValueError(f"`residence_tau_hours` must be positive, got {residence_tau_hours!r}.")
 
     out = df.copy()
     if ws_col and wd_col and ws_col in out.columns and wd_col in out.columns:
@@ -379,6 +403,41 @@ def add_met_physics_features(
                 out["vpd"] = np.maximum(0.0, es_t - es_td)
                 with np.errstate(divide="ignore", invalid="ignore"):
                     out["rh_derived"] = 100.0 * np.clip(es_td / np.maximum(es_t, 1e-12), 0.0, 1.0)
+
+    if include_memory and len(out) > 0:
+        n = len(out)
+        if "date" in out.columns and pd.api.types.is_datetime64_any_dtype(out["date"]):
+            ord_idx = np.argsort(out["date"].to_numpy(), kind="stable")
+        elif isinstance(out.index, pd.DatetimeIndex):
+            ord_idx = np.argsort(out.index.to_numpy(), kind="stable")
+        else:
+            ord_idx = np.arange(n, dtype=np.int64)
+        inv_idx = np.empty(n, dtype=np.int64)
+        inv_idx[ord_idx] = np.arange(n, dtype=np.int64)
+
+        tau_base = float(residence_tau_hours)
+        if blh_col and blh_col in out.columns:
+            blh_arr = pd.to_numeric(out[blh_col], errors="coerce").to_numpy(dtype=float)[ord_idx]
+            inv_blh = 1000.0 / np.maximum(np.where(np.isfinite(blh_arr), blh_arr, 500.0), 50.0)
+            if ws_col and ws_col in out.columns:
+                ws_arr = pd.to_numeric(out[ws_col], errors="coerce").to_numpy(dtype=float)[ord_idx]
+                ws_clean = np.maximum(np.where(np.isfinite(ws_arr), ws_arr, 2.0), 0.0)
+                tau_eff = tau_base / (1.0 + ws_clean / 3.0)
+            else:
+                tau_eff = np.full(n, tau_base, dtype=np.float64)
+            decay_stag = np.exp(-1.0 / np.maximum(tau_eff, 0.25))
+            out["stagnation_memory"] = _causal_ema(inv_blh, decay_stag)[inv_idx]
+
+        if ssrd_col and ssrd_col in out.columns:
+            rad_arr = pd.to_numeric(out[ssrd_col], errors="coerce").to_numpy(dtype=float)[ord_idx]
+            rad_clean = np.maximum(np.where(np.isfinite(rad_arr), rad_arr, 0.0), 0.0)
+            out["photochemical_dose"] = _causal_ema(rad_clean, float(np.exp(-1.0 / 6.0)))[inv_idx]
+
+        if precip_col and precip_col in out.columns:
+            tp_arr = pd.to_numeric(out[precip_col], errors="coerce").to_numpy(dtype=float)[ord_idx]
+            tp_clean = np.maximum(np.where(np.isfinite(tp_arr), tp_arr, 0.0), 0.0)
+            decay_tp = float(np.exp(-1.0 / max(tau_base, 0.5)))
+            out["wet_scavenging_memory"] = _causal_ema(tp_clean, decay_tp)[inv_idx]
 
     return out
 

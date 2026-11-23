@@ -1,5 +1,11 @@
 """Core analysis routines: normalisation, decomposition, rolling, PDP, events."""
 
+from .chemistry import (
+    ConservedOxResult,
+    RegimeConditionedResult,
+    normalise_ox_invariant,
+    normalise_regime_conditioned,
+)
 from .decomposition import (
     MET_PHYSICAL_GROUPS,
     DecomposeConfig,
@@ -18,8 +24,10 @@ from .diagnostics import NormalisationDiagnostics, diagnose_normalisation, suppo
 from .events import anomaly_scores, detect_events
 from .normalise import (
     CrossFitNormaliseResult,
+    DMLNormaliseResult,
     NormaliseConfig,
     crossfit_normalise,
+    dml_normalise,
     normalise,
     normalise_auto,
 )
@@ -27,11 +35,13 @@ from .pdp import ale, pdp
 from .rolling import RollingConfig, rolling, window_columns
 from .transport import (
     FootprintInversionResult,
+    MultisiteInversionResult,
     ReceptorGridResult,
     TrajectoryClusterResult,
     build_footprint_matrix,
     cluster_trajectories,
     gridded_receptor_model,
+    invert_multisite_footprints,
     invert_source_footprints,
     screen_donor_transport,
     wcwt,
@@ -77,10 +87,16 @@ __all__ = [
     "ShapleyInteractionResult",
     "NormaliseConfig",
     "CrossFitNormaliseResult",
+    "DMLNormaliseResult",
+    "ConservedOxResult",
+    "RegimeConditionedResult",
     "RollingConfig",
     "normalise",
     "normalise_auto",
     "crossfit_normalise",
+    "dml_normalise",
+    "normalise_ox_invariant",
+    "normalise_regime_conditioned",
     "NormalisationDiagnostics",
     "diagnose_normalisation",
     "support_audit",
@@ -101,12 +117,14 @@ __all__ = [
     "anomaly_scores",
     "ReceptorGridResult",
     "FootprintInversionResult",
+    "MultisiteInversionResult",
     "TrajectoryClusterResult",
     "gridded_receptor_model",
     "wpscf",
     "wcwt",
     "build_footprint_matrix",
     "invert_source_footprints",
+    "invert_multisite_footprints",
     "cluster_trajectories",
     "screen_donor_transport",
     "crps_from_quantiles",
