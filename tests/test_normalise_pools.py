@@ -13,7 +13,7 @@ import pytest
 
 from normet import normalise
 from normet.analysis.normalise import generate_resampled
-from normet.exceptions import ConfigError, DataError
+from normet.core.exceptions import ConfigError, DataError
 
 N = 40
 COVS = ["a", "b", "hour"]

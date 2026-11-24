@@ -24,7 +24,7 @@ from ..analysis.normalise import (
     crossfit_normalise,
     normalise,
 )
-from ..exceptions import ConfigError
+from ..core.exceptions import ConfigError
 from ..foundation.estimator import (
     CHRONOS_BACKEND,
     resolve_n_samples,

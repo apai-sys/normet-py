@@ -1,4 +1,4 @@
-"""First-principles v3 test suite: DML, control variates, Markov blocks, ICN upgrades,
+"""First-principles methods suite: DML, control variates, Markov blocks, ICN upgrades,
 photochemical Ox-NOx conservation, fused Shapley coalitions, deweathered/transport SCM,
 multi-receptor inversion, and built-in synthetic ground-truth benchmarks.
 """

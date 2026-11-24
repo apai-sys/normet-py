@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from ..exceptions import DataError
+from ..core.exceptions import DataError
 
 
 def require_column(df: pd.DataFrame, col: str, label: str = "column") -> None:

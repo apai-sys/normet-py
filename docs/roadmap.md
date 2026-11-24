@@ -36,7 +36,7 @@ it will commit the project to API stability for downstream users.
 | ✅ | Chronos-2 foundation model: zero-shot de-weathering, counterfactuals, station embeddings |
 | ✅ | Zero-shot paths through `do_all` and `decompose(method="meteorology")` |
 | ✅ | `embed_multisite`: station embeddings meet the multi-site drivers |
-| ✅ | mypy strict on the public surface (`warn_return_any` and `disallow_any_generics` deliberately off; `disallow_untyped_decorators` off for `normet.cli` and `normet.mcp_server` -- see CHANGELOG for why) |
+| ✅ | mypy strict on the public surface (`warn_return_any` and `disallow_any_generics` deliberately off; `disallow_untyped_decorators` off for `normet.app.cli` and `normet.app.mcp_server` -- see CHANGELOG for why) |
 | ✅ | Test coverage ≥ 80% (80% measured; the CI gate stays at 70% so an unlucky branch does not block a merge) |
 | ✅ | Fine-tuning via `Chronos2Estimator.finetune` (LoRA or full). Deliberately not `fit`, which stays free so `do_all` cannot start a training run by accident |
 | ✅ | `cross_learning=True` for joint multi-site prediction (`predict_quantiles_multisite`) |

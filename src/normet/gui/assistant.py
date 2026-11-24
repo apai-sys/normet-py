@@ -66,7 +66,7 @@ from PySide6.QtWidgets import (
 
 from normet.agent import llm, readings
 from normet.agent.mcp_http import ToolServer
-from normet.i18n import written_language
+from normet.core.i18n import written_language
 
 from . import _code, assistant_cli, uilang
 from .chatview import ChatView, Look, composer_sheet

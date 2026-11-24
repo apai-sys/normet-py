@@ -46,7 +46,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from normet import style as S
+from normet.viz import style as S
 
 from ._widgets import CanvasTab, NoWheelComboBox, fill_sortable, hint_style, table_context_menu
 from .dataframe_model import DataFrameModel
@@ -984,7 +984,7 @@ class DataTab(QWidget):
         var = self.cycle_combo.currentText()
         if d is None or not var or var not in d.columns:
             return
-        from normet.plotting import cycle_profiles, usable_cycles
+        from normet.viz.plotting import cycle_profiles, usable_cycles
 
         if not isinstance(d.index, pd.DatetimeIndex) or not usable_cycles(d.index):
             self.cycles.show_result(None, lines=["The record's time step shows no cycle."])
@@ -1004,7 +1004,7 @@ class DataTab(QWidget):
         var = self.wind_combo.currentText()
         if d is None or not var:
             return
-        from normet.plotting import polar_plot, pollution_rose, wind_rose
+        from normet.viz.plotting import polar_plot, pollution_rose, wind_rose
 
         from .polar_window import wind_columns
 

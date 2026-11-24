@@ -22,7 +22,7 @@ import pandas as pd
 import pytest
 
 from normet.causal.panel import prepare_panel
-from normet.exceptions import DataError
+from normet.core.exceptions import DataError
 
 CUTOFF = "2023-01-15"
 

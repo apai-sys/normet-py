@@ -31,7 +31,7 @@ fitted without it (the fit-time alternative would read good on the
 correction's training data and be worthless). Where a corrected band's
 cross-validated coverage still deviates from the nominal by more than ten
 points, the fit is returned anyway with a
-:class:`~normet.exceptions.CalibrationWarning`: the record's behaviour went
+:class:`~normet.core.exceptions.CalibrationWarning`: the record's behaviour went
 beyond the hold-out, and the warning is what keeps a band that would only
 look calibrated out of a paper.
 
@@ -54,7 +54,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from ..exceptions import CalibrationWarning, ConfigError
+from ..core.exceptions import CalibrationWarning, ConfigError
 
 log = logging.getLogger(__name__)
 
@@ -66,7 +66,7 @@ __all__ = [
 ]
 
 #: The cross-validated coverage deviation from the nominal that earns a
-#: :class:`~normet.exceptions.CalibrationWarning`: ten points is where a
+#: :class:`~normet.core.exceptions.CalibrationWarning`: ten points is where a
 #: band stops being the band it claims to be.
 DEFAULT_TOLERANCE = 0.10
 
@@ -317,7 +317,7 @@ def calibrate_quantiles(
         record names as such where it is too short for one.
     tolerance
         The cross-validated coverage deviation from the nominal that earns a
-        :class:`~normet.exceptions.CalibrationWarning` on return.
+        :class:`~normet.core.exceptions.CalibrationWarning` on return.
     covariates
         The estimator's covariate set for the fit's forecasts (the chronos-2
         estimator resolves it itself without one).

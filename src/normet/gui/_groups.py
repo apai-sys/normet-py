@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from normet import style as S
+from normet.viz import style as S
 
 from ._lists import parse_groups
 from ._widgets import hint_label

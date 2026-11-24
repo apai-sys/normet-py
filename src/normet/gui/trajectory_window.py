@@ -57,8 +57,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from normet import style as S
 from normet.io.trajectory import _missing_gdas1_files, _naive_utc
+from normet.viz import style as S
 
 from ._clock import TaskClock
 from ._widgets import (

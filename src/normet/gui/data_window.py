@@ -56,7 +56,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from normet import style as S
+from normet.viz import style as S
 
 from ._clock import TaskClock
 from ._station_map import StationMap

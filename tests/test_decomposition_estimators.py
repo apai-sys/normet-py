@@ -1,4 +1,8 @@
-"""Comprehensive tests for Layer 1–3 scientific & algorithmic decomposition upgrades."""
+"""Decomposition estimators.
+
+Meteorology and emission attribution, LMDI closure, Shapley/TreeSHAP
+interactions and cross-fit stitching.
+"""
 
 from __future__ import annotations
 
@@ -22,7 +26,7 @@ from normet.analysis import (
     shapley_interactions,
     suggest_met_groups,
 )
-from normet.exceptions import ConfigError
+from normet.core.exceptions import ConfigError
 
 dmod = sys.modules["normet.analysis.decomposition"]
 needs_lgb = pytest.mark.skipif(

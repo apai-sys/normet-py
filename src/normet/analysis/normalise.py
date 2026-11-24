@@ -17,7 +17,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from ..exceptions import ConfigError, DataError, ModelError
+from ..core.exceptions import ConfigError, DataError, ModelError
 from ..model.predict import ml_predict
 from ..utils import progress
 from ..utils._config import DEFAULT_SEED, resolve_config, resolve_workers

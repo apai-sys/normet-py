@@ -21,7 +21,7 @@ from typing import Any
 
 import pandas as pd
 
-from normet import style as S
+from normet.viz import style as S
 
 from . import readings
 from .jobs import JobStore
@@ -129,7 +129,7 @@ class Tools:
     def _table(path: str) -> pd.DataFrame:
         from pathlib import Path
 
-        from normet.cli import _load_table
+        from normet.app.cli import _load_table
 
         return _load_table(Path(path))
 
@@ -655,7 +655,7 @@ class Tools:
 
     def write_report(self, run: str, out: str | None = None) -> str:
         """The HTML report of a saved run, written beside it or to *out*."""
-        from normet.report import generate_html
+        from normet.reporting.report import generate_html
 
         r = self._run(run)
         base = run[: -len(".joblib")] if run.endswith(".joblib") else run
@@ -750,7 +750,7 @@ def _draw_table(fig: Any, ax: Any, df: pd.DataFrame, kind: str, cutoff: str | No
             f"; dotted: {cutoff}." if cutoff else "."
         )
     if kind == "imputation":
-        from normet.plotting import plot_imputation
+        from normet.viz.plotting import plot_imputation
 
         plot_imputation(df, ax=ax)
         return "Observed series with Chronos-2 imputed gaps and predictive interval."

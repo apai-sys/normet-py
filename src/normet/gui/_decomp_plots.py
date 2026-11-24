@@ -24,7 +24,7 @@ from typing import Any
 
 import pandas as pd
 
-from normet import style as S
+from normet.viz import style as S
 
 OBS_COLOR = S.OBSERVED
 NORM_COLOR = S.MODELLED
@@ -106,7 +106,7 @@ def emission_figure(
     ``res`` is shown at a coarser resolution (a day's means have no hours)."""
     import matplotlib.pyplot as plt
 
-    from normet.plotting import profile_axes, usable_cycles
+    from normet.viz.plotting import profile_axes, usable_cycles
 
     d = indexed_result(res)
     full = indexed_result(cycles_from) if cycles_from is not None else d

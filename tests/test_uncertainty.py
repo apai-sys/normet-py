@@ -19,7 +19,7 @@ import pytest
 from normet import UncDecomposition, decompose_uncertainty
 from normet.analysis.uncertainty import _decompose
 from normet.backends import backend_registry
-from normet.exceptions import ConfigError
+from normet.core.exceptions import ConfigError
 
 # ---------------------------------------------------------------------------
 # _decompose: the two-way identity, checked on raw matrices

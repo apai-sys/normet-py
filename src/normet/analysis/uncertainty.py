@@ -48,13 +48,13 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from .. import style as S
-from ..exceptions import ConfigError
+from ..core.exceptions import ConfigError
 from ..model.train import train_model
-from ..style import styled
 from ..utils._config import DEFAULT_SEED
 from ..utils.logging import get_logger
 from ..utils.prepare import log1p_target, prepare_data
+from ..viz import style as S
+from ..viz.style import styled
 from .normalise import normalise
 
 log = get_logger(__name__)

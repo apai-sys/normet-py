@@ -28,7 +28,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from ..exceptions import ConfigError, DataError
+from ..core.exceptions import ConfigError, DataError
 from ..model.train import build_model, train_model
 from ..utils._config import DEFAULT_SEED
 from ..utils.prepare import prepare_data, process_date

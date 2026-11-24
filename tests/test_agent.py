@@ -292,7 +292,7 @@ def test_a_run_read_drawn_and_reported(tools, synthetic_aq, tmp_path):
 
 def test_mcp_server_lists_and_calls_tools(tools):
     pytest.importorskip("mcp")
-    from normet.mcp_server import build_server
+    from normet.app.mcp_server import build_server
 
     server = build_server(tools)
     names = {t.name for t in asyncio.run(server.list_tools())}

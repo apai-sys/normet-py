@@ -9,7 +9,7 @@ from typing import Any, cast
 
 import pandas as pd
 
-from ..exceptions import ExperimentalWarning
+from ..core.exceptions import ExperimentalWarning
 from ..utils.logging import get_logger
 
 log = get_logger(__name__)

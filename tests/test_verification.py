@@ -13,7 +13,7 @@ from normet.analysis.verification import (
     crps_observed,
     pinball_loss,
 )
-from normet.exceptions import DataError
+from normet.core.exceptions import DataError
 
 # numpy 2.0 renamed `np.trapz` to `np.trapezoid` and removed the old name. The
 # getattr must not take `np.trapz` as its default: that expression is evaluated

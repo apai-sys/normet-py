@@ -1,4 +1,8 @@
-"""Comprehensive tests for causal inference & counterfactual v2 upgrades (Layers 1–3)."""
+"""Causal-inference and counterfactual methods.
+
+Panel and placebo design, pre-trend tests, uncertainty bands, staggered
+adoption, SCM estimators, conformal inference and HonestDiD bounds.
+"""
 
 from __future__ import annotations
 

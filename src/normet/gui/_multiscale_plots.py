@@ -25,7 +25,7 @@ from typing import Any
 
 import pandas as pd
 
-from normet import style as S
+from normet.viz import style as S
 
 from ._decomp_plots import NOISE_COLOR, _lw, _time_series_axes
 

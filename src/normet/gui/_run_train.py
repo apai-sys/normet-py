@@ -14,7 +14,7 @@ from typing import Any
 import pandas as pd
 from PySide6.QtWidgets import QFileDialog, QMainWindow
 
-from normet import style as S
+from normet.viz import style as S
 
 from . import _chronos
 from ._constants import MET_DEFAULTS, TIME_VARS

@@ -29,7 +29,7 @@ from ..analysis.normalise import (
     dml_normalise,
     normalise,
 )
-from ..exceptions import ConfigError, DataError
+from ..core.exceptions import ConfigError, DataError
 from ..model.train import build_model
 from ..utils._config import DEFAULT_SEED
 from ._common import newey_west_se_mean, pivot_panel

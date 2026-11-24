@@ -3,7 +3,7 @@
 import pandas as pd
 import pytest
 
-from normet.exceptions import DataError
+from normet.core.exceptions import DataError
 from normet.utils.validate import (
     require_column,
     require_no_duplicates,

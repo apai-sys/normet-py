@@ -70,9 +70,9 @@ def test_a_figure_is_laid_out_for_print_and_given_back(qapp, tmp_path, kept):
     from matplotlib.colors import to_hex
     from PIL import Image
 
-    from normet import figstyle as FS
     from normet.gui.printview import PrintDialog
     from normet.gui.theme import DARK, apply_figure_theme
+    from normet.viz import figstyle as FS
 
     fig, a, b, canvas = _two_panels()
     apply_figure_theme(fig, True)  # shown dark on its tab
@@ -132,8 +132,8 @@ def test_a_figure_is_laid_out_for_print_and_given_back(qapp, tmp_path, kept):
 
 
 def test_the_choices_are_kept_for_the_next_figure(qapp, kept):
-    from normet.figstyle import PRESETS
     from normet.gui.printview import PrintDialog
+    from normet.viz.figstyle import PRESETS
 
     dlg = PrintDialog(_two_panels()[3])
     dlg.preset_cb.setCurrentIndex(list(PRESETS).index("acs"))

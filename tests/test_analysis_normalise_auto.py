@@ -13,7 +13,7 @@ import pytest
 
 from normet.analysis.normalise import normalise_auto
 from normet.backends import backend_registry
-from normet.exceptions import ConfigError
+from normet.core.exceptions import ConfigError
 
 # ---------------------------------------------------------------------------
 # Mock backend + linear stub model

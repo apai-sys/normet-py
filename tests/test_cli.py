@@ -14,7 +14,7 @@ needs_click = pytest.mark.skipif(
 def test_cli_info_runs():
     from click.testing import CliRunner
 
-    from normet.cli import _build_cli
+    from normet.app.cli import _build_cli
 
     runner = CliRunner()
     result = runner.invoke(_build_cli(), ["info"])
@@ -28,7 +28,7 @@ def test_cli_info_runs():
 def test_cli_help():
     from click.testing import CliRunner
 
-    from normet.cli import _build_cli
+    from normet.app.cli import _build_cli
 
     runner = CliRunner()
     result = runner.invoke(_build_cli(), ["--help"])
@@ -47,8 +47,8 @@ def test_cli_backend_choices_track_the_registry():
     """
     from click.testing import CliRunner
 
+    from normet.app.cli import _build_cli
     from normet.backends import backend_registry
-    from normet.cli import _build_cli
 
     runner = CliRunner()
     for cmd in ("do-all", "decompose", "cv"):
@@ -68,7 +68,7 @@ def test_only_the_commands_with_a_zero_shot_path_offer_that_backend():
     """
     from click.testing import CliRunner
 
-    from normet.cli import _build_cli
+    from normet.app.cli import _build_cli
     from normet.pipeline import CHRONOS_BACKEND
 
     runner = CliRunner()
@@ -87,7 +87,7 @@ def test_only_the_commands_with_a_zero_shot_path_offer_that_backend():
 def test_cli_deweather_is_advertised_and_documented():
     from click.testing import CliRunner
 
-    from normet.cli import _build_cli
+    from normet.app.cli import _build_cli
 
     runner = CliRunner()
     assert "deweather" in runner.invoke(_build_cli(), ["--help"]).output
@@ -107,7 +107,7 @@ def test_cli_deweather_refuses_without_met_vars(tmp_path):
     import pandas as pd
     from click.testing import CliRunner
 
-    from normet.cli import _build_cli
+    from normet.app.cli import _build_cli
 
     src = tmp_path / "site.csv"
     pd.DataFrame(
@@ -129,8 +129,8 @@ def test_cli_info_reports_the_foundation_dependencies():
 
     from click.testing import CliRunner
 
+    from normet.app.cli import _build_cli
     from normet.backends import backend_registry
-    from normet.cli import _build_cli
 
     data = json.loads(CliRunner().invoke(_build_cli(), ["info"]).output)
     for pkg in ("chronos-forecasting", "torch"):
@@ -141,7 +141,7 @@ def test_cli_info_reports_the_foundation_dependencies():
 @needs_click
 def test_cli_split_csv_accepts_a_yaml_list():
     """`covariates: [t2m, blh]` in a config file arrives as a list, not a string."""
-    from normet.cli import _split_csv
+    from normet.app.cli import _split_csv
 
     assert _split_csv("t2m, blh ,u10") == ["t2m", "blh", "u10"]
     assert _split_csv(["t2m", "blh"]) == ["t2m", "blh"]
@@ -157,7 +157,7 @@ def test_cli_do_all_and_decompose_preserve_backend_default_n_samples(monkeypatch
     from click.testing import CliRunner
 
     import normet
-    from normet.cli import _build_cli
+    from normet.app.cli import _build_cli
 
     src = tmp_path / "site.csv"
     df = pd.DataFrame(
@@ -233,7 +233,7 @@ def test_cli_deweather_icn_method_and_help(monkeypatch, tmp_path):
     import pandas as pd
     from click.testing import CliRunner
 
-    from normet.cli import _build_cli
+    from normet.app.cli import _build_cli
     from normet.foundation import Chronos2Estimator, ICNResult
 
     runner = CliRunner()
@@ -346,7 +346,7 @@ def test_cli_scm_chronos_backend(monkeypatch, tmp_path):
     from click.testing import CliRunner
 
     import normet
-    from normet.cli import _build_cli
+    from normet.app.cli import _build_cli
 
     runner = CliRunner()
     assert "chronos" in runner.invoke(_build_cli(), ["scm", "--help"]).output
@@ -402,7 +402,7 @@ def test_cli_impute_backtest_events_and_model_path(monkeypatch, tmp_path):
 
     import normet
     import normet.foundation.operators as ops_mod
-    from normet.cli import _build_cli
+    from normet.app.cli import _build_cli
     from normet.foundation import Chronos2Estimator, QuantileCalibration
 
     runner = CliRunner()

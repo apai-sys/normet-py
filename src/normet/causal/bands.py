@@ -8,11 +8,11 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from .. import style as S
-from ..style import styled
 from ..utils._config import DEFAULT_SEED, dispatch_batch_size, resolve_workers
 from ..utils._time import to_datetime_coerced
 from ..utils.logging import get_logger
+from ..viz import style as S
+from ..viz.style import styled
 from .run_scm import run_scm
 
 log = get_logger(__name__)

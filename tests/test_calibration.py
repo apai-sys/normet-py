@@ -25,7 +25,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from normet.exceptions import CalibrationWarning, ConfigError
+from normet.core.exceptions import CalibrationWarning, ConfigError
 from normet.foundation import (
     CalibratedEstimator,
     QuantileCalibration,

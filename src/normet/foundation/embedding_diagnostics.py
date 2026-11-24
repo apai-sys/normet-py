@@ -22,10 +22,10 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from .. import style as S
-from ..style import styled
 from ..utils._lazy import require
 from ..utils.logging import get_logger
+from ..viz import style as S
+from ..viz.style import styled
 
 log = get_logger(__name__)
 

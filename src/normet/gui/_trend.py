@@ -322,7 +322,7 @@ def trend_breaks_fig(series: pd.Series, res: Any) -> Any:
     """
     import matplotlib.pyplot as plt
 
-    from normet import style as S
+    from normet.viz import style as S
 
     fig, ax = plt.subplots(figsize=(8, 3))
     S.line(
@@ -370,7 +370,7 @@ def trend_fig(series: pd.Series, res: Any) -> Any:
     """
     import matplotlib.pyplot as plt
 
-    from normet import style as S
+    from normet.viz import style as S
 
     fig, ax = plt.subplots(figsize=(8, 3))
     S.line(

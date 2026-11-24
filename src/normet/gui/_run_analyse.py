@@ -13,7 +13,7 @@ from typing import Any
 import pandas as pd
 from PySide6.QtWidgets import QMainWindow, QMessageBox
 
-from normet import style as S
+from normet.viz import style as S
 
 from . import _chronos
 from ._constants import TIME_VARS
@@ -286,7 +286,7 @@ class AnalyseRunMixin(QMainWindow):
         )
         projected = result.iloc[seeded:]
 
-        from normet.plotting import profile_axes, usable_cycles
+        from normet.viz.plotting import profile_axes, usable_cycles
 
         # The cycles beneath the series: observed and normalised averaged by the hour of
         # the day, the day of the week and the month -- what the weather moved and what
