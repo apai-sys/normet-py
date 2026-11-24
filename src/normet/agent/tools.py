@@ -71,6 +71,7 @@ _OUTPUTS = {
     "shapley_interactions": "interactions.csv",
     "benchmark": "benchmark/benchmark.csv",
     "invert_multisite": "inversion/summary.json",
+    "met_features": "met_features.csv",
 }
 
 
@@ -595,6 +596,27 @@ class Tools:
             out="benchmark",
         )
         return self._start("benchmark", argv, label)
+
+    def make_met_features(
+        self,
+        input_path: str,
+        include_memory: bool = False,
+        group_col: str | None = None,
+        residence_tau_hours: float | None = None,
+        temp_unit: str | None = None,
+        label: str = "",
+    ) -> str:
+        """Add meteorological physics features (``normet met-features``)."""
+        argv = ["met-features", self.path(input_path)]
+        if include_memory:
+            argv.append("--include-memory")
+        argv += self._options(
+            group_col=group_col,
+            residence_tau_hours=residence_tau_hours,
+            temp_unit=temp_unit,
+            out=_OUTPUTS["met_features"],
+        )
+        return self._start("met_features", argv, label)
 
     def invert_multisite(
         self,

@@ -22,6 +22,7 @@ normet --help
 | `normet shapley-interactions INPUT` | Main effects plus pairwise Grabisch–Roubens Shapley interactions (`nm.shapley_interactions`) |
 | `normet benchmark` | Generate a synthetic ground-truth benchmark family and optionally score a result against it (`nm.make_synthetic_benchmark` / `nm.evaluate_benchmark`) |
 | `normet invert-footprints` | Joint multi-receptor source-footprint inversion from per-site footprint matrices (`nm.invert_multisite_footprints`) |
+| `normet met-features INPUT` | Add meteorological physics features — wind components, ventilation, VPD — and, with `--include-memory`, causal ODE residence integrals per `--group-col` unit (`nm.add_met_physics_features`) |
 | `normet backtest INPUT` | Rolling multi-horizon probabilistic verification (`nm.chronos_backtest`; needs `normet[foundation]`) |
 | `normet impute INPUT` | Covariate-conditioned gap imputation with Chronos-2 (`nm.chronos_impute`) |
 | `normet events INPUT` | Anomalous-episode detection on raw or de-weathered residuals (`nm.detect_events`) |

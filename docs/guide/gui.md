@@ -59,6 +59,9 @@ variable list.
 
 Includes drag-and-drop CSV loading, recent files, config save/load, run history,
 CSV/HTML export, a live log dock, and one-click synthetic example data.
+File → **Add met physics features…** derives wind components, ventilation and
+VPD from the loaded meteorology — optionally with causal ODE memory features,
+accumulated per site in a panel.
 
 The window and its figures follow the system's light/dark appearance (or View →
 Appearance), Ctrl+K (⌘K) finds any menu command or result tab by typing, and

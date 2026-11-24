@@ -1274,6 +1274,54 @@ def _build_cli() -> Any:
         _save_table(out, Path(cfg["out_path"]))
         click.echo(f"[events] detected {len(out):,} event(s) ({method}) → {cfg['out_path']}")
 
+    # ---- feature engineering ----
+    @cli.command("met-features")
+    @click.argument("input", type=click.Path(exists=True, path_type=Path))
+    @click.option(
+        "--include-memory",
+        is_flag=True,
+        help="Add causal first-order ODE residence integrals (needs a dated record).",
+    )
+    @click.option(
+        "--group-col",
+        default=None,
+        help="Panel unit column (e.g. site) so the memory state resets per unit.",
+    )
+    @click.option("--residence-tau-hours", type=float, default=12.0)
+    @click.option("--temp-unit", type=click.Choice(["auto", "C", "K"]), default="auto")
+    @click.option("--out", "out_path", type=click.Path(path_type=Path), required=True)
+    def met_features_cmd(
+        input: Path,
+        include_memory: bool,
+        group_col: str | None,
+        residence_tau_hours: float,
+        temp_unit: str,
+        out_path: Path,
+    ) -> None:
+        """Add meteorological physics features (ventilation, VPD, wind, ODE memory).
+
+        Whichever columns the table's meteorology supports are added without
+        touching the inputs; with ``--include-memory`` the causal residence
+        integrals are accumulated per ``--group-col`` unit when one is given.
+        """
+        from .. import add_met_physics_features
+
+        df = _load_table(input)
+        out = add_met_physics_features(
+            df,
+            include_memory=include_memory,
+            group_col=group_col,
+            residence_tau_hours=residence_tau_hours,
+            temp_unit=temp_unit,
+        )
+        added = [c for c in out.columns if c not in df.columns]
+        _save_table(out, out_path)
+        click.echo(
+            f"[met-features] added {len(added)} column(s)"
+            + (f": {', '.join(added)}" if added else "")
+            + f" → {out_path}"
+        )
+
     # ---- scm ----
     @cli.command("scm")
     @click.argument("input", type=click.Path(exists=True, path_type=Path))

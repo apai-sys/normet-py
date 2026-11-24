@@ -119,6 +119,11 @@ class ShellMixin(QMainWindow):
         act.setToolTip("Score the current normalised series against the loaded benchmark's truth.")
         act = fm.addAction("Get &Data (AQ networks + met)…", self.open_data_studio)
         act.setShortcut("Ctrl+D")
+        act = fm.addAction("Add met &physics features…", self.add_met_features)
+        act.setToolTip(
+            "Derive wind components, ventilation and VPD from the loaded\n"
+            "meteorology, optionally with causal ODE memory features."
+        )
         self.recent_menu = fm.addMenu("Open &Recent")
         self._rebuild_recent_menu()
         fm.addSeparator()

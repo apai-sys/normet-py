@@ -405,6 +405,42 @@ class InputsMixin(QMainWindow):
         QMessageBox.information(self, "Benchmark scores", "\n".join(lines))
         self.statusBar().showMessage(f"Benchmark {bench.family} scored against known truth.")
 
+    def add_met_features(self) -> None:
+        """Add derived physics columns (ventilation, VPD, wind, optionally memory)."""
+        from normet import add_met_physics_features
+
+        if self.df_raw is None:
+            QMessageBox.information(
+                self, "No data", "Load a table first; physics features are derived from it."
+            )
+            return
+        has_site = "site" in self.df_raw.columns
+        answer = QMessageBox.question(
+            self,
+            "Meteorological physics features",
+            "Add the base features (wind components, ventilation, VPD)?\n\n"
+            "Also add causal ODE memory features — stagnation memory, photochemical\n"
+            "dose, wet scavenging? They need a dated record"
+            + (" and are accumulated per site.\n" if has_site else ".\n"),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        memory = answer == QMessageBox.StandardButton.Yes
+        enriched = add_met_physics_features(
+            self.df_raw, include_memory=memory, group_col="site" if has_site else None
+        )
+        added = [c for c in enriched.columns if c not in self.df_raw.columns]
+        if not added:
+            QMessageBox.information(
+                self,
+                "Nothing derived",
+                "The table lacks the conventional meteorology columns "
+                "(ws/wd/blh/t2m/rh/d2m/ssrd/tp), so no feature could be computed.",
+            )
+            return
+        self._ingest(enriched, f"physics features (+{len(added)})")
+        self.statusBar().showMessage(f"Added physics features: {', '.join(added)}.")
+
     def load_csv(self, path: str, remember: bool = False) -> None:
         """Load the table at *path* (any file :func:`normet.io.read_time_series` reads)
         into the Data tab, its times on UTC from the time zone chosen, and populate the

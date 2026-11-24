@@ -21,11 +21,12 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   (`--block-hours`), and a YAML config now forwards every key that names a
   `SingleConfig` field instead of the previous fixed handful; `nm.do_all` /
   `nm.do_all_unc` forward the same settings. New `normet normalise-ox`,
-  `normalise-regime`, `icn-decompose`, `shapley-interactions`, `benchmark`, and
-  `invert-footprints` subcommands, mirrored by MCP tools
+  `normalise-regime`, `icn-decompose`, `shapley-interactions`, `benchmark`,
+  `invert-footprints`, and `met-features` subcommands, mirrored by MCP tools
   (`normet_start_normalise_ox`, `normet_start_normalise_regime`,
   `normet_start_icn_decompose`, `normet_start_shapley_interactions`,
-  `normet_make_benchmark`, `normet_invert_multisite`). `normet deweather`
+  `normet_make_benchmark`, `normet_invert_multisite`,
+  `normet_make_met_features`). `normet deweather`
   gains `--surprise-tau`, `--save-bank`, and `--bank`, and `normet scm` routes
   `--backend deweathered|transport` with `--covariates`, `--deweather-method`,
   and `--spillover-exposure`. The GUI gains a Normalise engine selector
@@ -33,8 +34,9 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   block-mode toggles, ICN surprise weighting and draw-bank Save/Load (the raw
   draws outlive the GPU run), an ICN decomposition engine with
   pairwise-interaction readout, synthetic-benchmark load/score menu actions,
-  the two staged SCM backends in SCM Studio, and multi-receptor joint inversion
-  in Transport Studio.
+  File → Add met physics features… (ventilation, VPD, wind, optional causal ODE
+  memory per panel unit), the two staged SCM backends in SCM Studio, and
+  multi-receptor joint inversion in Transport Studio.
 - **Chronos-2 core primitives and first-principles operators** (`normet.foundation`):
   - `past_only_covariates` on `Chronos2Estimator` (constructor, `predict`,
     `predict_quantiles*`, `counterfactual`, `finetune`, `finetune_multisite`)
