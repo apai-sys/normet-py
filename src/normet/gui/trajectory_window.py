@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import tempfile
 import threading
@@ -652,6 +653,15 @@ class TrajectoryWindow(QMainWindow):
         )
         self.inv_btn.clicked.connect(self._run_inversion)
         af.addRow(self.inv_btn)
+        self.multi_inv_btn = run_button(
+            "▶  Invert multiple receptor sites",
+            "Joint inversion over every receptor directory in the tdump list:\n"
+            "one shared source intensity per region, a separate background per\n"
+            "site. The tdump subdirectories (NN_<site>, as the HYSPLIT page\n"
+            "writes them) must match the main data's 'site' column.",
+        )
+        self.multi_inv_btn.clicked.connect(self._run_multisite_inversion)
+        af.addRow(self.multi_inv_btn)
 
         self._run_buttons = [
             self.build_btn,
@@ -661,6 +671,7 @@ class TrajectoryWindow(QMainWindow):
             self.receptor_btn,
             self.cluster_btn,
             self.inv_btn,
+            self.multi_inv_btn,
         ]
 
         # A page per step, as the main window's (._pages.StepPanel): as wide as its
@@ -853,6 +864,7 @@ class TrajectoryWindow(QMainWindow):
         self.receptor_btn.setEnabled(not busy and has_tdumps)
         self.cluster_btn.setEnabled(not busy and has_tdumps)
         self.inv_btn.setEnabled(not busy and has_tdumps)
+        self.multi_inv_btn.setEnabled(not busy and has_tdumps)
         has_features = self.features is not None
         self.save_btn.setEnabled(has_features)
         self.send_btn.setEnabled(has_features and self._main is not None)
@@ -1430,6 +1442,247 @@ class TrajectoryWindow(QMainWindow):
         )
         self.tabs.setCurrentWidget(self.tab_inversion)
         self.statusBar().showMessage("Footprint inversion done.")
+
+    # ------------------------------------------------- multisite inversion
+    def _tdump_site_groups(self) -> dict[str, list[str]]:
+        """Group the active tdump files by receptor site.
+
+        The HYSPLIT page writes one ``NN_<site>/`` directory per receptor, so
+        the directory name is the site label; a manually organised batch is
+        expected to follow the same layout. Files sitting directly in one
+        directory all share the "Site name" box, which names a single batch.
+        """
+        groups: dict[str, list[str]] = {}
+        fallback = self.build_site_edit.text().strip()
+        paths = self._active_tdumps()
+        single_dir = len({str(Path(p).parent) for p in paths}) == 1
+        for p in paths:
+            parent = Path(p).parent
+            m = re.match(r"^\d+_(.*)$", parent.name)
+            # A flat batch (one directory, no NN_ prefix) is named by the
+            # "Site name" box; several such directories name themselves.
+            label = m.group(1) if m and m.group(1) else (fallback if single_dir else parent.name)
+            if not label or label == "site":
+                label = fallback or "site"
+            groups.setdefault(label, []).append(p)
+        return groups
+
+    @staticmethod
+    def _sanitise_site(name: str) -> str:
+        """The directory-safe form the HYSPLIT page gives a site name."""
+        return "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in name)
+
+    def _match_site_groups(
+        self, groups: dict[str, list[str]], data_sites: list[str]
+    ) -> tuple[dict[str, list[str]], list[str]]:
+        """``(site -> files, unmatched directory labels)`` against the data's sites."""
+        by_safe = {self._sanitise_site(s): s for s in data_sites}
+        matched: dict[str, list[str]] = {}
+        unmatched: list[str] = []
+        for label, files in groups.items():
+            site = label if label in data_sites else by_safe.get(label)
+            if site is None:
+                unmatched.append(label)
+            else:
+                matched[site] = files
+        return matched, unmatched
+
+    def _multisite_target_frame(self) -> tuple[pd.DataFrame, str, str] | None:
+        """Per-site values from the main window: ``(frame, value_col, label)``."""
+        main = self._main
+        if main is None:
+            return None
+        mode = self.receptor_source_combo.currentText()
+        norm_df = getattr(main, "results", {}).get("normalise")
+        use_norm = mode.startswith("de-weathered") or (
+            mode.startswith("auto")
+            and isinstance(norm_df, pd.DataFrame)
+            and "normalised" in norm_df.columns
+        )
+        if use_norm and isinstance(norm_df, pd.DataFrame) and "normalised" in norm_df.columns:
+            frame, col, label = norm_df.copy(), "normalised", "de-weathered normalised"
+        elif getattr(main, "df_raw", None) is not None and hasattr(main, "target_combo"):
+            df_raw = main.df_raw
+            tgt = main.target_combo.currentText()
+            if tgt not in df_raw.columns or "date" not in df_raw.columns:
+                return None
+            frame, col, label = df_raw.copy(), tgt, tgt
+        else:
+            return None
+        # A normalise result is date-indexed; the raw table keeps a 'date' column.
+        if "date" not in frame.columns and isinstance(frame.index, pd.DatetimeIndex):
+            frame = frame.copy()
+            frame["date"] = frame.index
+        if "site" not in frame.columns or "date" not in frame.columns:
+            return None
+        dates = pd.to_datetime(frame["date"], errors="coerce")
+        frame = frame[dates.notna()].copy()
+        if frame.empty:
+            return None
+        if hasattr(main, "_zone"):
+            from normet.io.tables import clock_to_utc
+
+            frame["date"] = clock_to_utc(frame["date"], main._zone()).to_numpy()
+        out = pd.DataFrame(
+            {
+                "date": pd.to_datetime(frame["date"]).to_numpy(),
+                "site": frame["site"].astype(str).to_numpy(),
+                col: pd.to_numeric(frame[col], errors="coerce").to_numpy(),
+            }
+        )
+        out = out[out[col].notna()]
+        return (out, col, label) if not out.empty else None
+
+    def _run_multisite_inversion(self) -> None:
+        tdumps = self._active_tdumps()
+        if not tdumps:
+            self.notices.notify("no-tdump", "Add tdump files or run HYSPLIT first.")
+            return
+        tgt = self._multisite_target_frame()
+        if tgt is None:
+            self.notices.notify(
+                "no-multisite-series",
+                "Multi-site inversion needs a main table with 'date', 'site' and a "
+                "target column (and, for de-weathered input, a 'normalise' result "
+                "that keeps 'site').",
+            )
+            return
+        frame, value_col, label = tgt
+        groups = self._tdump_site_groups()
+        data_sites = sorted(str(s) for s in frame["site"].unique())
+        matched, unmatched = self._match_site_groups(groups, data_sites)
+        missing = [s for s in data_sites if s not in matched]
+        if len(matched) < 2:
+            self.notices.notify(
+                "multisite-needs-two",
+                "Multi-site inversion needs at least two receptor directories in the "
+                f"tdump list matched to data sites. tdump labels: {sorted(groups)}; "
+                f"data sites: {data_sites}.",
+                kind="warn",
+            )
+            return
+        ok, regions = self._regions_or_warn()
+        if not ok:
+            return
+        if not regions:
+            self.notices.notify(
+                "no-regions",
+                "Define at least one source region for footprint inversion.",
+                kind="warn",
+            )
+            return
+        if unmatched:
+            log.warning("Multisite inversion: unmatched tdump directories %s", unmatched)
+        if missing:
+            log.warning("Multisite inversion: data sites without tdump files %s", missing)
+
+        min_h = self.build_min_spin.value() if self.build_min_check.isChecked() else None
+        phys = self._physics_kwargs()
+        phys.pop("horizons_h", None)
+        region_cols = [str(k) for k in regions]
+        series_by_site = {
+            site: sub[["date", value_col]]
+            for site, sub in frame.groupby("site")
+            if str(site) in matched
+        }
+
+        def job():
+            from normet import (
+                build_footprint_matrix,
+                invert_multisite_footprints,
+                read_trajectory_endpoints,
+            )
+
+            fps: dict[str, pd.DataFrame] = {}
+            for site, files in matched.items():
+                ep = read_trajectory_endpoints(files, min_hours=min_h, site=site)
+                fps[site] = build_footprint_matrix(ep, regions, **phys)
+            return invert_multisite_footprints(
+                fps,
+                series_by_site,
+                value_col=value_col,
+                region_cols=region_cols,
+            )
+
+        self._pending_multisite_label = f"{label}, {len(matched)} sites" + (
+            f" (+{len(missing)} unmatched)" if missing else ""
+        )
+        self.runner.submit(
+            f"invert multiple receptor sites ({len(matched)} sites)",
+            job,
+            self._multisite_inversion_done,
+            self._show_error,
+        )
+
+    def _multisite_inversion_done(self, inv: Any) -> None:
+        import matplotlib.pyplot as plt
+
+        label = getattr(self, "_pending_multisite_label", "")
+        reg = inv.regions.sort_values("mean_contribution", ascending=True).reset_index(drop=True)
+        fig, (ax_l, ax_r) = plt.subplots(1, 2, figsize=(9.6, 3.9), layout="constrained")
+        ypos = list(range(len(reg)))
+        ax_l.barh(ypos, reg["mean_contribution"], color=S.PALETTE[0], alpha=0.85)
+        ax_l.set_yticks(ypos, [str(r) for r in reg["region"]])
+        ax_l.set_xlabel("Mean contribution")
+        ax_l.set_title("Shared regional sources")
+        S.grid(ax_l)
+
+        contrib = inv.contributions
+        for i, (site, sub) in enumerate(contrib.groupby("site")):
+            ax_r.scatter(
+                sub["observed"],
+                sub["predicted"],
+                s=9,
+                alpha=0.6,
+                color=S.PALETTE[i % len(S.PALETTE)],
+                label=str(site),
+            )
+        vals = pd.concat([contrib["observed"], contrib["predicted"]], ignore_index=True)
+        if len(vals):
+            lo, hi = float(vals.min()), float(vals.max())
+            pad = 0.05 * (hi - lo or 1.0)
+            lim = (lo - pad, hi + pad)
+            ax_r.plot(lim, lim, color="0.45", lw=0.8)
+            ax_r.set_xlim(lim)
+            ax_r.set_ylim(lim)
+        ax_r.set_xlabel("Observed")
+        ax_r.set_ylabel("Predicted")
+        ax_r.set_title("Per-site fit")
+        S.legend(ax_r, loc="upper left")
+        S.grid(ax_r)
+        fig.suptitle(f"Multi-site footprint inversion ({label})", fontsize=10)
+
+        rows = [
+            [
+                str(r["site"]),
+                f"{int(r['n_obs'])}",
+                f"{r['intercept']:.2f}",
+                f"{r['rmse']:.2f}",
+                f"{r['r2']:.3f}" if pd.notna(r["r2"]) else "—",
+            ]
+            for _, r in inv.site_metrics.sort_values("site").iterrows()
+        ]
+        self.tab_inversion.show_result(
+            fig,
+            verdict=(
+                "ok",
+                f"R²={inv.r2:.3f}, RMSE={inv.rmse:.2f}, n={inv.n_obs} "
+                f"across {len(inv.site_metrics)} sites (alpha={inv.alpha:.3g}).",
+            ),
+            lines=[
+                "Region contributions: "
+                + ", ".join(
+                    f"{r['region']} {r['mean_contribution']:.2f}"
+                    for _, r in inv.regions.sort_values(
+                        "mean_contribution", ascending=False
+                    ).iterrows()
+                )
+            ],
+            header=["Site", "n", "Background", "RMSE", "R²"],
+            rows=rows,
+        )
+        self.tabs.setCurrentWidget(self.tab_inversion)
+        self.statusBar().showMessage("Multi-site footprint inversion done.")
 
     def closeEvent(self, event) -> None:  # noqa: N802
         if self._hysplit_stop is not None:

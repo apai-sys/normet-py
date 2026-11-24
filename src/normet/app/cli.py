@@ -88,6 +88,25 @@ def _load_yaml(path: Path | None) -> dict[str, Any]:
         return yaml.safe_load(f) or {}
 
 
+def _parse_groups(spec: Any) -> dict[str, list[str]] | None:
+    """Parse ``name=col1,col2;name2=col3`` into an ordered mapping of groups."""
+    if not spec:
+        return None
+    groups: dict[str, list[str]] = {}
+    for part in str(spec).split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        if "=" not in part:
+            raise ValueError(f"group must be name=col1,col2, got {part!r}")
+        name, cols = part.split("=", 1)
+        members = [c.strip() for c in cols.split(",") if c.strip()]
+        if not name.strip() or not members:
+            raise ValueError(f"group must name a group and at least one column, got {part!r}")
+        groups[name.strip()] = members
+    return groups or None
+
+
 def _cfg_float(cfg: dict[str, Any], key: str, default: float) -> float:
     """Read a float option, falling back to ``default`` when absent or None.
 
@@ -207,6 +226,31 @@ def _build_cli() -> Any:
     @click.option("--train-fraction", "train_fraction", type=float, default=None)
     @click.option("--seed", type=int, default=None)
     @click.option(
+        "--normalise-method",
+        "normalise_method",
+        type=click.Choice(["standard", "dml"]),
+        default=None,
+        help="Deweathering engine: standard Monte-Carlo normalise, or the "
+        "orthogonal Double-ML estimator (blocked out-of-fold).",
+    )
+    @click.option(
+        "--control-variates",
+        "control_variates",
+        is_flag=True,
+        default=None,
+        help="Use Monte-Carlo control variates (variance reduction).",
+    )
+    @click.option(
+        "--block-mode",
+        "block_mode",
+        type=click.Choice(["independent", "markov"]),
+        default=None,
+        help="Block resampling: independent blocks or a Markov bridge.",
+    )
+    @click.option("--block-hours", "block_hours", type=int, default=None)
+    @click.option("--dml-cutoff-days", "dml_cutoff_days", type=float, default=None)
+    @click.option("--dml-n-harmonics", "dml_n_harmonics", type=int, default=None)
+    @click.option(
         "--out",
         "out_path",
         type=click.Path(path_type=Path),
@@ -227,22 +271,47 @@ def _build_cli() -> Any:
         help="YAML config that supplies any of the above options.",
     )
     def do_all_cmd(input: Path, **opts: Any) -> None:
+        from dataclasses import fields
+
         from .. import do_all, make_run, save_run
+        from ..pipeline.do_all import SingleConfig
 
         cfg = _merge_cli_over_yaml(_load_yaml(opts.pop("config_path", None)), opts)
         df = _load_table(input)
+
+        # Every SingleConfig field the config file names reaches do_all, not
+        # only the handful the CLI had flags for. The YAML route used to look
+        # generic while the wrapper silently dropped sampling, block_hours,
+        # paired, cross_fit and model_config on the floor.
+        explicit = {
+            "target",
+            "backend",
+            "covariates",
+            "variables_resample",
+            "split_method",
+            "train_fraction",
+            "n_samples",
+            "seed",
+            "verbose",
+        }
+        known = {f.name for f in fields(SingleConfig)}
+        forwarded = {
+            k: v for k, v in cfg.items() if k in known and k not in explicit and v is not None
+        }
 
         out, model, df_prep = do_all(
             df=df,
             target=cfg["target"],
             covariates=_split_csv(cfg.get("covariates")),
-            variables_resample=_split_csv(cfg.get("resample_vars")),
+            variables_resample=_split_csv(cfg.get("resample_vars"))
+            or _split_csv(cfg.get("variables_resample")),
             backend=cfg.get("backend") or "flaml",
             n_samples=int(cfg["n_samples"]) if cfg.get("n_samples") is not None else None,
             split_method=cfg.get("split_method") or "random",
             train_fraction=_cfg_float(cfg, "train_fraction", 0.75),
             seed=_cfg_int(cfg, "seed", 7_654_321),
             verbose=True,
+            **forwarded,
         )
         _save_table(out.reset_index(), Path(cfg["out_path"]))
         click.echo(f"[do-all] wrote {cfg['out_path']}")
@@ -345,6 +414,27 @@ def _build_cli() -> Any:
         default=False,
         help="Run --method icn in log1p space (additive pairing, non-negative).",
     )
+    @click.option(
+        "--surprise-tau",
+        "surprise_tau",
+        type=float,
+        default=None,
+        help="For --method icn: gate anchor draws by exp(-(err/tau)^2).",
+    )
+    @click.option(
+        "--save-bank",
+        "save_bank",
+        type=click.Path(path_type=Path),
+        default=None,
+        help="For --method icn: persist the raw ICN draw bank for offline re-aggregation.",
+    )
+    @click.option(
+        "--bank",
+        "bank_path",
+        type=click.Path(exists=True, path_type=Path),
+        default=None,
+        help="Re-aggregate a saved ICN draw bank instead of running the model.",
+    )
     @click.option("--seed", type=int, default=None)
     @click.option("--out", "out_path", type=click.Path(path_type=Path), required=True)
     @click.option("--config", "config_path", type=click.Path(exists=True, path_type=Path))
@@ -372,6 +462,23 @@ def _build_cli() -> Any:
             raise click.BadParameter(f"estimate must be 'level' or 'paired', got {estimate!r}")
         if log_transform and method != "icn":
             raise click.BadParameter("--log-transform requires --method icn")
+        surprise_tau = cfg.get("surprise_tau")
+        save_bank = cfg.get("save_bank")
+        bank_path = cfg.get("bank_path")
+        if (surprise_tau, save_bank, bank_path) != (None, None, None) and method != "icn":
+            raise click.BadParameter("--surprise-tau/--save-bank/--bank require --method icn")
+        if save_bank and bank_path:
+            raise click.BadParameter("--save-bank and --bank are mutually exclusive")
+        if bank_path:
+            from ..foundation import ICNDrawBank
+
+            bank = ICNDrawBank.load(bank_path)
+            out = bank.aggregate(schema="normet").to_normet_frame(estimate=estimate)
+            _save_table(out.reset_index(), Path(cfg["out_path"]))
+            click.echo(
+                f"[deweather] re-aggregated bank {bank_path} ({estimate}); wrote {cfg['out_path']}"
+            )
+            return
         target = cfg["target"]
         met = _split_csv(cfg.get("met_vars"))
         if not met:
@@ -436,14 +543,32 @@ def _build_cli() -> Any:
                 design_overrides["stride"] = max(1, bh // 2)
             if log_transform:
                 design_overrides["log_transform"] = True
+            if surprise_tau is not None:
+                design_overrides["surprise_tau"] = float(surprise_tau)
             design = ICNDesign.v1(**design_overrides)
-            icn_res = est.normalise_in_context(
-                df_icn,
-                target,
-                design=design,
-                met_features=met,
-                quantiles=quantiles,
-            )
+            if save_bank:
+                from ..foundation import build_icn_draw_bank
+
+                bank = build_icn_draw_bank(
+                    est,
+                    df_icn,
+                    target,
+                    design=design,
+                    met_features=met,
+                    schema="normet",
+                    quantiles=quantiles,
+                )
+                bank.save(Path(save_bank))
+                click.echo(f"[deweather] saved ICN draw bank → {save_bank}")
+                icn_res = bank.aggregate(schema="normet")
+            else:
+                icn_res = est.normalise_in_context(
+                    df_icn,
+                    target,
+                    design=design,
+                    met_features=met,
+                    quantiles=quantiles,
+                )
             out = icn_res.to_normet_frame(estimate=estimate)
             uncovered = int(icn_res.diagnostics["uncovered_hours"])
             click.echo(
@@ -478,6 +603,402 @@ def _build_cli() -> Any:
                 click.echo(f"[deweather] mean(normalised - observed) over the rest = {delta:+.3f}")
         _save_table(out.reset_index(), Path(cfg["out_path"]))
         click.echo(f"[deweather] wrote {cfg['out_path']}")
+
+    # ---- icn-decompose (in-context group Shapley) ----
+    @cli.command("icn-decompose")
+    @click.argument("input", type=click.Path(exists=True, path_type=Path))
+    @click.option("--target", required=False, help="Target column name.")
+    @click.option("--met-vars", "met_vars", help="Comma-separated meteorological columns.")
+    @click.option("--date-col", "date_col", default=None)
+    @click.option("--device", default=None)
+    @click.option("--context-length", "context_length", type=int, default=None)
+    @click.option("--prediction-length", "prediction_length", type=int, default=None)
+    @click.option(
+        "--model-path",
+        "model_path",
+        type=click.Path(exists=True, path_type=Path),
+        default=None,
+    )
+    @click.option("--estimate", type=click.Choice(["level", "paired"]), default=None)
+    @click.option(
+        "--groups",
+        default=None,
+        help="Groups as name=col1,col2;name2=col3,... (default: one player per met variable).",
+    )
+    @click.option(
+        "--attribution",
+        type=click.Choice(["sequential", "shapley"]),
+        default=None,
+    )
+    @click.option("--n-permutations", "n_permutations", type=int, default=None)
+    @click.option("--interactions", is_flag=True, default=None)
+    @click.option("--include-diagnostics", "include_diagnostics", is_flag=True, default=None)
+    @click.option("--seed", type=int, default=None)
+    @click.option(
+        "--interactions-out", "interactions_out", type=click.Path(path_type=Path), default=None
+    )
+    @click.option("--out", "out_path", type=click.Path(path_type=Path), required=True)
+    @click.option("--config", "config_path", type=click.Path(exists=True, path_type=Path))
+    def icn_decompose_cmd(input: Path, **opts: Any) -> None:
+        """In-context meteorological attribution (``icn_decompose``)."""
+        from ..foundation import ICNDesign, add_calendar_covariates, icn_decompose
+
+        cfg = _merge_cli_over_yaml(_load_yaml(opts.pop("config_path", None)), opts)
+        df = _load_table(input)
+        target = cfg["target"]
+        met = _split_csv(cfg.get("met_vars"))
+        if not met:
+            raise click.UsageError("--met-vars is required.")
+        date_col = cfg.get("date_col") or "date"
+        df = _prepare_chronos_frame(df, date_col, [target, *met], "icn-decompose")
+        est = _load_chronos_estimator(cfg, met, "icn-decompose")
+        design_kw: dict[str, Any] = {
+            "context_length": est.context_length,
+            "seed": _cfg_int(cfg, "seed", 0),
+        }
+        if cfg.get("prediction_length") is not None:
+            bh = int(cfg["prediction_length"])
+            design_kw["block_h"] = bh
+            design_kw["stride"] = max(1, bh // 2)
+        design = ICNDesign.v1(**design_kw)
+        res = icn_decompose(
+            est,
+            add_calendar_covariates(df),
+            target,
+            design=design,
+            met_features=met,
+            groups=_parse_groups(cfg.get("groups")),
+            attribution=cfg.get("attribution"),
+            n_permutations=cfg.get("n_permutations"),
+            estimate=cfg.get("estimate") or "level",
+            include_diagnostics=bool(cfg.get("include_diagnostics")),
+            return_interactions=bool(cfg.get("interactions")),
+        )
+        out_path = Path(cfg["out_path"])
+        if cfg.get("interactions"):
+            _save_table(res.decomposition.reset_index(), out_path)
+            summary_path = (
+                Path(cfg["interactions_out"])
+                if cfg.get("interactions_out")
+                else out_path.with_name(f"{out_path.stem}_interactions.csv")
+            )
+            _save_table(res.summary, summary_path)
+            click.echo(f"[icn-decompose] wrote {out_path} and interactions {summary_path}")
+        else:
+            _save_table(res.reset_index(), out_path)
+            click.echo(f"[icn-decompose] wrote {out_path}")
+
+    # ---- shapley-interactions (second-order Shapley indices) ----
+    @cli.command("shapley-interactions")
+    @click.argument("input", type=click.Path(exists=True, path_type=Path))
+    @click.option("--target", required=False)
+    @click.option("--covariates", help="Comma-separated meteorological/calendar covariates.")
+    @click.option("--backend", default=None)
+    @click.option("--n-samples", "n_samples", type=int, default=None)
+    @click.option("--groups", default=None, help="Groups as name=col1,col2;name2=col3,...")
+    @click.option("--seed", type=int, default=None)
+    @click.option(
+        "--decomposition-out", "decomposition_out", type=click.Path(path_type=Path), default=None
+    )
+    @click.option("--out", "out_path", type=click.Path(path_type=Path), required=True)
+    @click.option("--config", "config_path", type=click.Path(exists=True, path_type=Path))
+    def shapley_interactions_cmd(input: Path, **opts: Any) -> None:
+        """Main effects plus pairwise Grabisch-Roubens Shapley interactions."""
+        from .. import shapley_interactions
+
+        cfg = _merge_cli_over_yaml(_load_yaml(opts.pop("config_path", None)), opts)
+        df = _load_table(input)
+        res = shapley_interactions(
+            df,
+            target=cfg["target"],
+            covariates=_split_csv(cfg.get("covariates")),
+            backend=cfg.get("backend") or "flaml",
+            n_samples=int(cfg["n_samples"]) if cfg.get("n_samples") is not None else None,
+            groups=_parse_groups(cfg.get("groups")),
+            seed=_cfg_int(cfg, "seed", 7_654_321),
+            verbose=True,
+        )
+        _save_table(res.summary, Path(cfg["out_path"]))
+        if cfg.get("decomposition_out"):
+            _save_table(res.decomposition.reset_index(), Path(cfg["decomposition_out"]))
+        click.echo(f"[shapley-interactions] wrote {cfg['out_path']}")
+
+    # ---- benchmark (synthetic ground truth) ----
+    @cli.command("benchmark")
+    @click.option(
+        "--family",
+        type=click.Choice(
+            ["F1_additive", "F2_multiplicative", "F3_titration", "F4_nonstationary", "F5_transport"]
+        ),
+        default=None,
+    )
+    @click.option("--n-days", "n_days", type=int, default=None)
+    @click.option("--freq", default=None)
+    @click.option("--start-date", "start_date", default=None)
+    @click.option("--event-start-day", "event_start_day", type=int, default=None)
+    @click.option("--event-duration-days", "event_duration_days", type=int, default=None)
+    @click.option("--event-reduction-pct", "event_reduction_pct", type=float, default=None)
+    @click.option("--trend-pct-per-year", "trend_pct_per_year", type=float, default=None)
+    @click.option("--noise-sd", "noise_sd", type=float, default=None)
+    @click.option("--seed", type=int, default=None)
+    @click.option(
+        "--evaluate",
+        "evaluate_path",
+        type=click.Path(exists=True, path_type=Path),
+        default=None,
+        help="Score this normalised table against the generated truth.",
+    )
+    @click.option("--col", default=None, help="Normalised column to score (default normalised).")
+    @click.option(
+        "--out",
+        "out_dir",
+        type=click.Path(path_type=Path),
+        required=True,
+        help="Output directory (benchmark.csv, truth.csv, metadata.json, scores.json).",
+    )
+    @click.option("--config", "config_path", type=click.Path(exists=True, path_type=Path))
+    def benchmark_cmd(**opts: Any) -> None:
+        """Generate a synthetic benchmark and optionally score a normalised series."""
+        from ..eval.benchmarks import evaluate_benchmark, make_synthetic_benchmark
+
+        cfg = _merge_cli_over_yaml(_load_yaml(opts.pop("config_path", None)), opts)
+        bench = make_synthetic_benchmark(
+            cfg.get("family") or "F1_additive",
+            n_days=_cfg_int(cfg, "n_days", 180),
+            freq=cfg.get("freq") or "h",
+            start_date=cfg.get("start_date") or "2023-01-01",
+            event_start_day=cfg.get("event_start_day"),
+            event_duration_days=cfg.get("event_duration_days"),
+            event_reduction_pct=_cfg_float(cfg, "event_reduction_pct", -30.0),
+            trend_pct_per_year=_cfg_float(cfg, "trend_pct_per_year", -5.0),
+            noise_sd=_cfg_float(cfg, "noise_sd", 1.5),
+            seed=_cfg_int(cfg, "seed", 42),
+        )
+        out_dir = Path(cfg["out_dir"])
+        out_dir.mkdir(parents=True, exist_ok=True)
+        bench_df = bench.df.reset_index()
+        if "date" not in bench_df.columns:
+            bench_df = bench_df.rename(columns={bench_df.columns[0]: "date"})
+        _save_table(bench_df, out_dir / "benchmark.csv")
+        truth_df = bench.truth.reset_index()
+        if "date" not in truth_df.columns:
+            truth_df = truth_df.rename(columns={truth_df.columns[0]: "date"})
+        _save_table(truth_df, out_dir / "truth.csv")
+        (out_dir / "metadata.json").write_text(json.dumps(bench.metadata, indent=2, default=str))
+        click.echo(f"[benchmark] wrote {out_dir / 'benchmark.csv'} (family {bench.family})")
+        if cfg.get("evaluate_path"):
+            result = _load_table(Path(cfg["evaluate_path"]))
+            scores = evaluate_benchmark(bench, result, col=cfg.get("col") or "normalised")
+            (out_dir / "scores.json").write_text(json.dumps(scores, indent=2, default=str))
+            click.echo(f"[benchmark] scores → {out_dir / 'scores.json'}")
+
+    # ---- invert-footprints (multi-receptor inversion) ----
+    @cli.command("invert-footprints")
+    @click.option(
+        "--footprint",
+        "footprints",
+        multiple=True,
+        help="SITE=PATH footprint table (repeat once per receptor).",
+    )
+    @click.option(
+        "--series",
+        "series_path",
+        type=click.Path(exists=True, path_type=Path),
+        required=True,
+        help="Long table (date, unit, value) or wide table (date index, one column per site).",
+    )
+    @click.option("--date-col", "date_col", default=None)
+    @click.option("--unit-col", "unit_col", default=None)
+    @click.option("--value-col", "value_col", default=None)
+    @click.option("--region-cols", "region_cols", default=None)
+    @click.option("--spatial-alpha", "spatial_alpha", type=float, default=None)
+    @click.option("--spatial-scale-km", "spatial_scale_km", type=float, default=None)
+    @click.option("--n-bootstrap", "n_bootstrap", type=int, default=None)
+    @click.option("--seed", type=int, default=None)
+    @click.option("--out", "out_dir", type=click.Path(path_type=Path), required=True)
+    def invert_footprints_cmd(**opts: Any) -> None:
+        """Joint multi-receptor footprint inversion (``invert_multisite_footprints``)."""
+        from .. import invert_multisite_footprints
+
+        cfg = _merge_cli_over_yaml({}, opts)
+        if not cfg.get("footprints"):
+            raise click.UsageError("give at least one --footprint SITE=PATH")
+        footprints: dict[str, pd.DataFrame] = {}
+        for spec in cfg["footprints"]:
+            if "=" not in spec:
+                raise click.BadParameter(f"--footprint must be SITE=PATH, got {spec!r}")
+            site, path = spec.split("=", 1)
+            footprints[site.strip()] = _load_table(Path(path.strip()))
+        series = _load_table(Path(cfg["series_path"]))
+        date_col = cfg.get("date_col") or "date"
+        unit_col = cfg.get("unit_col")
+        series_by_site: dict[str, pd.Series | pd.DataFrame] = {}
+        if unit_col and unit_col in series.columns:
+            for site, group in series.groupby(unit_col):
+                series_by_site[str(site)] = group
+        else:
+            wide = series.set_index(date_col) if date_col in series.columns else series
+            for site in footprints:
+                if site in wide.columns:
+                    series_by_site[site] = wide[site]
+        if not series_by_site:
+            raise click.UsageError(
+                "no site matched the series table: pass --unit-col for a long table, "
+                "or name the wide columns as the --footprint site keys"
+            )
+        res = invert_multisite_footprints(
+            footprints,
+            series_by_site,
+            value_col=cfg.get("value_col"),
+            date_col=date_col,
+            region_cols=_split_csv(cfg.get("region_cols")),
+            spatial_alpha=_cfg_float(cfg, "spatial_alpha", 0.0),
+            spatial_scale_km=_cfg_float(cfg, "spatial_scale_km", 100.0),
+            n_bootstrap=_cfg_int(cfg, "n_bootstrap", 200),
+            seed=_cfg_int(cfg, "seed", 7_654_321),
+        )
+        out_dir = Path(cfg["out_dir"])
+        out_dir.mkdir(parents=True, exist_ok=True)
+        _save_table(res.regions, out_dir / "regions.csv")
+        _save_table(res.site_metrics, out_dir / "site_metrics.csv")
+        _save_table(res.contributions, out_dir / "contributions.csv")
+        summary = {
+            "alpha": res.alpha,
+            "spatial_alpha": res.spatial_alpha,
+            "r2": res.r2,
+            "rmse": res.rmse,
+            "n_obs": res.n_obs,
+            "intercepts": res.intercepts,
+        }
+        (out_dir / "summary.json").write_text(json.dumps(summary, indent=2, default=str))
+        click.echo(f"[invert-footprints] wrote {out_dir}")
+
+    # ---- normalise-ox (conserved Ox-NOx deweathering) ----
+    @cli.command("normalise-ox")
+    @click.argument("input", type=click.Path(exists=True, path_type=Path))
+    @click.option("--o3-col", "o3_col", default="O3", help="Ozone column.")
+    @click.option("--no2-col", "no2_col", default="NO2", help="Nitrogen-dioxide column.")
+    @click.option(
+        "--no-col",
+        "no_col",
+        default="NO",
+        help="Nitric-oxide column; pass an empty string when the table has none.",
+    )
+    @click.option("--covariates", help="Comma-separated meteorological/calendar covariates.")
+    @click.option("--resample-vars", "resample_vars", help="Comma-separated variables to resample.")
+    @click.option("--unit", type=click.Choice(["ug_m3", "ppb"]), default=None)
+    @click.option(
+        "--method",
+        type=click.Choice(["dml", "crossfit", "standard"]),
+        default=None,
+        help="Deweathering engine (default dml).",
+    )
+    @click.option("--backend", default=None, help="Regression backend (default lightgbm).")
+    @click.option("--cutoff-days", "cutoff_days", type=float, default=None)
+    @click.option("--n-splits", "n_splits", type=int, default=None)
+    @click.option("--n-samples", "n_samples", type=int, default=None)
+    @click.option("--log-transform", "log_transform", is_flag=True, default=None)
+    @click.option(
+        "--unpaired", is_flag=True, default=None, help="Use the level series instead of paired."
+    )
+    @click.option("--seed", type=int, default=None)
+    @click.option("--ox-out", "ox_out", type=click.Path(path_type=Path), default=None)
+    @click.option("--nox-out", "nox_out", type=click.Path(path_type=Path), default=None)
+    @click.option("--out", "out_path", type=click.Path(path_type=Path), required=True)
+    @click.option("--config", "config_path", type=click.Path(exists=True, path_type=Path))
+    def normalise_ox_cmd(input: Path, **opts: Any) -> None:
+        """Conserved Ox-NOx photochemical deweathering (``normalise_ox_invariant``)."""
+        from .. import normalise_ox_invariant
+
+        cfg = _merge_cli_over_yaml(_load_yaml(opts.pop("config_path", None)), opts)
+        df = _load_table(input)
+        res = normalise_ox_invariant(
+            df,
+            o3_col=cfg.get("o3_col") or "O3",
+            no2_col=cfg.get("no2_col") or "NO2",
+            no_col=(cfg.get("no_col") or None),
+            covariates=_split_csv(cfg.get("covariates")) or [],
+            variables_resample=_split_csv(cfg.get("resample_vars")),
+            unit=cfg.get("unit") or "ug_m3",
+            method=cfg.get("method") or "dml",
+            backend=cfg.get("backend") or "lightgbm",
+            cutoff_days=_cfg_float(cfg, "cutoff_days", 30.0),
+            n_splits=_cfg_int(cfg, "n_splits", 5),
+            n_samples=_cfg_int(cfg, "n_samples", 300),
+            log_transform=bool(cfg.get("log_transform")),
+            use_paired=not bool(cfg.get("unpaired")),
+            seed=_cfg_int(cfg, "seed", 7_654_321),
+            verbose=True,
+        )
+        _save_table(res.species.reset_index(), Path(cfg["out_path"]))
+        if cfg.get("ox_out"):
+            _save_table(res.ox_result.reset_index(), Path(cfg["ox_out"]))
+        if cfg.get("nox_out"):
+            _save_table(res.nox_result.reset_index(), Path(cfg["nox_out"]))
+        click.echo(
+            f"[normalise-ox] wrote {cfg['out_path']} "
+            f"(max conservation error {res.conservation_max_err:.3g} mol m^-3)"
+        )
+
+    # ---- normalise-regime (precursor-conditioned deweathering) ----
+    @cli.command("normalise-regime")
+    @click.argument("input", type=click.Path(exists=True, path_type=Path))
+    @click.option("--target", required=False, help="Secondary pollutant column.")
+    @click.option("--precursors", help="Comma-separated primary tracer columns.")
+    @click.option("--covariates", help="Comma-separated meteorological/calendar covariates.")
+    @click.option("--resample-vars", "resample_vars", help="Comma-separated variables to resample.")
+    @click.option(
+        "--method",
+        type=click.Choice(["dml", "crossfit", "standard"]),
+        default=None,
+        help="Deweathering engine (default dml).",
+    )
+    @click.option("--backend", default=None, help="Regression backend (default lightgbm).")
+    @click.option("--cutoff-days", "cutoff_days", type=float, default=None)
+    @click.option("--n-splits", "n_splits", type=int, default=None)
+    @click.option("--n-samples", "n_samples", type=int, default=None)
+    @click.option("--log-transform", "log_transform", is_flag=True, default=None)
+    @click.option("--unpaired", is_flag=True, default=None)
+    @click.option("--seed", type=int, default=None)
+    @click.option(
+        "--precursors-out",
+        "precursors_out",
+        type=click.Path(path_type=Path),
+        default=None,
+    )
+    @click.option("--out", "out_path", type=click.Path(path_type=Path), required=True)
+    @click.option("--config", "config_path", type=click.Path(exists=True, path_type=Path))
+    def normalise_regime_cmd(input: Path, **opts: Any) -> None:
+        """Deweather a secondary pollutant conditioned on deweathered precursors."""
+        from .. import normalise_regime_conditioned
+
+        cfg = _merge_cli_over_yaml(_load_yaml(opts.pop("config_path", None)), opts)
+        df = _load_table(input)
+        precursors = _split_csv(cfg.get("precursors"))
+        if not precursors:
+            raise click.UsageError(
+                "--precursors is required (the primary tracers defining regime)."
+            )
+        res = normalise_regime_conditioned(
+            df,
+            cfg["target"],
+            precursors,
+            covariates=_split_csv(cfg.get("covariates")) or [],
+            variables_resample=_split_csv(cfg.get("resample_vars")),
+            method=cfg.get("method") or "dml",
+            backend=cfg.get("backend") or "lightgbm",
+            cutoff_days=_cfg_float(cfg, "cutoff_days", 30.0),
+            n_splits=_cfg_int(cfg, "n_splits", 5),
+            n_samples=_cfg_int(cfg, "n_samples", 300),
+            log_transform=bool(cfg.get("log_transform")),
+            use_paired=not bool(cfg.get("unpaired")),
+            seed=_cfg_int(cfg, "seed", 7_654_321),
+            verbose=True,
+        )
+        _save_table(res.normalised.reset_index(), Path(cfg["out_path"]))
+        if cfg.get("precursors_out"):
+            _save_table(res.precursors.reset_index(), Path(cfg["precursors_out"]))
+        click.echo(f"[normalise-regime] wrote {cfg['out_path']}")
 
     # ---- impute (Chronos-2 gap filling) ----
     @cli.command("impute")
@@ -765,8 +1286,45 @@ def _build_cli() -> Any:
     @click.option(
         "--backend",
         "scm_backend",
-        type=click.Choice(["scm", "mlscm", "abadie", "did", "mcnnm", "robust", "chronos"]),
+        type=click.Choice(
+            [
+                "scm",
+                "mlscm",
+                "abadie",
+                "did",
+                "mcnnm",
+                "robust",
+                "ascm",
+                "sdid",
+                "deweathered",
+                "transport",
+                "chronos",
+            ]
+        ),
         default=None,
+    )
+    @click.option(
+        "--covariates",
+        help="Comma-separated covariates (deweathered/transport backends).",
+    )
+    @click.option(
+        "--resample-vars",
+        "resample_vars",
+        help="Comma-separated meteorological variables to marginalise over "
+        "(deweathered backend; defaults to covariates).",
+    )
+    @click.option(
+        "--deweather-method",
+        "deweather_method",
+        type=click.Choice(["dml", "crossfit", "standard"]),
+        default=None,
+        help="Stage-1 deweathering engine for --backend deweathered.",
+    )
+    @click.option(
+        "--spillover-exposure",
+        "spillover_exposure",
+        default=None,
+        help="Column carrying the donor transport exposure F_j(t) for --backend transport.",
     )
     @click.option(
         "--model-path",
@@ -784,6 +1342,17 @@ def _build_cli() -> Any:
         df = _load_table(input)
         scm_backend = cfg.get("scm_backend") or "scm"
         scm_kwargs: dict[str, Any] = {}
+        if scm_backend == "deweathered":
+            scm_kwargs["covariates"] = _split_csv(cfg.get("covariates"))
+            scm_kwargs["variables_resample"] = _split_csv(cfg.get("resample_vars"))
+            if cfg.get("deweather_method"):
+                scm_kwargs["deweather_method"] = cfg["deweather_method"]
+        elif scm_backend == "transport":
+            if not cfg.get("spillover_exposure"):
+                raise click.BadParameter(
+                    "--spillover-exposure is required with --backend transport"
+                )
+            scm_kwargs["spillover_exposure"] = cfg["spillover_exposure"]
         if cfg.get("model_path"):
             if scm_backend != "chronos":
                 raise click.BadParameter("--model-path is only supported with --backend chronos")

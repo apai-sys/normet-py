@@ -11,11 +11,20 @@ normet --help
 
 | Command | What it runs |
 |---|---|
-| `normet do-all INPUT` | Prepare → train → normalise (`nm.do_all`); `--backend chronos-2` for the zero-shot path |
+| `normet do-all INPUT` | Prepare → train → normalise (`nm.do_all`); `--backend chronos-2` for the zero-shot path, `--normalise-method dml` for Double-ML deweathering, `--control-variates` and `--block-mode markov` for variance-reduced resampling |
 | `normet decompose INPUT` | Emission or meteorology decomposition (`nm.decompose`) |
-| `normet deweather INPUT` | Zero-shot meteorological normalisation with Chronos-2 (needs `normet[foundation]`) |
-| `normet scm INPUT` | Synthetic control on a panel table (`nm.run_scm`) |
+| `normet deweather INPUT` | Zero-shot meteorological normalisation with Chronos-2 (needs `normet[foundation]`); `--method icn` adds the in-context path, with `--surprise-tau`, and `--save-bank` / `--bank` for offline draw reuse |
+| `normet scm INPUT` | Synthetic control on a panel table (`nm.run_scm`); `--backend deweathered` / `transport` for the staged and spillover-adjusted engines |
 | `normet cv INPUT` | Walk-forward cross-validation (`nm.cv_score`) |
+| `normet normalise-ox INPUT` | Conserved $\mathrm{O_x\text{–}NO_x}$ photochemical deweathering (`nm.normalise_ox_invariant`) |
+| `normet normalise-regime INPUT` | Precursor-regime-conditioned deweathering of a secondary pollutant (`nm.normalise_regime_conditioned`) |
+| `normet icn-decompose INPUT` | In-context group Shapley meteorological attribution with Chronos-2 (`nm.icn_decompose`; needs `normet[foundation]`) |
+| `normet shapley-interactions INPUT` | Main effects plus pairwise Grabisch–Roubens Shapley interactions (`nm.shapley_interactions`) |
+| `normet benchmark` | Generate a synthetic ground-truth benchmark family and optionally score a result against it (`nm.make_synthetic_benchmark` / `nm.evaluate_benchmark`) |
+| `normet invert-footprints` | Joint multi-receptor source-footprint inversion from per-site footprint matrices (`nm.invert_multisite_footprints`) |
+| `normet backtest INPUT` | Rolling multi-horizon probabilistic verification (`nm.chronos_backtest`; needs `normet[foundation]`) |
+| `normet impute INPUT` | Covariate-conditioned gap imputation with Chronos-2 (`nm.chronos_impute`) |
+| `normet events INPUT` | Anomalous-episode detection on raw or de-weathered residuals (`nm.detect_events`) |
 | `normet report RUN_PATH` | Render a saved run archive as an HTML or Markdown report |
 | `normet info` | Show the installed version and the available backends |
 

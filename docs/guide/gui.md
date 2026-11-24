@@ -41,7 +41,12 @@ in place of the parity plot, and can **fine-tune** the checkpoint to the site
 (LoRA or full); Step 3's meteorological decomposition runs on either backend,
 by variable or by named group, with sequential or Shapley attribution; Step 2 lets you
 choose exactly which variables are resampled in the Monte-Carlo ("Met only" by
-default); Step 4's Rolling plot shows the overall rolling mean (± spread across
+default). Step 2's **engine** selector chooses standard Monte-Carlo
+(optionally with variance-reduced control variates and seam-free Markov-bridge
+block resampling), orthogonal Double-ML deweathering, conserved
+$\mathrm{O_x\text{–}NO_x}$ deweathering, or precursor-regime conditioning; on
+chronos-2 the in-context path takes a surprise weight, and Step 3 can decompose
+in-context (`icn`) with a pairwise-interaction readout. Step 4's Rolling plot shows the overall rolling mean (± spread across
 overlapping windows), and an adjacent **Multi-scale decomposition** panel differences
 rolling-deweathered series at increasing window widths (14/90/365 d by
 default) against each other and against Step 2's full-record baseline —
@@ -121,7 +126,9 @@ can be saved as CSV or sent straight into Step 1.
 **Analysis → Synthetic Control, or the 🧪 toolbar button** — the
 counterfactual workflow on panel data: map date/unit/outcome columns, pick the
 treated unit, cutoff and donor pool, choose an estimator
-(`scm`, `mlscm`, `abadie`, `did`, `mcnnm`, `robust`, `bayesian`), then run
+(`scm`, `mlscm`, `abadie`, `did`, `mcnnm`, `robust`, `bayesian`, plus the
+staged `deweathered` — de-weather treated and donors first — and the
+spillover-adjusted `transport`), then run
 fit + diagnostics, placebo-in-space/time, jackknife/bootstrap uncertainty
 bands and the all-units batch — each with a p-value / fit-quality verdict.
 With the `foundation` extra, **Rank donors by similarity** embeds every unit's
@@ -141,4 +148,8 @@ dataset — each row takes the latest trajectory to have arrived, within one
 release interval, and each site its own — with the new `traj_*` columns
 auto-ticked as predictors in Step 1. An advanced panel can also drive
 `hyts_std` itself for a set of receptor times, with GDAS1 meteorology it
-downloads or met files already on disk, if HYSPLIT is installed locally.
+downloads or met files already on disk, if HYSPLIT is installed locally. Its
+Analysis page maps WCWT/WPSCF source contributions, clusters trajectories, and
+inverts source footprints — for one receptor, or jointly across every receptor
+directory in the tdump list (shared regional sources, a separate background
+per site).

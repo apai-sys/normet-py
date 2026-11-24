@@ -202,6 +202,13 @@ class AnalyseRunMixin(QMainWindow):
                 key="need-resample-vars",
             )
             return
+        engine = self.norm_engine.currentText()
+        if engine in ("ox_invariant", "regime_conditioned") and self._is_chronos():
+            self.notify(
+                "The chemistry engines build an AutoML model; choose flaml or lightgbm.",
+                key="chem-needs-automl",
+            )
+            return
         if self._is_chronos():
             met_vars = [v for v in resample_vars if v not in TIME_VARS]
             method = (
@@ -231,6 +238,7 @@ class AnalyseRunMixin(QMainWindow):
                     method="icn",
                     estimate=estimate,
                     log_transform=log_tf,
+                    surprise_tau=float(self.chronos_norm_surprise.value()),
                 )
             else:
                 self.runner.submit(
@@ -249,6 +257,115 @@ class AnalyseRunMixin(QMainWindow):
         from normet import normalise
 
         quantiles = (0.05, 0.25, 0.75, 0.95) if self.norm_quantiles.isChecked() else None
+        control_vars = self.norm_control_vars.isChecked()
+        block_mode = self.norm_block_mode.currentText()
+        block_hours = int(self.norm_block_hours.value()) or None
+        if block_mode == "markov" and block_hours is None:
+            self.notify(
+                "Markov block resampling needs a Block hours value above 0.",
+                key="markov-needs-block-hours",
+            )
+            return
+        covariates = self.trained_features + list(TIME_VARS)
+        met_covariates = [f for f in self.trained_features if f not in TIME_VARS]
+        backend = self.backend_combo.currentText()
+        if engine == "ox_invariant":
+            from normet import normalise_ox_invariant
+
+            o3_col = self.ox_o3_combo.currentText()
+            no2_col = self.ox_no2_combo.currentText()
+            no_col = self.ox_no_combo.currentText() or None
+            unit = self.ox_unit_combo.currentText()
+
+            def run_ox() -> pd.DataFrame:
+                res = normalise_ox_invariant(
+                    self.df_raw,
+                    o3_col=o3_col,
+                    no2_col=no2_col,
+                    no_col=no_col,
+                    covariates=met_covariates,
+                    variables_resample=resample_vars,
+                    unit=unit,
+                    method="dml",
+                    backend=backend,
+                    cutoff_days=float(self.norm_dml_cutoff.value()),
+                    n_splits=int(self.norm_dml_splits.value()),
+                    n_samples=self.norm_samples.value(),
+                    n_cores=self._n_cores(self.norm_cores),
+                    seed=self.seed_spin.value(),
+                    verbose=True,
+                )
+                species = res.species.copy()
+                species["observed"] = species[f"{o3_col}_observed"]
+                species["normalised"] = species[f"{o3_col}_normalised"]
+                return species
+
+            self.runner.submit("normalise (Ox-NOx)", run_ox, self._normalise_done, self._show_error)
+            return
+        if engine == "regime_conditioned":
+            from normet import normalise_regime_conditioned
+
+            precursors = _checked_items(self.regime_precursors)
+            if not precursors:
+                self.notify(
+                    "Tick at least one precursor under Normalise → Engine regime_conditioned.",
+                    key="regime-needs-precursors",
+                )
+                return
+            target = self.target_combo.currentText()
+
+            def run_regime() -> pd.DataFrame:
+                res = normalise_regime_conditioned(
+                    self.df_raw,
+                    target,
+                    precursors,
+                    covariates=met_covariates,
+                    variables_resample=resample_vars,
+                    method="dml",
+                    backend=backend,
+                    cutoff_days=float(self.norm_dml_cutoff.value()),
+                    n_splits=int(self.norm_dml_splits.value()),
+                    n_samples=self.norm_samples.value(),
+                    n_cores=self._n_cores(self.norm_cores),
+                    seed=self.seed_spin.value(),
+                    verbose=True,
+                )
+                return res.normalised
+
+            self.runner.submit(
+                "normalise (regime)", run_regime, self._normalise_done, self._show_error
+            )
+            return
+        if engine == "dml":
+            from normet import dml_normalise
+
+            def run_dml() -> pd.DataFrame:
+                res = dml_normalise(
+                    self.df_prep,
+                    "value",
+                    covariates=covariates,
+                    variables_resample=resample_vars,
+                    backend=backend,
+                    cutoff_days=float(self.norm_dml_cutoff.value()),
+                    n_splits=int(self.norm_dml_splits.value()),
+                    n_samples=self.norm_samples.value(),
+                    n_cores=self._n_cores(self.norm_cores),
+                    seed=self.seed_spin.value(),
+                    return_quantiles=quantiles,
+                    control_variates=control_vars,
+                    block_mode=block_mode,
+                    block_hours=block_hours,
+                    verbose=True,
+                )
+                return res.normalised
+
+            self.runner.submit(
+                "normalise (dml)",
+                run_dml,
+                self._normalise_done,
+                self._show_error,
+            )
+            return
         self.runner.submit(
             "normalise",
             normalise,
@@ -256,12 +373,15 @@ class AnalyseRunMixin(QMainWindow):
             self._show_error,
             self.df_prep,
             self.model,
-            covariates=self.trained_features + list(TIME_VARS),
+            covariates=covariates,
             variables_resample=resample_vars,
             n_samples=self.norm_samples.value(),
             n_cores=self._n_cores(self.norm_cores),
             seed=self.seed_spin.value(),
             return_quantiles=quantiles,
+            control_variates=control_vars,
+            block_mode=block_mode,
+            block_hours=block_hours,
             verbose=True,
         )
 
@@ -376,10 +496,11 @@ class AnalyseRunMixin(QMainWindow):
             return
         from normet import decompose
 
+        self._interaction_summary = None
         method = self.decom_method.currentText()
         options: dict[str, object] = {}
-        if method == "meteorology":
-            met = [f for f in self.trained_features if f not in TIME_VARS]
+        met = [f for f in self.trained_features if f not in TIME_VARS]
+        if method == "meteorology" or self.decom_engine.currentText() == "icn":
             try:
                 groups = self.decom_groups.groups(met)
             except ValueError as exc:
@@ -389,11 +510,66 @@ class AnalyseRunMixin(QMainWindow):
                 options["groups"] = groups
             if self.decom_attribution.currentText() != "auto":
                 options["attribution"] = self.decom_attribution.currentText()
+        interactions = self.decom_interactions.isChecked()
+        if self.decom_engine.currentText() == "icn":
+            if not self._is_chronos():
+                self.notify(
+                    "The ICN decomposition needs the chronos-2 backend and a loaded estimator.",
+                    key="icn-decompose-needs-chronos",
+                )
+                return
+            from normet import icn_decompose
+            from normet.foundation import add_calendar_covariates, to_indexed_frame
+
+            def run_icn() -> pd.DataFrame:
+                res = icn_decompose(
+                    self.model,
+                    add_calendar_covariates(to_indexed_frame(self.df_prep)),
+                    "value",
+                    met_features=met,
+                    groups=options.get("groups"),
+                    attribution=options.get("attribution"),
+                    return_interactions=interactions,
+                )
+                if interactions:
+                    self._interaction_summary = res.summary
+                    return res.decomposition
+                return res
+
+            self.runner.submit("decompose (icn)", run_icn, self._decompose_done, self._show_error)
+            return
+        if interactions and not self._is_chronos() and method == "meteorology":
+            from normet import shapley_interactions
+
+            interaction_options = {
+                key: value for key, value in options.items() if key != "attribution"
+            }
+
+            def run_interactions() -> pd.DataFrame:
+                res = shapley_interactions(
+                    self.df_prep,
+                    self.model,
+                    target="value",
+                    covariates=self.trained_features + list(TIME_VARS),
+                    n_samples=self.decom_samples.value(),
+                    seed=self.seed_spin.value(),
+                    **interaction_options,
+                )
+                self._interaction_summary = res.summary
+                return res.decomposition
+
+            self.runner.submit(
+                "decompose (shapley interactions)",
+                run_interactions,
+                self._decompose_done,
+                self._show_error,
+            )
+            return
         if self._is_chronos():
             # The zero-shot path: each coalition is a de-weathering of the
             # estimator's own, over the meteorology it was loaded with.
             options.update(target="value", backend=_chronos.BACKEND)
-            covariates = [f for f in self.trained_features if f not in TIME_VARS]
+            covariates = met
         else:
             covariates = self.trained_features + list(TIME_VARS)
         self.runner.submit(
@@ -441,6 +617,11 @@ class AnalyseRunMixin(QMainWindow):
                     f"met_total = observed − normalised, split across {len(contribs)} "
                     f"{what} ({how} attribution) — strongest: {dominant}."
                 ]
+            summary = getattr(self, "_interaction_summary", None)
+            if summary is not None and len(summary) and "mean_abs" in summary.columns:
+                top = summary.sort_values("mean_abs", ascending=False).head(3)
+                parts = [f"{row.term} ({row.mean:+.2f})" for row in top.itertuples()]
+                lines.append("Pairwise interactions, largest |mean|: " + ", ".join(parts))
             # Each method's last result from this model, a Method selector to switch.
             if self._decom_model is not self.model:
                 self._decom_views, self._decom_model = {}, self.model

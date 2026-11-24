@@ -430,3 +430,66 @@ def test_transport_studio_layer1_physics_dateline_and_layer2_analysis(main_win, 
         assert s.tabs.currentWidget() is s.tab_inversion
     finally:
         s.close()
+
+
+def test_multisite_tdump_directories_name_their_sites(studio, tmp_path):
+    """Manual and HYSPLIT-made batches group by receptor, not by one flat list."""
+    a = tmp_path / "run" / "00_MY1"
+    b = tmp_path / "run" / "01_Kuala_Lumpur"
+    a.mkdir(parents=True)
+    b.mkdir()
+    fa, fb = a / "tdump_1", b / "tdump_2"
+    fa.write_text("")
+    fb.write_text("")
+    studio._tdump_paths = [str(fa), str(fb)]
+    groups = studio._tdump_site_groups()
+    assert sorted(groups) == ["Kuala_Lumpur", "MY1"]
+    # A directory-safe name still matches the data's spaced site name.
+    matched, unmatched = studio._match_site_groups(groups, ["MY1", "Kuala Lumpur"])
+    assert not unmatched
+    assert matched["Kuala Lumpur"] == [str(fb)]
+
+
+def test_multisite_inversion_fits_every_receptor(main_win, qapp, tmp_path):
+    """The Analysis page joins each receptor's footprints to its own series."""
+    from normet import read_trajectory_endpoints
+    from normet.data.datasets import example_traj_dir
+    from normet.gui.trajectory_window import TrajectoryWindow
+
+    s = TrajectoryWindow(main_win)
+    try:
+        i = main_win.zone_combo.findData("UTC")
+        if i >= 0:
+            main_win.zone_combo.setCurrentIndex(i)
+        run = tmp_path / "run"
+        paths: list[str] = []
+        for k, site in enumerate(("MY1", "BJ")):
+            d = run / f"{k:02d}_{site}"
+            d.mkdir(parents=True)
+            for p in sorted(example_traj_dir().glob("tdump_*")):
+                q = d / p.name
+                shutil.copy(p, q)
+                paths.append(str(q))
+        dates = sorted(pd.to_datetime(read_trajectory_endpoints(paths)["receptor_date"].unique()))
+        rows = [
+            {"date": d, "site": site, "PM2.5": 10.0 + 3.0 * k + float(j)}
+            for k, site in enumerate(("MY1", "BJ"))
+            for j, d in enumerate(dates)
+        ]
+        main_win._ingest(pd.DataFrame(rows), "two sites")
+        main_win.target_combo.setCurrentText("PM2.5")
+
+        s.region_table.add_row("eu", (-5.0, 47.0, 5.0, 53.0))
+        s._tdump_paths = paths
+        s._sync_enabled()
+        assert s.multi_inv_btn.isEnabled()
+
+        s._run_multisite_inversion()
+        _wait(qapp, s.runner)
+        assert s.tabs.currentWidget() is s.tab_inversion
+        assert s.tab_inversion.canvas is not None
+        assert any(ax.has_data() for ax in s.tab_inversion.canvas.figure.axes)
+        assert s.tab_inversion._verdict is not None
+        assert "across 2 sites" in s.tab_inversion._verdict.text()
+    finally:
+        s.close()

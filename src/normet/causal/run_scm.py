@@ -47,8 +47,11 @@ def run_scm(
         Treatment cutoff in "YYYY-MM-DD" (flexible parsing accepted).
     donors : List[str] | None
         Donor pool. If None, use all units except the treated unit.
-    scm_backend : {"scm","ascm","sdid","mlscm","abadie","did","mcnnm","robust","chronos"}
-        Which synthetic-control backend to use.
+    scm_backend : {"scm","ascm","sdid","mlscm","abadie","did","mcnnm","robust","chronos",
+        "deweathered","transport"}
+        Which synthetic-control backend to use. ``"deweathered"`` runs the
+        two-stage deweather-then-SCM estimator; ``"transport"`` the
+        spillover-adjusted one and needs ``spillover_exposure``.
     **kwargs
         Forwarded to the selected backend function.
 
@@ -153,6 +156,45 @@ def run_scm(
                 backend=ml_backend,
                 **kw,  # model_config, seed, etc.
             )
+
+    if scm_backend in {"deweathered", "transport"}:
+        from .deweathered import deweathered_scm, transport_adjusted_scm
+
+        log.info(
+            "Running synthetic control | scm_backend=%s | treated=%s | donors=%d | cutoff=%s",
+            scm_backend,
+            treated_unit,
+            len(donor_pool),
+            cutoff_str,
+        )
+        if scm_backend == "deweathered":
+            stage_res: Any = deweathered_scm(
+                df=df,
+                date_col=date_col,
+                unit_col=unit_col,
+                outcome_col=outcome_col,
+                treated_unit=treated_unit,
+                cutoff_date=cutoff_str,
+                donors=donor_pool,
+                **kwargs,
+            )
+        else:
+            if "spillover_exposure" not in kwargs:
+                raise ValueError(
+                    "scm_backend='transport' needs spillover_exposure (a wide exposure "
+                    "frame or the name of a column in df)."
+                )
+            stage_res = transport_adjusted_scm(
+                df=df,
+                date_col=date_col,
+                unit_col=unit_col,
+                outcome_col=outcome_col,
+                treated_unit=treated_unit,
+                cutoff_date=cutoff_str,
+                donors=donor_pool,
+                **kwargs,
+            )
+        return stage_res.synthetic
 
     # Standard panel backends (ASCM / SDID / Abadie / DiD / MC-NNM / Robust SCM): same signature.
     if scm_backend in {"ascm", "sdid", "abadie", "did", "mcnnm", "robust"}:

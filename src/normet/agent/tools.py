@@ -65,6 +65,12 @@ _OUTPUTS = {
     "impute": "imputed.csv",
     "backtest": "backtest.csv",
     "events": "events.csv",
+    "normalise_ox": "ox_species.csv",
+    "normalise_regime": "regime_normalised.csv",
+    "icn_decompose": "icn_decomposition.csv",
+    "shapley_interactions": "interactions.csv",
+    "benchmark": "benchmark/benchmark.csv",
+    "invert_multisite": "inversion/summary.json",
 }
 
 
@@ -270,12 +276,21 @@ class Tools:
         n_samples: int | None = None,
         split_method: str | None = None,
         train_fraction: float | None = None,
+        normalise_method: str | None = None,
+        control_variates: bool = False,
+        block_mode: str | None = None,
+        block_hours: int | None = None,
+        dml_cutoff_days: float | None = None,
         seed: int | None = None,
         label: str = "",
     ) -> str:
         """Train a model of *target* on *covariates* and normalise it (``normet do-all``)."""
         if not covariates:
             raise ValueError("give the covariates (predictor columns) to train on")
+        if normalise_method not in (None, "standard", "dml"):
+            raise ValueError("normalise_method is 'standard' or 'dml'")
+        if block_mode not in (None, "independent", "markov"):
+            raise ValueError("block_mode is 'independent' or 'markov'")
         argv = ["do-all", self._source(data, example)] + self._options(
             target=target,
             covariates=covariates,
@@ -284,8 +299,14 @@ class Tools:
             n_samples=n_samples,
             split_method=split_method,
             train_fraction=train_fraction,
+            normalise_method=normalise_method,
+            block_mode=block_mode,
+            block_hours=block_hours,
+            dml_cutoff_days=dml_cutoff_days,
             seed=seed,
         )
+        if control_variates:
+            argv.append("--control-variates")
         argv += ["--out", _OUTPUTS["do_all"], "--run-path", "run"]
         return self._start("do_all", argv, label)
 
@@ -328,6 +349,9 @@ class Tools:
         context_length: int | None = None,
         prediction_length: int | None = None,
         log_transform: bool = False,
+        surprise_tau: float | None = None,
+        save_bank: bool = False,
+        bank_path: str | None = None,
         seed: int | None = None,
         model_path: str | None = None,
         label: str = "",
@@ -339,6 +363,10 @@ class Tools:
             raise ValueError(f"method must be 'deweather' or 'icn', got {method!r}")
         if estimate not in ("level", "paired"):
             raise ValueError(f"estimate must be 'level' or 'paired', got {estimate!r}")
+        if (surprise_tau is not None or save_bank or bank_path) and method != "icn":
+            raise ValueError("surprise_tau / save_bank / bank_path need method='icn'")
+        if save_bank and bank_path:
+            raise ValueError("save_bank and bank_path are mutually exclusive")
         ckpt = self.path(model_path) if model_path is not None else None
         argv = ["deweather", self._source(data, example)] + self._options(
             target=target,
@@ -348,11 +376,16 @@ class Tools:
             n_samples=n_samples,
             context_length=context_length,
             prediction_length=prediction_length,
+            surprise_tau=surprise_tau,
             seed=seed,
             model_path=ckpt,
         )
         if log_transform:
             argv.append("--log-transform")
+        if save_bank:
+            argv += ["--save-bank", "bank"]
+        if bank_path is not None:
+            argv += ["--bank", self.path(bank_path)]
         argv += ["--out", _OUTPUTS["deweather"]]
         return self._start("deweather", argv, label)
 
@@ -367,6 +400,10 @@ class Tools:
         unit_col: str | None = None,
         outcome_col: str | None = None,
         backend: str | None = None,
+        covariates: list[str] | None = None,
+        resample_vars: list[str] | None = None,
+        deweather_method: str | None = None,
+        spillover_exposure: str | None = None,
         model_path: str | None = None,
         label: str = "",
     ) -> str:
@@ -383,10 +420,214 @@ class Tools:
             unit_col=unit_col,
             outcome_col=outcome_col,
             backend=backend,
+            covariates=covariates,
+            resample_vars=resample_vars,
+            deweather_method=deweather_method,
+            spillover_exposure=spillover_exposure,
             model_path=ckpt,
         )
         argv += ["--out", _OUTPUTS["scm"]]
         return self._start("scm", argv, label)
+
+    @staticmethod
+    def _groups_spec(groups: dict[str, list[str]] | None) -> str | None:
+        if not groups:
+            return None
+        return ";".join(f"{name}={','.join(cols)}" for name, cols in groups.items())
+
+    def start_normalise_ox(
+        self,
+        o3_col: str,
+        no2_col: str,
+        covariates: list[str],
+        data: str | None = None,
+        example: str | None = None,
+        no_col: str | None = "NO",
+        resample_vars: list[str] | None = None,
+        unit: str | None = None,
+        method: str | None = None,
+        backend: str | None = None,
+        n_samples: int | None = None,
+        cutoff_days: float | None = None,
+        seed: int | None = None,
+        label: str = "",
+    ) -> str:
+        """Conserved Ox-NOx deweathering (``normet normalise-ox``)."""
+        if not covariates:
+            raise ValueError("give the meteorological covariates to deweather against")
+        argv = ["normalise-ox", self._source(data, example)] + self._options(
+            o3_col=o3_col,
+            no2_col=no2_col,
+            no_col="" if no_col is None else no_col,
+            covariates=covariates,
+            resample_vars=resample_vars,
+            unit=unit,
+            method=method,
+            backend=backend,
+            n_samples=n_samples,
+            cutoff_days=cutoff_days,
+            seed=seed,
+        )
+        argv += [
+            "--out",
+            "ox_species.csv",
+            "--ox-out",
+            "ox_components.csv",
+            "--nox-out",
+            "nox_components.csv",
+        ]
+        return self._start("normalise_ox", argv, label)
+
+    def start_normalise_regime(
+        self,
+        target: str,
+        precursors: list[str],
+        covariates: list[str],
+        data: str | None = None,
+        example: str | None = None,
+        resample_vars: list[str] | None = None,
+        method: str | None = None,
+        backend: str | None = None,
+        n_samples: int | None = None,
+        cutoff_days: float | None = None,
+        seed: int | None = None,
+        label: str = "",
+    ) -> str:
+        """Precursor-conditioned deweathering (``normet normalise-regime``)."""
+        if not precursors:
+            raise ValueError("give the primary tracer columns that define the regime")
+        if not covariates:
+            raise ValueError("give the meteorological covariates to deweather against")
+        argv = ["normalise-regime", self._source(data, example)] + self._options(
+            target=target,
+            precursors=precursors,
+            covariates=covariates,
+            resample_vars=resample_vars,
+            method=method,
+            backend=backend,
+            n_samples=n_samples,
+            cutoff_days=cutoff_days,
+            seed=seed,
+        )
+        argv += ["--out", "regime_normalised.csv", "--precursors-out", "regime_precursors.csv"]
+        return self._start("normalise_regime", argv, label)
+
+    def start_icn_decompose(
+        self,
+        target: str,
+        met_vars: list[str],
+        data: str | None = None,
+        example: str | None = None,
+        estimate: str = "level",
+        groups: dict[str, list[str]] | None = None,
+        attribution: str | None = None,
+        n_permutations: int | None = None,
+        interactions: bool = False,
+        context_length: int | None = None,
+        prediction_length: int | None = None,
+        seed: int | None = None,
+        model_path: str | None = None,
+        label: str = "",
+    ) -> str:
+        """In-context group-Shapley decomposition (``normet icn-decompose``)."""
+        if not met_vars:
+            raise ValueError("give the meteorological covariates to attribute")
+        ckpt = self.path(model_path) if model_path is not None else None
+        argv = ["icn-decompose", self._source(data, example)] + self._options(
+            target=target,
+            met_vars=met_vars,
+            estimate=estimate,
+            groups=self._groups_spec(groups),
+            attribution=attribution,
+            n_permutations=n_permutations,
+            context_length=context_length,
+            prediction_length=prediction_length,
+            seed=seed,
+            model_path=ckpt,
+        )
+        if interactions:
+            argv.append("--interactions")
+        argv += ["--out", "icn_decomposition.csv", "--interactions-out", "icn_interactions.csv"]
+        return self._start("icn_decompose", argv, label)
+
+    def start_shapley_interactions(
+        self,
+        target: str,
+        covariates: list[str],
+        data: str | None = None,
+        example: str | None = None,
+        backend: str | None = None,
+        n_samples: int | None = None,
+        groups: dict[str, list[str]] | None = None,
+        seed: int | None = None,
+        label: str = "",
+    ) -> str:
+        """Second-order Shapley interaction indices (``normet shapley-interactions``)."""
+        if not covariates:
+            raise ValueError("give the covariates to attribute")
+        argv = ["shapley-interactions", self._source(data, example)] + self._options(
+            target=target,
+            covariates=covariates,
+            backend=backend,
+            n_samples=n_samples,
+            groups=self._groups_spec(groups),
+            seed=seed,
+        )
+        argv += ["--out", "interactions.csv", "--decomposition-out", "interactions_decomp.csv"]
+        return self._start("shapley_interactions", argv, label)
+
+    def make_benchmark(
+        self,
+        family: str = "F1_additive",
+        n_days: int | None = None,
+        seed: int | None = None,
+        evaluate: str | None = None,
+        col: str | None = None,
+        label: str = "",
+    ) -> str:
+        """Generate a synthetic benchmark and optionally score a normalised table."""
+        argv = ["benchmark"] + self._options(
+            family=family,
+            n_days=n_days,
+            seed=seed,
+            evaluate=self.path(evaluate) if evaluate is not None else None,
+            col=col,
+            out="benchmark",
+        )
+        return self._start("benchmark", argv, label)
+
+    def invert_multisite(
+        self,
+        footprints: dict[str, str],
+        series: str,
+        date_col: str | None = None,
+        unit_col: str | None = None,
+        value_col: str | None = None,
+        region_cols: list[str] | None = None,
+        spatial_alpha: float | None = None,
+        spatial_scale_km: float | None = None,
+        n_bootstrap: int | None = None,
+        seed: int | None = None,
+        label: str = "",
+    ) -> str:
+        """Joint multi-receptor footprint inversion (``normet invert-footprints``)."""
+        if not footprints:
+            raise ValueError("give at least one site -> footprint table")
+        argv = ["invert-footprints"] + self._options(
+            series=self.path(series),
+            date_col=date_col,
+            unit_col=unit_col,
+            value_col=value_col,
+            region_cols=region_cols,
+            spatial_alpha=spatial_alpha,
+            spatial_scale_km=spatial_scale_km,
+            n_bootstrap=n_bootstrap,
+            seed=seed,
+            out="inversion",
+        )
+        for site, path in footprints.items():
+            argv += ["--footprint", f"{site}={self.path(path)}"]
+        return self._start("invert_multisite", argv, label)
 
     def start_cv(
         self,

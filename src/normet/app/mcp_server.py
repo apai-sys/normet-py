@@ -173,6 +173,11 @@ def build_server(tools: Any = None) -> Any:
         n_samples: int | None = None,
         split_method: str | None = None,
         train_fraction: float | None = None,
+        normalise_method: str | None = None,
+        control_variates: bool = False,
+        block_mode: str | None = None,
+        block_hours: int | None = None,
+        dml_cutoff_days: float | None = None,
         seed: int | None = None,
         label: str = "",
     ) -> str:
@@ -181,8 +186,11 @@ def build_server(tools: Any = None) -> Any:
         meteorology (`resample_vars`, all covariates by default) n_samples times
         (normet's default 300). backend: 'flaml' (AutoML, the default) or 'lightgbm'
         (faster); split_method: 'random', 'ts', 'month_ts', 'season_ts';
-        train_fraction: share of rows trained on (0.75). Writes normalised.csv and the
-        run (run.joblib); poll normet_job_status, which reads them once done."""
+        train_fraction: share of rows trained on (0.75). normalise_method: 'standard'
+        (Monte-Carlo resampling) or 'dml' (orthogonal Double-ML with blocked
+        out-of-fold prediction); control_variates: reduce Monte-Carlo variance;
+        block_mode: 'independent' or 'markov' block resampling (needs block_hours).
+        Writes normalised.csv and the run (run.joblib); poll normet_job_status."""
         return t.start_do_all(
             target,
             covariates,
@@ -193,6 +201,11 @@ def build_server(tools: Any = None) -> Any:
             n_samples=n_samples,
             split_method=split_method,
             train_fraction=train_fraction,
+            normalise_method=normalise_method,
+            control_variates=control_variates,
+            block_mode=block_mode,
+            block_hours=block_hours,
+            dml_cutoff_days=dml_cutoff_days,
             seed=seed,
             label=label,
         )
@@ -238,12 +251,18 @@ def build_server(tools: Any = None) -> Any:
         context_length: int | None = None,
         prediction_length: int | None = None,
         log_transform: bool = False,
+        surprise_tau: float | None = None,
+        save_bank: bool = False,
+        bank_path: str | None = None,
         seed: int | None = None,
         model_path: str | None = None,
         label: str = "",
     ) -> str:
         """Start a zero-shot Chronos-2 de-weathering job (default future-only 'icn'
-        or legacy 'deweather') conditioning on `met_vars`. Writes normalised.csv;
+        or legacy 'deweather') conditioning on `met_vars`. surprise_tau gates
+        anchor draws by exp(-(err/tau)^2); save_bank writes the raw ICN draw
+        bank (bank.joblib) for offline re-aggregation, and bank_path re-aggregates
+        a saved bank instead of running the model. Writes normalised.csv;
         poll normet_job_status."""
         return t.start_deweather(
             target,
@@ -256,6 +275,9 @@ def build_server(tools: Any = None) -> Any:
             context_length=context_length,
             prediction_length=prediction_length,
             log_transform=log_transform,
+            surprise_tau=surprise_tau,
+            save_bank=save_bank,
+            bank_path=bank_path,
             seed=seed,
             model_path=model_path,
             label=label,
@@ -272,6 +294,10 @@ def build_server(tools: Any = None) -> Any:
         unit_col: str | None = None,
         outcome_col: str | None = None,
         backend: str | None = None,
+        covariates: list[str] | None = None,
+        resample_vars: list[str] | None = None,
+        deweather_method: str | None = None,
+        spillover_exposure: str | None = None,
         model_path: str | None = None,
         label: str = "",
     ) -> str:
@@ -280,8 +306,10 @@ def build_server(tools: Any = None) -> Any:
         date_col 'date', unit_col 'ID', outcome_col 'value' by default; the scm example
         uses unit_col='code', outcome_col='NO2_dw'), and its effect after `cutoff`
         (YYYY-MM-DD). backend: 'scm', 'mlscm', 'abadie', 'did', 'mcnnm', 'robust',
-        'chronos'. Writes scm.csv; poll normet_job_status, which reads the pre-period
-        fit and the effect."""
+        'ascm', 'sdid', 'deweathered', 'transport', 'chronos'. deweathered needs
+        covariates (and optional resample_vars/deweather_method); transport needs
+        spillover_exposure, a column carrying donor exposure F_j(t). Writes scm.csv;
+        poll normet_job_status, which reads the pre-period fit and the effect."""
         return t.start_scm(
             treated,
             cutoff,
@@ -292,7 +320,199 @@ def build_server(tools: Any = None) -> Any:
             unit_col=unit_col,
             outcome_col=outcome_col,
             backend=backend,
+            covariates=covariates,
+            resample_vars=resample_vars,
+            deweather_method=deweather_method,
+            spillover_exposure=spillover_exposure,
             model_path=model_path,
+            label=label,
+        )
+
+    @tool
+    def normet_start_normalise_ox(
+        o3_col: str,
+        no2_col: str,
+        covariates: list[str],
+        example: str | None = None,
+        data: str | None = None,
+        no_col: str | None = "NO",
+        resample_vars: list[str] | None = None,
+        unit: str | None = None,
+        method: str | None = None,
+        backend: str | None = None,
+        n_samples: int | None = None,
+        cutoff_days: float | None = None,
+        seed: int | None = None,
+        label: str = "",
+    ) -> str:
+        """Start a job: conserved Ox-NOx de-weathering. Deweathers Ox = O3 + NO2 and
+        NOx = NO + NO2 in molar coordinates, then repartitions Ox with the
+        meteorology-marginalised NO2 fraction, so titration is not double-counted.
+        Writes ox_species.csv (observed/normalised per species); poll
+        normet_job_status."""
+        return t.start_normalise_ox(
+            o3_col,
+            no2_col,
+            covariates,
+            data=data,
+            example=example,
+            no_col=no_col,
+            resample_vars=resample_vars,
+            unit=unit,
+            method=method,
+            backend=backend,
+            n_samples=n_samples,
+            cutoff_days=cutoff_days,
+            seed=seed,
+            label=label,
+        )
+
+    @tool
+    def normet_start_normalise_regime(
+        target: str,
+        precursors: list[str],
+        covariates: list[str],
+        example: str | None = None,
+        data: str | None = None,
+        resample_vars: list[str] | None = None,
+        method: str | None = None,
+        backend: str | None = None,
+        n_samples: int | None = None,
+        cutoff_days: float | None = None,
+        seed: int | None = None,
+        label: str = "",
+    ) -> str:
+        """Start a job: de-weather a secondary pollutant (e.g. O3) conditioned on the
+        de-weathered trajectories of primary precursors (e.g. NOx, CO), holding the
+        emission-driven regime fixed. Writes regime_normalised.csv; poll
+        normet_job_status."""
+        return t.start_normalise_regime(
+            target,
+            precursors,
+            covariates,
+            data=data,
+            example=example,
+            resample_vars=resample_vars,
+            method=method,
+            backend=backend,
+            n_samples=n_samples,
+            cutoff_days=cutoff_days,
+            seed=seed,
+            label=label,
+        )
+
+    @tool
+    def normet_start_icn_decompose(
+        target: str,
+        met_vars: list[str],
+        example: str | None = None,
+        data: str | None = None,
+        estimate: str = "level",
+        groups: dict[str, list[str]] | None = None,
+        attribution: str | None = None,
+        n_permutations: int | None = None,
+        interactions: bool = False,
+        context_length: int | None = None,
+        prediction_length: int | None = None,
+        seed: int | None = None,
+        model_path: str | None = None,
+        label: str = "",
+    ) -> str:
+        """Start a job: in-context group-Shapley decomposition of observed minus
+        counterfactual with Chronos-2, batched over common-random-number weather
+        draws. groups maps a physical group name to its columns; interactions=True
+        also writes pairwise Grabisch-Roubens indices. Writes icn_decomposition.csv
+        (and icn_interactions.csv); poll normet_job_status."""
+        return t.start_icn_decompose(
+            target,
+            met_vars,
+            data=data,
+            example=example,
+            estimate=estimate,
+            groups=groups,
+            attribution=attribution,
+            n_permutations=n_permutations,
+            interactions=interactions,
+            context_length=context_length,
+            prediction_length=prediction_length,
+            seed=seed,
+            model_path=model_path,
+            label=label,
+        )
+
+    @tool
+    def normet_start_shapley_interactions(
+        target: str,
+        covariates: list[str],
+        example: str | None = None,
+        data: str | None = None,
+        backend: str | None = None,
+        n_samples: int | None = None,
+        groups: dict[str, list[str]] | None = None,
+        seed: int | None = None,
+        label: str = "",
+    ) -> str:
+        """Start a job: exact second-order Shapley interaction indices for a trained
+        AutoML model. Writes interactions.csv (main effects plus pairwise terms) and
+        interactions_decomp.csv; poll normet_job_status."""
+        return t.start_shapley_interactions(
+            target,
+            covariates,
+            data=data,
+            example=example,
+            backend=backend,
+            n_samples=n_samples,
+            groups=groups,
+            seed=seed,
+            label=label,
+        )
+
+    @tool
+    def normet_make_benchmark(
+        family: str = "F1_additive",
+        n_days: int | None = None,
+        seed: int | None = None,
+        evaluate: str | None = None,
+        col: str | None = None,
+        label: str = "",
+    ) -> str:
+        """Start a job: generate a synthetic benchmark (families F1-F5) with exact
+        ground truth in benchmark/ (benchmark.csv, truth.csv, metadata.json); with
+        evaluate=<normalised table> also scores it and writes benchmark/scores.json.
+        Poll normet_job_status."""
+        return t.make_benchmark(
+            family=family, n_days=n_days, seed=seed, evaluate=evaluate, col=col, label=label
+        )
+
+    @tool
+    def normet_invert_multisite(
+        footprints: dict[str, str],
+        series: str,
+        date_col: str | None = None,
+        unit_col: str | None = None,
+        value_col: str | None = None,
+        region_cols: list[str] | None = None,
+        spatial_alpha: float | None = None,
+        spatial_scale_km: float | None = None,
+        n_bootstrap: int | None = None,
+        seed: int | None = None,
+        label: str = "",
+    ) -> str:
+        """Start a job: joint inversion of source footprints at several receptors.
+        footprints maps site -> footprint CSV; series is a long table (with unit_col)
+        or a wide table with one column per site. Writes inversion/ (regions.csv,
+        site_metrics.csv, contributions.csv, summary.json); poll normet_job_status."""
+        return t.invert_multisite(
+            footprints,
+            series,
+            date_col=date_col,
+            unit_col=unit_col,
+            value_col=value_col,
+            region_cols=region_cols,
+            spatial_alpha=spatial_alpha,
+            spatial_scale_km=spatial_scale_km,
+            n_bootstrap=n_bootstrap,
+            seed=seed,
             label=label,
         )
 
