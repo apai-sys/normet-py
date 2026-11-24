@@ -318,6 +318,93 @@ class InputsMixin(QMainWindow):
             "▶ Train model."
         )
 
+    def load_benchmark(self) -> None:
+        """Generate a synthetic benchmark (families F1-F5) with known ground truth."""
+        from PySide6.QtWidgets import QDialog, QDialogButtonBox, QFormLayout, QSpinBox
+
+        from ..eval.benchmarks import make_synthetic_benchmark
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Synthetic benchmark")
+        form = QFormLayout(dialog)
+        family = NoWheelComboBox()
+        family.addItems(
+            [
+                "F1_additive",
+                "F2_multiplicative",
+                "F3_titration",
+                "F4_nonstationary",
+                "F5_transport",
+            ]
+        )
+        family.setToolTip(
+            "F1 additive weather; F2 multiplicative; F3 nonlinear titration;\n"
+            "F4 non-stationary; F5 intermittent transport."
+        )
+        days = QSpinBox()
+        days.setRange(30, 3650)
+        days.setValue(180)
+        seed = QSpinBox()
+        seed.setRange(0, 2_147_483_647)
+        seed.setValue(42)
+        form.addRow("Family", family)
+        form.addRow("Days", days)
+        form.addRow("Seed", seed)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        bench = make_synthetic_benchmark(
+            family.currentText(), n_days=days.value(), seed=seed.value()
+        )
+        self._data_path = None
+        self._ingest(bench.df, f"Synthetic benchmark {bench.family}")
+        self._benchmark = bench
+        self._show_dates(None)
+        self.target_combo.setCurrentText(bench.target)
+        numeric = [self.feature_list.item(i).text() for i in range(self.feature_list.count())]
+        _fill_checklist(self.feature_list, numeric, set(bench.met_covariates))
+        self.statusBar().showMessage(
+            f"{bench.family}: truth is known ({bench.metadata.get('n_days')} days); "
+            "train, normalise, then File → Score benchmark against it."
+        )
+
+    def score_benchmark(self) -> None:
+        """Score the current normalisation against the loaded benchmark's truth."""
+        from ..eval.benchmarks import evaluate_benchmark
+
+        bench = getattr(self, "_benchmark", None)
+        if bench is None:
+            QMessageBox.information(
+                self,
+                "No benchmark",
+                "Load one first: File → Load Example → Synthetic benchmark…",
+            )
+            return
+        result = self.results.get("normalise")
+        if result is None:
+            QMessageBox.information(
+                self,
+                "Nothing to score",
+                "Run the normalisation first; its 'normalised' column is scored.",
+            )
+            return
+        try:
+            scores = evaluate_benchmark(bench, result, col="normalised")
+        except (KeyError, ValueError) as exc:
+            QMessageBox.warning(self, "Benchmark", str(exc))
+            return
+        lines = [
+            f"{key}: {value:.4f}" if isinstance(value, float) else f"{key}: {value}"
+            for key, value in scores.items()
+        ]
+        QMessageBox.information(self, "Benchmark scores", "\n".join(lines))
+        self.statusBar().showMessage(f"Benchmark {bench.family} scored against known truth.")
+
     def load_csv(self, path: str, remember: bool = False) -> None:
         """Load the table at *path* (any file :func:`normet.io.read_time_series` reads)
         into the Data tab, its times on UTC from the time zone chosen, and populate the
@@ -368,6 +455,7 @@ class InputsMixin(QMainWindow):
         self.df_raw = self.df_loaded = df
         self.exclusions = []
         self._met_attachments = []
+        self._benchmark = None
         self.df_prep = None
         self.model = None
         self.chronos_check = None
@@ -405,6 +493,7 @@ class InputsMixin(QMainWindow):
 
         met = {c for c in numeric if c.lower() in MET_DEFAULTS or c in MET_DEFAULTS}
         _fill_checklist(self.feature_list, numeric, met or set(numeric))
+        self._refresh_chem_columns(numeric)
         self.pdp_vars.clear()
         self._reset_pdp_toggle_buttons()
 

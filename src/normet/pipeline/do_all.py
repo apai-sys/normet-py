@@ -22,6 +22,7 @@ from ..analysis.normalise import (
     CrossFitNormaliseResult,
     _back_transform_values,
     crossfit_normalise,
+    dml_normalise,
     normalise,
 )
 from ..core.exceptions import ConfigError
@@ -109,6 +110,26 @@ class SingleConfig:
     cross_fit: bool = False
     cv_folds: int = 5
     chronos_mode: str = "deweather"
+    normalise_method: str = "standard"
+    """Deweathering engine: ``"standard"`` (fitted model + Monte-Carlo
+    resampling) or ``"dml"`` (orthogonal partialling-out with a smooth
+    low-frequency nuisance basis). ``"dml"`` does its own blocked
+    out-of-fold pass, so it is incompatible with ``cross_fit=True`` and with
+    the Chronos-2 backend; the returned model slot then holds the
+    :class:`~normet.analysis.normalise.DMLNormaliseResult`."""
+    control_variates: bool = False
+    """Use Monte-Carlo control variates in :func:`normalise` (variance
+    reduction; requires resampled variables). Forwarded only on the
+    ``"standard"`` and ``"dml"`` paths."""
+    block_mode: str = "independent"
+    """Block-resampling mode for the meteorological draws: ``"independent"``
+    or ``"markov"``. ``"markov"`` needs ``block_hours > 1`` to differ from
+    independent sampling."""
+    dml_cutoff_days: float = 30.0
+    """Smooth-basis cutoff (days) for ``normalise_method="dml"``."""
+    dml_n_harmonics: int | None = None
+    """Number of low-frequency cosine terms for ``normalise_method="dml"``;
+    ``None`` chooses it from the record span and ``dml_cutoff_days``."""
 
 
 @dataclass
@@ -387,6 +408,66 @@ def _do_all_zero_shot(
     return out, estimator, df_prep
 
 
+def _do_all_dml(df: pd.DataFrame, cfg: SingleConfig) -> tuple[pd.DataFrame, object, pd.DataFrame]:
+    """The ``normalise_method="dml"`` branch of :func:`do_all`.
+
+    ``dml_normalise`` owns its own preparation, blocked folds and nuisance
+    basis, so the trained-model slot is the :class:`DMLNormaliseResult`
+    instead of an estimator. ``df_prep`` is still prepared with the same
+    split settings as the standard path so run archives and reports keep the
+    same contract.
+    """
+    paired_opt: bool | str = (
+        ("log_ratio" if cfg.log_transform else "additive") if cfg.paired is False else cfg.paired
+    )
+    res = dml_normalise(
+        df,
+        target=cfg.target,
+        covariates=list(cfg.covariates or []),
+        variables_resample=cfg.variables_resample,
+        backend=cfg.backend,
+        model_config=cfg.model_config,
+        cutoff_days=float(cfg.dml_cutoff_days),
+        n_harmonics=cfg.dml_n_harmonics,
+        n_splits=int(cfg.cv_folds),
+        embargo=(_CROSSFIT_DEFAULT_EMBARGO if cfg.embargo is None else int(cfg.embargo)),
+        paired=paired_opt,
+        paired_floor=float(cfg.paired_floor),
+        n_samples=int(cast(int, cfg.n_samples)),
+        log_transform=bool(cfg.log_transform),
+        back_transform=cfg.back_transform,
+        stratify_by=cfg.stratify_by,
+        conditional_k=cfg.conditional_k,
+        conditional_on=cfg.conditional_on,
+        resample_pools=cfg.resample_pools,
+        resample_df=cfg.resample_df,
+        return_quantiles=cfg.return_quantiles,
+        return_mc_se=bool(cfg.return_mc_se),
+        sampling=cfg.sampling,
+        control_variates=bool(cfg.control_variates),
+        block_hours=cfg.block_hours,
+        block_mode=cfg.block_mode,
+        seed=int(cfg.seed),
+        n_cores=cfg.n_cores,
+        memory_save=bool(cfg.memory_save),
+        cache=cfg.cache,
+        impute=cfg.impute,
+        max_gap=cfg.max_gap,
+        verbose=bool(cfg.verbose),
+    )
+    df_prep = prepare_data(
+        df,
+        target=cfg.target,
+        covariates=list(cfg.covariates or []),
+        split_method=cfg.split_method,
+        train_fraction=cfg.train_fraction,
+        seed=cfg.seed,
+        embargo=_prepare_embargo(cfg.embargo),
+    )
+    log.info("do_all finished (dml): %d timestamps", len(res.normalised))
+    return res.normalised, res, df_prep
+
+
 def _prepare_embargo(embargo: int | None) -> int:
     """Map :attr:`SingleConfig.embargo`'s ``None`` sentinel to 0 for ``prepare_data``.
 
@@ -486,6 +567,11 @@ def do_all(
     cross_fit: bool | None = None,
     cv_folds: int | None = None,
     chronos_mode: str | None = None,
+    normalise_method: str | None = None,
+    control_variates: bool | None = None,
+    block_mode: str | None = None,
+    dml_cutoff_days: float | None = None,
+    dml_n_harmonics: int | None = None,
     **kwargs: Any,
 ) -> tuple[pd.DataFrame, object, pd.DataFrame]:
     r"""Run the standard pipeline: prepare → build_model → normalise.
@@ -519,6 +605,22 @@ def do_all(
         ``back_transform`` (``"geometric"``, the default and legacy behaviour /
         ``"arithmetic"`` / ``"smearing"``);
         the prepared frame returned as the third tuple item carries ``log1p(value)``.
+    normalise_method : {"standard", "dml"} or None, default=None
+        De-weathering engine. ``"standard"`` runs Monte-Carlo resampling of the
+        meteorological covariates (the historical path). ``"dml"`` runs
+        :func:`~normet.analysis.normalise.dml_normalise` -- orthogonal Double-ML
+        with a smooth low-frequency nuisance basis -- which owns its own blocked
+        out-of-fold pass, so it cannot be combined with ``cross_fit=True``; it is
+        also unavailable on the Chronos-2 backend, whose ``chronos_mode`` already
+        selects the engine.
+    control_variates, block_mode : bool / str or None, default=None
+        Variance reduction for the standard engine: ``control_variates=True``
+        uses the meteorological covariates as control variates, and
+        ``block_mode="markov"`` resamples trajectory blocks with a Markov bridge
+        instead of independent hours (``"independent"``, the default).
+    dml_cutoff_days, dml_n_harmonics : float / int or None, default=None
+        The Double-ML nuisance basis: harmonics up to the cutoff period
+        (30 d in :func:`dml_normalise`) and an optional explicit harmonic count.
     **kwargs
         Any additional keyword arguments are forwarded to
         :func:`_resolve_single_config`.
@@ -573,6 +675,11 @@ def do_all(
         cross_fit=cross_fit,
         cv_folds=cv_folds,
         chronos_mode=chronos_mode,
+        normalise_method=normalise_method,
+        control_variates=control_variates,
+        block_mode=block_mode,
+        dml_cutoff_days=dml_cutoff_days,
+        dml_n_harmonics=dml_n_harmonics,
         **kwargs,
     )
 
@@ -580,6 +687,23 @@ def do_all(
         raise ValueError("`target` must be provided either directly or via config.")
 
     _cfg.n_samples = resolve_n_samples(_cfg.n_samples, _cfg.backend)
+    if _cfg.normalise_method not in ("standard", "dml"):
+        raise ConfigError(
+            f"`normalise_method` must be 'standard' or 'dml', got {_cfg.normalise_method!r}."
+        )
+    if _cfg.block_mode not in ("independent", "markov"):
+        raise ConfigError(
+            f"`block_mode` must be 'independent' or 'markov', got {_cfg.block_mode!r}."
+        )
+    if _cfg.normalise_method == "dml" and _cfg.cross_fit:
+        raise ConfigError(
+            "`normalise_method='dml'` runs its own blocked out-of-fold pass; set cross_fit=False."
+        )
+    if _cfg.backend == CHRONOS_BACKEND and _cfg.normalise_method != "standard":
+        raise ConfigError(
+            "`normalise_method` selects an AutoML de-weathering engine; the "
+            "Chronos-2 backend has its own (chronos_mode/ICN)."
+        )
     log.info(
         "Starting do_all | backend=%s | target=%s | n_samples=%d",
         _cfg.backend,
@@ -592,6 +716,9 @@ def do_all(
 
     if _cfg.covariates is None:
         raise ValueError("covariates must be provided")
+
+    if _cfg.normalise_method == "dml":
+        return _do_all_dml(df, _cfg)
 
     if _cfg.cross_fit:
         paired_opt: bool | str = (
@@ -622,6 +749,8 @@ def do_all(
             return_mc_se=bool(_cfg.return_mc_se),
             sampling=_cfg.sampling,
             block_hours=_cfg.block_hours,
+            control_variates=_cfg.control_variates,
+            block_mode=_cfg.block_mode,
             seed=int(_cfg.seed),
             n_cores=_cfg.n_cores,
             memory_save=bool(_cfg.memory_save),
@@ -704,6 +833,8 @@ def do_all(
         resample_pools=_cfg.resample_pools,
         sampling=_cfg.sampling,
         block_hours=_cfg.block_hours,
+        control_variates=_cfg.control_variates,
+        block_mode=_cfg.block_mode,
         cache=_cfg.cache,
     )
 
@@ -748,6 +879,11 @@ def do_all_unc(
     embargo: int | None = None,
     cross_fit: bool | None = None,
     cv_folds: int | None = None,
+    normalise_method: str | None = None,
+    control_variates: bool | None = None,
+    block_mode: str | None = None,
+    dml_cutoff_days: float | None = None,
+    dml_n_harmonics: int | None = None,
     unc_method: str | None = None,
     ci_method: str | None = None,
     block_length: int | None = None,
@@ -803,6 +939,11 @@ def do_all_unc(
         embargo=embargo,
         cross_fit=cross_fit,
         cv_folds=cv_folds,
+        normalise_method=normalise_method,
+        control_variates=control_variates,
+        block_mode=block_mode,
+        dml_cutoff_days=dml_cutoff_days,
+        dml_n_harmonics=dml_n_harmonics,
         unc_method=unc_method,
         ci_method=ci_method,
         block_length=block_length,
@@ -820,6 +961,20 @@ def do_all_unc(
     ci_mode = str(_cfg.ci_method or "quantile").lower()
     if ci_mode not in {"quantile", "student_t"}:
         raise ValueError("`ci_method` must be 'quantile' or 'student_t'.")
+    if _cfg.normalise_method not in ("standard", "dml"):
+        raise ConfigError(
+            f"`normalise_method` must be 'standard' or 'dml', got {_cfg.normalise_method!r}."
+        )
+    if _cfg.block_mode not in ("independent", "markov"):
+        raise ConfigError(
+            f"`block_mode` must be 'independent' or 'markov', got {_cfg.block_mode!r}."
+        )
+    if _cfg.normalise_method == "dml" and unc_mode != "legacy":
+        raise ConfigError(
+            "`normalise_method='dml'` is available through the 'legacy' ensemble "
+            "(which repeats do_all) only; block_bootstrap and crossfit_ensemble "
+            "use the standard normalise path."
+        )
     if not (0.0 < float(_cfg.confidence_level) < 1.0):
         raise ValueError("`confidence_level` must be strictly between 0 and 1.")
 
@@ -927,6 +1082,8 @@ def do_all_unc(
                 resample_pools=_cfg.resample_pools,
                 sampling=_cfg.sampling,
                 block_hours=_cfg.block_hours,
+                control_variates=_cfg.control_variates,
+                block_mode=_cfg.block_mode,
                 cache=_cfg.cache,
             )
             if observed_ref is None:
@@ -986,6 +1143,8 @@ def do_all_unc(
                 resample_df=_cfg.resample_df,
                 sampling=_cfg.sampling,
                 block_hours=_cfg.block_hours,
+                control_variates=_cfg.control_variates,
+                block_mode=_cfg.block_mode,
                 seed=int(s),
                 n_cores=_cfg.n_cores,
                 memory_save=bool(_cfg.memory_save),
@@ -1058,6 +1217,11 @@ def do_all_unc(
                 cross_fit=_cfg.cross_fit,
                 cv_folds=_cfg.cv_folds,
                 chronos_mode=_cfg.chronos_mode,
+                normalise_method=_cfg.normalise_method,
+                control_variates=_cfg.control_variates,
+                block_mode=_cfg.block_mode,
+                dml_cutoff_days=_cfg.dml_cutoff_days,
+                dml_n_harmonics=_cfg.dml_n_harmonics,
             )
 
             if is_chronos and shared_chronos is None:

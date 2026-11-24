@@ -87,6 +87,8 @@ BACKEND_TIPS = {
     "robust": "Robust SCM (de-noised donor matrix).",
     "bayesian": "Bayesian simplex SCM — needs pymc, gives credible bands.",
     "chronos": "Zero-shot Chronos-2 SCM (covariate-conditioned foundation model) — needs foundation extra.",
+    "deweathered": "Two-stage deweather-then-SCM, propagating meteorological and matching uncertainty.",
+    "transport": "SCM corrected for downwind spillover onto donors (needs an exposure column).",
 }
 
 
@@ -470,6 +472,27 @@ class SCMWindow(QMainWindow):
         self.backend_combo.setToolTip("Which synthetic-control estimator to use.")
         self.backend_combo.currentTextChanged.connect(self._backend_changed)
         ef.addRow("Backend", self.backend_combo)
+        ef.addRow(QLabel("Covariates (deweathered)"))
+        self.scm_covariates = QListWidget()
+        self.scm_covariates.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.scm_covariates.setMaximumHeight(110)
+        self.scm_covariates.setToolTip(
+            "Predictors used by the stage-1 deweathering of every unit.\n"
+            "Used by the deweathered backend only."
+        )
+        ef.addRow(self.scm_covariates)
+        self.deweather_method_combo = NoWheelComboBox()
+        self.deweather_method_combo.addItems(["dml", "crossfit", "standard"])
+        self.deweather_method_combo.setToolTip(
+            "Stage-1 deweathering engine for the deweathered backend."
+        )
+        ef.addRow("Deweather method", self.deweather_method_combo)
+        self.spillover_combo = NoWheelComboBox()
+        self.spillover_combo.setToolTip(
+            "Column carrying donor exposure F_j(t) from the treated zone.\n"
+            "Used by the transport backend only."
+        )
+        ef.addRow("Spillover exposure", self.spillover_combo)
         self.ml_backend_combo = NoWheelComboBox()
         self.ml_backend_combo.addItems(["flaml", "lightgbm"])
         ef.addRow("ML backend", self.ml_backend_combo)
@@ -795,6 +818,20 @@ class SCMWindow(QMainWindow):
             self.treated_combo.clear()
             self.treated_combo.addItems(units)
             self._rebuild_donors()
+            outcome_col = self.outcome_combo.currentText()
+            self.scm_covariates.clear()
+            self.spillover_combo.clear()
+            if unit_col in self.df.columns:
+                for c in self.df.columns:
+                    self.spillover_combo.addItem(str(c))
+                    if c in (date_col, unit_col, outcome_col):
+                        continue
+                    if not pd.api.types.is_numeric_dtype(self.df[c]):
+                        continue
+                    item = QListWidgetItem(str(c))
+                    item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                    item.setCheckState(Qt.CheckState.Checked)
+                    self.scm_covariates.addItem(item)
 
             if date_col in self.df.columns:
                 dates = to_datetime_coerced(self.df[date_col]).dropna()
@@ -836,6 +873,9 @@ class SCMWindow(QMainWindow):
         self.ml_backend_combo.setEnabled(is_ml)
         self.ml_budget.setEnabled(is_ml)
         self.bayes_draws.setEnabled(is_bayes)
+        self.scm_covariates.setEnabled(backend == "deweathered")
+        self.deweather_method_combo.setEnabled(backend == "deweathered")
+        self.spillover_combo.setEnabled(backend == "transport")
         for b in (self.placebo_space_btn, self.placebo_time_btn, self.unc_btn, self.all_btn):
             b.setEnabled(not is_bayes and self.df is not None and not self.runner.busy)
             if is_bayes:
@@ -935,6 +975,9 @@ class SCMWindow(QMainWindow):
             "donors": donors,
             "cutoff_date": cutoff,
         }
+
+    def _scm_covariates(self) -> list[str]:
+        return _checked(self.scm_covariates)
 
     def _ml_kwargs(self) -> dict:
         ml_backend = self.ml_backend_combo.currentText()
@@ -1044,6 +1087,47 @@ class SCMWindow(QMainWindow):
                     scm_backend="chronos",
                 )
                 return {"synthetic": synth, "weights": None}, None
+            if backend == "deweathered":
+                from normet.causal import deweathered_scm
+
+                res = deweathered_scm(
+                    design["df"],
+                    date_col=design["date_col"],
+                    unit_col=design["unit_col"],
+                    outcome_col=design["outcome_col"],
+                    treated_unit=design["treated_unit"],
+                    donors=design["donors"],
+                    cutoff_date=design["cutoff_date"],
+                    covariates=self._scm_covariates(),
+                    deweather_method=self.deweather_method_combo.currentText(),
+                    scm_backend="ascm",
+                )
+                return {
+                    "synthetic": res.synthetic,
+                    "weights": None,
+                    "att": res.att,
+                    "att_se_total": res.att_se_total,
+                }, None
+            if backend == "transport":
+                from normet.causal import transport_adjusted_scm
+
+                res = transport_adjusted_scm(
+                    design["df"],
+                    date_col=design["date_col"],
+                    unit_col=design["unit_col"],
+                    outcome_col=design["outcome_col"],
+                    treated_unit=design["treated_unit"],
+                    donors=design["donors"],
+                    cutoff_date=design["cutoff_date"],
+                    spillover_exposure=self.spillover_combo.currentText(),
+                    scm_backend="ascm",
+                )
+                return {
+                    "synthetic": res.synthetic,
+                    "weights": None,
+                    "att_naive": res.att_naive,
+                    "att_debiased": res.att_debiased,
+                }, None
             if backend == "mlscm":
                 from normet.causal import mlscm
 

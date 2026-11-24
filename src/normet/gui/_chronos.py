@@ -127,12 +127,14 @@ def deweather(
     method: str = "deweather",
     estimate: str = "level",
     log_transform: bool = False,
+    surprise_tau: float = 0.0,
 ) -> pd.DataFrame:
     """De-weather on normet's schema so the existing plot and report paths apply.
 
     ``n_samples`` is the dominant cost here -- see :data:`DEFAULT_SAMPLES`.
     ``method="icn"`` routes through In-Context Normalisation (ICN-v1) and
-    supports ``estimate="level"|"paired"`` and ``log_transform=True``.
+    supports ``estimate="level"|"paired"``, ``log_transform=True`` and
+    ``surprise_tau > 0`` (anchor-error gating).
     """
     indexed = to_indexed_frame(df_prep)
     quantiles = QUANTILES if with_quantiles else (0.5,)
@@ -151,6 +153,7 @@ def deweather(
             n_resamples=int(n_samples),
             seed=0,
             log_transform=bool(log_transform),
+            surprise_tau=float(surprise_tau),
         )
         res = estimator.normalise_in_context(
             add_calendar_covariates(indexed),

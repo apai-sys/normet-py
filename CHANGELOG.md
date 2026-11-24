@@ -15,6 +15,25 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   - Multi-coalition fused resampling in `decom_met` / `shapley_interactions` eliminating repeated data prep and RNG sampling across $2^k$ coalitions with bit-identical results.
   - Two-stage uncertainty-propagated SCM (`nm.deweathered_scm`, `nm.DeweatheredSCMResult`), dynamic downwind plume spillover-adjusted SCM (`nm.transport_adjusted_scm`, `nm.TransportSCMResult`), and joint multi-receptor footprint inversion (`nm.invert_multisite_footprints`, `nm.MultisiteInversionResult`).
   - Built-in synthetic ground-truth benchmarks (`nm.make_synthetic_benchmark`, `nm.evaluate_benchmark`, `nm.SyntheticBenchmark`) covering `F1_additive`, `F2_multiplicative`, `F3_titration`, `F4_nonstationary`, and `F5_transport`, plus a macOS `KMP_DUPLICATE_LIB_OK` OpenMP coexistence guard between LightGBM and PyTorch.
+- **First-principles surfaces in the CLI, MCP server, and desktop GUI**:
+  `normet do-all` accepts `--normalise-method dml` (with `--dml-cutoff-days`,
+  `--dml-n-harmonics`), `--control-variates`, and `--block-mode markov`
+  (`--block-hours`), and a YAML config now forwards every key that names a
+  `SingleConfig` field instead of the previous fixed handful; `nm.do_all` /
+  `nm.do_all_unc` forward the same settings. New `normet normalise-ox`,
+  `normalise-regime`, `icn-decompose`, `shapley-interactions`, `benchmark`, and
+  `invert-footprints` subcommands, mirrored by MCP tools
+  (`normet_start_normalise_ox`, `normet_start_normalise_regime`,
+  `normet_start_icn_decompose`, `normet_start_shapley_interactions`,
+  `normet_make_benchmark`, `normet_invert_multisite`). `normet deweather`
+  gains `--surprise-tau`, `--save-bank`, and `--bank`, and `normet scm` routes
+  `--backend deweathered|transport` with `--covariates`, `--deweather-method`,
+  and `--spillover-exposure`. The GUI gains a Normalise engine selector
+  (standard / DML / conserved Ox / regime-conditioned), control-variate and
+  block-mode toggles, ICN surprise weighting, an ICN decomposition engine with
+  pairwise-interaction readout, synthetic-benchmark load/score menu actions,
+  the two staged SCM backends in SCM Studio, and multi-receptor joint inversion
+  in Transport Studio.
 - **Chronos-2 core primitives and first-principles operators** (`normet.foundation`):
   - `past_only_covariates` on `Chronos2Estimator` (constructor, `predict`,
     `predict_quantiles*`, `counterfactual`, `finetune`, `finetune_multisite`)

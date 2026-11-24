@@ -109,7 +109,14 @@ class ShellMixin(QMainWindow):
         ex_menu.addSeparator()
         act = ex_menu.addAction("Synthetic control panel (SCM Studio)", self.open_scm_example)
         act.setToolTip("Opens the SCM Studio with its example panel loaded.")
+        act = ex_menu.addAction("Synthetic benchmark…", self.load_benchmark)
+        act.setToolTip(
+            "Generate a synthetic series from a known data-generating family\n"
+            "(F1-F5), with its exact emission truth, to validate a normalisation."
+        )
         ex_menu.setToolTipsVisible(True)
+        act = fm.addAction("Score benchmark against truth", self.score_benchmark)
+        act.setToolTip("Score the current normalised series against the loaded benchmark's truth.")
         act = fm.addAction("Get &Data (AQ networks + met)…", self.open_data_studio)
         act.setShortcut("Ctrl+D")
         self.recent_menu = fm.addMenu("Open &Recent")

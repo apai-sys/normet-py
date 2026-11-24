@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QPushButton,
     QSizePolicy,
@@ -83,6 +84,92 @@ class AnalysePanelMixin(QMainWindow):
         self.norm_quantiles = QCheckBox("5–95 % quantile band")
         self.norm_quantiles.setToolTip("Also return the Monte-Carlo quantiles and shade the band.")
         nf.addRow(self.norm_quantiles)
+        self.norm_engine = NoWheelComboBox()
+        self.norm_engine.addItems(["standard", "dml", "ox_invariant", "regime_conditioned"])
+        self.norm_engine.setToolTip(
+            "standard: fitted model + Monte-Carlo weather resampling.\n"
+            "dml: orthogonal Double-ML — a smooth low-frequency nuisance basis is\n"
+            "partialled out and each block is predicted out-of-fold, so short\n"
+            "emission events are not absorbed by the model.\n"
+            "ox_invariant: conserved Ox = O3 + NO2 / NOx = NO + NO2 deweathering,\n"
+            "repartitioned by the photochemical NO2 fraction.\n"
+            "regime_conditioned: deweather the target holding deweathered primary\n"
+            "precursors (NOx, CO, ...) at their emission-driven trajectories."
+        )
+        self.norm_engine.currentTextChanged.connect(self._norm_engine_changed)
+        nf.addRow("Engine", self.norm_engine)
+        self.norm_control_vars = QCheckBox("Control variates (variance reduction)")
+        self.norm_control_vars.setToolTip(
+            "Subtract the Monte-Carlo mean of the resampled prediction and add the\n"
+            "conditional prediction back (requires resampled variables)."
+        )
+        nf.addRow(self.norm_control_vars)
+        block_row = QHBoxLayout()
+        self.norm_block_mode = NoWheelComboBox()
+        self.norm_block_mode.addItems(["independent", "markov"])
+        self.norm_block_mode.setToolTip(
+            "independent: draw weather blocks independently.\n"
+            "markov: bridge between block ends (needs Block hours > 1)."
+        )
+        self.norm_block_hours = NoWheelSpinBox()
+        self.norm_block_hours.setRange(0, 24 * 30)
+        self.norm_block_hours.setValue(0)
+        self.norm_block_hours.setSpecialValueText("off")
+        self.norm_block_hours.setToolTip(
+            "Length of the resampled blocks in hours; off = iid draws."
+        )
+        block_row.addWidget(self.norm_block_mode, 2)
+        block_row.addWidget(self.norm_block_hours, 1)
+        nf.addRow("Block resampling", wrap_row(block_row))
+        self._dml_box = QWidget()
+        dml_form = QFormLayout(self._dml_box)
+        dml_form.setContentsMargins(0, 0, 0, 0)
+        dml_form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.norm_dml_cutoff = NoWheelDoubleSpinBox()
+        self.norm_dml_cutoff.setRange(1.0, 3650.0)
+        self.norm_dml_cutoff.setValue(30.0)
+        self.norm_dml_cutoff.setSuffix(" d")
+        self.norm_dml_cutoff.setToolTip(
+            "Smoothness bandwidth: the highest slow Fourier frequency removed as nuisance."
+        )
+        dml_form.addRow("DML cutoff", self.norm_dml_cutoff)
+        self.norm_dml_splits = NoWheelSpinBox()
+        self.norm_dml_splits.setRange(2, 20)
+        self.norm_dml_splits.setValue(5)
+        self.norm_dml_splits.setToolTip("Contiguous out-of-fold blocks for the DML estimator.")
+        dml_form.addRow("DML blocks", self.norm_dml_splits)
+        self._dml_box.setVisible(False)
+        nf.addRow(self._dml_box)
+        self._ox_box = QWidget()
+        ox_form = QFormLayout(self._ox_box)
+        ox_form.setContentsMargins(0, 0, 0, 0)
+        ox_form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.ox_o3_combo = NoWheelComboBox()
+        self.ox_no2_combo = NoWheelComboBox()
+        self.ox_no_combo = NoWheelComboBox()
+        ox_form.addRow("O3 column", self.ox_o3_combo)
+        ox_form.addRow("NO2 column", self.ox_no2_combo)
+        ox_form.addRow("NO column", self.ox_no_combo)
+        self.ox_unit_combo = NoWheelComboBox()
+        self.ox_unit_combo.addItems(["ug_m3", "ppb"])
+        ox_form.addRow("Units", self.ox_unit_combo)
+        self._ox_box.setVisible(False)
+        nf.addRow(self._ox_box)
+        self._regime_box = QWidget()
+        regime_form = QFormLayout(self._regime_box)
+        regime_form.setContentsMargins(0, 0, 0, 0)
+        regime_form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.regime_precursors = QListWidget()
+        self.regime_precursors.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.regime_precursors.setMaximumHeight(100)
+        self.regime_precursors.setToolTip(
+            "Primary tracers (NOx, CO, ...) whose deweathered trajectories define\n"
+            "the chemical regime the target is conditioned on."
+        )
+        regime_form.addRow("Precursors", self.regime_precursors)
+        self._regime_box.setVisible(False)
+        nf.addRow(self._regime_box)
+        self._norm_engine_changed(self.norm_engine.currentText())
         self._chronos_norm_box = QWidget()
         cn_form = QFormLayout(self._chronos_norm_box)
         cn_form.setContentsMargins(0, 0, 0, 0)
@@ -106,6 +193,17 @@ class AnalysePanelMixin(QMainWindow):
             "For ICN-v1: run in log1p space (additive pairing, non-negative)."
         )
         cn_form.addRow(self.chronos_norm_log)
+        self.chronos_norm_surprise = NoWheelDoubleSpinBox()
+        self.chronos_norm_surprise.setRange(0.0, 100.0)
+        self.chronos_norm_surprise.setDecimals(2)
+        self.chronos_norm_surprise.setSingleStep(0.5)
+        self.chronos_norm_surprise.setValue(0.0)
+        self.chronos_norm_surprise.setSpecialValueText("off")
+        self.chronos_norm_surprise.setToolTip(
+            "For ICN-v1: gate each anchor's draws by exp(-(err/tau)^2), so\n"
+            "high-error anchors contribute less. off = unweighted (ICN-v1)."
+        )
+        cn_form.addRow("Surprise tau", self.chronos_norm_surprise)
         self._chronos_norm_method_changed(self.chronos_norm_method.currentText())
         self._chronos_norm_box.setVisible(False)
         nf.addRow(self._chronos_norm_box)
@@ -122,12 +220,56 @@ class AnalysePanelMixin(QMainWindow):
         is_icn = method == "icn"
         self.chronos_norm_estimate.setEnabled(is_icn)
         self.chronos_norm_log.setEnabled(is_icn)
+        self.chronos_norm_surprise.setEnabled(is_icn)
+
+    def _norm_engine_changed(self, engine: str) -> None:
+        self._dml_box.setVisible(engine == "dml")
+        self._ox_box.setVisible(engine == "ox_invariant")
+        self._regime_box.setVisible(engine == "regime_conditioned")
+
+    def _refresh_chem_columns(self, numeric: list[str]) -> None:
+        """Offer the loaded table's columns to the chemistry engine selectors."""
+        for combo, preferred in (
+            (self.ox_o3_combo, "O3"),
+            (self.ox_no2_combo, "NO2"),
+            (self.ox_no_combo, "NO"),
+        ):
+            combo.clear()
+            combo.addItems(numeric)
+            if preferred in numeric:
+                combo.setCurrentText(preferred)
+        self.regime_precursors.clear()
+        default_precursors = {"NO2", "NO", "NOX", "CO", "SO2"}
+        for column in numeric:
+            item = QListWidgetItem(column)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            state = (
+                Qt.CheckState.Checked
+                if column.upper() in default_precursors
+                else Qt.CheckState.Unchecked
+            )
+            item.setCheckState(state)
+            self.regime_precursors.addItem(item)
 
     def _build_decompose_box(self) -> QGroupBox:
         """Step 3: emission or meteorology, attribution and groups."""
         box = QGroupBox("Decompose")
         df_ = QFormLayout(box)
         df_.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.decom_engine = NoWheelComboBox()
+        self.decom_engine.addItems(["standard", "icn"])
+        self.decom_engine.setToolTip(
+            "standard: nested normalisation of the trained AutoML model.\n"
+            "icn: in-context group-Shapley with the loaded Chronos-2 estimator,\n"
+            "batched over shared weather draws (needs the chronos-2 backend)."
+        )
+        df_.addRow("Engine", self.decom_engine)
+        self.decom_interactions = QCheckBox("Pairwise interactions")
+        self.decom_interactions.setToolTip(
+            "Also compute exact second-order Grabisch–Roubens indices\n"
+            "(standard: Shapley attribution; icn: the in-context coalition bank)."
+        )
+        df_.addRow(self.decom_interactions)
         self.decom_method = NoWheelComboBox()
         self.decom_method.addItems(["emission", "meteorology"])
         self.decom_method.setToolTip(
