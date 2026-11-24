@@ -1,4 +1,8 @@
-"""Comprehensive v2 test suite for Meteorological Normalisation Layers 1–3."""
+"""Meteorological-normalisation pipeline.
+
+Back-transform modes, cross-fit/embargo, do_all orchestration, multisite
+runs, sampling and diagnostics.
+"""
 
 from __future__ import annotations
 
@@ -817,7 +821,7 @@ def test_do_all_forwards_layer1_2_3_and_chronos_icn():
     )
 
     class _MockBackend:
-        name = "mock_v2"
+        name = "mock"
 
         def train(self, frame, **kw):
             return _StubModel(
@@ -831,12 +835,12 @@ def test_do_all_forwards_layer1_2_3_and_chronos_icn():
         def load(self, path=".", filename=None):
             return None
 
-    backend_registry._backends["mock_v2"] = _MockBackend()
+    backend_registry._backends["mock"] = _MockBackend()
     try:
         out, model, df_prep = do_all(
             df,
             target="pm25",
-            backend="mock_v2",
+            backend="mock",
             covariates=["w", "t2m"],
             variables_resample=["w", "t2m"],
             stratify_by="hour",
@@ -854,7 +858,7 @@ def test_do_all_forwards_layer1_2_3_and_chronos_icn():
         )
         assert {"observed", "normalised", "paired", "q100", "q900", "mc_se"} <= set(out.columns)
     finally:
-        backend_registry._backends.pop("mock_v2", None)
+        backend_registry._backends.pop("mock", None)
 
     # Chronos-2 ICN dispatch without torch
     n_c = 160
@@ -1197,7 +1201,7 @@ def test_block_hours_contiguous_trajectories_and_path_parity():
 
 
 @needs_lgb
-def test_do_all_unc_v2_methods(synthetic_aq):
+def test_do_all_unc_methods(synthetic_aq):
     """do_all_unc supports block_bootstrap, crossfit_ensemble, student_t CI, inv_mse & uniform."""
     df = synthetic_aq.iloc[:150].copy()
     feats = ["t2m", "blh", "u10", "v10"]
@@ -1243,7 +1247,7 @@ def test_do_all_unc_v2_methods(synthetic_aq):
 
 
 @needs_lgb
-def test_rolling_v2_summary_log_stratified_paired_and_refit(synthetic_aq):
+def test_rolling_summary_log_stratified_paired_and_refit(synthetic_aq):
     """rolling supports include_summary=True, log_transform, stratify_by, paired, and refit_per_window."""
     df = synthetic_aq.iloc[: 24 * 12].copy()
     df["PM2.5"] = np.maximum(df["PM2.5"], 1.0)
@@ -1445,7 +1449,7 @@ def test_ale_correlated_additive_recovery_and_pdp_log_transform():
     assert (pdp_geom["pdp_std"] > 0).all()
 
 
-def test_v2_top_level_exports_available():
+def test_top_level_exports_available():
     for name in (
         "blocked_time_cv",
         "compute_duan_smearing",

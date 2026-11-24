@@ -20,7 +20,7 @@ import pandas as pd
 import pytest
 
 from normet.analysis.trend import TrendBreaks, detect_trend_breaks
-from normet.exceptions import DataError
+from normet.core.exceptions import DataError
 
 
 def _hourly_index(n: int, start: str = "2020-01-01") -> pd.DatetimeIndex:

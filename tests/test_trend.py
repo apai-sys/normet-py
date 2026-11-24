@@ -22,7 +22,7 @@ from normet.analysis.trend import (
     theil_sen,
     trend,
 )
-from normet.exceptions import DataError
+from normet.core.exceptions import DataError
 
 
 def _hourly_index(n: int, start: str = "2020-01-01") -> pd.DatetimeIndex:

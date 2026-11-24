@@ -263,7 +263,7 @@ def to_normet_frame(
 
     ``normalise`` returns a frame indexed by ``date`` carrying ``observed`` and
     ``normalised``, plus one ``qNNN`` column per requested quantile. Everything
-    downstream keys off that shape rather than off a type: :func:`normet.report`
+    downstream keys off that shape rather than off a type: :func:`normet.reporting.report`
     dispatches its automatic plot on ``{"observed", "normalised"}`` being present
     and picks the outermost ``qNNN`` columns as the shaded band, and
     :func:`normet.normalise_plot` defaults to the same two names. Chronos-2 calls
@@ -1814,7 +1814,7 @@ class Chronos2Estimator:
             band (``counterfactual_p10`` / ``counterfactual_p90`` and
             ``fraction_outside_interval``). The fit rides along on the result
             (``calibration``) with its cross-validated coverage table, and a
-            :class:`~normet.exceptions.CalibrationWarning` names the level it
+            :class:`~normet.core.exceptions.CalibrationWarning` names the level it
             could not bring onto target.
         past_only_covariates : sequence of str, optional
             Historical covariates included only before ``intervention_date``.

@@ -54,8 +54,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from normet import style as S
 from normet.utils._time import to_datetime_coerced
+from normet.viz import style as S
 
 from ._clock import TaskClock
 from ._errors import read_error

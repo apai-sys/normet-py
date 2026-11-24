@@ -2,7 +2,7 @@
 
 File → Load Example and the welcome's Examples card list :data:`EXAMPLES`: the normet
 paper's own case studies at London Marylebone Road (MY1), real AURN observations with
-ERA5 meteorology (:mod:`normet.datasets`), each opened with the target and the
+ERA5 meteorology (:mod:`normet.data.datasets`), each opened with the target and the
 predictors the paper used ticked; and a synthetic site whose signals are known, made on
 the fly. The synthetic control panel has an example of its own, in the SCM Studio.
 

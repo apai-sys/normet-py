@@ -11,7 +11,7 @@ from normet.analysis.normalise import (
     _format_quantile_name,
     generate_resampled,
 )
-from normet.exceptions import DataError
+from normet.core.exceptions import DataError
 
 # ---------------------------------------------------------------------------
 # _format_quantile_name
@@ -337,7 +337,7 @@ def test_a_model_feature_missing_from_the_frame_is_refused(monkeypatch):
     import sys
 
     from normet.analysis.normalise import normalise
-    from normet.exceptions import ConfigError
+    from normet.core.exceptions import ConfigError
 
     normalise_mod = sys.modules["normet.analysis.normalise"]
     monkeypatch.setattr(normalise_mod, "ml_predict", lambda model, df, **kw: np.full(len(df), 1.0))

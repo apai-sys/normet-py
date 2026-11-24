@@ -170,7 +170,7 @@ def test_tables_say_which_row_is_wrong(studio):
 
 
 def _example_tdumps(tmp_path, n=2):
-    from normet.datasets import example_traj_dir
+    from normet.data.datasets import example_traj_dir
 
     src = sorted(example_traj_dir().glob("tdump_*"))[:n]
     return [shutil.copy(p, tmp_path / p.name) for p in src]

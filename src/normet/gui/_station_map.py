@@ -46,7 +46,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from normet import style as S
+from normet.viz import style as S
 
 from . import _basemap
 from ._widgets import _canvas_class, adaptive_layout

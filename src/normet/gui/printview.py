@@ -1,5 +1,5 @@
 """A figure for print: a tab's figure laid out at the size a journal prints it, in the
-lettering its guide asks for (:mod:`normet.figstyle`), shown at that size -- fitted to
+lettering its guide asks for (:mod:`normet.viz.figstyle`), shown at that size -- fitted to
 the window as it opens, or its actual size on the screen -- beside what the guide asks of
 it, read from the figure as drawn; saved as it is shown, a raster file at the resolution
 chosen.
@@ -52,7 +52,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from normet import figstyle as FS
+from normet.viz import figstyle as FS
 
 from .theme import apply_figure_theme, muted_color
 

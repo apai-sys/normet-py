@@ -1,4 +1,4 @@
-"""Figures for print (normet.figstyle): formulas written as chemistry writes
+"""Figures for print (normet.viz.figstyle): formulas written as chemistry writes
 them, a figure laid out at a journal's column width in its lettering and put back as it
 was, its panels lettered, what the journal's guide asks read from the figure as drawn,
 and the file written at its size exactly with its fonts embedded."""
@@ -14,9 +14,9 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 
-from normet import figstyle as FS  # noqa: E402
-from normet.figstyle import MM, PRESETS  # noqa: E402
-from normet.style import formula, plain  # noqa: E402
+from normet.viz import figstyle as FS  # noqa: E402
+from normet.viz.figstyle import MM, PRESETS  # noqa: E402
+from normet.viz.style import formula, plain  # noqa: E402
 
 
 @pytest.mark.parametrize(

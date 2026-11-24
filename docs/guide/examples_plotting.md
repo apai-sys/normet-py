@@ -1,6 +1,6 @@
 # Example: Comprehensive Visualisation and Plotting Suite
 
-This recipe tours the core visualisations in the `normet.plotting` suite. These plotting functions are designed to create publication-quality figures for environmental research. Every function shown here is exported at the top level, so `nm.<name>` works after `import normet as nm`; the API reference lists the full set, including `wind_rose`, `pollution_rose`, `cycle_profiles` and `scm_dashboard`.
+This recipe tours the core visualisations in the `normet.viz.plotting` suite. These plotting functions are designed to create publication-quality figures for environmental research. Every function shown here is exported at the top level, so `nm.<name>` works after `import normet as nm`; the API reference lists the full set, including `wind_rose`, `pollution_rose`, `cycle_profiles` and `scm_dashboard`.
 
 ---
 

@@ -163,7 +163,7 @@ def main(argv: list[str] | None = None, *, splash: object | None = None) -> int:
     import matplotlib
 
     matplotlib.use("QtAgg")
-    from normet.style import apply_style
+    from normet.viz.style import apply_style
 
     apply_style()  # every figure in the journal style; exports cropped tight
 

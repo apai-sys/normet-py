@@ -15,8 +15,11 @@ The main sub-packages are also documented individually below.
    normet.model
    normet.foundation
    normet.counterfactual
-   normet.benchmarks
-   normet.plotting
+   normet.viz
+   normet.reporting
+   normet.eval
+   normet.app
+   normet.core
    normet.utils
    normet.io
 

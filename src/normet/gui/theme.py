@@ -4,7 +4,7 @@ The window follows the
 system's appearance (macOS / Windows / Linux dark mode, through Qt's colour
 scheme) unless View → Appearance pins it to Light or Dark.
 
-Figures are always *drawn* in the light colours of :mod:`normet.style` (or
+Figures are always *drawn* in the light colours of :mod:`normet.viz.style` (or
 matplotlib's defaults, for one drawn without it) — normet's plotting helpers,
 the HTML report and scripts all share one look — and a
 figure shown on a dark window is recoloured in place by
@@ -35,7 +35,7 @@ DARK = {
     "grid": "#38383a",
 }
 
-#: The light colours -- normet.style's, and matplotlib's defaults -- mapped to the dark
+#: The light colours -- normet.viz.style's, and matplotlib's defaults -- mapped to the dark
 #: theme's by role.
 _TEXT = {"#000000": DARK["ink"], "#1a1a1a": DARK["ink"], "#333333": DARK["tick"]}
 _LINE = {

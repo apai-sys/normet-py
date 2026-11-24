@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from normet.report import generate_html
+from normet.reporting.report import generate_html
 from normet.utils.provenance import make_run
 
 needs_click = pytest.mark.skipif(
@@ -62,7 +62,7 @@ def test_generate_html_for_scm(scm_panel, tmp_path):
 
 
 def test_report_to_markdown_minimal(tmp_path):
-    from normet.report import report_to_markdown
+    from normet.reporting.report import report_to_markdown
 
     dates = pd.date_range("2024-01-01", periods=20, freq="D")
     result = pd.DataFrame(
@@ -86,7 +86,7 @@ def test_report_to_markdown_minimal(tmp_path):
 
 
 def test_generate_html_for_bayesian_scm(tmp_path):
-    from normet.report import generate_html
+    from normet.reporting.report import generate_html
 
     dates = pd.date_range("2023-01-01", periods=30, freq="D")
     result = pd.DataFrame(
@@ -119,7 +119,7 @@ def test_cli_report_to_markdown(tmp_path):
     import joblib
     from click.testing import CliRunner
 
-    from normet.cli import _build_cli
+    from normet.app.cli import _build_cli
 
     dates = pd.date_range("2024-01-01", periods=20, freq="D")
     result = pd.DataFrame(
@@ -219,8 +219,8 @@ def test_a_report_figure_in_chinese():
     from matplotlib.text import Text
 
     from normet.gui._i18n import figure_font
-    from normet.plotting import normalise_plot
-    from normet.report import translate_figure
+    from normet.reporting.report import translate_figure
+    from normet.viz.plotting import normalise_plot
 
     if figure_font("zh") is None:
         pytest.skip("no face with Chinese characters on this machine")
@@ -242,7 +242,7 @@ def test_cli_report_in_chinese(tmp_path):
     import joblib
     from click.testing import CliRunner
 
-    from normet.cli import _build_cli
+    from normet.app.cli import _build_cli
 
     run_file = tmp_path / "run.joblib"
     joblib.dump(_normalise_run(), run_file)
@@ -279,8 +279,8 @@ def test_auto_plot_handles_imputation_pdp_and_backtest(monkeypatch):
     """_auto_plot recognises Chronos-2 imputation, PDP, and backtest lead frames."""
     import matplotlib.pyplot as plt
 
-    from normet import plotting
-    from normet.report import _auto_plot
+    from normet.reporting.report import _auto_plot
+    from normet.viz import plotting
 
     called: list[str] = []
     orig_plot_imp = plotting.plot_imputation

@@ -1,4 +1,4 @@
-"""Comprehensive tests for Data Preparation, Model Training, and Evaluation v2."""
+"""Data preparation, model training/backends/IO, and evaluation metrics and CV."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from normet.analysis.verification import (
 from normet.backends import backend_registry
 from normet.backends.flaml_backend import train_flaml
 from normet.backends.lgb_backend import LgbModel, train_lgb
-from normet.exceptions import DataError
+from normet.core.exceptions import DataError
 from normet.model.io import load_model, load_model_metadata, save_model
 from normet.model.predict import ml_predict, ml_predict_dask
 from normet.model.train import build_model, train_model
@@ -1214,7 +1214,7 @@ def test_probabilistic_verification_suite() -> None:
     assert np.allclose(cal["pred_mean"], cal["obs_mean"], atol=0.6)
 
 
-def test_top_level_v2_exports() -> None:
+def test_top_level_exports() -> None:
     expected = [
         "screen_aq_data",
         "add_met_physics_features",

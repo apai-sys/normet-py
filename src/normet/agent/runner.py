@@ -40,7 +40,7 @@ def main(folder: str) -> int:
     try:
         import click
 
-        from normet.cli import _build_cli
+        from normet.app.cli import _build_cli
 
         try:
             _build_cli().main(args=job["argv"], prog_name="normet", standalone_mode=False)

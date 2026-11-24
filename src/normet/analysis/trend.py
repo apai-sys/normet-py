@@ -43,7 +43,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from ..exceptions import DataError
+from ..core.exceptions import DataError
 from ..utils.logging import get_logger
 
 log = get_logger(__name__)
@@ -458,7 +458,7 @@ def mann_kendall(
         e.g. 24 for hourly-with-diurnal-structure, 7 for daily-with-weekly,
         12 for monthly-with-annual. The record must contain a whole number of
         full periods after dropping missing values; anything else raises
-        :class:`~normet.exceptions.DataError` rather than testing uneven
+        :class:`~normet.core.exceptions.DataError` rather than testing uneven
         groups, which is where the variance formula silently breaks. Grouping
         is by *record position* (value ``m`` of each block of ``period``), so
         the alignment assumes a gap-free record: missing hours shift what

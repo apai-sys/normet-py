@@ -1202,7 +1202,7 @@ INNER.update(
         "the y axis of panel {s0}": "子图 {s0} 的 y 轴",
     }
 )
-# For print (normet.gui.printview, normet.figstyle): the dialog, the journals' guides and
+# For print (normet.gui.printview, normet.viz.figstyle): the dialog, the journals' guides and
 # what they ask, read from the figure.
 TEXTS.update(
     {

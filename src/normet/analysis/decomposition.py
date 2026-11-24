@@ -18,7 +18,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from ..exceptions import ConfigError, DataError, ModelError
+from ..core.exceptions import ConfigError, DataError, ModelError
 from ..foundation.estimator import CHRONOS_BACKEND, resolve_n_samples
 from ..io.trajectory import is_trajectory_qc_column
 from ..model.predict import ml_predict

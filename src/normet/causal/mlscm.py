@@ -9,7 +9,7 @@ from typing import Any
 
 import pandas as pd
 
-from ..exceptions import ExperimentalWarning
+from ..core.exceptions import ExperimentalWarning
 from ..model.predict import ml_predict
 from ..model.train import build_model
 from ..utils.logging import get_logger

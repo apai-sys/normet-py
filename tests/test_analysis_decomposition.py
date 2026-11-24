@@ -16,7 +16,7 @@ import normet.analysis.decomposition
 from normet.analysis.decomposition import _effective_cores, decom_emi, decom_met, decompose
 
 # Import module and get the actual module objects from sys.modules
-from normet.exceptions import ConfigError, DataError
+from normet.core.exceptions import ConfigError, DataError
 
 decomposition_mod = sys.modules["normet.analysis.decomposition"]
 
@@ -202,7 +202,7 @@ def test_emission_decomposition_is_refused_on_the_zero_shot_backend():
     import pytest
 
     from normet import decompose
-    from normet.exceptions import ConfigError
+    from normet.core.exceptions import ConfigError
 
     df = pd.DataFrame(
         {
@@ -221,7 +221,7 @@ def test_zero_shot_meteorology_decomposition_needs_meteorological_covariates():
     import pytest
 
     from normet import decompose
-    from normet.exceptions import ConfigError
+    from normet.core.exceptions import ConfigError
 
     df = pd.DataFrame(
         {

@@ -1270,7 +1270,7 @@ def _summary_from_rows(
     pinball_fn: Any,
 ) -> dict[str, Any]:
     """Compute probabilistic verification metrics for one set of backtest rows."""
-    from ..exceptions import DataError
+    from ..core.exceptions import DataError
 
     mid_i = int(np.argmin(np.abs(q_levels - 0.5)))
     finite = np.isfinite(y) & np.isfinite(q_mat).all(axis=1)

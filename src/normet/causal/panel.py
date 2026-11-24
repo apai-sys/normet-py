@@ -6,7 +6,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from ..exceptions import DataError
+from ..core.exceptions import DataError
 from ..utils._time import to_datetime_coerced
 from ..utils.logging import get_logger
 
@@ -101,7 +101,7 @@ def prepare_panel(
         coverage screen, not to fit anything here.
     treated_unit : str, optional
         Unit ID to always keep regardless of its coverage. Raises
-        :class:`~normet.exceptions.DataError` if it's still incomplete after
+        :class:`~normet.core.exceptions.DataError` if it's still incomplete after
         interpolation (silently dropping the treated unit would be worse
         than failing loudly).
     min_coverage : float, default 0.65

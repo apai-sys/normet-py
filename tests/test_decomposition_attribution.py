@@ -21,7 +21,7 @@ import pytest
 import normet.analysis.decomposition  # noqa: F401  (registers the module)
 from normet import decompose
 from normet.analysis.decomposition import DecomposeConfig, decom_emi, decom_met
-from normet.exceptions import ConfigError
+from normet.core.exceptions import ConfigError
 
 dmod = sys.modules["normet.analysis.decomposition"]
 

@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from normet.plotting import (
+from normet.viz.plotting import (
     decomposition_stack,
     pdp_grid,
     polar_plot,
@@ -87,7 +87,7 @@ def test_scm_dashboard_minimal(scm_panel):
 
 
 def test_time_series_plot_minimal():
-    from normet.plotting import time_series_plot
+    from normet.viz.plotting import time_series_plot
 
     dates = pd.date_range("2024-01-01", periods=30, freq="D")
     df = pd.DataFrame(
@@ -106,7 +106,7 @@ def test_time_series_plot_minimal():
 
 
 def test_normalise_plot_minimal():
-    from normet.plotting import normalise_plot
+    from normet.viz.plotting import normalise_plot
 
     dates = pd.date_range("2024-01-01", periods=30, freq="D")
     df = pd.DataFrame(
@@ -126,7 +126,7 @@ def test_normalise_plot_minimal():
 
 
 def test_plot_bayesian_scm_minimal():
-    from normet.plotting import plot_bayesian_scm
+    from normet.viz.plotting import plot_bayesian_scm
 
     dates = pd.date_range("2023-01-01", periods=30, freq="D")
     res = {
@@ -201,7 +201,7 @@ def test_pdp_grid_prefers_quantile_envelope_with_std_fallback():
 
 
 def test_plot_attention_attribution_and_validation():
-    from normet.plotting import plot_attention_attribution
+    from normet.viz.plotting import plot_attention_attribution
 
     dates = pd.date_range("2024-01-01", periods=6, freq="h")
     attrib = {
@@ -243,7 +243,7 @@ def test_plot_attention_attribution_and_validation():
 
 
 def test_plot_imputation_with_gaps_and_intervals():
-    from normet.plotting import plot_imputation
+    from normet.viz.plotting import plot_imputation
 
     dates = pd.date_range("2024-01-01", periods=24, freq="h")
     obs = np.linspace(10.0, 33.0, 24)
@@ -278,7 +278,7 @@ def test_transport_plots_render_cleanly():
         invert_source_footprints,
         wcwt,
     )
-    from normet.plotting import (
+    from normet.viz.plotting import (
         plot_footprint_inversion,
         plot_receptor_grid,
         plot_trajectory_clusters,
@@ -329,7 +329,7 @@ def test_decomposition_stack_diverging_and_shapley_heatmap():
     import matplotlib.pyplot as plt
 
     from normet.analysis.decomposition import ShapleyInteractionResult
-    from normet.plotting import plot_shapley_interactions
+    from normet.viz.plotting import plot_shapley_interactions
 
     dates = pd.date_range("2024-01-01", periods=24, freq="D")
     # Emission frame must exclude emi_total automatically so totals aren't double-stacked.

@@ -1106,7 +1106,7 @@ def figure_texts(fig, lang: str | None = None):
         if new != en and "$" in new:
             # Mathtext sets the whole text in its own face, which has no Chinese: the
             # formula is written out in sub- and superscripts instead (NO₂).
-            from normet.style import plain
+            from normet.viz.style import plain
 
             new = plain(new)
         if new != shown:

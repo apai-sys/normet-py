@@ -202,6 +202,15 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
     `pit_diagnostics` and `calibration_curve` for probabilistic diagnostics.
 
 ### Changed
+- **Package layout (`normet`)**: the loose top-level modules now live in
+  subpackages — `normet.viz` (`plotting`, `style`, `figstyle`),
+  `normet.reporting` (`report`), `normet.app` (`cli`, `mcp_server`),
+  `normet.core` (`exceptions`, `i18n`), `normet.eval` (`benchmarks`) and
+  `normet.data` (`datasets`, beside the CSV.GZ assets). The old module
+  paths remain as aliases of the same module objects, so
+  `from normet.plotting import ...`, the `normet.cli:main` /
+  `normet.mcp_server:main` entry points and
+  `normet.datasets.load_my1_pm25()` keep working unchanged.
 - **De-weathering defaults restored (`normet.analysis.normalise`, `nm.pdp` /
   `nm.ale`, `nm.rolling`, `nm.decompose_uncertainty`, `nm.do_all`,
   `nm.do_all_multisite`, `nm.prepare_data`, `nm.train_lgb`)**:

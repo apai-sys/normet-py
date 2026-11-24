@@ -9,9 +9,7 @@ from importlib.metadata import version as _version
 __version__ = _version("normet")
 
 # --- Exceptions ---
-from . import datasets
-from .benchmarks import SyntheticBenchmark, evaluate_benchmark, make_synthetic_benchmark
-from .exceptions import (
+from .core.exceptions import (
     CalibrationWarning,
     ConfigError,
     DataError,
@@ -19,6 +17,8 @@ from .exceptions import (
     ModelError,
     NormetError,
 )
+from .data import datasets
+from .eval.benchmarks import SyntheticBenchmark, evaluate_benchmark, make_synthetic_benchmark
 
 # --- Modelling ---
 from .model import (
@@ -526,7 +526,13 @@ __all__ = [
     "report_to_markdown",
 ]
 
-from .plotting import (
+from .reporting.report import (
+    generate_html as generate_html_report,
+)
+from .reporting.report import (
+    report_to_markdown,
+)
+from .viz.plotting import (
     cycle_profiles,
     decomposition_stack,
     normalise_plot,
@@ -544,10 +550,4 @@ from .plotting import (
     scm_dashboard,
     time_series_plot,
     wind_rose,
-)
-from .report import (
-    generate_html as generate_html_report,
-)
-from .report import (
-    report_to_markdown,
 )

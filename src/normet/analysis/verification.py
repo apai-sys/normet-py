@@ -40,7 +40,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from ..exceptions import DataError
+from ..core.exceptions import DataError
 from ..utils._config import DEFAULT_SEED
 
 __all__ = [

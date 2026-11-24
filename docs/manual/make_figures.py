@@ -494,7 +494,7 @@ def main():
     from normet.gui import uilang
 
     uilang.install(app)  # the window's texts in LANG, before any window is built
-    from normet.style import apply_style
+    from normet.viz.style import apply_style
 
     apply_style()  # the figures' style, as normet-gui sets it
     keep = [main_figures(app), scm_figures(None), transport_figures(), data_studio_figure()]

@@ -19,7 +19,7 @@ import pandas as pd
 import pytest
 
 from normet.analysis.decomposition import DecomposeConfig, _rank_by_sensitivity
-from normet.exceptions import ConfigError
+from normet.core.exceptions import ConfigError
 from normet.foundation import (
     Chronos2Estimator,
     CounterfactualResult,
@@ -592,7 +592,7 @@ def test_converted_frame_drives_the_html_report(dew_frame, tmp_path):
     """report._auto_plot dispatches on the column names, so this is the real check."""
     pytest.importorskip("matplotlib")
     from normet import generate_html_report, make_run
-    from normet.report import _auto_plot
+    from normet.reporting.report import _auto_plot
 
     out = to_normet_frame(
         dew_frame, point_col="dew_p50", quantile_cols={0.1: "dew_p10", 0.9: "dew_p90"}
@@ -987,7 +987,7 @@ def test_zero_shot_decomposition_honours_an_explicit_variable_order(chronos2_pip
     silently partially applied.
     """
     from normet import decompose
-    from normet.exceptions import ConfigError
+    from normet.core.exceptions import ConfigError
 
     n = 700
     rng = np.random.default_rng(6)
