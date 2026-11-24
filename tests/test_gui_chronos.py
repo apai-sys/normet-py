@@ -308,6 +308,33 @@ def test_chronos_gui_helpers_icn_and_save_load(monkeypatch, tmp_path):
     assert out.index.name == "date"
     assert {"observed", "normalised", "q100", "q500", "q900"} <= set(out.columns)
 
+    # The raw draws survive the run: saved once, re-aggregated without a model pass.
+    bank = tmp_path / "draws.json.gz"
+    saved_out = _chronos.deweather(
+        est,
+        df_prep,
+        ["ws"],
+        with_quantiles=True,
+        n_samples=2,
+        method="icn",
+        estimate="paired",
+        save_bank=bank,
+    )
+    assert bank.exists()
+    loaded_out = _chronos.deweather(
+        est,
+        df_prep,
+        ["ws"],
+        with_quantiles=True,
+        n_samples=2,
+        method="icn",
+        estimate="paired",
+        bank_path=bank,
+    )
+    assert np.allclose(saved_out["normalised"], loaded_out["normalised"], equal_nan=True)
+    with pytest.raises(ValueError, match="require method='icn'"):
+        _chronos.deweather(est, df_prep, ["ws"], False, method="deweather", save_bank=bank)
+
     saved = _chronos.save_estimator(est, tmp_path / "gui-ckpt")
     assert (saved / "normet_estimator.json").exists()
     monkeypatch.setattr(est_mod, "resolve_device", lambda req=None: req or "cpu")
