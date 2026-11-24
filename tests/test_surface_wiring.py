@@ -306,3 +306,42 @@ def test_run_scm_routes_deweathered_and_transport(monkeypatch: pytest.MonkeyPatc
     )
     assert out is synthetic
     assert seen["spillover_exposure"] == "F"
+
+
+def test_cli_met_features_adds_physics_columns(tmp_path) -> None:
+    from click.testing import CliRunner
+
+    from normet.app.cli import _build_cli
+
+    src = tmp_path / "in.csv"
+    pd.DataFrame(
+        {
+            "date": pd.date_range("2024-01-01", periods=6, freq="h"),
+            "ws": [1.0] * 6,
+            "wd": [180.0] * 6,
+            "blh": [500.0] * 6,
+            "t2m": [280.0] * 6,
+            "rh": [50.0] * 6,
+        }
+    ).to_csv(src, index=False)
+    out = tmp_path / "out.csv"
+    result = CliRunner().invoke(_build_cli(), ["met-features", str(src), "--out", str(out)])
+    assert result.exit_code == 0, result.output
+    got = pd.read_csv(out)
+    assert {"u_wind", "v_wind", "ventilation_coef", "vpd"} <= set(got.columns)
+
+
+def test_tools_make_met_features_argv(monkeypatch: pytest.MonkeyPatch) -> None:
+    tools = Tools()
+    captured: dict = {}
+    monkeypatch.setattr(tools, "path", lambda p: str(p))
+    monkeypatch.setattr(
+        tools, "_start", lambda kind, argv, label: captured.update(kind=kind, argv=argv) or "ok"
+    )
+    tools.make_met_features("in.csv", include_memory=True, group_col="site")
+    argv = captured["argv"]
+    assert captured["kind"] == "met_features"
+    assert argv[:2] == ["met-features", "in.csv"]
+    assert "--include-memory" in argv
+    assert argv[argv.index("--group-col") + 1] == "site"
+    assert argv[argv.index("--out") + 1] == "met_features.csv"

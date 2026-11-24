@@ -485,6 +485,28 @@ def build_server(tools: Any = None) -> Any:
         )
 
     @tool
+    def normet_make_met_features(
+        input_path: str,
+        include_memory: bool = False,
+        group_col: str | None = None,
+        residence_tau_hours: float | None = None,
+        temp_unit: str | None = None,
+        label: str = "",
+    ) -> str:
+        """Start a job: add meteorological physics features (wind components,
+        ventilation, VPD; with include_memory the causal ODE residence integrals)
+        to a table, writing met_features.csv. Set group_col (e.g. site) so the
+        memory state resets per panel unit. Poll normet_job_status."""
+        return t.make_met_features(
+            input_path,
+            include_memory=include_memory,
+            group_col=group_col,
+            residence_tau_hours=residence_tau_hours,
+            temp_unit=temp_unit,
+            label=label,
+        )
+
+    @tool
     def normet_invert_multisite(
         footprints: dict[str, str],
         series: str,

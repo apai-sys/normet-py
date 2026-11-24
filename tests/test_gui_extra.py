@@ -201,3 +201,25 @@ def test_chat_tool_toggles_from_the_keyboard(qapp):
         QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Return, Qt.KeyboardModifier.NoModifier)
     )
     assert not bad.opened
+
+
+def test_add_met_features_ingests_the_enriched_table(qapp, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    from normet.gui.main_window import MainWindow
+
+    win = MainWindow()
+    try:
+        win.load_example()
+        n0 = win.df_raw.shape[1]
+        monkeypatch.setattr(
+            QMessageBox,
+            "question",
+            staticmethod(lambda *args, **kwargs: QMessageBox.StandardButton.No),
+        )
+        win.add_met_features()
+        assert win.df_raw.shape[1] > n0
+        assert {"u_wind", "v_wind", "ventilation_coef", "vpd"} <= set(win.df_raw.columns)
+        assert "physics features" in win.file_label.text()
+    finally:
+        win.close()
