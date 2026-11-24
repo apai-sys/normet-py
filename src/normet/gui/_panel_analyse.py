@@ -13,10 +13,12 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
@@ -204,6 +206,30 @@ class AnalysePanelMixin(QMainWindow):
             "high-error anchors contribute less. off = unweighted (ICN-v1)."
         )
         cn_form.addRow("Surprise tau", self.chronos_norm_surprise)
+        self.chronos_norm_bank = QLineEdit()
+        self.chronos_norm_bank.setPlaceholderText(
+            "optional draw-bank file (.json.gz); Save writes it, Load re-aggregates it"
+        )
+        self.chronos_norm_bank.setToolTip(
+            "ICN draws can outlive the GPU run: Save writes them, Load turns a\n"
+            "saved bank into a normalised series on CPU (no model pass). A path\n"
+            "typed here without Load… is treated as the Save target."
+        )
+        self._icn_bank_load = False
+        bank_row = QHBoxLayout()
+        bank_row.setContentsMargins(0, 0, 0, 0)
+        self.icn_bank_save_btn = QPushButton("Save…")
+        self.icn_bank_save_btn.setToolTip("Write this run's raw ICN draw bank.")
+        self.icn_bank_save_btn.clicked.connect(self._choose_icn_bank_save)
+        self.icn_bank_load_btn = QPushButton("Load…")
+        self.icn_bank_load_btn.setToolTip(
+            "Re-aggregate a saved bank on the next Run normalisation, then clear."
+        )
+        self.icn_bank_load_btn.clicked.connect(self._choose_icn_bank_load)
+        bank_row.addWidget(self.chronos_norm_bank, 1)
+        bank_row.addWidget(self.icn_bank_save_btn)
+        bank_row.addWidget(self.icn_bank_load_btn)
+        cn_form.addRow("Draw bank", wrap_row(bank_row))
         self._chronos_norm_method_changed(self.chronos_norm_method.currentText())
         self._chronos_norm_box.setVisible(False)
         nf.addRow(self._chronos_norm_box)
@@ -221,6 +247,31 @@ class AnalysePanelMixin(QMainWindow):
         self.chronos_norm_estimate.setEnabled(is_icn)
         self.chronos_norm_log.setEnabled(is_icn)
         self.chronos_norm_surprise.setEnabled(is_icn)
+        self.chronos_norm_bank.setEnabled(is_icn)
+        self.icn_bank_save_btn.setEnabled(is_icn)
+        self.icn_bank_load_btn.setEnabled(is_icn)
+
+    def _choose_icn_bank_save(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save ICN draw bank",
+            "normet_icn_bank.json.gz",
+            "Draw bank (*.json.gz *.json)",
+        )
+        if path:
+            self.chronos_norm_bank.setText(path)
+            self._icn_bank_load = False
+
+    def _choose_icn_bank_load(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load ICN draw bank",
+            "",
+            "Draw bank (*.json.gz *.json)",
+        )
+        if path:
+            self.chronos_norm_bank.setText(path)
+            self._icn_bank_load = True
 
     def _norm_engine_changed(self, engine: str) -> None:
         self._dml_box.setVisible(engine == "dml")

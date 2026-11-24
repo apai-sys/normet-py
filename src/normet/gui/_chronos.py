@@ -128,17 +128,23 @@ def deweather(
     estimate: str = "level",
     log_transform: bool = False,
     surprise_tau: float = 0.0,
+    save_bank: str | Path | None = None,
+    bank_path: str | Path | None = None,
 ) -> pd.DataFrame:
     """De-weather on normet's schema so the existing plot and report paths apply.
 
     ``n_samples`` is the dominant cost here -- see :data:`DEFAULT_SAMPLES`.
     ``method="icn"`` routes through In-Context Normalisation (ICN-v1) and
     supports ``estimate="level"|"paired"``, ``log_transform=True`` and
-    ``surprise_tau > 0`` (anchor-error gating).
+    ``surprise_tau > 0`` (anchor-error gating). ``save_bank`` writes the raw
+    draws of that run; ``bank_path`` re-aggregates such a file instead of
+    running the model (GPU once, CPU afterwards).
     """
     indexed = to_indexed_frame(df_prep)
     quantiles = QUANTILES if with_quantiles else (0.5,)
     method_norm = str(method).lower()
+    if (save_bank is not None or bank_path is not None) and method_norm != "icn":
+        raise ValueError("save_bank/bank_path require method='icn'")
     if method_norm == "icn":
         estimate_norm = str(estimate).lower()
         if estimate_norm not in ("level", "paired"):
@@ -155,13 +161,33 @@ def deweather(
             log_transform=bool(log_transform),
             surprise_tau=float(surprise_tau),
         )
-        res = estimator.normalise_in_context(
-            add_calendar_covariates(indexed),
-            "value",
-            design=design,
-            met_features=met_features,
-            quantiles=quantiles,
-        )
+        df_icn = add_calendar_covariates(indexed)
+        if bank_path is not None and str(bank_path):
+            from normet.foundation import ICNDrawBank
+
+            res = ICNDrawBank.load(bank_path).aggregate(schema="normet")
+        elif save_bank is not None and str(save_bank):
+            from normet.foundation import build_icn_draw_bank
+
+            bank = build_icn_draw_bank(
+                estimator,
+                df_icn,
+                "value",
+                design=design,
+                met_features=met_features,
+                schema="normet",
+                quantiles=quantiles,
+            )
+            bank.save(Path(save_bank))
+            res = bank.aggregate(schema="normet")
+        else:
+            res = estimator.normalise_in_context(
+                df_icn,
+                "value",
+                design=design,
+                met_features=met_features,
+                quantiles=quantiles,
+            )
         out = res.to_normet_frame(estimate=estimate_norm)
         out.index.name = "date"
         return out

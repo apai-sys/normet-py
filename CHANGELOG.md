@@ -30,7 +30,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   `--backend deweathered|transport` with `--covariates`, `--deweather-method`,
   and `--spillover-exposure`. The GUI gains a Normalise engine selector
   (standard / DML / conserved Ox / regime-conditioned), control-variate and
-  block-mode toggles, ICN surprise weighting, an ICN decomposition engine with
+  block-mode toggles, ICN surprise weighting and draw-bank Save/Load (the raw
+  draws outlive the GPU run), an ICN decomposition engine with
   pairwise-interaction readout, synthetic-benchmark load/score menu actions,
   the two staged SCM backends in SCM Studio, and multi-receptor joint inversion
   in Transport Studio.

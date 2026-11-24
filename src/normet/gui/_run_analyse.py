@@ -225,6 +225,12 @@ class AnalyseRunMixin(QMainWindow):
                 log_tf = bool(
                     hasattr(self, "chronos_norm_log") and self.chronos_norm_log.isChecked()
                 )
+                bank = (
+                    self.chronos_norm_bank.text().strip()
+                    if hasattr(self, "chronos_norm_bank")
+                    else ""
+                )
+                use_bank = bool(bank) and getattr(self, "_icn_bank_load", False)
                 self.runner.submit(
                     f"ICN-v1 ({estimate}, chronos-2)",
                     _chronos.deweather,
@@ -239,7 +245,10 @@ class AnalyseRunMixin(QMainWindow):
                     estimate=estimate,
                     log_transform=log_tf,
                     surprise_tau=float(self.chronos_norm_surprise.value()),
+                    save_bank=None if use_bank else (bank or None),
+                    bank_path=bank if use_bank else None,
                 )
+                self._icn_bank_load = False
             else:
                 self.runner.submit(
                     "de-weather (chronos-2)",

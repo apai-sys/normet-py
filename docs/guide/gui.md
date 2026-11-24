@@ -45,8 +45,9 @@ default). Step 2's **engine** selector chooses standard Monte-Carlo
 (optionally with variance-reduced control variates and seam-free Markov-bridge
 block resampling), orthogonal Double-ML deweathering, conserved
 $\mathrm{O_x\text{–}NO_x}$ deweathering, or precursor-regime conditioning; on
-chronos-2 the in-context path takes a surprise weight, and Step 3 can decompose
-in-context (`icn`) with a pairwise-interaction readout. Step 4's Rolling plot shows the overall rolling mean (± spread across
+chronos-2 the in-context path takes a surprise weight and can save its raw
+draws for later CPU-only re-aggregation (Draw bank Save/Load), and Step 3 can
+decompose in-context (`icn`) with a pairwise-interaction readout. Step 4's Rolling plot shows the overall rolling mean (± spread across
 overlapping windows), and an adjacent **Multi-scale decomposition** panel differences
 rolling-deweathered series at increasing window widths (14/90/365 d by
 default) against each other and against Step 2's full-record baseline —
