@@ -192,6 +192,9 @@ def main_figures(app):
         "  sd:",
         emi[["date_unix", "day_julian", "weekday", "hour", "emi_noise"]].std().round(2).to_dict(),
     )
+    # The caption quotes the baseline (the mean of the de-weathered level) and
+    # the component spreads; print both from this run so the text can match.
+    print("  baseline:", round(float(emi["emi_base"].mean()), 2))
     # The box's "Run after each emission decomposition" tick is unticked by
     # default, so the decomposition's end did not start the trend and the
     # window's tabs are still where the decomposition put them: this grab
@@ -238,6 +241,18 @@ def main_figures(app):
     win._run_trend()
     t = win.results["trend"]
     print(t.to_string())
+    raw = win._trend_raw
+    print(
+        "  sse:",
+        getattr(raw, "sse_single", None),
+        "->",
+        getattr(raw, "sse_segmented", None),
+        " p:",
+        getattr(raw, "p_value", None),
+    )
+    from normet.gui import _trend
+
+    print("  verdict:", _trend.trend_breaks_verdict(raw, win._trend_name or "series")[1])
     said(win.tab_trend)
     grab(win, "ui_trend_breaks.png")
     win.tre_segments.setValue(1)  # the rest of the run stands on the default
@@ -296,6 +311,13 @@ def main_figures(app):
     print("  columns:", list(met.columns))
     groups = ["Wind", "Temperature and humidity", "Boundary layer and pressure", "Sky and rain"]
     print("  sd:", met[groups].std().round(2).to_dict())
+    # The caption quotes met_total's spread as well as the groups'.
+    print(
+        "  met_total sd:",
+        round(float(met["met_total"].std()), 2),
+        " met_noise sd:",
+        round(float(met["met_noise"].std()), 2),
+    )
     said(win.tab_decom)
     grab(win, "ui_decompose_met.png")
 

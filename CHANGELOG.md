@@ -224,6 +224,14 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
     `pit_diagnostics` and `calibration_curve` for probabilistic diagnostics.
 
 ### Changed
+- **User manual rebuilt for 0.3.0** (`docs/manual/normet_manual.tex` and
+  `normet_manual_zh.tex`, both PDFs): the books now document the v3 engines
+  (DML, conserved Ox–NOx, regime-conditioned, ICN and its draw bank), the
+  synthetic benchmarks, the meteorological physics features, the new SCM
+  backends (ASCM, SDID, Chronos-2, de-weathered, transport), the Transport
+  Studio's receptor maps, clustering and footprint inversion, the 17 CLI
+  subcommands and 26 MCP tools; the screenshots and the example numbers are
+  regenerated from the current package.
 - **Package layout (`normet`)**: the loose top-level modules now live in
   subpackages — `normet.viz` (`plotting`, `style`, `figstyle`),
   `normet.reporting` (`report`), `normet.app` (`cli`, `mcp_server`),

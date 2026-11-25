@@ -64,6 +64,7 @@
 \setlength{\emergencystretch}{2.5em}
 \newcommand{\tab}[1]{\textbf{#1}}
 \newcommand{\NOtwo}{NO\textsubscript{2}}
+\newcommand{\NOx}{NO\textsubscript{x}}
 \newcommand{\PMtwo}{PM\textsubscript{2.5}}
 \newcommand{\ugm}{\ensuremath{\mu}g\,m\textsuperscript{$-3$}}
 \newcommand{\note}[1]{\par\noindent\colorbox{codebg}{\parbox{0.97\linewidth}{\small\textbf{Note.} #1}}\par}
@@ -83,11 +84,12 @@
 {\IfFileExists{../../packaging/assets/normet.png}{\includegraphics[width=3.2cm]{../../packaging/assets/normet.png}\\[1cm]}{}}
 {\Huge\bfseries\color{nmblue} normet\par}
 \vspace{0.4cm}
-{\Large Normalisation, Decomposition and Counterfactual Modelling\\for Environmental Time Series\par}
+{\Large Meteorological Normalisation, Decomposition and Counterfactual\\
+Modelling for Air Quality Time Series\par}
 \vspace{1.2cm}
 {\large\bfseries User Manual\par}
 \vspace{0.3cm}
-{\large Version 1.0.0\par}
+{\large Version 0.3.0\par}
 \vfill
 {\large A desktop application and Python library for removing the weather\\
 from air-quality records and asking what an intervention changed.\par}
@@ -155,27 +157,46 @@ it.
   \item Monte-Carlo meteorological normalisation, with a choice of which variables
         are resampled, uncertainty quantiles, reference pools and conditional
         resampling; an adaptive version that stops when the series has converged.
+  \item Three estimators beyond the plain Monte-Carlo one, on the same result
+        schema: control variates (a variance-reduction correction), Double-ML
+        de-weathering (orthogonalising the weather against the calendar), and
+        Markov-bridge blocks (weather resampled in consecutive blocks, so a
+        multi-hour episode is not broken into independent hours).
+  \item Conserved \NOtwo{}--NO\textsubscript{x} (O\textsubscript{x}) photochemical
+        normalisation, and regime-conditioned normalisation for secondary pollutants
+        whose weather response depends on the precursor regime.
   \item Emission decomposition (trend, seasonal, weekly, diurnal, short-term) and
         meteorological decomposition (one contribution per variable or named group,
-        sequential or Shapley).
+        sequential, Shapley, or second-order Shapley interactions).
   \item Rolling (windowed) normalisation, and a multi-scale decomposition that
         separates the weather's influence by timescale.
   \item Partial-dependence curves of the trained model.
   \item Zero-shot de-weathering with the Chronos-2 time-series foundation model, on
-        the same result schema --- no training needed.
+        the same result schema --- no training needed. In-context normalisation
+        (ICN) turns the model's own forecast error into a paired de-weathering
+        estimate, with an optional surprise gate and a draw bank that stores the raw
+        draws for re-aggregation without the GPU.
   \item Synthetic control on panel data: augmented SCM, classic Abadie SCM,
-        difference-in-differences, matrix completion, robust SCM, ML-SCM and Bayesian
-        SCM, with placebo-in-space and placebo-in-time tests, jackknife and bootstrap
-        bands, and an all-units batch.
+        synthetic difference-in-differences, difference-in-differences, matrix
+        completion, robust SCM, ML-SCM and Bayesian SCM, with placebo-in-space and
+        placebo-in-time tests, jackknife and bootstrap bands, and an all-units batch.
+        A de-weathered backend removes the weather before the donors are fitted, and
+        a transport backend adjusts for downwind plume spillover.
+  \item Synthetic benchmarks (five scenario families with a known truth), scored
+        against the truth from the File menu, and meteorological physics features
+        (ventilation coefficient, wind components, vapour-pressure deficit, and
+        memory terms) computed from the standard meteorological columns.
   \item Data Studio: air quality from the six UK networks, the EEA reporting network
         for Europe, or OpenAQ for most of the world, with reanalysis meteorology,
         merged into a model-ready table (no key for the UK networks or the EEA).
   \item Transport Studio: HYSPLIT back-trajectories turned into transport predictors
-        and joined onto the record.
+        and joined onto the record; regularised footprint inversion from one or
+        several receptors at once.
   \item A command log that writes every action as the call that repeats it; HTML
         reports with provenance; figures laid out for a journal's column.
   \item An Assistant (a language model working in the window) that proposes the
-        target and predictors and reads the results with you.
+        target and predictors and reads the results with you, and an MCP server that
+        exposes 26 \nm{} tools to any Model-Context-Protocol client.
 \end{itemize}
 
 \section{How this manual is organised}
@@ -207,7 +228,7 @@ package on PyPI. Choose the installers for interactive analysis, the package for
 scripting, servers and notebooks.
 
 \section{macOS}
-Open \code{Normet-1.0.0-macos-arm64.dmg} and drag \code{Normet.app} onto the
+Open \code{Normet-0.3.0-macos-arm64.dmg} and drag \code{Normet.app} onto the
 \code{Applications} folder. The application carries its own Python, Qt, FLAML, LightGBM
 and XGBoost, and the Data Studio's readers, so nothing else is needed for the
 de-weathering, synthetic-control and data workflows. The first launch takes longer than
@@ -225,10 +246,10 @@ options are greyed out in the window, with a tooltip naming what is missing; ins
 \nm{} from PyPI with the extra to use them (below).
 
 \section{Windows and Linux}
-On Windows run \code{normet-setup-1.0.0.exe}, an Inno~Setup wizard that adds Start-menu
+On Windows run \code{normet-setup-0.3.0.exe}, an Inno~Setup wizard that adds Start-menu
 and optional desktop shortcuts. The installer is unsigned, so SmartScreen shows
 \emph{Windows protected your PC} on first run: choose \emph{More info} $\rightarrow$
-\emph{Run anyway}. On Linux download \code{normet-1.0.0-x86\_64.AppImage}, mark it
+\emph{Run anyway}. On Linux download \code{Normet-0.3.0-x86\_64.AppImage}, mark it
 executable (\code{chmod +x}) and run it. On a minimal distribution Qt may need
 \code{libegl1 libgl1 libxkbcommon0 libdbus-1-3 libxcb-cursor0}.
 
@@ -238,8 +259,8 @@ operating system; PyInstaller cannot cross-compile) and are attached to its runs
 one locally.
 
 \section{From PyPI}
-\nm{} needs Python~3.10 or newer (3.10--3.12 are tested) and NumPy below 2. The core
-package is small; everything heavier is an extra:
+\nm{} needs Python~3.10 or newer; CI tests 3.10--3.13, and NumPy 1.22 or newer,
+including the 2.x line. The core package is small; everything heavier is an extra:
 \begin{lstlisting}[language=bash]
 python -m venv .venv && source .venv/bin/activate
 pip install "normet[gui,flaml]"      # the desktop app with the AutoML backend
@@ -387,6 +408,68 @@ of the others.
 \paragraph{Reproducibility.} The draws are seeded (\code{seed=7654321} by default), so the
 same model, data and settings give the same series to the last digit.
 
+\paragraph{Control variates.} Every draw is a noisy estimate of the weather-marginalised
+expectation. With \code{control\_variates=True} each prediction has a zero-mean linear
+correction subtracted from it, built from the resampled meteorological values and their
+exact expectation in the pool: the correction averages to zero over the pool, so the
+estimate stays unbiased, while the share of the draw-to-draw variation that the
+covariate values explain is removed. On smooth daily means the gain is small; on hourly
+values with a coarse pool it is where most of the run-to-run jitter lives. Quantiles
+are built from the adjusted draws, so a band shares its central line's level.
+
+\paragraph{Blocks and the Markov bridge.} With \code{block\_hours} greater than one the
+weather is resampled in contiguous blocks of that length rather than one row at a time,
+so lagged and rolling features see a coherent sequence rather than a stitched-together
+one. Independent blocks can still meet at a seam --- a block ending in a calm hour
+followed by one starting in a gale --- which no real day contains.
+\code{block\_mode="markov"} chooses each next block's start from the pool states
+nearest to the previous block's ending meteorology, so consecutive blocks join through
+a plausible transition. Both settings are off by default; \code{"markov"} requires
+\code{block\_hours} greater than one, and the surface says so instead of silently
+falling back to independent draws.
+
+\subsection{Double-ML de-weathering}\label{sec:dmltheory}
+The plain Monte-Carlo scheme has a known failure on long records: the model learns the
+calendar trend from the same rows it is then asked to de-weather, so a multi-week
+emission episode leaks into the weather response and is subtracted from the normalised
+series --- the mechanism is what the synthetic benchmarks of
+Section~\ref{sec:benchtheory} measure. \code{dml\_normalise}
+attacks it with orthogonalisation (Robinson 1988; Chernozhukov et al.\ 2018). The
+record is cut into contiguous time blocks with an embargo of a day on either side; a
+model is fitted on each block's complement and predicts the block out of fold. The slow
+calendar terms (\code{date\_unix}, \code{year}, \code{day\_julian}) are kept out of
+the tree's split space and enter only through a ridge-penalised Fourier baseline whose
+bandwidth \code{cutoff\_days} (30 days) sets the highest slow frequency. The
+normalised series is that slow baseline plus the weather effect averaged over
+resampled meteorology on the out-of-fold predictions, so no row's weather response
+was learned from a row inside the same episode. \code{paired="log\_ratio"} (the
+default) also keeps the observed anomaly, the form that preserves short events.
+\code{n\_splits} (5) and \code{embargo} (24 rows) are the cross-fitting controls.
+
+\subsection{Conserved O\textsubscript{x} and regime-conditioned normalisation}
+\label{sec:chemtheory}
+De-weathering \NOtwo{} and O\textsubscript{3} independently fails in the titration
+regime: a model that has learned ``high \NOtwo{} goes with low O\textsubscript{3}''
+produces the two species on resampled weather as if they were unrelated, so the
+photochemical change is attributed to the weather. \code{normalise\_ox\_invariant}
+de-weathers total odd oxygen $\mathrm{O_x} = \mathrm{O_3} + \mathrm{NO_2}$ and
+$\mathrm{NO_x} = \mathrm{NO} + \mathrm{NO_2}$ in molar units, then repartitions
+O\textsubscript{x} through a meteorology-marginalised \NOtwo{} fraction
+$f_{\mathrm{NO_2}} = \mathrm{NO_2}/\mathrm{O_x}$ evaluated at the de-weathered
+\NOx{} level. The reported species satisfy the conservation identity to numerical
+precision, and \code{conservation\_max\_err} says how far from it the worst timestamp
+fell. The portion of O\textsubscript{3} that the changed \NOtwo{} fraction moves is
+reported separately as the titration reallocation.
+
+\code{normalise\_regime\_conditioned} handles a secondary pollutant whose weather
+response depends on how much precursor is present, e.g.\ O\textsubscript{3} or
+\PMtwo{} against \NOx{} and CO. It de-weathers each precursor first, then fits the
+target on weather plus precursors while the precursors are held on their de-weathered
+trajectories, and marginalises over the weather. The conditioned series and an
+unconditioned one (precursors at observed values) are both returned; their difference
+is the \code{precursor\_regime\_effect} --- how much of the normalised change travels
+through the precursor regime.
+
 \section{Emission decomposition}\label{sec:emission}
 The emission decomposition splits the normalised series into the timescales the calendar
 variables carry, by \emph{nested} normalisation. Five normalisations are run with the
@@ -457,6 +540,26 @@ column per group; a group is fixed and resampled as a unit, so its column includ
 interactions among its members. Every meteorological predictor must be in exactly one
 group. With groups the default attribution is Shapley; without them it is sequential.
 
+\paragraph{Pairwise interactions.} A Shapley value averages an effect over all orders,
+which hides whether two variables act together: a model in which temperature only
+matters through the boundary layer gives both variables large main effects and no hint
+of the dependence. \code{shapley\_interactions} computes the exact second-order
+Grabisch--Roubens index
+\begin{equation}
+  I_{ij} = \sum_{S \subseteq N\setminus\{i,j\}}
+    \frac{|S|!\,(k-|S|-2)!}{(k-1)!}\,
+    \bigl[v(S\cup\{i,j\}) - v(S\cup\{i\}) - v(S\cup\{j\}) + v(S)\bigr],
+\end{equation}
+together with adjusted main effects $I_{ii} = \phi_i - \tfrac12\sum_{j\ne i} I_{ij}$.
+The two sets close exactly, row by row:
+$\sum_i I_{ii} + \sum_{i<j} I_{ij} = \text{met\_explained}$. No extra model
+predictions are needed --- the $2^k$ coalition values already computed for the exact
+Shapley attribution are reused --- so the function requires exact enumeration
+(\code{n\_permutations=None}) and the same $k \le 10$ limit. The summary table lists
+each main effect and interaction with its mean, standard deviation and mean absolute
+value over the record; an interaction whose spread is not small against its mean is a
+statement about the model, not about a particular day.
+
 \section{Rolling normalisation}\label{sec:rolling}
 \code{rolling} normalises the record window by window: windows of \code{window\_days}
 days (14 by default), started every \code{rolling\_every} days (7), each normalised with
@@ -501,12 +604,17 @@ second estimate from a model that never saw the target's own record. Four proper
 decide whether it is the right tool:
 \begin{itemize}\nosep
   \item \textbf{The first \code{context\_length} rows are not a result.} The model needs
-        that much history (2048 rows by default) before it can project, so those rows
-        are seeded with the observed values and the two curves coincide there by
-        construction. Give it years, not months.
+        that much history (2048 rows by default) before it can project, so under
+        \code{deweather} those rows are seeded with the observed values and the two
+        curves coincide there by construction. Under ICN nothing is seeded: the
+        bidirectional passes cover the record, and hours no anchor sees are left blank.
+        Either way, give it years, not months --- a record no longer than
+        context~+~horizon produces nothing at all.
   \item \textbf{Every Monte-Carlo sample is a full forward pass}, so the default is 8
-        samples, not 300. The model runs on CUDA, Apple Silicon (\code{mps}) or the CPU,
-        in that order of preference; the CPU is slow.
+        samples, not 300. Under ICN the count is the counterfactual weather trajectories
+        per anchor (five in the frozen v1 design), and each anchor forecasts its block
+        once from the real history besides. The model runs on CUDA, Apple Silicon
+        (\code{mps}) or the CPU, in that order of preference; the CPU is slow.
   \item \textbf{Position is time.} Chronos-2 counts rows, so the record must be on a
         regular grid; \code{to\_regular\_index} rebuilds it, leaving gaps as missing.
   \item \textbf{Covariate sensitivity is the quality gate.} Nothing was fitted, so there
@@ -519,6 +627,91 @@ The meteorological decomposition has a zero-shot path. The emission decompositio
 rolling normalisation and partial dependence do not: they are defined on a fitted
 model's response to the calendar variables, which Chronos-2 reads off the target's own
 history instead.
+
+\subsection{In-context normalisation}\label{sec:icntheory}
+Resampling the weather for one row at a time asks the model to forecast from a
+meteorological sequence the history never contained, which is out of distribution for a
+model that conditions on its context. \emph{In-context normalisation} (ICN) intervenes
+on a forecast block instead. The record is cut into \emph{anchors}, each with a
+conditioning window of \code{context\_length} rows and a forecast horizon of
+\code{block\_h} hours. At each anchor the model forecasts the block twice: from the
+real history, and from the same history with the block's meteorology replaced by a
+trajectory drawn from the record. The difference is the weather effect on the block,
+and the \emph{level} estimate is the forecast under the counterfactual weather.
+Averaging the forecast error away this way gives a second estimate, the \emph{paired}
+one: the observed anomaly rescaled by (counterfactual level / factual level), which
+keeps an emission event at its observed size instead of shrinking it with the weather
+response. The design axes:
+\begin{description}\nosep
+  \item[intervene] \code{future\_only} (the default; only the forecast block's
+        weather changes) or \code{past\_future} (history and future both, which is
+        \code{deweather}'s marginalisation; on a history-driven model this collapses
+        the weather response).
+  \item[pool] \code{record\_pointwise} (each hour drawn independently),
+        \code{record\_trajectory} (the default; a contiguous block, so the joint
+        structure of the weather is kept) or \code{climatology} (a block starting
+        within 15 days of the forecast's day of year, for short records with a strong
+        seasonal cycle).
+  \item[gap\_h] hours of meteorological gap between context and forecast block; a
+        leakage-control ablation, 0 by default.
+  \item[block\_h, stride] the forecast horizon and the anchor step. Every covered
+        hour is averaged over all the anchors that see it, so a stride shorter than
+        the block averages several forecasts.
+  \item[direction] \code{forward}, \code{reverse} or \code{bidirectional}; a
+        time-reversed pass fills the hours the forward pass leaves uncovered near the
+        ends of the record.
+  \item[lead\_tau] when positive, each anchor's contribution to an hour is weighted
+        by $\exp(-\text{lead}/\text{lead\_tau})$, so the hour is mostly informed by
+        the anchor that sees it soonest; 0 averages unweighted.
+  \item[aggregate] \code{mean}, \code{median} or \code{trimmed} (the weighted mean
+        of the 10--90\,\% band; the median is likewise weighted), one value per hour
+        from that hour's draws.
+  \item[n\_resamples] counterfactual weather trajectories per anchor.
+  \item[min\_context] the shortest conditioning window an anchor may use. Left at
+        \code{None}, an anchor exists only once \code{context\_length} rows precede
+        it, so a record shorter than about 85 days at $C = 2048$ produces no output
+        at all; set it to a few hundred hours to let the context shrink instead.
+  \item[support\_min\_frac] the support gate: an anchor whose factual block falls
+        outside the pool's observed range for more than this fraction of
+        (hour, variable) cells is dropped and recorded in the diagnostics --- a
+        counterfactual drawn from weather the pool never saw is an extrapolation,
+        not an intervention.
+\end{description}
+\code{ICNDesign.v1()} is the frozen configuration: future-only, record-trajectory
+pool, gap 0, block 336 hours, stride 168, bidirectional, trimmed aggregation,
+\code{lead\_tau} 0, five resamples, context 2048. The CLI and the window build it from
+the loaded checkpoint: the context is the estimator's (2048 by default), \code{normet
+deweather --prediction-length} replaces the block and sets the stride to half of it, and
+the window always takes the horizon from the checkpoint. The design hash is written
+into the result's diagnostics, so a run can prove which design produced it.
+
+\paragraph{Surprise weighting.} An anchor is only as good as its factual forecast: if
+the model cannot reproduce the observed block from the real history, its counterfactual
+forecast is equally untrustworthy. \code{surprise\_tau} $> 0$ weights each anchor's
+draws by $\exp\bigl(-(\text{err}/\tau)^2\bigr)$, where err is the anchor's factual
+forecast error, in absolute value and normalised by the observation's scale; anchors
+the model reproduces keep their weight and blocks it misses fade out. The weighting is computed in log space, so a set of anchors whose gates all
+underflow keeps its relative weights instead of reverting to a uniform average. The
+default 0 disables it and keeps the frozen design's hash unchanged.
+
+\paragraph{The draw bank.} The expensive part of ICN is the foundation model;
+aggregation (direction, \code{aggregate}, \code{lead\_tau}, surprise, quantiles,
+schema) is arithmetic on the draws. \code{ICNDrawBank} stores the raw draws of both
+orientations and re-derives the estimate on a CPU. \code{save()} writes a
+gzip-compressed JSON file, \code{load()} restores it, and \code{aggregate()} returns a
+new result under any aggregation settings --- so a design sweep costs one GPU run.
+\code{normet deweather --save-bank} and \code{--bank} expose this on the command
+line, the window's Save\dots/Load\dots\ buttons in the Normalise panel, and the MCP
+tools mirror it. \code{decompose\_uncertainty()} splits the result's variance into the
+spread across anchors and the spread across resamples within anchors.
+
+\paragraph{Attribution.} \code{icn\_decompose} attributes the difference between the
+all-weather forecast and the weather-marginalised one across meteorological variables
+or named groups, using common random-number weather draws across the coalitions so the
+contributions are paired differences. With groups (or on request) it computes group
+Shapley values; \code{return\_interactions=True} adds exact second-order
+Grabisch--Roubens interactions, which show whether two variables act together ---
+temperature and boundary-layer height, say --- more than additively.
 
 \section{Synthetic control}\label{sec:scmtheory}
 A synthetic control estimates the effect of an intervention on one \emph{treated} unit
@@ -540,6 +733,12 @@ input: the weather is then not part of what the donors must reproduce.
         synthetic value is the treated unit's ridge prediction plus a weighted sum of the
         donors' ridge residuals, the weights summing to one (non-negative unless allowed
         otherwise).
+  \item[\code{ascm}] Ridge ASCM (Ben-Michael, Feller and Rothstein, 2021): the ridge
+        outcome model and the simplex weights are fitted with time-blocked
+        cross-validation, so the adjustment is not fitted on the rows it corrects.
+  \item[\code{sdid}] Synthetic difference-in-differences (Arkhangelsky et al., 2021):
+        unit weights and time weights are estimated jointly, which removes the
+        parallel-trends assumption in favour of a weighted two-way fit.
   \item[\code{abadie}] Classic SCM: non-negative donor weights summing to one, fitted to
         the treated unit's pre-cutoff path. Interpretable, but it cannot reach a treated
         unit that lies outside the range of its donors.
@@ -555,6 +754,24 @@ input: the weather is then not part of what the donors must reproduce.
         guarantees of the others and warns so.
   \item[\code{bayesian}] Bayesian simplex SCM (PyMC): a Dirichlet prior on the weights,
         giving posterior credible bands directly.
+  \item[\code{deweathered}] Two-stage SCM (\emph{experimental}): every unit ---
+        treated and donors --- is de-weathered first, the SCM is fitted on the
+        normalised panel, and the effect band combines the first-stage Monte-Carlo
+        weather uncertainty (\code{se\_met}) with the SCM's matching uncertainty
+        (\code{se\_scm}) by the law of total variance.
+  \item[\code{transport}] Spillover-corrected SCM (\emph{experimental}): a
+        \code{spillover\_exposure} table (from Transport Studio) measures how much
+        downwind plume each donor receives from the treated zone. The estimator
+        identifies the spillover coefficient $\gamma$ from post-cutoff donor
+        contrasts against that exposure, decontaminates the donor trajectories and
+        reconstructs the counterfactual; without the correction, a policy that also
+        cleans the donors' downwind air biases the naive effect toward zero.
+  \item[\code{chronos}] Zero-shot covariate-conditioned SCM: the counterfactual is a
+        Chronos-2 forecast of the treated unit conditional on the pre-cutoff record
+        and on the donors' outcomes (and optional meteorology) as known-future
+        covariates, with native predictive bands rather than donor weights. Nothing
+        is fitted on the pre-period, so the small-sample donor overfitting of the
+        other estimators cannot arise; it needs the \code{foundation} extra.
 \end{description}
 
 \subsection{Diagnostics}\label{sec:scmdiag}
@@ -637,6 +854,60 @@ needs a pool of its own, and with the default \code{scm} backend that is at leas
 donors; with a smaller pool the $p$-values come back NaN while the effects are still
 read.
 
+\section{Synthetic benchmarks}\label{sec:benchtheory}
+A de-weathering method is hard to grade on real data, because the true emissions are
+unknown. The benchmark generator writes a record whose emission trajectory is known
+exactly, so an estimate can be scored against the truth rather than against a plausible
+story. Five families:
+\begin{description}\nosep
+  \item[\code{F1\_additive}] an additive meteorological response, an annual trend and a
+        step event.
+  \item[\code{F2\_multiplicative}] dilution by boundary-layer height and ventilation,
+        so the weather multiplies the emission term.
+  \item[\code{F3\_titration}] Leighton photochemistry: an \NOx{} cut repartitions
+        O\textsubscript{3} at fixed O\textsubscript{x}.
+  \item[\code{F4\_nonstationary}] a piecewise trend break plus seasonal modulation.
+  \item[\code{F5\_transport}] local emissions plus intermittent upwind plume episodes.
+\end{description}
+Each dataset carries the synoptic meteorology, the observed series, the event dates
+and a truth table with the true emission trajectory, the true weather term and the
+event mask. \code{evaluate\_benchmark} scores any normalised series against it:
+NRMSE and bias against the true emission, Pearson $r$, and \emph{event recovery} ---
+the estimated step over the true step --- with \emph{absorption} its complement.
+Recovery near 100\,\% means the event survived the de-weathering; near 0\,\% means
+the estimator removed it as if it were weather. The generators are seeded and the
+family is explicit, so two methods can be compared on the same record, and a method
+tuned on one family can be checked on the others. F3 is the honest stress test: a
+tree can represent the titration curve, but an additive de-weathering then resamples
+weather through a nonlinearity, and the residual is not an additive weather term.
+
+\section{Meteorological physics features}\label{sec:metfeaturestheory}
+Reanalysis columns are not always the quantities the boundary layer responds to.
+\code{add\_met\_physics\_features} derives, from the standard meteorological
+columns, whichever of these the table supports:
+\begin{itemize}\nosep
+  \item \code{u\_wind}, \code{v\_wind} --- wind components from speed and direction,
+        so a model can split on direction without a circular discontinuity at north.
+  \item \code{ventilation\_coef} --- wind speed $\times$ boundary-layer height, the
+        volume flux that dilutes a surface source.
+  \item \code{vpd} (vapour-pressure deficit, kPa) and \code{dewpoint\_depression},
+        from temperature with relative humidity or dew point, plus \code{rh\_derived}
+        when only the dew point is present.
+  \item with \code{include\_memory=True}, causal first-order residence integrals
+        $\int_0^t x(s)\,e^{-(t-s)/\tau}\,ds$: \code{stagnation\_memory} (the inverse
+        boundary-layer height, with the time constant shortened by wind:
+        $\tau_\text{eff} = \tau/(1 + \mathrm{ws}/3)$), \code{photochemical\_dose}
+        (downward short-wave radiation, fixed 6-hour decay) and
+        \code{wet\_scavenging\_memory} (precipitation, $\tau$ =
+        \code{residence\_tau\_hours}, 12\,h). The memory terms carry the air mass's
+        recent history rather than the instant.
+\end{itemize}
+The integrals are causal and stateful, so on a panel \code{group\_col} must name the
+site: the state then resets per site and rows are ordered by site then date. Without
+it the frame is treated as one record and one site's air mass feeds the next site's
+features. Decay is applied per elapsed hour, so hourly, daily and irregular records
+share the same physical kernel.
+
 % ============================ 4. GETTING STARTED ==============================
 \chapter{Getting started}\label{ch:start}
 
@@ -681,6 +952,10 @@ source sets them.
         paper's London ULEZ panel and a synthetic weekly panel of 31 units, in which the
         unit ``2+26 cities'' has its SO\textsubscript{2} cut by about 35\,\% from 2015-10-23
         and every other unit is a clean donor.
+  \item[Synthetic benchmark\ldots] A dialog chooses one of the five benchmark families
+        (F1--F5), the length, the event size and the seed; the generated record loads
+        with its truth table, so a normalisation can be scored against the known
+        emission (Section~\ref{sec:benchtheory}).
 \end{description}
 The real records of the \nm{} model-description paper ship with the package; in a script
 they are loaded with:
@@ -745,9 +1020,19 @@ Its pages, and what each holds (a page's first box goes untitled, the tab naming
         estimators, seed; for Chronos-2 the device and fine-tuning instead
         (Chapter~\ref{ch:train}).
   \item[Normalise] The variables resampled, the number of samples, CPU cores and the
-        quantile band (Chapter~\ref{ch:normalise}).
-  \item[Decompose] Emission or meteorology; for meteorology the attribution and the
-        groups (Chapter~\ref{ch:decompose}). Under it \emph{Multi-scale decomposition}:
+        quantile band (Chapter~\ref{ch:normalise}). An \emph{Engine} selector switches
+        between \code{standard}, \code{dml} (with its \emph{DML cutoff} and
+        \emph{DML blocks}), \code{ox\_invariant} (O\textsubscript{3}, \NOtwo{} and NO
+        columns, units) and \code{regime\_conditioned} (the precursor checklist);
+        \emph{Control variates} and \emph{Block resampling} (independent or markov,
+        with the block length) are on the standard engine. With Chronos-2 loaded, a
+        \emph{Chronos mode} selector (\code{deweather} or \code{icn}) adds the ICN
+        estimate (\code{level} or \code{paired}), the log-space switch, \emph{Surprise
+        tau}, and a \emph{Draw bank} row with Save\dots/Load\dots{} buttons.
+  \item[Decompose] Emission or meteorology; an \emph{Engine} selector (\code{standard}
+        or \code{icn}, the latter for Chronos-2), a \emph{Pairwise interactions}
+        checkbox, and for meteorology the attribution and the groups
+        (Chapter~\ref{ch:decompose}). Under it \emph{Multi-scale decomposition}:
         three window widths (Section~\ref{sec:multiscaleui}); \emph{Trend}: the
         series to test (a part of the decomposition, its separated long-term trend, or
         the observed target), its seasonal period, the number of segments and how
@@ -764,7 +1049,7 @@ read from the \tab{File} menu (Section~\ref{sec:config}).
 
 \section{Result tabs}
 \begin{center}\small
-\begin{tabular}{@{}lll@{}}
+\begin{tabular}{@{}p{2.2cm}p{7.2cm}p{5.2cm}@{}}
 \toprule
 Tab & Shows & Filled by \\
 \midrule
@@ -818,14 +1103,14 @@ the current tab's result as an HTML report with its provenance.
 
 \section{Run buttons}
 \begin{center}\small
-\begin{tabular}{@{}lp{5.0cm}l@{}}
+\begin{tabular}{@{}p{4.4cm}p{4.3cm}p{5.4cm}@{}}
 \toprule
 Button & Needs & Runs \\
 \midrule
 Train model / Load Chronos-2 & a table, one predictor ticked & \code{build\_model} \\
 Fine-tune Chronos-2   & Chronos-2 loaded         & \code{finetune} \\
-Run normalisation     & a model, one variable to resample & \code{normalise} \\
-Run decomposition     & a model                  & \code{decompose} \\
+Run normalisation     & a model, one variable to resample & \code{normalise}, \code{dml\_normalise}, \code{normalise\_ox\_invariant} or \code{normalise\_regime\_conditioned} (the engine) \\
+Run decomposition     & a model                  & \code{decompose}; \code{icn\_decompose} with the ICN engine \\
 Run rolling normalisation & an AutoML model      & \code{rolling} \\
 Multi-scale decomposition & an AutoML model, a normalisation & \code{rolling} $\times 3$ \\
 Trend analysis      & an AutoML model (a decomposition, where it tests one) & \code{trend} (1 segment), \code{detect\_trend\_breaks} (more) \\
@@ -862,8 +1147,10 @@ turns green when that step has a result.
 Menu & Command & Shortcut \\
 \midrule
 File     & Open Data\ldots                      & Ctrl+O \\
-         & Load Example (the examples, SCM's)   & \\
+         & Load Example: the examples, SCM's, Synthetic benchmark\ldots & \\
+         & Score benchmark against truth        & \\
          & Get Data (AQ networks + met)\ldots & Ctrl+D \\
+         & Add met \&physics features\ldots      & \\
          & Open Recent (eight tables)           & \\
          & Save Results\ldots{} / Load Results\ldots & Ctrl+S \\
          & Reopen Last Session                  & \\
@@ -888,6 +1175,17 @@ Help     & User Manual                          & F1 \\
 \bottomrule
 \end{tabular}
 \end{center}
+\tab{File $\rightarrow$ Load Example $\rightarrow$ Synthetic benchmark\ldots} generates
+a record from one of the five benchmark families (F1--F5,
+Section~\ref{sec:benchtheory}) and loads it with its truth table attached; after a
+normalisation, \tab{File $\rightarrow$ Score benchmark against truth} reports the
+recovery, absorption, NRMSE, bias and correlation against the known emission
+trajectory. \tab{File $\rightarrow$ Add met \&physics features\ldots} derives the wind
+components, ventilation coefficient, VPD and dew-point depression (and optionally the
+causal memory integrals) from the loaded meteorological columns and adds them to the
+table as new predictors; on a panel, a site column keeps the memory state per site
+(Section~\ref{sec:metfeaturestheory}).
+
 On macOS, Ctrl is the Command key. The \emph{command palette} (Ctrl+K) lists every
 menu command and every result tab; type a few letters of one and press Return.
 \tab{Help $\rightarrow$ Keyboard Shortcuts} lists every shortcut, read from the menus;
@@ -1008,7 +1306,7 @@ A forecast that carries a spread scores its own CRPS, and only a score below thi
 reference says the spread is worth carrying.
 
 \screenshot{ui_model.png}{MY1 trained with FLAML (LightGBM, 30~s budget, random split):
-on the 1,448 held-out hours $R^2 = 0.883$ and RMSE $= 8.66$~\ugm{}, against $0.976$ on
+on the 1,448 held-out hours $R^2 = 0.900$ and RMSE $= 8.00$~\ugm{}, against $1.000$ on
 the 4,345 training hours. Wind direction and speed, the boundary-layer height and the
 trend carry the most splits.}{fig:model}
 
@@ -1060,18 +1358,45 @@ On the Chronos-2 backend, rolling, partial dependence and the emission decomposi
 are disabled, and the multi-scale decomposition, built on rolling, does not apply
 (Section~\ref{sec:chronos}).
 
+\emph{Chronos mode} chooses what the Normalise button runs: \code{deweather} (the
+original zero-shot marginalisation) or \code{icn} (in-context normalisation,
+Section~\ref{sec:icntheory}). With \code{icn} the page adds \emph{ICN estimate}
+(\code{level} or the event-preserving \code{paired}), a log-space checkbox,
+\emph{Surprise tau} and the \emph{Draw bank} row. The run uses the frozen ICN-v1
+design, with the checkpoint's context and horizon and the page's \emph{Samples} as its
+resample count. \emph{Save\ldots} writes the raw draws of the run to a gzip-compressed JSON
+file; \emph{Load\ldots} re-aggregates a saved bank instead of running the model --- the
+CPU-only path, and the way to re-derive the series under a different surprise tau (0
+on the spinner keeps the bank's stored value).
+
 % ============================ 7. NORMALISATION ================================
 \chapter{Normalising}\label{ch:normalise}
 
 \begin{description}\nosep
+  \item[Engine] Which estimator the button runs: \code{standard} (Monte-Carlo
+        marginalisation), \code{dml} (Double-ML, with \emph{DML cutoff} and
+        \emph{DML blocks}), \code{ox\_invariant} (conserved
+        \NOtwo{}--\NOx{}/O\textsubscript{x}, with the species columns and units) or
+        \code{regime\_conditioned} (with the precursor checklist)
+        (Sections~\ref{sec:dmltheory} and~\ref{sec:chemtheory}). The Ox and regime
+        engines need O\textsubscript{3}, \NOtwo{} (and optionally NO) columns; the
+        regime engine's result carries the conditioned and unconditioned series with
+        their difference.
   \item[Resample vars] Every variable the model was trained on, the four calendar
         variables included. Ticked variables are resampled (their influence averaged
         out); unticked ones keep their observed values. After training the list is set
         to \emph{Met only} --- the usual de-weathering --- and \emph{All} ticks
         everything, which removes the trend and the seasonal and weekly cycles as well.
   \item[Samples] Monte-Carlo draws, 300 by default (8 on Chronos-2;
-        Section~\ref{sec:normalise} on how many are enough).
+        Section~\ref{sec:normalise} on how many are enough). Under Chronos-2's
+        \code{icn} method the count is the counterfactual weather trajectories per
+        anchor.
   \item[CPU cores] \emph{auto} uses all but one.
+  \item[Control variates] Variance-reduced draws on the standard engine
+        (Section~\ref{sec:normalise}).
+  \item[Block resampling] \emph{independent} or \emph{markov}, with the block length:
+        weather drawn in contiguous blocks, joined through nearest-neighbour
+        transitions (Section~\ref{sec:normalise}).
   \item[5--95\,\% quantile band] Also return the 5th, 25th, 75th and 95th percentiles of
         the draws and shade the outer band.
 \end{description}
@@ -1091,7 +1416,7 @@ normalised series keeps the rush hours and the weekday--weekend difference --- t
 calendar is held at its observed values --- with less of the observed series' spread.}{fig:normalise}
 
 The line above the figure gives the number of timestamps, draws and resampled variables,
-and the mean of normalised $-$ observed over the record: here $-0.26$~\ugm{}, since over
+and the mean of normalised $-$ observed over the record: here $+0.02$~\ugm{}, since over
 eight months the weather averages out. The monthly means tell the story the figure shows:
 \begin{center}\small
 \begin{tabular}{@{}lrrrrrrrr@{}}
@@ -1099,17 +1424,19 @@ eight months the weather averages out. The monthly means tell the story the figu
 \NOtwo{} (\ugm{}) & Jan & Feb & Mar & Apr & May & Jun & Jul & Aug \\
 \midrule
 observed   & 60.3 & 65.2 & 51.7 & 34.5 & 30.7 & 35.1 & 31.6 & 36.6 \\
-normalised & 59.7 & 64.7 & 54.0 & 34.7 & 32.1 & 32.5 & 32.1 & 33.8 \\
+normalised & 59.3 & 66.1 & 54.4 & 33.9 & 32.1 & 32.6 & 32.3 & 35.1 \\
 \bottomrule
 \end{tabular}
 \end{center}
-From February to April the normalised series falls by 30.0~\ugm{} (46\,\%), against
+From February to April the normalised series falls by 32.2~\ugm{} (49\,\%), against
 30.7~\ugm{} observed: almost none of the spring drop was the weather. In March the weather
-was cleaner than usual (observed 2.3 below normalised), in June and August dirtier.
+was cleaner than usual (observed 2.7 below normalised), in June and August dirtier.
 
-\note{On Chronos-2 the first \code{context\_length} rows are seeded with the observed
-values; they are shaded grey on the figure, the line under it says how many there are,
-and the mean is taken over the rest.}
+\note{On Chronos-2 with the \code{deweather} method the first \code{context\_length} rows
+are seeded with the observed values; they are shaded grey on the figure, the line under it
+says how many there are, and the mean is taken over the rest. With \code{icn} nothing is
+seeded: the bidirectional passes cover the record, and only hours no anchor sees are left
+blank.}
 
 \caution{The normalised series is the model's expectation under typical weather. A model
 that has not learnt the weather's effect --- a poor fit, or meteorology missing from the
@@ -1130,17 +1457,23 @@ week, shaded between its 25th and 75th percentiles --- rather than as months of
 oscillation.
 
 \screenshot{ui_decompose_emission.png}{The emission decomposition of MY1 (100 draws per
-normalisation; baseline 43.1~\ugm{}). The lockdown appears as a step in both the trend
-($\sigma = 9.56$) and the seasonal component ($\sigma = 4.74$): a one-off event is not a
-season, and the record is too short to tell them apart. The diurnal cycle (right) is the
-largest ($\sigma = 9.92$): low before 05:00, high through the working day, its spread wide
-because it shrank after the lockdown, as rush-hour traffic did; the weekly cycle
-($\sigma = 3.36$) dips at the weekend.}{fig:emission}
+normalisation; baseline 43.06~\ugm{}). The lockdown appears as a step in both the trend
+($\sigma = 9.1$) and the seasonal component ($\sigma = 5.6$): a one-off event is not a
+season, and the record is too short to tell them apart. The trend is the largest component;
+the diurnal cycle (right) comes next ($\sigma = 8.81$): low before 05:00, high through the
+working day, its spread wide because it shrank after the lockdown, as rush-hour traffic
+did; the weekly cycle ($\sigma = 3.57$) dips at the weekend.}{fig:emission}
 
 \section{By variable: the meteorological decomposition}
 With \emph{Method} set to \emph{meteorology}, the decomposition splits observed $-$ normalised among
 the meteorological variables (Section~\ref{sec:metdecomp}). \emph{Attribution} is enabled and \emph{Groups} appears
 (it is hidden for \emph{emission}):
+\emph{Engine} chooses \code{standard} (nested normalisations of the trained AutoML
+model) or \code{icn} (in-context group Shapley with the loaded Chronos-2 estimator,
+batched over shared weather draws, Section~\ref{sec:icntheory}). \emph{Pairwise
+interactions} adds exact second-order Grabisch--Roubens indices --- on the standard
+engine with Shapley attribution, on the ICN engine from its coalition bank --- which
+report where two variables act together more (or less) than additively.
 \begin{description}\nosep
   \item[Attribution] \emph{sequential}, \emph{shapley}, or \emph{auto} (Shapley when groups
         are given, else sequential).
@@ -1157,22 +1490,24 @@ $\sigma$ beside \code{met\_noise}, the part the model does not reproduce
 (Figure~\ref{fig:metdecomp}).
 
 \screenshot{ui_decompose_met.png}{MY1's weather influence (observed $-$ normalised,
-$\sigma = 16.79$~\ugm{}) split among four groups by exact Shapley values (16 coalitions):
-wind (\code{ws}, \code{wd}; $\sigma = 9.92$), thermodynamics (\code{temp}, \code{RH};
-5.24), mixing (\code{blh}, \code{atmos\_pres}; 4.89) and sky (\code{tcc}, \code{tp},
-\code{ssrd}; 3.44).}{fig:metdecomp}
+$\sigma = 16.72$~\ugm{}) split among four groups by exact Shapley values (16 coalitions):
+wind (\code{ws}, \code{wd}; $\sigma = 9.73$), thermodynamics (\code{temp}, \code{RH};
+4.98), mixing (\code{blh}, \code{atmos\_pres}; 5.10) and sky (\code{tcc}, \code{tp},
+\code{ssrd}; 4.12).}{fig:metdecomp}
 
 The decomposition runs $k+1$ normalisations sequentially or $2^k$ by Shapley, each of
 \emph{Samples} draws, so its cost grows quickly with the number of variables. Ten
-variables by Shapley is 1024 normalisations: group them. Unlike the normalisation, the
-meteorological decomposition always resamples every meteorological variable trained on;
-it does not follow the \tab{Normalise} page's list.
+variables by Shapley is 1024 normalisations: group them. \emph{Pairwise interactions}
+reuse those coalitions, so under exact Shapley they cost no extra normalisation; under
+sequential attribution or sampled permutations they do not apply. Unlike the
+normalisation, the meteorological decomposition always resamples every meteorological
+variable trained on; it does not follow the \tab{Normalise} page's list.
 
 \section{Trend}\label{sec:trend}
 The question a decomposition invites: is the series it just drew rising, falling or flat,
 and is the rise real? The \emph{Trend analysis} box under \emph{Decompose} runs
 Mann--Kendall and Theil--Sen on the chosen series and, the record carrying the
-autocorrelation the correction exists for (MY1's emission part: AR(1) residual acf 0.94),
+autocorrelation the correction exists for (MY1's emission part: AR(1) residual acf 0.95),
 replaces the slope's classical error bar with a moving-block bootstrap. It runs again
 each time an emission decomposition ends where \emph{Run after each emission
 decomposition} is ticked (unticked by default).
@@ -1212,13 +1547,13 @@ the classical Mann--Kendall one and, the record being autocorrelated, the
 block-bootstrap one --- with the verdict above the figure saying which to quote.}{fig:trend}
 
 \screenshot{ui_trend_breaks.png}{The segmented fit (Segments 2) on MY1's separated
-long-term trend: the search found the break at 2020-03-18 19:00 --- the 2020-03-23
-lockdown's lead-in --- the single-slope SSE down 88.7\,\% with the block-bootstrap
-p of the search 0.001, the one to quote. Segment 1 runs +0.0812 per day
-(95\,\% [0.0761, 0.0863]); segment 2 flattens to $-$0.0121 per day
-(95\,\% [$-$0.0134, $-$0.0108]). The piecewise Theil--Sen lines and the marked
-break are in the figure; the per-segment table and the verdict above it are the
-Trend tab's.}{fig:trend_breaks}
+long-term trend: the search found the break at 2020-03-18 20:00 --- the 2020-03-23
+lockdown's lead-in --- the single-slope SSE down 91.2\,\% with the block-bootstrap
+p of the search 0.001, the one to quote. Segment 1 runs +0.0792 per day
+(95\,\% [0.0747, 0.0836]); segment 2 flattens to $+0.0028$ per day
+(95\,\% [0.0015, 0.0041]) --- from 28.9 to 1.0 a year. The piecewise Theil--Sen
+lines and the marked break are in the figure; the per-segment table and the
+verdict above it are the Trend tab's.}{fig:trend_breaks}
 
 \section{Events \& anomalies}\label{sec:eventsui}
 The question beside the trend: not where the record is heading but what happened
@@ -1253,11 +1588,11 @@ strip's shading are the same stretches, hour for hour.
 \screenshot{ui_events.png}{The \tab{Events} tab on MY1's emission part
 (Section~\ref{sec:emission}): the iqr score of every timestamp, the $k=2$
 threshold as a line --- the box's default $k=3$ flags no window on this
-de-weathered series, so 2 is the first value that does --- and the 26 flagged
+de-weathered series, so 2 is the first value that does --- and the 7 flagged
 windows shaded, the table of them ranked by the maximum score above the figure,
-the largest scoring 2.36. The shading is simply where the curve crosses the
+the largest scoring 2.17. The shading is simply where the curve crosses the
 line; at a low threshold the ordinary-weather tails are what get flagged, and
-the top of the table is the 2020-03-10 07:00--18:00 stretch, a full day.}{fig:events}
+the top of the table is the 2020-02-19 15:00--17:00 stretch, three hours.}{fig:events}
 
 \section{Uncertainty decomposition}\label{sec:uncertainty}
 The question a de-weathered estimate invites: of the band around an effect, how
@@ -1282,7 +1617,7 @@ The \tab{Uncertainty} tab (Figure~\ref{fig:uncertainty}) stacks the per-date
 variance, weather under model under interaction, the line over the stack the
 total, and says the headline above the figure: the median share of the total by
 source. For MY1, three members and 50 shared draws under the figure's settings,
-the median spread is 96\,\% met resampling, 3\,\% the interaction and 0\,\%
+the median spread is 95\,\% met resampling, 4\,\% the interaction and 1\,\%
 model form --- the fitted model is nearly certain about what the weather does,
 and the band an effect is tested against is the weather's, not the model's. The
 table gives each source's median variance and median share; the shares are
@@ -1295,9 +1630,9 @@ The cost is \emph{Models} fits and \emph{Models} normalisations of
 two, not an hour.
 
 \screenshot{ui_uncertainty.png}{The attribution of MY1's per-date spread: the
-stacked bands (met resampling, model form, the interaction) total 144.3
+stacked bands (met resampling, model form, the interaction) total 137.0
 (\ugm{})$^{2}$ of variance in the median, and the verdict above says where it
-goes --- 96\,\% met resampling, 3\,\% interaction, 0\,\% model form (three
+goes --- 95\,\% met resampling, 4\,\% interaction, 1\,\% model form (three
 members sharing 50 met draws, lightgbm members). An effect smaller than that band
 is not separated from the weather by the model form at all.}{fig:uncertainty}
 
@@ -1325,7 +1660,7 @@ is named in the notes, with why.
 
 \screenshot{ui_multiscale.png}{Multi-scale decomposition of MY1 at 14, 60 and 120~days
 (the 365-day default is longer than this eight-month record): 77, 13 and 5 windows. The
-synoptic band carries the most ($D_\text{fast}$, $\sigma \approx 3.0$), then the intra-seasonal
+synoptic band carries the most ($D_\text{fast}$, $\sigma \approx 2.9$), then the intra-seasonal
 and the slow.}{fig:multiscale}
 
 % ============================ 10. PDP =========================================
@@ -1358,8 +1693,8 @@ welcome's example card. It is laid out as the main window is: the panel on the l
 its pages chosen from a bar --- \tab{Data} (the panel data and its columns),
 \tab{Design}, \tab{Estimator}, \tab{Inference} --- result tabs on the right
 (\tab{Panel}, \tab{Fit}, \tab{Fit Checks}, \tab{Placebo Space}, \tab{Placebo Time},
-\tab{Uncertainty}, \tab{All Units}, \tab{Similarity}), and \emph{Export current tab
-data} above them. The
+\tab{Uncertainty}, \tab{All Units}, \tab{Similarity}, \tab{Spatial}), and \emph{Export
+current tab data} above them. The
 method is described in Section~\ref{sec:scmtheory}.
 
 This chapter's figures reproduce the ULEZ case study of the \nm{} paper: the London Ultra
@@ -1387,7 +1722,9 @@ main-window data} takes the main window's table, when it has a unit column. The
 \emph{Date} column is guessed from its name, the \emph{Unit} column as the first
 non-numeric column with between 3 and a quarter as many distinct values as rows, and the
 \emph{Outcome} as a numeric column whose name ends in \code{wn} (the de-weathered series
-of the paper's tables), else the first numeric one. Check all three.
+of the paper's tables), else the first numeric one. Check all three. The
+\emph{Latitude} and \emph{Longitude} columns are optional: they name each unit's
+coordinates and feed only the \tab{Spatial} tab.
 
 \section{Design}
 \begin{description}\nosep
@@ -1401,6 +1738,10 @@ of the paper's tables), else the first numeric one. Check all three.
         unit's pre-cutoff record with Chronos-2 and ranks the others by the cosine
         similarity of their dynamics to the treated unit's, on the \tab{Similarity} tab;
         \emph{Tick the top N} and \emph{Apply} make those the pool.
+  \item[Show donor layout] Places each ticked donor around the treated unit by
+        great-circle distance and compass bearing, on the \tab{Spatial} tab --- where the
+        counterfactual is borrowed from, which the weights alone do not say. Needs the
+        panel's \emph{Latitude} and \emph{Longitude} columns.
 \end{description}
 The \tab{Panel} tab plots the outcome of every unit with the treated one in red, and
 checks the panel: amber when more than 10\,\% of the date $\times$ unit cells are missing
@@ -1412,14 +1753,24 @@ them throughout.}{fig:scmpanel}
 
 \section{Fitting}\label{sec:scmfit}
 \emph{Backend} chooses the estimator (Section~\ref{sec:scmtheory}); \emph{ML backend} and
-\emph{Time budget} (15~s) apply to \code{mlscm}, \emph{Draws} (1000) to
-\code{bayesian}. \emph{Run synthetic control} fills the \tab{Fit} tab: observed and
-synthetic, the effect, the largest donor weights, and the diagnostics table.
+\emph{Search trials} apply to \code{mlscm}, \emph{Draws} (1000) to \code{bayesian}.
+Two rows appear for the two staged backends: \emph{Covariates (deweathered)} lists the
+meteorological columns \code{deweathered} de-weathers the panel with, and
+\emph{Deweather method} is \code{dml}, \code{crossfit} or \code{standard};
+\emph{Spillover exposure} names the column (or joined table column) that
+\code{transport} reads the donor exposures from. \code{chronos} needs the
+\code{foundation} extra; \code{deweathered} and \code{transport} are experimental.
+\emph{Run synthetic control} fills the \tab{Fit} tab: observed and synthetic, the
+effect, the largest donor weights, and the diagnostics table --- for
+\code{deweathered} with its total standard error split into the weather and matching
+parts, for \code{transport} with the naive and debiased effects and the estimated
+spillover coefficient.
 
-For \code{scm}, \code{abadie}, \code{did}, \code{mcnnm} and \code{robust} the fit is
-followed by one more, of the same design with the treated unit's pre-cutoff values
-shuffled in time: a series with the treated unit's level and spread but no relation to the
-donors (Section~\ref{sec:scmdiag}). Its pre-cutoff $R^2$ is the table's
+For the donor-weighting backends (\code{scm}, \code{ascm}, \code{sdid}, \code{abadie},
+\code{did}, \code{mcnnm}, \code{robust}) the fit is followed by one more, of the same
+design with the treated unit's pre-cutoff values shuffled in time: a series with the
+treated unit's level and spread but no relation to the donors
+(Section~\ref{sec:scmdiag}). Its pre-cutoff $R^2$ is the table's
 \code{pre\_r2, shuffled} row, and it decides how the verdict reads:
 \begin{itemize}\nosep
   \item If the shuffled series also reaches $R^2 \ge 0.5$, the design fits anything and
@@ -1428,9 +1779,10 @@ donors (Section~\ref{sec:scmdiag}). Its pre-cutoff $R^2$ is the table's
   \item Otherwise the verdict is read from the pre-cutoff $R^2$: green at 0.8 or above,
         amber from 0.5, red below; it gives the ATT.
 \end{itemize}
-\code{mlscm} and \code{bayesian} are too slow to fit twice; their verdict is read from the
-pre-cutoff $R^2$ alone. An \code{scm} fit adds a line saying its weights balance the ridge
-residuals only.
+\code{mlscm}, \code{bayesian}, \code{chronos}, \code{deweathered} and \code{transport}
+are too slow to fit twice; their verdict is read from the pre-cutoff $R^2$ alone (and
+the staged backends' Fit tab shows their own uncertainty columns). An \code{scm} fit
+adds a line saying its weights balance the ridge residuals only.
 
 \screenshot{ui_scm_fit.png}{The augmented SCM (\code{scm}) fit for MY1: ATT $=
 -18.14$~\ugm{} over the 11 post-cutoff months. Its pre-cutoff $R^2$ is 0.999, but with
@@ -1614,8 +1966,9 @@ the command log says so rather than writing a \code{read\_csv} it could not repe
 \section{Transport Studio: back-trajectory predictors}\label{sec:transport}
 Local meteorology does not say where the air came from. The Transport Studio turns
 HYSPLIT back-trajectories into predictors that do, and joins them onto the table
-(Figure~\ref{fig:transport}). Its panel has two pages: \emph{Trajectories}, for files
-already made, and \emph{HYSPLIT}, for running them.
+(Figure~\ref{fig:transport}). Its panel has three pages: \emph{Trajectories}, for files
+already made; \emph{HYSPLIT}, for running them; and \emph{Analysis}, for mapping and
+clustering them and inverting their footprints.
 
 \paragraph{Trajectory files.} \emph{Add files\ldots} takes existing HYSPLIT
 \code{tdump} files (no HYSPLIT installation is needed to read them). \emph{Site name}
@@ -1633,15 +1986,21 @@ each count an endpoint inside both.
 \code{traj\_age\_max\_h} (quality: how far back it reached), \code{traj\_dist\_km}
 (straight-line reach), \code{traj\_pathlen\_km}, \code{traj\_speed\_kmh},
 \code{traj\_inflow\_deg} (bearing from the receptor to the origin),
-\code{traj\_height\_mean} and \code{traj\_height\_min}, one
-\code{traj\_resid\_}\emph{region} per region, and --- where the \code{tdump} carries
-them --- along-path rainfall, mixing depth, humidity, pressure and temperature.
+\code{traj\_height\_mean} and \code{traj\_height\_min}, the physical descriptors
+\code{traj\_straightness} (path length over straight-line reach) and the sine/cosine
+pairs \code{traj\_inflow\_sin}/\code{\_cos} and \code{traj\_mean\_bearing\_sin}/
+\code{\_cos} (a compass angle is circular; the pair does not split at north), one
+\code{traj\_resid\_}\emph{region} per region with, the physics panel on, the
+boundary-layer- and decay-weighted \code{traj\_footprint\_}\emph{region} beside it, and
+--- where the \code{tdump} carries them --- along-path rainfall, mixing depth, humidity,
+pressure and temperature. The \tab{Features} tab draws the built rows.
 
 \paragraph{HYSPLIT (advanced).} With a local \code{hyts\_std}, the studio can run the
-trajectories itself, on its \emph{HYSPLIT} page, for a table of receptors, at a chosen
-height, hours back and time step, with GDAS1 meteorology it downloads or ARL files already
-on disk. The features are built with the source regions set on the \emph{Trajectories}
-page.
+trajectories itself, on its \emph{HYSPLIT} page, for its \emph{Receptor sites} table ---
+one row per receptor (name, latitude, longitude), each name tagging its results in a
+\code{site} column --- at a chosen height, hours back and time step, with GDAS1
+meteorology it downloads for a chosen date range or ARL files already on disk. The
+features are built with the source regions set on the \emph{Trajectories} page.
 
 \paragraph{Joining.} \emph{Send to main window} joins the features onto the open table:
 each row takes the latest trajectory that has \emph{already arrived}, within one release
@@ -1650,8 +2009,33 @@ yet arrived --- and the new \code{traj\_*} columns are ticked as predictors. The
 trajectories' times, UTC as HYSPLIT writes them, are put on the window's clock first
 (Section~\ref{sec:clock}); the studio is given the table's times in UTC to start them from.
 
+\paragraph{Receptor maps and clusters.} On the \emph{Analysis} page, \emph{Receptor
+method} chooses \code{wcwt} (concentration-weighted trajectory: the target's
+concentration smeared along each trajectory into grid cells) or \code{wpscf} (potential
+source contribution function: the share of each cell's trajectories that carried
+concentrations in the target's top quartile). \emph{Grid resolution} (0.5$^\circ$) sets
+the grid, and \emph{Target series} chooses the observed or the de-weathered series (auto
+prefers the de-weathered one when one has been run). Each endpoint is weighted by its
+boundary-layer exposure and each cell down-weighted by how few distinct trajectories
+visit it, so a stagnant loop does not pass for confidence; the map lands on the
+\tab{Receptor Map} tab. \emph{Clusters (k)} groups the trajectories in tangent-plane
+space --- \emph{auto} picks $k$ by a total-spatial-variance elbow, at most 8, or set 2
+to 12 --- and the \tab{Clusters} tab draws each centroid with its share.
+
+\paragraph{Footprint inversion.} \emph{Invert source footprints} fits a non-negative,
+regularised linear model from the region footprints to the open record's target (or its
+normalised series): each region receives an intensity estimate with a 95\,\% bootstrap
+interval, alongside a background term, the regions' mean contributions and their shares
+of the transport part. The \tab{Footprint Inversion} tab shows the fit and its $R^2$. \emph{Invert
+multiple receptor sites} is the joint version: the \code{tdump} directories named
+\code{NN\_\emph{site}} (as the HYSPLIT page writes them) are matched to the main
+table's \code{site} column, and one inversion is fitted across all receptors with a
+shared intensity per region and a separate background per site. Several receptors
+constrain the same regions from different directions, which no stack of single-site
+fits can do.
+
 \screenshot{ui_transport.png}{The two days of \code{tdump} files that ship with \nm{},
-built for receptor MY1: 9 features for 8 receptor times, released every six hours.
+built for receptor MY1: 14 features for 8 receptor times, released every six hours.
 Inflow turns from the east (80$^\circ$) to the west (270$^\circ$) over 1--2 January
 2020.}{fig:transport}
 
@@ -1952,6 +2336,15 @@ Function & Does \\
 \code{trend}, \code{mann\_kendall}, \code{theil\_sen} & trend analyses with the block-bootstrap correction (the \tab{Trend} tab, Section~\ref{sec:trend}) \\
 \code{detect\_trend\_breaks} & segmented trend: where the level or slope breaks (BIC + block-bootstrap gate) \\
 \code{decompose\_uncertainty} & the total spread attributed to weather, model form and their interaction (the \tab{Uncertainty} tab, Section~\ref{sec:uncertainty}) \\
+\code{dml\_normalise}, \code{crossfit\_normalise} & Double-ML and cross-fitted de-weathering (Section~\ref{sec:dmltheory}) \\
+\code{normalise\_ox\_invariant}, \code{normalise\_regime\_conditioned} & conserved O\textsubscript{x} and precursor-regime de-weathering (Section~\ref{sec:chemtheory}) \\
+\code{normalise\_in\_context}, \code{ICNDesign}, \code{build\_icn\_draw\_bank} & in-context normalisation on Chronos-2 (Section~\ref{sec:icntheory}) \\
+\code{ICNDrawBank}, \code{icn\_decompose} & draw-bank re-aggregation; in-context group-Shapley attribution \\
+\code{shapley\_interactions} & second-order Grabisch--Roubens interactions \\
+\code{make\_synthetic\_benchmark}, \code{evaluate\_benchmark} & the F1--F5 generators and scoring (Section~\ref{sec:benchtheory}) \\
+\code{add\_met\_physics\_features} & ventilation, VPD, wind and memory features (Section~\ref{sec:metfeaturestheory}) \\
+\code{deweathered\_scm}, \code{transport\_adjusted\_scm} & staged SCM backends (Section~\ref{sec:scmtheory}) \\
+\code{invert\_multisite\_footprints} & joint footprint inversion over receptors \\
 \code{make\_memory}       & on-disk caching \\
 \code{Chronos2Estimator}  & zero-shot de-weathering (\code{foundation} extra) \\
 \bottomrule
@@ -1970,19 +2363,55 @@ normet do-all my1.csv --target NO2 \
     --covariates ws,wd,temp,RH,atmos_pres,blh,tcc,tp,ssrd,date_unix,day_julian,weekday,hour \
     --resample-vars ws,wd,temp,RH,atmos_pres,blh,tcc,tp,ssrd \
     --n-samples 300 --out normalised.csv --run-path my1_run
+normet do-all my1.csv --target NO2 --normalise-method dml --control-variates \
+    --block-mode markov --block-hours 6 --covariates ... --out dw_dml.csv
 normet report my1_run.joblib --out my1_report.html
 normet decompose my1.csv --target NO2 --covariates ... --method emission --out emi.csv
 normet scm ulez_panel.csv --treated MY1 --cutoff 2019-04-01 --date-col date \
     --unit-col code --outcome-col NO2_dw --backend scm --out scm.csv
+normet scm ulez_panel.csv --treated MY1 --cutoff 2019-04-01 --backend deweathered \
+    --covariates ws,wd,temp,blh --deweather-method dml --out scm_dw.csv
 normet cv my1.csv --target NO2 --covariates ... --n-splits 5 --out cv.csv
 normet deweather site.csv --target PM2.5 --met-vars t2m,blh,u10,v10 --out dw.csv
+normet deweather site.csv --target PM2.5 --method icn --estimate paired \
+    --surprise-tau 1.5 --save-bank bank.json.gz --out dw_icn.csv
+normet normalise-ox site.csv --o3-col O3 --no2-col NO2 --no-col NO \
+    --covariates t2m,blh,ws --out ox.csv
+normet normalise-regime site.csv --target O3 --precursors NOx,CO \
+    --covariates t2m,blh,ws --out o3_regime.csv
+normet icn-decompose site.csv --target PM2.5 --groups 'wind=ws,wd;thermo=t2m,rh' \
+    --out icn_met.csv
+normet shapley-interactions site.csv --target PM2.5 --groups 'wind=ws,wd;thermo=t2m,rh' \
+    --out interactions.csv
+normet benchmark --family F3_titration --n-days 180 --out bench
+normet met-features my1.csv --include-memory --out my1_feat.csv
+normet invert-footprints --footprint A=fp_a.csv --footprint B=fp_b.csv \
+    --series wide.csv --out inv/
 normet info                     # version and the backends installed
 \end{lstlisting}
 Every command takes \code{--config file.yaml}, whose keys are the options' names; an
 option on the command line overrides the file. \code{--run-path} also saves a
 \code{NormetRun} archive (\code{.joblib} with a \code{.meta.json} sidecar) that
-\code{normet report} turns into HTML or Markdown. The command line's \code{scm} offers
-\code{scm}, \code{mlscm}, \code{abadie}, \code{did} and \code{mcnnm}.
+\code{normet report} turns into HTML or Markdown. The 17 subcommands:
+\begin{center}\small
+\begin{tabular}{@{}p{3.5cm}p{11.4cm}@{}}
+\toprule
+Command & Does \\
+\midrule
+\code{do-all} & prepare, train and normalise; \code{--normalise-method dml}, \code{--control-variates}, \code{--block-mode markov} \\
+\code{deweather} & zero-shot Chronos-2 de-weathering; \code{--method icn}, \code{--estimate}, \code{--surprise-tau}, \code{--save-bank}/\code{--bank} \\
+\code{normalise-ox}, \code{normalise-regime} & conserved O\textsubscript{x} and precursor-regime de-weathering \\
+\code{decompose}, \code{icn-decompose}, \code{shapley-interactions} & emission/met, in-context group Shapley, and second-order interaction decompositions \\
+\code{scm} & synthetic control; backends \code{scm}, \code{ascm}, \code{sdid}, \code{mlscm}, \code{abadie}, \code{did}, \code{mcnnm}, \code{robust}, \code{deweathered}, \code{transport}, \code{chronos} \\
+\code{cv} & walk-forward cross-validation \\
+\code{impute}, \code{backtest}, \code{events} & Chronos-2 gap imputation, probabilistic backtesting, event detection \\
+\code{benchmark} & generate an F1--F5 record and score a normalised series against it \\
+\code{met-features} & derive the meteorological physics features \\
+\code{invert-footprints} & joint multi-receptor footprint inversion \\
+\code{report}, \code{info} & HTML/Markdown from a run archive; version and installed backends \\
+\bottomrule
+\end{tabular}
+\end{center}
 
 \section{AI assistants over MCP}\label{sec:mcp}
 With the \code{mcp} extra, \code{normet-mcp} serves \nm{} to an AI assistant over the
@@ -1992,15 +2421,22 @@ claude mcp add normet -- normet-mcp          # Claude Code
 # Claude Desktop, claude_desktop_config.json:
 #   {"mcpServers": {"normet": {"command": "normet-mcp"}}}
 \end{lstlisting}
-The assistant can list the examples, inspect a table, start \code{do-all},
-\code{decompose}, \code{scm} and \code{cv} jobs, follow and cancel them, read a run or a
-result, draw a figure and write a report. Each fit is a \nm{} command run in its own
+The server exposes 26 tools. The assistant can list the examples, inspect a table,
+start \code{do-all}, \code{decompose}, \code{scm}, \code{cv}, \code{impute},
+\code{backtest} and \code{events} jobs, the conserved Ox and regime-conditioned
+normalisations, the ICN decomposition and the Shapley-interaction decomposition,
+generate a synthetic benchmark or the physics features, invert several receptors'
+footprints, follow and cancel jobs, read a run or a result, run the trend analyses,
+draw a figure and write a report. Each fit is a \nm{} command run in its own
 process and folder (\code{\$NORMET\_MCP\_HOME}, \code{\textasciitilde/.normet/mcp} by
 default), so its command line is its record and runs again without the assistant. The
 assistant is given \nm{}'s readings of a table or result, not the data; files are read
 only under \code{\$NORMET\_MCP\_ROOTS} (your home folder by default). The server asks the
 assistant to propose the target, predictors and donor pool with its reasons, to let you
-confirm them, and to quote only the numbers the tools return.
+confirm them, and to quote only the numbers the tools return. One default differs from
+the rest of \nm{}: the server's deweather tool runs the ICN method unless told
+otherwise, while the command line and the window default to the plain de-weathering
+path; the job's recorded command line says which ran.
 
 % ============================ APPENDICES ======================================
 \appendix
@@ -2028,7 +2464,23 @@ Multi-scale widths             & 14 / 90 / 365 d & --- \\
 PDP grid points / range        & 50 / 1st--99th percentile & 50 / 1st--99th percentile \\
 \code{normalise\_auto}          & --- & batches of 100, P95 RSE $<$ 3\,\%, 3 in a row, $\le$ 5000 \\
 Chronos-2 context / horizon    & 2048 / 168 rows & 2048 / 168 rows \\
+Normalise engine               & standard & standard \\
+Control variates / block mode  & off / independent & off / independent \\
+DML cutoff / blocks           & 30 d / 5 & 30 d / 5, embargo 24 rows \\
+Ox engine method / unit        & dml / \ugm{} & dml / \ugm{} \\
+Regime engine method           & dml & dml \\
+Pairwise interactions          & off (exact Shapley only) & exact Shapley coalitions only \\
+ICN design                     & \code{ICNDesign.v1()} from the checkpoint & \code{v1()}: block 336, stride 168, 5 resamples \\
+ICN surprise / min context     & 0 (off) / --- & 0 (off) / \code{None} \\
+ICN support gate / aggregate   & 0.5 / trimmed & 0.5 / trimmed \\
 SCM backend                    & scm & scm \\
+Deweathered SCM method         & dml & dml \\
+Deweathered SCM samples / draws & --- & 100 / 100, 95\,\% CI \\
+Receptor map grid / clusters  & 0.5$^\circ$ / auto ($\le 8$) & 0.5$^\circ$ / elbow ($\le 8$) \\
+Benchmark family / length / seed & F1, 180 d, 42 (dialog) & F1, 180 d, 42 \\
+Benchmark event                & --- & $-30\,\%$ at day 90 for 14 d \\
+Met memory $\tau$ / photochemical & 12 h / 6 h & 12 h / 6 h \\
+Footprint inversion bootstrap  & --- & 200, $\alpha$ by blocked CV \\
 Placebo in time: min pre / every & 30 / 7 steps & --- \\
 Uncertainty bands              & jackknife, $B = 100$ & jackknife, $B = 200$, 80\,\% donors \\
 \bottomrule
@@ -2037,7 +2489,7 @@ Uncertainty bands              & jackknife, $B = 100$ & jackknife, $B = 200$, 80
 
 \chapter{Where normet keeps its files}\label{app:files}
 \begin{center}\small
-\begin{tabular}{@{}ll@{}}
+\begin{tabular}{@{}p{5.4cm}p{9.4cm}@{}}
 \toprule
 What & Where \\
 \midrule
