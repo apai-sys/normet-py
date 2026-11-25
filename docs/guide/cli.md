@@ -13,7 +13,7 @@ normet --help
 |---|---|
 | `normet do-all INPUT` | Prepare → train → normalise (`nm.do_all`); `--backend chronos-2` for the zero-shot path, `--normalise-method dml` for Double-ML deweathering, `--control-variates` and `--block-mode markov` for variance-reduced resampling |
 | `normet decompose INPUT` | Emission or meteorology decomposition (`nm.decompose`) |
-| `normet deweather INPUT` | Zero-shot meteorological normalisation with Chronos-2 (needs `normet[foundation]`); `--method icn` adds the in-context path, with `--surprise-tau`, and `--save-bank` / `--bank` for offline draw reuse |
+| `normet deweather INPUT` | Zero-shot meteorological normalisation with Chronos-2 (needs `normet[foundation]`); `--method icn` adds the in-context path, with `--surprise-tau`, and `--save-bank` / `--bank` for offline draw reuse (a supplied `--surprise-tau` re-weights the loaded draws) |
 | `normet scm INPUT` | Synthetic control on a panel table (`nm.run_scm`); `--backend deweathered` / `transport` for the staged and spillover-adjusted engines |
 | `normet cv INPUT` | Walk-forward cross-validation (`nm.cv_score`) |
 | `normet normalise-ox INPUT` | Conserved $\mathrm{O_x\text{–}NO_x}$ photochemical deweathering (`nm.normalise_ox_invariant`) |

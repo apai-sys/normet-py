@@ -348,8 +348,8 @@ def build_server(tools: Any = None) -> Any:
         """Start a job: conserved Ox-NOx de-weathering. Deweathers Ox = O3 + NO2 and
         NOx = NO + NO2 in molar coordinates, then repartitions Ox with the
         meteorology-marginalised NO2 fraction, so titration is not double-counted.
-        Writes ox_species.csv (observed/normalised per species); poll
-        normet_job_status."""
+        Pass ``no_col=None`` when the table has no NO leg. Writes ox_species.csv
+        (observed/normalised per species); poll normet_job_status."""
         return t.start_normalise_ox(
             o3_col,
             no2_col,

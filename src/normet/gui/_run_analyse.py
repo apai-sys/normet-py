@@ -269,9 +269,9 @@ class AnalyseRunMixin(QMainWindow):
         control_vars = self.norm_control_vars.isChecked()
         block_mode = self.norm_block_mode.currentText()
         block_hours = int(self.norm_block_hours.value()) or None
-        if block_mode == "markov" and block_hours is None:
+        if block_mode == "markov" and (block_hours is None or block_hours <= 1):
             self.notify(
-                "Markov block resampling needs a Block hours value above 0.",
+                "Markov block resampling needs a Block hours value above 1.",
                 key="markov-needs-block-hours",
             )
             return
@@ -283,7 +283,10 @@ class AnalyseRunMixin(QMainWindow):
 
             o3_col = self.ox_o3_combo.currentText()
             no2_col = self.ox_no2_combo.currentText()
-            no_col = self.ox_no_combo.currentText() or None
+            # "(none)" is the explicit "no NO leg" choice; the old fallback
+            # passed whatever column the combo happened to select.
+            no_text = self.ox_no_combo.currentText()
+            no_col = None if no_text in ("", "(none)") else no_text
             unit = self.ox_unit_combo.currentText()
 
             def run_ox() -> pd.DataFrame:

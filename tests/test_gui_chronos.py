@@ -470,3 +470,40 @@ def test_chronos_gui_pdp_normalise_icn_checkpoint_and_scm_backend(
     _wait(qapp, s.runner)
     assert seen_scm.get("scm_backend") == "chronos"
     s.close()
+
+
+def test_gui_bank_reaggregation_passes_surprise_tau(monkeypatch, tmp_path):
+    """A loaded bank stores draws; the spin box's tau must re-weight them."""
+    from types import SimpleNamespace
+
+    import normet.foundation as foundation
+    from normet.gui import _chronos
+
+    est = SimpleNamespace(context_length=24, prediction_length=12)
+    df = pd.DataFrame(
+        {
+            "date": pd.date_range("2024-01-01", periods=48, freq="h"),
+            "value": np.linspace(1.0, 2.0, 48),
+            "ws": np.linspace(0.1, 0.4, 48),
+        }
+    )
+    seen: dict = {}
+
+    class _Bank:
+        def aggregate(self, **kwargs: object) -> object:
+            seen.update(kwargs)
+            index = pd.DatetimeIndex(["2024-01-03"])
+            return SimpleNamespace(
+                to_normet_frame=lambda estimate: pd.DataFrame(
+                    {"observed": [1.0], "normalised": [1.0]}, index=index
+                )
+            )
+
+    monkeypatch.setattr(foundation.ICNDrawBank, "load", staticmethod(lambda path: _Bank()))
+    _chronos.deweather(
+        est, df, ["ws"], False, method="icn", bank_path=tmp_path / "b.gz", surprise_tau=2.0
+    )
+    assert seen == {"schema": "normet", "surprise_tau": 2.0}
+    # 0 is the spin's default, not an instruction to drop the bank's stored tau.
+    _chronos.deweather(est, df, ["ws"], False, method="icn", bank_path=tmp_path / "b.gz")
+    assert seen == {"schema": "normet", "surprise_tau": None}

@@ -794,6 +794,26 @@ def test_scm_window_example_design(qapp):
         assert design is not None
         assert design["treated_unit"] == "2+26 cities"
         assert len(design["donors"]) == 30
+        # The staged backends read these from the design frame; selecting only
+        # (date, unit, outcome) left them out and the fit failed on a column
+        # the user had filled in.
+        covariates = win._scm_covariates()
+        assert covariates
+        assert set(covariates) <= set(design["df"].columns)
+        from PySide6.QtCore import Qt
+
+        for i in range(win.scm_covariates.count()):
+            win.scm_covariates.item(i).setCheckState(Qt.CheckState.Unchecked)
+        numeric = [
+            str(c)
+            for c in win.df.columns
+            if c not in (design["date_col"], design["unit_col"], design["outcome_col"])
+        ]
+        assert numeric
+        win.spillover_combo.setCurrentText(numeric[0])
+        transport_design = win._design()
+        assert transport_design is not None
+        assert numeric[0] in transport_design["df"].columns
         # bayesian backend disables run_scm-based inference
         win.backend_combo.setCurrentText("bayesian")
         assert not win.placebo_space_btn.isEnabled()

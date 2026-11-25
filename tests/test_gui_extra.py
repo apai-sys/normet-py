@@ -223,3 +223,19 @@ def test_add_met_features_ingests_the_enriched_table(qapp, monkeypatch):
         assert "physics features" in win.file_label.text()
     finally:
         win.close()
+
+
+def test_chem_combo_offers_an_explicit_no_column(qapp):
+    """NO is optional; without "(none)" the combo silently read PM2.5 as NO."""
+    from normet.gui.main_window import MainWindow
+
+    win = MainWindow()
+    try:
+        win._refresh_chem_columns(["O3", "NO2", "PM2.5"])
+        items = [win.ox_no_combo.itemText(i) for i in range(win.ox_no_combo.count())]
+        assert items[0] == "(none)"
+        assert win.ox_no_combo.currentText() == "(none)"
+        win._refresh_chem_columns(["O3", "NO2", "NO", "PM2.5"])
+        assert win.ox_no_combo.currentText() == "NO"
+    finally:
+        win.close()

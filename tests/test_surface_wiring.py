@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -102,12 +103,14 @@ def test_do_all_dml_routes_to_dml_normalise(monkeypatch: pytest.MonkeyPatch) -> 
         dml_cutoff_days=45.0,
         control_variates=True,
         block_mode="markov",
+        block_hours=3,
     )
     assert out is expected
     assert model.normalised is expected
     assert captured["cutoff_days"] == 45.0
     assert captured["control_variates"] is True
     assert captured["block_mode"] == "markov"
+    assert captured["block_hours"] == 3
 
 
 @pytest.mark.parametrize(
@@ -117,6 +120,8 @@ def test_do_all_dml_routes_to_dml_normalise(monkeypatch: pytest.MonkeyPatch) -> 
         ({"normalise_method": "dml", "cross_fit": True}, "cross_fit"),
         ({"normalise_method": "dml", "backend": "chronos-2"}, "Chronos-2"),
         ({"block_mode": "bridge"}, "block_mode"),
+        ({"block_mode": "markov"}, "block_hours"),
+        ({"block_mode": "markov", "block_hours": 1}, "block_hours"),
     ],
 )
 def test_do_all_rejects_incompatible_engine_settings(kwargs: dict, message: str) -> None:
@@ -345,3 +350,182 @@ def test_tools_make_met_features_argv(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "--include-memory" in argv
     assert argv[argv.index("--group-col") + 1] == "site"
     assert argv[argv.index("--out") + 1] == "met_features.csv"
+
+
+def test_tools_start_do_all_rejects_markov_without_block_hours() -> None:
+    tools = Tools()
+    with pytest.raises(ValueError, match="block_hours"):
+        tools.start_do_all("value", ["t2m"], block_mode="markov")
+    with pytest.raises(ValueError, match="block_hours"):
+        tools.start_do_all("value", ["t2m"], block_mode="markov", block_hours=1)
+
+
+def test_tools_start_normalise_ox_sends_explicit_none_no_col(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tools = Tools()
+    captured: dict = {}
+    monkeypatch.setattr(tools, "_source", lambda data, example: "in.csv")
+    monkeypatch.setattr(
+        tools, "_start", lambda kind, argv, label: captured.update(argv=argv) or "ok"
+    )
+    tools.start_normalise_ox("O3", "NO2", ["t2m"], no_col=None)
+    argv = captured["argv"]
+    assert argv[argv.index("--no-col") + 1] == "none"
+    tools.start_normalise_ox("O3", "NO2", ["t2m"], no_col="NOx")
+    argv = captured["argv"]
+    assert argv[argv.index("--no-col") + 1] == "NOx"
+
+
+def test_cli_invert_footprints_wide_csv_with_a_named_date_column(tmp_path) -> None:
+    """A wide CSV keeps ``date`` as a column; read_csv(parse_dates=True) only
+    parses the index, so the command must index it on a DatetimeIndex itself."""
+    from click.testing import CliRunner
+
+    from normet.app.cli import _build_cli
+
+    rng = np.random.default_rng(0)
+    dates = pd.date_range("2023-03-01", periods=60, freq="h")
+    beta = np.array([10.0, 4.0, 0.5])
+    fp = pd.DataFrame(
+        rng.uniform(0.0, 2.0, size=(60, 3)),
+        columns=[f"traj_footprint_{r}" for r in ("north", "east", "south")],
+    )
+    fp.insert(0, "date", dates)
+    wide = pd.DataFrame({"date": dates})
+    for k, site in enumerate(("site_A", "site_B")):
+        wide[site] = 12.0 * (k + 1) + fp[fp.columns[1:]].to_numpy() @ beta
+    fp.to_csv(tmp_path / "fp_a.csv", index=False)
+    fp.to_csv(tmp_path / "fp_b.csv", index=False)
+    wide.to_csv(tmp_path / "wide.csv", index=False)
+    out = tmp_path / "inv"
+    result = CliRunner().invoke(
+        _build_cli(),
+        [
+            "invert-footprints",
+            "--footprint",
+            f"site_A={tmp_path / 'fp_a.csv'}",
+            "--footprint",
+            f"site_B={tmp_path / 'fp_b.csv'}",
+            "--series",
+            str(tmp_path / "wide.csv"),
+            "--n-bootstrap",
+            "5",
+            "--out",
+            str(out),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert (out / "regions.csv").exists()
+    assert (out / "summary.json").exists()
+
+
+def test_cli_deweather_bank_reaggregation_applies_surprise_tau(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    from click.testing import CliRunner
+
+    import normet.foundation as foundation
+    from normet.app.cli import _build_cli
+
+    seen: dict = {}
+
+    class _Bank:
+        def aggregate(self, **kwargs: object) -> object:
+            seen.update(kwargs)
+            index = pd.DatetimeIndex(["2024-01-01"])
+            return SimpleNamespace(
+                to_normet_frame=lambda estimate: pd.DataFrame(
+                    {"observed": [1.0], "normalised": [1.0]}, index=index
+                )
+            )
+
+    monkeypatch.setattr(foundation.ICNDrawBank, "load", staticmethod(lambda path: _Bank()))
+    data = tmp_path / "in.csv"
+    _frame().to_csv(data, index=False)
+    bank = tmp_path / "bank.json.gz"
+    bank.write_bytes(b"{}")
+    out = tmp_path / "out.csv"
+    result = CliRunner().invoke(
+        _build_cli(),
+        [
+            "deweather",
+            str(data),
+            "--method",
+            "icn",
+            "--bank",
+            str(bank),
+            "--surprise-tau",
+            "2.0",
+            "--out",
+            str(out),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert seen == {"schema": "normet", "surprise_tau": 2.0}
+    assert out.exists()
+
+
+def test_cli_normalise_ox_maps_the_none_sentinel(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    from click.testing import CliRunner
+
+    import normet
+    from normet.app.cli import _build_cli
+
+    seen: dict = {}
+    frame = pd.DataFrame(
+        {"observed": [1.0], "normalised": [1.0]}, index=pd.DatetimeIndex(["2024-01-01"])
+    )
+
+    def fake_ox(df: pd.DataFrame, **kwargs: object) -> SimpleNamespace:
+        seen.update(kwargs)
+        return SimpleNamespace(
+            species=frame, ox_result=frame, nox_result=frame, conservation_max_err=0.0
+        )
+
+    monkeypatch.setattr(normet, "normalise_ox_invariant", fake_ox)
+    data = tmp_path / "in.csv"
+    pd.DataFrame(
+        {
+            "date": pd.date_range("2024-01-01", periods=6, freq="h"),
+            "O3": [30.0] * 6,
+            "NO2": [20.0] * 6,
+            "t2m": [280.0] * 6,
+        }
+    ).to_csv(data, index=False)
+    out = tmp_path / "out.csv"
+    base = ["normalise-ox", str(data), "--covariates", "t2m", "--out", str(out)]
+    result = CliRunner().invoke(_build_cli(), [*base, "--no-col", "none"])
+    assert result.exit_code == 0, result.output
+    assert seen["no_col"] is None
+    result = CliRunner().invoke(_build_cli(), base)
+    assert result.exit_code == 0, result.output
+    assert seen["no_col"] == "NO"
+
+
+def test_cli_do_all_rejects_markov_without_block_hours(tmp_path) -> None:
+    from click.testing import CliRunner
+
+    from normet.app.cli import _build_cli
+
+    data = tmp_path / "in.csv"
+    _frame().to_csv(data, index=False)
+    result = CliRunner().invoke(
+        _build_cli(),
+        [
+            "do-all",
+            str(data),
+            "--target",
+            "value",
+            "--covariates",
+            "t2m",
+            "--backend",
+            "lightgbm",
+            "--block-mode",
+            "markov",
+            "--out",
+            str(tmp_path / "out.csv"),
+        ],
+    )
+    assert result.exit_code == 2
+    assert "block-hours" in result.output
