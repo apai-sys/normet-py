@@ -1206,6 +1206,14 @@ def normalise(
             raise ConfigError(f"`block_hours` must be a positive integer or None, got {bh_obj!r}.")
         if int(bh_obj) < 1:
             raise ConfigError(f"`block_hours` must be at least 1, got {bh_obj!r}.")
+    if _cfg.block_mode == "markov" and (_cfg.block_hours is None or int(_cfg.block_hours) <= 1):
+        # The Markov branch only activates for block_hours > 1; otherwise the
+        # draws are identical to independent resampling and the setting is a
+        # silent no-op.
+        raise ConfigError(
+            "`block_mode='markov'` needs `block_hours` > 1; with None or 1 the "
+            "draws are the same as independent resampling."
+        )
 
     required_features: set[str] | None = None
     if _cfg.covariates is None:

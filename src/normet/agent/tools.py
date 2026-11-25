@@ -292,6 +292,8 @@ class Tools:
             raise ValueError("normalise_method is 'standard' or 'dml'")
         if block_mode not in (None, "independent", "markov"):
             raise ValueError("block_mode is 'independent' or 'markov'")
+        if block_mode == "markov" and (block_hours is None or int(block_hours) <= 1):
+            raise ValueError("block_mode='markov' needs block_hours > 1")
         argv = ["do-all", self._source(data, example)] + self._options(
             target=target,
             covariates=covariates,
@@ -453,13 +455,19 @@ class Tools:
         seed: int | None = None,
         label: str = "",
     ) -> str:
-        """Conserved Ox-NOx deweathering (``normet normalise-ox``)."""
+        """Conserved Ox-NOx deweathering (``normet normalise-ox``).
+
+        ``no_col=None`` asks for Ox without the NO leg. The CLI default is
+        ``"NO"`` and ``_options`` drops empty strings, so the choice is sent
+        as the explicit ``--no-col none`` sentinel.
+        """
         if not covariates:
             raise ValueError("give the meteorological covariates to deweather against")
-        argv = ["normalise-ox", self._source(data, example)] + self._options(
+        argv = ["normalise-ox", self._source(data, example)]
+        argv += ["--no-col", no_col if no_col else "none"]
+        argv += self._options(
             o3_col=o3_col,
             no2_col=no2_col,
-            no_col="" if no_col is None else no_col,
             covariates=covariates,
             resample_vars=resample_vars,
             unit=unit,

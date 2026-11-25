@@ -277,6 +277,12 @@ def _build_cli() -> Any:
         from ..pipeline.do_all import SingleConfig
 
         cfg = _merge_cli_over_yaml(_load_yaml(opts.pop("config_path", None)), opts)
+        if cfg.get("block_mode") == "markov" and not (
+            cfg.get("block_hours") is not None and int(cfg["block_hours"]) > 1
+        ):
+            # The library treats markov with no usable block length as
+            # independent draws, which made --block-mode markov a silent no-op.
+            raise click.UsageError("--block-mode markov needs --block-hours > 1")
         df = _load_table(input)
 
         # Every SingleConfig field the config file names reaches do_all, not
@@ -473,7 +479,13 @@ def _build_cli() -> Any:
             from ..foundation import ICNDrawBank
 
             bank = ICNDrawBank.load(bank_path)
-            out = bank.aggregate(schema="normet").to_normet_frame(estimate=estimate)
+            # The bank stores draws, not an aggregate: a supplied tau must
+            # re-weight them here, otherwise --surprise-tau was silently
+            # dropped on the re-aggregation path.
+            overrides: dict[str, Any] = {"schema": "normet"}
+            if surprise_tau is not None:
+                overrides["surprise_tau"] = float(surprise_tau)
+            out = bank.aggregate(**overrides).to_normet_frame(estimate=estimate)
             _save_table(out.reset_index(), Path(cfg["out_path"]))
             click.echo(
                 f"[deweather] re-aggregated bank {bank_path} ({estimate}); wrote {cfg['out_path']}"
@@ -831,6 +843,12 @@ def _build_cli() -> Any:
             footprints[site.strip()] = _load_table(Path(path.strip()))
         series = _load_table(Path(cfg["series_path"]))
         date_col = cfg.get("date_col") or "date"
+        if date_col in series.columns:
+            # ``_load_table`` reads CSVs with ``parse_dates=True``, which only
+            # parses the index: a named date column stays a string, and the wide
+            # path below indexes on it, so the estimator received a string index
+            # and raised "must have a DatetimeIndex". Coerce it here.
+            series[date_col] = pd.to_datetime(series[date_col])
         unit_col = cfg.get("unit_col")
         series_by_site: dict[str, pd.Series | pd.DataFrame] = {}
         if unit_col and unit_col in series.columns:
@@ -882,7 +900,7 @@ def _build_cli() -> Any:
         "--no-col",
         "no_col",
         default="NO",
-        help="Nitric-oxide column; pass an empty string when the table has none.",
+        help="Nitric-oxide column; pass 'none' when the table has no NO leg.",
     )
     @click.option("--covariates", help="Comma-separated meteorological/calendar covariates.")
     @click.option("--resample-vars", "resample_vars", help="Comma-separated variables to resample.")
@@ -912,11 +930,16 @@ def _build_cli() -> Any:
 
         cfg = _merge_cli_over_yaml(_load_yaml(opts.pop("config_path", None)), opts)
         df = _load_table(input)
+        no_col_raw = cfg.get("no_col")
+        # "none" (or an empty value) means the table has no NO leg; without
+        # this the Click default "NO" was used and the run failed on a column
+        # the user never had.
+        no_col = None if str(no_col_raw or "").strip().lower() in ("", "none") else str(no_col_raw)
         res = normalise_ox_invariant(
             df,
             o3_col=cfg.get("o3_col") or "O3",
             no2_col=cfg.get("no2_col") or "NO2",
-            no_col=(cfg.get("no_col") or None),
+            no_col=no_col,
             covariates=_split_csv(cfg.get("covariates")) or [],
             variables_resample=_split_csv(cfg.get("resample_vars")),
             unit=cfg.get("unit") or "ug_m3",

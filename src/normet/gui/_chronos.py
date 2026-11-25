@@ -138,7 +138,8 @@ def deweather(
     supports ``estimate="level"|"paired"``, ``log_transform=True`` and
     ``surprise_tau > 0`` (anchor-error gating). ``save_bank`` writes the raw
     draws of that run; ``bank_path`` re-aggregates such a file instead of
-    running the model (GPU once, CPU afterwards).
+    running the model (GPU once, CPU afterwards). On the bank path a
+    ``surprise_tau > 0`` re-weights the stored draws; 0 keeps the bank's own.
     """
     indexed = to_indexed_frame(df_prep)
     quantiles = QUANTILES if with_quantiles else (0.5,)
@@ -165,7 +166,13 @@ def deweather(
         if bank_path is not None and str(bank_path):
             from normet.foundation import ICNDrawBank
 
-            res = ICNDrawBank.load(bank_path).aggregate(schema="normet")
+            # The bank stores the draws, not the aggregate: the spin box must
+            # re-weight them here. 0 keeps the bank's stored surprise_tau
+            # (the spin shows its default, not the bank's design).
+            tau = float(surprise_tau)
+            res = ICNDrawBank.load(bank_path).aggregate(
+                schema="normet", surprise_tau=tau if tau > 0.0 else None
+            )
         elif save_bank is not None and str(save_bank):
             from normet.foundation import build_icn_draw_bank
 

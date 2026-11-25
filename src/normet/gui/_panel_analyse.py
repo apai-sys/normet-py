@@ -280,15 +280,19 @@ class AnalysePanelMixin(QMainWindow):
 
     def _refresh_chem_columns(self, numeric: list[str]) -> None:
         """Offer the loaded table's columns to the chemistry engine selectors."""
-        for combo, preferred in (
-            (self.ox_o3_combo, "O3"),
-            (self.ox_no2_combo, "NO2"),
-            (self.ox_no_combo, "NO"),
-        ):
+        for combo, preferred in ((self.ox_o3_combo, "O3"), (self.ox_no2_combo, "NO2")):
             combo.clear()
             combo.addItems(numeric)
             if preferred in numeric:
                 combo.setCurrentText(preferred)
+        # NO is optional: conserved Ox also works without the NO leg. Without
+        # an explicit "(none)" entry the combo fell back to the first numeric
+        # column, silently reading e.g. PM2.5 as NO.
+        self.ox_no_combo.clear()
+        self.ox_no_combo.addItem("(none)")
+        self.ox_no_combo.addItems(numeric)
+        if "NO" in numeric:
+            self.ox_no_combo.setCurrentText("NO")
         self.regime_precursors.clear()
         default_precursors = {"NO2", "NO", "NOX", "CO", "SO2"}
         for column in numeric:

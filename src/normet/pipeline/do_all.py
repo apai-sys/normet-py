@@ -695,6 +695,13 @@ def do_all(
         raise ConfigError(
             f"`block_mode` must be 'independent' or 'markov', got {_cfg.block_mode!r}."
         )
+    if _cfg.block_mode == "markov" and (_cfg.block_hours is None or int(_cfg.block_hours) <= 1):
+        # The Markov bridge only engages for block_hours > 1; otherwise the
+        # setting was a silent no-op equal to independent resampling.
+        raise ConfigError(
+            "`block_mode='markov'` needs `block_hours` > 1; with None or 1 the "
+            "draws are the same as independent resampling."
+        )
     if _cfg.normalise_method == "dml" and _cfg.cross_fit:
         raise ConfigError(
             "`normalise_method='dml'` runs its own blocked out-of-fold pass; set cross_fit=False."
@@ -968,6 +975,13 @@ def do_all_unc(
     if _cfg.block_mode not in ("independent", "markov"):
         raise ConfigError(
             f"`block_mode` must be 'independent' or 'markov', got {_cfg.block_mode!r}."
+        )
+    if _cfg.block_mode == "markov" and (_cfg.block_hours is None or int(_cfg.block_hours) <= 1):
+        # The Markov bridge only engages for block_hours > 1; otherwise the
+        # setting was a silent no-op equal to independent resampling.
+        raise ConfigError(
+            "`block_mode='markov'` needs `block_hours` > 1; with None or 1 the "
+            "draws are the same as independent resampling."
         )
     if _cfg.normalise_method == "dml" and unc_mode != "legacy":
         raise ConfigError(

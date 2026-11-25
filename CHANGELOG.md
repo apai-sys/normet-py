@@ -262,6 +262,24 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
     the default `traj_*` column set is unchanged; Transport Studio passes it.
 
 ### Fixed
+- **Surface defects found by the remaining-todo audit**:
+  - SCM Studio's `deweathered` / `transport` backends now see their
+    meteorological covariates and the spillover-exposure column in the design
+    frame (`_design` selected only date/unit/outcome, so the staged fits
+    failed on missing columns although the controls were filled in).
+  - `normet invert-footprints` parses a named `date` column for CSV input;
+    `read_csv(parse_dates=True)` only parses the index, so a wide table
+    reached the estimator with a string index.
+  - `normalise-ox` / MCP: `no_col=None` is sent as the explicit
+    `--no-col none` sentinel instead of being dropped by `_options` (which
+    made Click fall back to `"NO"`); the GUI's NO selector gains an explicit
+    `"(none)"` entry instead of silently using the first numeric column.
+  - `deweather --bank` and the GUI's draw-bank Load pass `surprise_tau`
+    into `ICNDrawBank.aggregate`; the re-aggregation path had ignored it, and
+    the GUI's `0` now keeps the bank's stored value.
+  - `block_mode="markov"` requires `block_hours > 1` in `normalise`,
+    `do_all`, the CLI, the MCP tool and the GUI; the previous fallback was
+    silent independent resampling.
 - **First-principles review of the v3 additions (`nm.dml_normalise`,
   `nm.normalise`, `nm.decom_met`, `nm.shapley_interactions`,
   `nm.add_met_physics_features`, `nm.normalise_ox_invariant`,

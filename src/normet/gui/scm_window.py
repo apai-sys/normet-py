@@ -962,7 +962,15 @@ class SCMWindow(QMainWindow):
             QMessageBox.information(self, "Donor pool too small", "Tick at least two donor units.")
             return None
         cutoff = self.cutoff_edit.date().toString("yyyy-MM-dd")
-        d = self.df[[date_col, unit_col, outcome]].copy()
+        # The ``deweathered`` / ``transport`` backends read their meteorological
+        # covariates and the spillover exposure from this frame. Selecting only
+        # (date, unit, outcome) left those columns out, so a staged fit failed
+        # on missing columns although the controls above were filled in.
+        columns = [date_col, unit_col, outcome]
+        for name in [*self._scm_covariates(), self.spillover_combo.currentText()]:
+            if name and name in self.df.columns and name not in columns:
+                columns.append(name)
+        d = self.df[columns].copy()
         d[date_col] = to_datetime_coerced(d[date_col])
         d = d.dropna(subset=[date_col])
         d[unit_col] = d[unit_col].astype(str)
