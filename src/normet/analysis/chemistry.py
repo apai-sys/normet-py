@@ -98,9 +98,54 @@ def _deweather_series(
     seed: int,
     n_cores: int | None,
     verbose: bool,
+    icn_estimator: Any = None,
+    icn_design: Any = None,
+    icn_pipeline: Any = None,
 ) -> tuple[pd.DataFrame, pd.Series]:
     """Deweather one scalar column and return ``(result_df, aligned_estimate_series)``."""
-    if method == "dml":
+    if method == "icn":
+        from ..foundation import (
+            Chronos2Estimator,
+            ICNDesign,
+            normalise_in_context,
+            to_indexed_frame,
+        )
+
+        keep_cols = list(
+            dict.fromkeys([c for c in ("date", target_col, *covariates) if c in df.columns])
+        )
+        indexed = to_indexed_frame(df[keep_cols])
+        est = (
+            icn_estimator
+            if icn_estimator is not None
+            else Chronos2Estimator(met_covariates=covariates)
+        )
+        if icn_design is not None:
+            design = icn_design
+        else:
+            min_ctx = (
+                min(336, max(48, len(indexed) // 4))
+                if len(indexed) <= int(getattr(est, "context_length", 2048)) + 336
+                else None
+            )
+            design = ICNDesign.v1(
+                log_transform=bool(log_transform),
+                seed=seed,
+                min_context=min_ctx,
+            )
+        met_feats = list(variables_resample) if variables_resample is not None else None
+        icn_res = normalise_in_context(
+            est,
+            indexed,
+            target_col,
+            design=design,
+            pipeline=icn_pipeline,
+            met_features=met_feats,
+            schema="normet",
+        )
+        res = icn_res.to_normet_frame("level", include_factual=True)
+        res["paired"] = icn_res.paired.reindex(res.index).to_numpy(dtype=float)
+    elif method == "dml":
         res = dml_normalise(
             df,
             target=target_col,
@@ -190,6 +235,9 @@ def normalise_ox_invariant(
     seed: int = DEFAULT_SEED,
     n_cores: int | None = None,
     verbose: bool = False,
+    icn_estimator: Any = None,
+    icn_design: Any = None,
+    icn_pipeline: Any = None,
 ) -> ConservedOxResult:
     """Conserved :math:`\\mathrm{O_x\\text{–}NO_x}` photochemical coordinate deweathering.
 
@@ -217,12 +265,16 @@ def normalise_ox_invariant(
         covariates.
     unit : {"ug_m3", "ppb"}, default "ug_m3"
         Concentration units of ``o3_col``, ``no2_col``, and ``no_col``.
-    method : {"dml", "crossfit", "standard"}, default "dml"
+    method : {"dml", "crossfit", "standard", "icn"}, default "dml"
         Deweathering engine used for :math:`\\mathrm{O_x}` and :math:`\\mathrm{NO_x}`.
     backend : str, default "lightgbm"
         Model backend for regression and photochemical partitioning.
     use_paired : bool, default True
         Use the anomaly-preserving ``paired`` series when available.
+    icn_estimator, icn_design, icn_pipeline : optional
+        Optional Chronos-2 estimator, :class:`~normet.foundation.in_context.ICNDesign`,
+        and :class:`~normet.foundation.in_context.ICLPipeline` forwarded when
+        ``method="icn"``.
 
     Returns
     -------
@@ -230,8 +282,10 @@ def normalise_ox_invariant(
     """
     if unit not in ("ug_m3", "ppb"):
         raise ConfigError(f"`unit` must be 'ug_m3' or 'ppb', got {unit!r}.")
-    if method not in ("dml", "crossfit", "standard"):
-        raise ConfigError(f"`method` must be 'dml', 'crossfit', or 'standard', got {method!r}.")
+    if method not in ("dml", "crossfit", "standard", "icn"):
+        raise ConfigError(
+            f"`method` must be 'dml', 'crossfit', 'standard', or 'icn', got {method!r}."
+        )
     if not covariates:
         raise ConfigError("`covariates` must be non-empty.")
 
@@ -297,6 +351,9 @@ def normalise_ox_invariant(
         seed=seed,
         n_cores=n_cores,
         verbose=verbose,
+        icn_estimator=icn_estimator,
+        icn_design=icn_design,
+        icn_pipeline=icn_pipeline,
     )
     nox_df, nox_dew_s = _deweather_series(
         work_chem,
@@ -315,9 +372,19 @@ def normalise_ox_invariant(
         seed=seed + 101,
         n_cores=n_cores,
         verbose=verbose,
+        icn_estimator=icn_estimator,
+        icn_design=icn_design,
+        icn_pipeline=icn_pipeline,
     )
 
     common_idx = ox_dew_s.index.intersection(nox_dew_s.index)
+    if method == "icn":
+        fin_mask = ox_dew_s.reindex(common_idx).notna() & nox_dew_s.reindex(common_idx).notna()
+        common_idx = common_idx[fin_mask.to_numpy(dtype=bool)]
+        if len(common_idx) == 0:
+            raise DataError(
+                "ICN produced no finite Ox/NOx estimates; supply a longer series or set min_context."
+            )
     ox_dew = np.maximum(ox_dew_s.reindex(common_idx).to_numpy(dtype=float), 0.0)
     nox_dew = np.maximum(nox_dew_s.reindex(common_idx).to_numpy(dtype=float), 0.0)
 

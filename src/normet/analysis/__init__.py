@@ -20,7 +20,12 @@ from .decomposition import (
     shapley_interactions,
     suggest_met_groups,
 )
-from .diagnostics import NormalisationDiagnostics, diagnose_normalisation, support_audit
+from .diagnostics import (
+    NormalisationDiagnostics,
+    counterfactual_separability_audit,
+    diagnose_normalisation,
+    support_audit,
+)
 from .events import anomaly_scores, detect_events
 from .normalise import (
     CrossFitNormaliseResult,
@@ -98,6 +103,7 @@ __all__ = [
     "normalise_ox_invariant",
     "normalise_regime_conditioned",
     "NormalisationDiagnostics",
+    "counterfactual_separability_audit",
     "diagnose_normalisation",
     "support_audit",
     "decom_emi",

@@ -48,6 +48,7 @@ __all__ = [
     "Chronos2ICLPipeline",
     "Chronos2MultivariateICLPipeline",
     "build_icn_draw_bank",
+    "debias_icn_residuals",
     "decompose_icn_uncertainty",
     "icn_decompose",
     "normalise_in_context",
@@ -183,6 +184,34 @@ class ICNDesign:
         cells is dropped, and the anchor index and fraction are recorded in
         ``diagnostics["low_support"]``.  A counterfactual drawn from a pool
         that never saw such weather is an extrapolation, not an intervention.
+    log_transform:
+        Forecast the level on the ``log1p`` scale and map draws back with
+        ``expm1`` -- for right-skewed pollutants whose weather response is
+        multiplicative.  Requires non-negative targets; with ``log_transform``
+        the default ``paired_mode="auto"`` resolves to ``"log_ratio"``.
+    surprise_tau:
+        Edge-preserving aggregation weight: when ``> 0`` each anchor's draws
+        are weighted by ``exp(-(err / surprise_tau)**2)``, where ``err`` is the
+        anchor's factual forecast error normalised by the observed scale.  An
+        anchor that straddles a step event forecasts across the edge, so its
+        error is large; down-weighting it stops the event edge being smeared.
+        ``0`` (default) disables the gate, keeping the frozen ICN-v1 hash.
+    paired_mode:
+        How the observed series is re-based onto the counterfactual weather for
+        ``ICNResult.paired``: ``"auto"`` (``"log_ratio"`` when
+        ``log_transform`` else ``"ratio"`` -- the pre-2026-11 behaviour),
+        ``"additive"``, ``"ratio"``, ``"log_ratio"`` or ``"rank"``.
+        ``"rank"`` transports the observed value through each anchor's factual
+        and counterfactual quantile fans by rank, so a multiplicative shock
+        keeps its size instead of being clipped at the fan's edge; it needs a
+        pipeline exposing ``forecast_quantiles_batch``.
+    point_estimate:
+        How the predictive fan becomes the level point forecast: ``"median"``
+        (the ``q=0.5`` column, the pre-2026-11 behaviour) or
+        ``"quantile_mean"`` (trapezoidal :math:`E[Y \\mid X]` over the fan).
+        Under multiplicative noise the median understates the conditional
+        mean, so ``"quantile_mean"`` removes part of the level bias when the
+        pipeline emits quantiles.
     """
 
     intervene: str = "future_only"
@@ -200,6 +229,8 @@ class ICNDesign:
     support_min_frac: float = 0.5
     log_transform: bool = False
     surprise_tau: float = 0.0
+    paired_mode: str = "auto"
+    point_estimate: str = "median"
 
     def __post_init__(self) -> None:
         if self.intervene not in ("future_only", "past_future"):
@@ -220,6 +251,14 @@ class ICNDesign:
             raise ValueError(f"support_min_frac must be in [0, 1], got {self.support_min_frac}")
         if float(self.surprise_tau) < 0.0:
             raise ValueError(f"surprise_tau must be >= 0, got {self.surprise_tau}")
+        if self.paired_mode not in ("auto", "additive", "ratio", "log_ratio", "rank"):
+            raise ValueError(
+                f"paired_mode must be auto|additive|ratio|log_ratio|rank, got {self.paired_mode!r}"
+            )
+        if self.point_estimate not in ("median", "quantile_mean"):
+            raise ValueError(
+                f"point_estimate must be median|quantile_mean, got {self.point_estimate!r}"
+            )
 
     @classmethod
     def v1(cls, **overrides: Any) -> ICNDesign:
@@ -393,6 +432,7 @@ class _DirResult(NamedTuple):
     quantile_draws: dict[float, dict[int, list[tuple[float, int]]]]
     paired_quantile_draws: dict[float, dict[int, list[tuple[float, int]]]]
     factual_errors: dict[int, list[float]]
+    factual_draws: dict[int, list[tuple[float, int]]]
 
 
 @dataclass
@@ -402,7 +442,10 @@ class ICNResult:
     Attributes
     ----------
     level:
-        Counterfactual (weather-removed) median, indexed by the frame's time.
+        Counterfactual (weather-removed) point estimate -- the median by
+        default, the predictive quantile mean under
+        ``ICNDesign(point_estimate="quantile_mean")`` -- indexed by the frame's
+        time.
     paired:
         Observed rescaled by ``level_cf / level_factual`` (D11), or additive in
         ``log1p`` space when ``log_transform=True``, the ICN-P estimate that keeps
@@ -430,6 +473,8 @@ class ICNResult:
     paired_quantiles:
         Optional DataFrame of aggregated paired counterfactual quantiles (``qNNN``),
         populated when ``quantiles`` are requested.
+    factual:
+        Optional aggregated factual baseline forecast aligned with ``observed``.
     """
 
     level: pd.Series
@@ -441,8 +486,11 @@ class ICNResult:
     observed: pd.Series | None = None
     quantiles: pd.DataFrame | None = None
     paired_quantiles: pd.DataFrame | None = None
+    factual: pd.Series | None = None
 
-    def to_normet_frame(self, estimate: str = "level") -> pd.DataFrame:
+    def to_normet_frame(
+        self, estimate: str = "level", *, include_factual: bool = False
+    ) -> pd.DataFrame:
         """Convert the result onto :func:`normet.normalise`'s ``observed/normalised/qNNN`` schema."""
         if estimate not in ("level", "paired"):
             raise ValueError(f"estimate must be 'level' or 'paired', got {estimate!r}")
@@ -460,6 +508,8 @@ class ICNResult:
         if q_src is not None:
             for col in q_src.columns:
                 out[col] = q_src[col].reindex(self.observed.index).to_numpy()
+        if include_factual and self.factual is not None:
+            out["factual"] = self.factual.reindex(self.observed.index).to_numpy()
         return out
 
 
@@ -480,6 +530,7 @@ class ICNDrawBank:
     quantiles: tuple[float, ...] | None = None
     external_pool: bool = False
     schema: str = "chronos"
+    past_only_cols: tuple[str, ...] = ()
 
     def _merged_dir(self, direction: str | None) -> tuple[str, _DirResult]:
         """Resolve and mirror/merge directional cached draws."""
@@ -536,6 +587,7 @@ class ICNDrawBank:
             req_qs=self.quantiles,
             ext_pool=self.external_pool,
             schema=schema_eff,
+            past_only_cols=self.past_only_cols,
         )
 
     def decompose_uncertainty(self, *, direction: str | None = None) -> Any:
@@ -565,6 +617,7 @@ class ICNDrawBank:
             "quantiles": list(self.quantiles) if self.quantiles is not None else None,
             "external_pool": bool(self.external_pool),
             "schema": self.schema,
+            "past_only_cols": list(self.past_only_cols),
         }
         with gzip.open(out_path, "wt", encoding="utf-8") as fh:
             json.dump(payload, fh, allow_nan=False)
@@ -621,6 +674,7 @@ class ICNDrawBank:
             quantiles=qs,
             external_pool=bool(payload.get("external_pool", False)),
             schema=str(payload.get("schema", "chronos")),
+            past_only_cols=tuple(str(c) for c in payload.get("past_only_cols", ())),
         )
 
 
@@ -666,6 +720,10 @@ def _dir_to_json(r: _DirResult) -> dict[str, Any]:
         "factual_errors": {
             str(h): [_sanitise_float(v) for v in vals] for h, vals in r.factual_errors.items()
         },
+        "factual_draws": {
+            str(h): [[_sanitise_float(v), int(lead)] for v, lead in items]
+            for h, items in r.factual_draws.items()
+        },
     }
 
 
@@ -702,6 +760,10 @@ def _dir_from_json(d: Mapping[str, Any]) -> _DirResult:
         factual_errors={
             int(h): [_restore_float(v) for v in vals]
             for h, vals in d.get("factual_errors", {}).items()
+        },
+        factual_draws={
+            int(h): [(_restore_float(v), int(lead)) for v, lead in items]
+            for h, items in d.get("factual_draws", {}).items()
         },
     )
 
@@ -793,9 +855,16 @@ class Chronos2ICLPipeline:
     a :class:`MetPool` draw for a counterfactual one.
     """
 
-    def __init__(self, estimator: Any, *, cross_learning: bool = False) -> None:
+    def __init__(
+        self,
+        estimator: Any,
+        *,
+        cross_learning: bool = False,
+        past_only_cols: Sequence[str] = (),
+    ) -> None:
         self.estimator = estimator
         self.cross_learning = bool(cross_learning)
+        self.past_only_cols = tuple(str(c) for c in past_only_cols)
 
     def _run_blocks(
         self,
@@ -806,6 +875,14 @@ class Chronos2ICLPipeline:
         prepared = [
             (np.asarray(hist, dtype=np.float64), past, future[cols]) for hist, past, future in items
         ]
+        if self.past_only_cols:
+            return self.estimator._forecast_blocks(
+                prepared,
+                cols,
+                horizon,
+                past_only_cols=self.past_only_cols,
+                cross_learning=self.cross_learning,
+            )
         if self.cross_learning:
             return self.estimator._forecast_blocks(prepared, cols, horizon, cross_learning=True)
         return self.estimator._forecast_blocks(prepared, cols, horizon)
@@ -860,9 +937,16 @@ class Chronos2ICLPipeline:
 class Chronos2MultivariateICLPipeline:
     """Adapter executing joint multivariate Chronos-2 predictions for ICN."""
 
-    def __init__(self, estimator: Any, *, cross_learning: bool = False) -> None:
+    def __init__(
+        self,
+        estimator: Any,
+        *,
+        cross_learning: bool = False,
+        past_only_cols: Sequence[str] = (),
+    ) -> None:
         self.estimator = estimator
         self.cross_learning = bool(cross_learning)
+        self.past_only_cols = tuple(str(c) for c in past_only_cols)
 
     def forecast_multivariate_batch(
         self,
@@ -889,7 +973,14 @@ class Chronos2MultivariateICLPipeline:
                 raise ValueError(f"Expected target_history shape ({n_var}, T), got {stacked.shape}")
             for row in stacked:
                 self.estimator._check_context(row)
-            inputs.append(self.estimator._make_input(stacked, past, future[cols], cols))
+            if self.past_only_cols:
+                inputs.append(
+                    self.estimator._make_input(
+                        stacked, past, future[cols], cols, past_only_cols=self.past_only_cols
+                    )
+                )
+            else:
+                inputs.append(self.estimator._make_input(stacked, past, future[cols], cols))
 
         raw = (
             self.estimator._predict_raw(inputs, horizon, cross_learning=True)
@@ -1008,11 +1099,123 @@ class _PreparedSiteAnchor(NamedTuple):
 
 def _design_hash(design: ICNDesign) -> str:
     d = dict(design.__dict__)
-    # Preserve the frozen ICN-v1 hash when surprise_tau is at its default 0.0.
+    # Preserve the frozen ICN-v1 hash when new axes stay at their defaults.
     if float(d.get("surprise_tau", 0.0)) == 0.0:
         d.pop("surprise_tau", None)
+    if d.get("paired_mode", "auto") == "auto":
+        d.pop("paired_mode", None)
+    if d.get("point_estimate", "median") == "median":
+        d.pop("point_estimate", None)
     payload = json.dumps(d, sort_keys=True, default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+
+
+_DEFAULT_DIST_QUANTILES: tuple[float, ...] = (0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 0.8, 0.9, 0.95)
+
+
+def _resolve_dist_quantiles(pipeline: Any) -> tuple[float, ...]:
+    """Return sorted quantile grid for quantile-mean integration and rank transport."""
+    est_qs = getattr(getattr(pipeline, "estimator", None), "_quantiles", None)
+    pipe_qs = getattr(pipeline, "quantile_levels", None)
+    src = est_qs if est_qs is not None else pipe_qs
+    if src is not None:
+        cleaned = tuple(sorted({float(q) for q in src if 0.0 <= float(q) <= 1.0}))
+        if len(cleaned) >= 2:
+            return cleaned
+    return _DEFAULT_DIST_QUANTILES
+
+
+def _trapezoidal_quantile_mean(q_vals: np.ndarray, q_levels: np.ndarray) -> np.ndarray:
+    """Approximate E[Y | X] from predictive quantiles via trapezoidal integration."""
+    arr = np.asarray(q_vals, dtype=float)
+    ql = np.asarray(q_levels, dtype=float)
+    if arr.shape[-2] != len(ql):
+        raise ValueError(f"Quantile axis size {arr.shape[-2]} does not match q_levels ({len(ql)}).")
+    if len(ql) == 1:
+        return arr[..., 0, :]
+    span = float(ql[-1] - ql[0])
+    if span <= 0.0:
+        return np.mean(arr, axis=-2)
+    dq = np.diff(ql)
+    mids = 0.5 * (arr[..., :-1, :] + arr[..., 1:, :])
+    bshape = [1] * mids.ndim
+    bshape[-2] = len(dq)
+    return np.sum(mids * dq.reshape(bshape), axis=-2) / span
+
+
+def _enforce_monotone_quantiles(q_vals: np.ndarray, q_levels: np.ndarray) -> np.ndarray:
+    """Enforce non-decreasing quantiles outward from the median along axis -2."""
+    out = np.asarray(q_vals, dtype=float).copy()
+    mid = int(np.argmin(np.abs(np.asarray(q_levels, dtype=float) - 0.5)))
+    if mid > 0:
+        out[..., : mid + 1, :] = np.minimum.accumulate(
+            out[..., : mid + 1, :][..., ::-1, :], axis=-2
+        )[..., ::-1, :]
+    out[..., mid:, :] = np.maximum.accumulate(out[..., mid:, :], axis=-2)
+    return out
+
+
+def _rank_transport_anchor(
+    obs_seg: np.ndarray,
+    fact_q: np.ndarray,
+    cf_q: np.ndarray,
+    q_levels: np.ndarray,
+    *,
+    non_negative: bool = False,
+) -> np.ndarray:
+    """Rank-preserving quantile transport from factual quantiles onto counterfactual draws."""
+    fq_all = _enforce_monotone_quantiles(fact_q, q_levels)
+    cq_all = _enforce_monotone_quantiles(cf_q, q_levels)
+    h_len = len(obs_seg)
+    out = np.full(h_len, np.nan, dtype=float)
+    ql = np.asarray(q_levels, dtype=float)
+
+    for j in range(h_len):
+        y = float(obs_seg[j])
+        fq = fq_all[:, j]
+        if not np.isfinite(y) or not np.all(np.isfinite(fq)):
+            continue
+        iqr_f = float(np.interp(0.75, ql, fq) - np.interp(0.25, ql, fq))
+        if iqr_f <= 1e-9:
+            iqr_f = float(fq[-1] - fq[0])
+
+        vals: list[float] = []
+        if fq[0] <= y <= fq[-1]:
+            eq = np.flatnonzero(fq == y)
+            u = (
+                float(0.5 * (ql[eq[0]] + ql[eq[-1]]))
+                if eq.size > 1
+                else float(np.interp(y, fq, ql))
+            )
+            for k in range(cq_all.shape[0]):
+                cq = cq_all[k, :, j]
+                if np.all(np.isfinite(cq)):
+                    vals.append(float(np.interp(u, ql, cq)))
+        else:
+            for k in range(cq_all.shape[0]):
+                cq = cq_all[k, :, j]
+                if not np.all(np.isfinite(cq)):
+                    continue
+                iqr_c = float(np.interp(0.75, ql, cq) - np.interp(0.25, ql, cq))
+                if iqr_c <= 1e-9:
+                    iqr_c = float(cq[-1] - cq[0])
+                scale_ratio = (
+                    float(np.clip(iqr_c / iqr_f, 0.25, 4.0))
+                    if (iqr_f > 1e-9 and iqr_c > 0.0)
+                    else 1.0
+                )
+                if y > fq[-1]:
+                    vals.append(float(cq[-1] + scale_ratio * (y - fq[-1])))
+                else:
+                    vals.append(float(cq[0] + scale_ratio * (y - fq[0])))
+
+        if not vals:
+            continue
+        mean_v = float(np.mean(vals))
+        if non_negative and np.isfinite(mean_v):
+            mean_v = max(mean_v, 0.0)
+        out[j] = mean_v
+    return out
 
 
 def _empty_dir_result(quantiles: tuple[float, ...] | None) -> _DirResult:
@@ -1027,6 +1230,7 @@ def _empty_dir_result(quantiles: tuple[float, ...] | None) -> _DirResult:
         quantile_draws={q: {} for q in qs},
         paired_quantile_draws={q: {} for q in qs},
         factual_errors={},
+        factual_draws={},
     )
 
 
@@ -1047,6 +1251,7 @@ def _mirror_dir_result(r: _DirResult, n: int) -> _DirResult:
             for q, hmap in r.paired_quantile_draws.items()
         },
         factual_errors={n - 1 - h: v for h, v in r.factual_errors.items()},
+        factual_draws={n - 1 - h: v for h, v in r.factual_draws.items()},
     )
 
 
@@ -1065,6 +1270,7 @@ def _merge_dir_results(fwd: _DirResult, revr: _DirResult, n: int) -> _DirResult:
         for q, hmap in fwd.paired_quantile_draws.items()
     }
     f_errs = {h: list(fwd.factual_errors[h]) for h in fwd.factual_errors}
+    f_draws = {h: list(fwd.factual_draws[h]) for h in fwd.factual_draws}
     # forward already keyed by original hours; reverse keyed by reversed-frame
     # hours, so map each reversed key r -> original hour n-1-r.
     for hr, lvals in revr.level_draws.items():
@@ -1077,6 +1283,8 @@ def _merge_dir_results(fwd: _DirResult, revr: _DirResult, n: int) -> _DirResult:
         mc_v.setdefault(n - 1 - hr, []).extend(mvals)
     for hr, evals in revr.factual_errors.items():
         f_errs.setdefault(n - 1 - hr, []).extend(evals)
+    for hr, fdvals in revr.factual_draws.items():
+        f_draws.setdefault(n - 1 - hr, []).extend(fdvals)
     for q, hmap in revr.quantile_draws.items():
         dst = q_draws.setdefault(q, {})
         for hr, qvals in hmap.items():
@@ -1100,6 +1308,7 @@ def _merge_dir_results(fwd: _DirResult, revr: _DirResult, n: int) -> _DirResult:
         quantile_draws=q_draws,
         paired_quantile_draws=pq_draws,
         factual_errors=f_errs,
+        factual_draws=f_draws,
     )
 
 
@@ -1141,10 +1350,12 @@ def _assemble_icn_result(
     req_qs: tuple[float, ...] | None,
     ext_pool: bool,
     schema: str,
+    past_only_cols: Sequence[str] = (),
 ) -> ICNResult:
     n = len(index)
     level_vals = np.full(n, np.nan)
     paired_vals = np.full(n, np.nan)
+    factual_vals = np.full(n, np.nan)
     mc_spread = np.full(n, np.nan)
     contrib_arr = np.zeros(n, dtype=int)
     for h in range(n):
@@ -1164,6 +1375,14 @@ def _assemble_icn_result(
         if h in merged.paired_draws and merged.paired_draws[h]:
             paired_vals[h] = _aggregate(
                 merged.paired_draws[h],
+                design.aggregate,
+                design.lead_tau,
+                surprise_errors=errs_h,
+                surprise_tau=design.surprise_tau,
+            )
+        if h in merged.factual_draws and merged.factual_draws[h]:
+            factual_vals[h] = _aggregate(
+                merged.factual_draws[h],
                 design.aggregate,
                 design.lead_tau,
                 surprise_errors=errs_h,
@@ -1205,11 +1424,12 @@ def _assemble_icn_result(
     obs_series = pd.Series(observed_arr, index=index, name="observed")
     level = pd.Series(level_vals, index=index, name="level")
     paired = pd.Series(paired_vals, index=index, name="paired")
+    factual_ser = pd.Series(factual_vals, index=index, name="factual")
     weather_effect = pd.Series(observed_arr - level_vals, index=index, name="weather_effect")
     spread = pd.DataFrame({"anchor": anchor_spread, "mc": mc_spread}, index=index)
     hour_contrib = pd.Series(contrib_arr, index=index, name="hour_contrib")
 
-    diagnostics = {
+    diagnostics: dict[str, Any] = {
         "design": dict(design.__dict__),
         "design_hash": _design_hash(design),
         "n_anchors": int(np.count_nonzero(contrib_arr)),
@@ -1219,6 +1439,8 @@ def _assemble_icn_result(
         "low_support": list(merged.low_support),
         "external_pool": ext_pool,
     }
+    if past_only_cols:
+        diagnostics["past_only_covariates"] = list(past_only_cols)
     result = ICNResult(
         level=level,
         paired=paired,
@@ -1229,24 +1451,32 @@ def _assemble_icn_result(
         observed=obs_series,
         quantiles=q_frame,
         paired_quantiles=pq_frame,
+        factual=factual_ser,
     )
     if schema == "normet":
         result.level = result.level.rename("normalised")
     return result
 
 
-def _validate_quantiles_and_schema(
+class _QuantilePlan(NamedTuple):
+    req_qs: tuple[float, ...] | None
+    ask_qs: list[float]
+    i50_ask: int
+    dist_idx: list[int]
+    dist_q_arr: np.ndarray
+
+
+def _resolve_quantile_plan(
     schema: str,
     quantiles: Sequence[float] | None,
     pipe: Any,
+    design: ICNDesign,
     *,
     multivariate: bool = False,
-) -> tuple[tuple[float, ...] | None, list[float], int]:
+) -> _QuantilePlan:
     if schema not in ("chronos", "normet"):
         raise ValueError(f"schema must be 'chronos' or 'normet', got {schema!r}")
     req_qs: tuple[float, ...] | None = None
-    ask_qs: list[float] = []
-    i50_ask = 0
     if quantiles is not None:
         req_qs = tuple(dict.fromkeys(float(q) for q in quantiles))
         if not req_qs:
@@ -1254,18 +1484,44 @@ def _validate_quantiles_and_schema(
         for q in req_qs:
             if not (0.0 <= q <= 1.0):
                 raise ValueError(f"Quantile must be in [0, 1]: got {q}")
-        if not multivariate and not hasattr(pipe, "forecast_quantiles_batch"):
-            raise TypeError(
-                f"pipeline {type(pipe).__name__} does not implement "
-                "forecast_quantiles_batch required for `quantiles`"
-            )
-        if 0.5 in req_qs:
-            ask_qs = list(req_qs)
-            i50_ask = ask_qs.index(0.5)
-        else:
-            ask_qs = [*req_qs, 0.5]
-            i50_ask = len(req_qs)
-    return req_qs, ask_qs, i50_ask
+
+    need_dist = (design.point_estimate == "quantile_mean") or (design.paired_mode == "rank")
+    if req_qs is None and not need_dist:
+        return _QuantilePlan(
+            req_qs=None,
+            ask_qs=[],
+            i50_ask=0,
+            dist_idx=[],
+            dist_q_arr=np.empty(0, dtype=float),
+        )
+
+    if not multivariate and not hasattr(pipe, "forecast_quantiles_batch"):
+        reason = (
+            "`quantiles`"
+            if req_qs is not None
+            else f"point_estimate={design.point_estimate!r} / paired_mode={design.paired_mode!r}"
+        )
+        raise TypeError(
+            f"pipeline {type(pipe).__name__} does not implement "
+            f"forecast_quantiles_batch required for {reason}"
+        )
+    if multivariate and not hasattr(pipe, "forecast_multivariate_batch"):
+        raise TypeError(
+            f"pipeline {type(pipe).__name__} does not implement forecast_multivariate_batch"
+        )
+
+    dist_qs = _resolve_dist_quantiles(pipe) if need_dist else ()
+    ask_qs = sorted({*(req_qs or ()), 0.5, *dist_qs})
+    i50_ask = ask_qs.index(0.5)
+    dist_idx = [ask_qs.index(q) for q in dist_qs]
+    dist_q_arr = np.asarray(dist_qs, dtype=float)
+    return _QuantilePlan(
+        req_qs=req_qs,
+        ask_qs=ask_qs,
+        i50_ask=i50_ask,
+        dist_idx=dist_idx,
+        dist_q_arr=dist_q_arr,
+    )
 
 
 def _resolve_met_cols(
@@ -1273,12 +1529,42 @@ def _resolve_met_cols(
     df: pd.DataFrame,
     target: str | Sequence[str],
     met_features: list[str] | None,
-) -> tuple[list[str], list[str]]:
-    cols: list[str] = estimator._resolve_covariates(df, target)  # type: ignore[attr-defined]
-    met_cols = (
-        list(met_features)
-        if met_features is not None
-        else [
+    past_only_covariates: Sequence[str] | None = None,
+) -> tuple[list[str], list[str], list[str]]:
+    raw_past = list(
+        dict.fromkeys(
+            str(c)
+            for c in (
+                past_only_covariates
+                if past_only_covariates is not None
+                else (getattr(estimator, "past_only_covariates", None) or ())
+            )
+        )
+    )
+    if raw_past:
+        missing_po = [c for c in raw_past if c not in df.columns]
+        if missing_po:
+            raise KeyError(f"past-only covariate columns absent from frame: {missing_po}")
+        targets = {target} if isinstance(target, str) else set(target)
+        bad_targets = [c for c in raw_past if c in targets]
+        if bad_targets:
+            raise ValueError(f"target columns cannot be past-only covariates: {bad_targets}")
+
+    try:
+        cols_all: list[str] = estimator._resolve_covariates(df, target, exclude=raw_past)  # type: ignore[attr-defined]
+    except TypeError:
+        cols_all = estimator._resolve_covariates(df, target)  # type: ignore[attr-defined]
+
+    past_set = set(raw_past)
+    cols = [c for c in cols_all if c not in past_set]
+
+    if met_features is not None:
+        overlap = [c for c in met_features if c in past_set]
+        if overlap:
+            raise ValueError(f"covariate(s) cannot be both met_features and past-only: {overlap}")
+        met_cols = list(met_features)
+    else:
+        met_cols = [
             c
             for c in cols
             if c not in ("hour_sin", "hour_cos", "dow_sin", "dow_cos", "doy_sin", "doy_cos")
@@ -1287,8 +1573,7 @@ def _resolve_met_cols(
             # pool's marginalisation both assume a numeric column.
             and pd.api.types.is_numeric_dtype(df[c])
         ]
-    )
-    return cols, met_cols
+    return cols, met_cols, raw_past
 
 
 def _resolve_ext_pool(pool: MetPool | pd.DataFrame | None, met_cols: list[str]) -> MetPool | None:
@@ -1388,23 +1673,61 @@ def _record_anchor_draws(
     has_met: bool,
     quantiles: tuple[float, ...] | None,
     ask_qs: list[float],
+    *,
+    pred_fact_dist_q: np.ndarray | None = None,
+    preds_dist_q_cf: np.ndarray | None = None,
+    dist_q_arr: np.ndarray | None = None,
 ) -> None:
     """Project factual/counterfactual anchor outputs onto linear/log level & paired draws."""
-    if design.log_transform:
-        cf_levels = np.maximum(np.expm1(pred_cf), 0.0)
-        if not has_met:
-            paired = np.where(np.isfinite(obs_seg), np.maximum(obs_seg, 0.0), np.nan)
+    pmode = (
+        ("log_ratio" if design.log_transform else "ratio")
+        if design.paired_mode == "auto"
+        else design.paired_mode
+    )
+    fact_level = np.maximum(np.expm1(pred_fact), 0.0) if design.log_transform else pred_fact
+    cf_levels = np.maximum(np.expm1(pred_cf), 0.0) if design.log_transform else pred_cf
+    cf_level_mean = cf_levels.mean(axis=0)
+
+    if not has_met:
+        paired = (
+            np.where(np.isfinite(obs_seg), np.maximum(obs_seg, 0.0), np.nan)
+            if design.log_transform
+            else obs_seg.copy()
+        )
+    elif pmode == "rank":
+        if pred_fact_dist_q is None or preds_dist_q_cf is None or dist_q_arr is None:
+            raise ValueError("paired_mode='rank' requires quantile fan outputs")
+        if design.log_transform:
+            paired_z = _rank_transport_anchor(
+                z_obs_seg, pred_fact_dist_q, preds_dist_q_cf, dist_q_arr, non_negative=False
+            )
+            paired = np.where(np.isfinite(paired_z), np.maximum(np.expm1(paired_z), 0.0), np.nan)
         else:
+            fin_o = obs_seg[np.isfinite(obs_seg)]
+            non_neg = bool(fin_o.size and np.min(fin_o) >= 0.0)
+            paired = _rank_transport_anchor(
+                obs_seg, pred_fact_dist_q, preds_dist_q_cf, dist_q_arr, non_negative=non_neg
+            )
+    elif pmode == "additive":
+        paired = obs_seg + (cf_level_mean - fact_level)
+    elif pmode == "log_ratio":
+        if design.log_transform:
             paired = np.maximum(np.expm1(z_obs_seg + (pred_cf.mean(axis=0) - pred_fact)), 0.0)
-    else:
-        cf_levels = pred_cf
-        if not has_met:
-            paired = obs_seg.copy()
         else:
-            level_cf_mean = cf_levels.mean(axis=0)
-            # D11 paired ratio, guarded against a near-zero factual level
+            z_o = np.log1p(np.maximum(obs_seg, 0.0))
+            z_f = np.log1p(np.maximum(fact_level, 0.0))
+            z_c = np.log1p(np.maximum(cf_level_mean, 0.0))
+            paired = np.where(
+                np.isfinite(obs_seg), np.maximum(np.expm1(z_o + (z_c - z_f)), 0.0), np.nan
+            )
+    else:  # "ratio"
+        if design.log_transform:
             with np.errstate(divide="ignore", invalid="ignore"):
-                ratio = np.where(np.abs(pred_fact) > 1e-6, level_cf_mean / pred_fact, np.nan)
+                ratio = np.where(np.abs(fact_level) > 1e-6, cf_level_mean / fact_level, np.nan)
+            paired = obs_seg * ratio
+        else:
+            with np.errstate(divide="ignore", invalid="ignore"):
+                ratio = np.where(np.abs(pred_fact) > 1e-6, cf_level_mean / pred_fact, np.nan)
             paired = obs_seg * ratio
 
     if design.log_transform:
@@ -1419,6 +1742,7 @@ def _record_anchor_draws(
     for offset, h in enumerate(range(s, e)):
         acc.level_draws.setdefault(h, []).extend((float(v), offset) for v in cf_levels[:, offset])
         acc.paired_draws.setdefault(h, []).append((float(paired[offset]), offset))
+        acc.factual_draws.setdefault(h, []).append((float(fact_level[offset]), offset))
         acc.anchor_values.setdefault(h, []).append(float(cf_levels[:, offset].mean()))
         acc.mc_vars.setdefault(h, []).append(float(cf_levels[:, offset].var()))
         acc.factual_errors.setdefault(h, []).append(float(err_seg[offset]))
@@ -1429,15 +1753,35 @@ def _record_anchor_draws(
             raw_q = preds_q_cf[:, qi, :]
             if design.log_transform:
                 cf_q = np.maximum(np.expm1(raw_q), 0.0)
-                p_q = np.maximum(np.expm1(z_obs_seg[None, :] + (raw_q - pred_fact[None, :])), 0.0)
+                if pmode == "additive":
+                    p_q = obs_seg[None, :] + (cf_q - fact_level[None, :])
+                elif pmode == "rank":
+                    p_q = np.maximum(paired[None, :] + (cf_q - cf_level_mean[None, :]), 0.0)
+                else:
+                    p_q = np.maximum(
+                        np.expm1(z_obs_seg[None, :] + (raw_q - pred_fact[None, :])), 0.0
+                    )
             else:
                 cf_q = raw_q
-                with np.errstate(divide="ignore", invalid="ignore"):
-                    p_q = np.where(
-                        (pred_fact[None, :] > 1e-6) & (obs_seg[None, :] >= 0.0),
-                        obs_seg[None, :] * (cf_q / pred_fact[None, :]),
-                        np.nan,
-                    )
+                if pmode == "additive":
+                    p_q = obs_seg[None, :] + (cf_q - fact_level[None, :])
+                elif pmode == "log_ratio":
+                    z_o = np.log1p(np.maximum(obs_seg[None, :], 0.0))
+                    z_f = np.log1p(np.maximum(fact_level[None, :], 0.0))
+                    z_cq = np.log1p(np.maximum(cf_q, 0.0))
+                    p_q = np.maximum(np.expm1(z_o + (z_cq - z_f)), 0.0)
+                elif pmode == "rank":
+                    fin_o = obs_seg[np.isfinite(obs_seg)]
+                    non_neg = bool(fin_o.size and np.min(fin_o) >= 0.0)
+                    shifted = paired[None, :] + (cf_q - cf_level_mean[None, :])
+                    p_q = np.maximum(shifted, 0.0) if non_neg else shifted
+                else:
+                    with np.errstate(divide="ignore", invalid="ignore"):
+                        p_q = np.where(
+                            (pred_fact[None, :] > 1e-6) & (obs_seg[None, :] >= 0.0),
+                            obs_seg[None, :] * (cf_q / pred_fact[None, :]),
+                            np.nan,
+                        )
             qd = acc.quantile_draws[q]
             pqd = acc.paired_quantile_draws[q]
             for offset, h in enumerate(range(s, e)):
@@ -1453,18 +1797,20 @@ def _run_univariate_batch(
     flat_items: Sequence[tuple[np.ndarray, pd.DataFrame, pd.DataFrame]],
     cols: list[str],
     target: str,
-    quantiles: tuple[float, ...] | None,
-    ask_qs: list[float],
-    i50_ask: int,
+    qplan: _QuantilePlan,
+    point_estimate: str = "median",
 ) -> tuple[np.ndarray, np.ndarray | None]:
     preds_q: np.ndarray | None = None
-    if quantiles is not None:
+    if qplan.ask_qs:
         q_pipe: Any = pipeline
         preds_q = np.asarray(
-            q_pipe.forecast_quantiles_batch(flat_items, cols, target, ask_qs),
+            q_pipe.forecast_quantiles_batch(flat_items, cols, target, qplan.ask_qs),
             dtype=float,
         )
-        preds_med = preds_q[:, i50_ask, :]
+        if point_estimate == "quantile_mean" and qplan.dist_idx:
+            preds_med = _trapezoidal_quantile_mean(preds_q[:, qplan.dist_idx, :], qplan.dist_q_arr)
+        else:
+            preds_med = preds_q[:, qplan.i50_ask, :]
     elif hasattr(pipeline, "forecast_batch"):
         b_pipe: Any = pipeline
         preds_med = np.asarray(b_pipe.forecast_batch(flat_items, cols, target), dtype=float)
@@ -1498,14 +1844,13 @@ def _one_direction(
     acc = _empty_dir_result(quantiles)
     has_met = bool(met_cols)
 
-    can_batch = quantiles is not None or hasattr(pipeline, "forecast_batch")
+    qplan = _resolve_quantile_plan("chronos", quantiles, pipeline, design)
+    can_batch = bool(qplan.ask_qs) or hasattr(pipeline, "forecast_batch")
     est_bs = getattr(getattr(pipeline, "estimator", None), "batch_size", None)
     base_bs = int(est_bs) if est_bs is not None else 32
     batch_limit = (
         max(base_bs, 1 + (max(1, design.n_resamples) if has_met else 0)) if can_batch else 1
     )
-
-    _, ask_qs, i50_ask = _validate_quantiles_and_schema("chronos", quantiles, pipeline)
 
     pending: list[_PendingAnchor] = []
     pending_items = 0
@@ -1521,7 +1866,12 @@ def _one_direction(
             flat_items.extend(entry.cf_items)
 
         preds_med, preds_q = _run_univariate_batch(
-            pipeline, flat_items, cols, target, quantiles, ask_qs, i50_ask
+            pipeline,
+            flat_items,
+            cols,
+            target,
+            qplan,
+            point_estimate=design.point_estimate,
         )
 
         cursor = 0
@@ -1541,6 +1891,16 @@ def _one_direction(
                     if preds_q is not None
                     else None
                 )
+            pred_fact_dist_q = (
+                preds_q[cursor, qplan.dist_idx, :]
+                if (preds_q is not None and qplan.dist_idx)
+                else None
+            )
+            preds_dist_q_cf = (
+                preds_q_cf[:, qplan.dist_idx, :]
+                if (preds_q_cf is not None and qplan.dist_idx)
+                else None
+            )
             _record_anchor_draws(
                 acc,
                 s,
@@ -1553,7 +1913,10 @@ def _one_direction(
                 design,
                 has_met,
                 quantiles,
-                ask_qs,
+                qplan.ask_qs,
+                pred_fact_dist_q=pred_fact_dist_q,
+                preds_dist_q_cf=preds_dist_q_cf,
+                dist_q_arr=qplan.dist_q_arr if qplan.dist_idx else None,
             )
             cursor += 1 + n_cf
 
@@ -1620,15 +1983,23 @@ def build_icn_draw_bank(
     schema: str = "chronos",
     pool: MetPool | pd.DataFrame | None = None,
     quantiles: Sequence[float] | None = None,
+    past_only_covariates: Sequence[str] | None = None,
 ) -> ICNDrawBank:
     """Run ICN forward/reverse model passes once and return a reusable :class:`ICNDrawBank`."""
     design = design or ICNDesign()
     if hasattr(estimator, "_check_index"):
         estimator._check_index(df.index)  # type: ignore[attr-defined]
 
-    cols, met_cols = _resolve_met_cols(estimator, df, target, met_features)
-    pipe = pipeline if pipeline is not None else Chronos2ICLPipeline(estimator)
-    req_qs, _, _ = _validate_quantiles_and_schema(schema, quantiles, pipe)
+    cols, met_cols, past_only_cols = _resolve_met_cols(
+        estimator, df, target, met_features, past_only_covariates=past_only_covariates
+    )
+    pipe = (
+        pipeline
+        if pipeline is not None
+        else Chronos2ICLPipeline(estimator, past_only_cols=past_only_cols)
+    )
+    qplan = _resolve_quantile_plan(schema, quantiles, pipe, design)
+    req_qs = qplan.req_qs
     ext_pool = _resolve_ext_pool(pool, met_cols)
 
     fwd_res: _DirResult | None = None
@@ -1646,7 +2017,7 @@ def build_icn_draw_bank(
         )
 
     obs_arr = df[target].to_numpy(dtype=float)
-    return ICNDrawBank(
+    bank = ICNDrawBank(
         index=pd.DatetimeIndex(df.index),
         observed=obs_arr,
         target=target,
@@ -1656,7 +2027,9 @@ def build_icn_draw_bank(
         quantiles=req_qs,
         external_pool=ext_pool is not None,
         schema=schema,
+        past_only_cols=tuple(past_only_cols),
     )
+    return bank
 
 
 def normalise_in_context(
@@ -1669,6 +2042,7 @@ def normalise_in_context(
     schema: str = "chronos",
     pool: MetPool | pd.DataFrame | None = None,
     quantiles: Sequence[float] | None = None,
+    past_only_covariates: Sequence[str] | None = None,
 ) -> ICNResult:
     """In-context meteorological normalisation of ``target`` in ``df``.
 
@@ -1700,6 +2074,12 @@ def normalise_in_context(
     quantiles:
         Optional quantile levels in ``[0, 1]`` to aggregate across counterfactual
         draws (requires a pipeline exposing ``forecast_quantiles_batch``).
+    past_only_covariates:
+        Columns passed to the forecaster only through the conditioning context
+        (never through the future covariates): co-pollutants, traffic counts or
+        lagged transport indices whose future values are unavailable or would
+        leak the post-intervention outcome.  Defaults to the estimator's own
+        ``past_only_covariates``.
 
     Returns
     -------
@@ -1716,6 +2096,7 @@ def normalise_in_context(
         schema=schema,
         pool=pool,
         quantiles=quantiles,
+        past_only_covariates=past_only_covariates,
     ).aggregate()
 
 
@@ -1747,9 +2128,7 @@ def _one_direction_multivariate(
     base_bs = int(est_bs) if est_bs is not None else 32
     batch_limit = max(base_bs, 1 + (max(1, design.n_resamples) if has_met else 0))
 
-    _, ask_qs, i50_ask = _validate_quantiles_and_schema(
-        "chronos", quantiles, pipeline, multivariate=True
-    )
+    qplan = _resolve_quantile_plan("chronos", quantiles, pipeline, design, multivariate=True)
 
     pending: list[_PendingAnchor] = []
     pending_items = 0
@@ -1765,12 +2144,17 @@ def _one_direction_multivariate(
             flat_items.extend(entry.cf_items)
 
         preds_q: np.ndarray | None = None
-        if quantiles is not None:
+        if qplan.ask_qs:
             preds_q = np.asarray(
-                pipeline.forecast_multivariate_batch(flat_items, cols, targets, ask_qs),
+                pipeline.forecast_multivariate_batch(flat_items, cols, targets, qplan.ask_qs),
                 dtype=float,
             )  # (n, V, Q, H)
-            preds_med = preds_q[:, :, i50_ask, :]  # (n, V, H)
+            if design.point_estimate == "quantile_mean" and qplan.dist_idx:
+                preds_med = _trapezoidal_quantile_mean(
+                    preds_q[:, :, qplan.dist_idx, :], qplan.dist_q_arr
+                )
+            else:
+                preds_med = preds_q[:, :, qplan.i50_ask, :]  # (n, V, H)
         else:
             preds_med = np.asarray(
                 pipeline.forecast_multivariate_batch(flat_items, cols, targets, None),
@@ -1795,6 +2179,16 @@ def _one_direction_multivariate(
                         if preds_q is not None
                         else None
                     )
+                pred_fact_dist_q = (
+                    preds_q[cursor, vi, qplan.dist_idx, :]
+                    if (preds_q is not None and qplan.dist_idx)
+                    else None
+                )
+                preds_dist_q_cf = (
+                    preds_q_cf[:, qplan.dist_idx, :]
+                    if (preds_q_cf is not None and qplan.dist_idx)
+                    else None
+                )
                 _record_anchor_draws(
                     accs[tgt],
                     s,
@@ -1807,7 +2201,10 @@ def _one_direction_multivariate(
                     design,
                     has_met,
                     quantiles,
-                    ask_qs,
+                    qplan.ask_qs,
+                    pred_fact_dist_q=pred_fact_dist_q,
+                    preds_dist_q_cf=preds_dist_q_cf,
+                    dist_q_arr=qplan.dist_q_arr if qplan.dist_idx else None,
                 )
             cursor += 1 + n_cf
 
@@ -1874,6 +2271,7 @@ def normalise_in_context_multivariate(
     schema: str = "chronos",
     pool: MetPool | pd.DataFrame | None = None,
     quantiles: Sequence[float] | None = None,
+    past_only_covariates: Sequence[str] | None = None,
 ) -> dict[str, ICNResult]:
     """Joint multivariate ICN over co-varying pollutants sharing weather draws."""
     target_list = list(dict.fromkeys(str(t) for t in targets))
@@ -1887,15 +2285,20 @@ def normalise_in_context_multivariate(
     if hasattr(estimator, "_check_index"):
         estimator._check_index(df.index)  # type: ignore[attr-defined]
 
-    cols, met_cols = _resolve_met_cols(estimator, df, target_list, met_features)
+    cols, met_cols, past_only_cols = _resolve_met_cols(
+        estimator, df, target_list, met_features, past_only_covariates=past_only_covariates
+    )
     pipe: MultivariateICLPipeline = (
-        pipeline if pipeline is not None else Chronos2MultivariateICLPipeline(estimator)
+        pipeline
+        if pipeline is not None
+        else Chronos2MultivariateICLPipeline(estimator, past_only_cols=past_only_cols)
     )
     if not hasattr(pipe, "forecast_multivariate_batch"):
         raise TypeError(
             f"pipeline {type(pipe).__name__} does not implement forecast_multivariate_batch"
         )
-    req_qs, _, _ = _validate_quantiles_and_schema(schema, quantiles, pipe, multivariate=True)
+    qplan = _resolve_quantile_plan(schema, quantiles, pipe, design, multivariate=True)
+    req_qs = qplan.req_qs
     ext_pool = _resolve_ext_pool(pool, met_cols)
 
     fwd_map: dict[str, _DirResult] | None = None
@@ -1925,6 +2328,7 @@ def normalise_in_context_multivariate(
             quantiles=req_qs,
             external_pool=ext_pool is not None,
             schema=schema,
+            past_only_cols=tuple(past_only_cols),
         )
         out[tgt] = bank.aggregate()
     return out
@@ -1943,7 +2347,7 @@ def _one_direction_multisite(
     """Execute one orientation across sites, batching co-occurring anchors per slot."""
     accs = {st: _empty_dir_result(quantiles) for st in site_frames}
     has_met = bool(met_cols)
-    _, ask_qs, i50_ask = _validate_quantiles_and_schema("chronos", quantiles, pipeline)
+    qplan = _resolve_quantile_plan("chronos", quantiles, pipeline, design)
 
     grouped: dict[tuple[pd.Timestamp, int], list[_PreparedSiteAnchor]] = {}
     for st, df_st in site_frames.items():
@@ -1996,7 +2400,7 @@ def _one_direction_multisite(
     for group in grouped.values():
         fact_items = [g.factual_item for g in group]
         fact_med, fact_q = _run_univariate_batch(
-            pipeline, fact_items, cols, target, quantiles, ask_qs, i50_ask
+            pipeline, fact_items, cols, target, qplan, point_estimate=design.point_estimate
         )
 
         cf_med_by_k: list[np.ndarray] = []
@@ -2005,7 +2409,7 @@ def _one_direction_multisite(
             for k in range(design.n_resamples):
                 k_items = [g.cf_items[k] for g in group]
                 k_med, k_q = _run_univariate_batch(
-                    pipeline, k_items, cols, target, quantiles, ask_qs, i50_ask
+                    pipeline, k_items, cols, target, qplan, point_estimate=design.point_estimate
                 )
                 cf_med_by_k.append(k_med)
                 if k_q is not None:
@@ -2027,6 +2431,14 @@ def _one_direction_multisite(
                     if fact_q is not None
                     else None
                 )
+            pred_fact_dist_q = (
+                fact_q[gi, qplan.dist_idx, :] if (fact_q is not None and qplan.dist_idx) else None
+            )
+            preds_dist_q_cf = (
+                preds_q_cf[:, qplan.dist_idx, :]
+                if (preds_q_cf is not None and qplan.dist_idx)
+                else None
+            )
             _record_anchor_draws(
                 accs[g.site],
                 g.start,
@@ -2039,7 +2451,10 @@ def _one_direction_multisite(
                 design,
                 has_met,
                 quantiles,
-                ask_qs,
+                qplan.ask_qs,
+                pred_fact_dist_q=pred_fact_dist_q,
+                preds_dist_q_cf=preds_dist_q_cf,
+                dist_q_arr=qplan.dist_q_arr if qplan.dist_idx else None,
             )
 
     return accs
@@ -2056,6 +2471,7 @@ def normalise_in_context_multisite(
     pool: MetPool | pd.DataFrame | None = None,
     quantiles: Sequence[float] | None = None,
     cross_learning: bool = True,
+    past_only_covariates: Sequence[str] | None = None,
 ) -> dict[str, ICNResult]:
     """Run ICN across a station network, optionally sharing cross-site context per slot."""
     if not frames:
@@ -2069,9 +2485,11 @@ def normalise_in_context_multisite(
         raise KeyError(f"site {names[0]!r} has no column {target!r}")
     if hasattr(estimator, "_check_index"):
         estimator._check_index(first.index)  # type: ignore[attr-defined]
-    cols, met_cols = _resolve_met_cols(estimator, first, target, met_features)
+    cols, met_cols, past_only_cols = _resolve_met_cols(
+        estimator, first, target, met_features, past_only_covariates=past_only_covariates
+    )
 
-    need_cols = list(dict.fromkeys([target, *cols, *met_cols]))
+    need_cols = list(dict.fromkeys([target, *cols, *met_cols, *past_only_cols]))
     for name in names:
         df_st = site_frames[name]
         if target not in df_st.columns:
@@ -2094,12 +2512,18 @@ def normalise_in_context_multisite(
                 schema=schema,
                 pool=pool,
                 quantiles=quantiles,
+                past_only_covariates=past_only_cols,
             )
             for name in names
         }
 
-    pipe = pipeline if pipeline is not None else Chronos2ICLPipeline(estimator, cross_learning=True)
-    req_qs, _, _ = _validate_quantiles_and_schema(schema, quantiles, pipe)
+    pipe = (
+        pipeline
+        if pipeline is not None
+        else Chronos2ICLPipeline(estimator, cross_learning=True, past_only_cols=past_only_cols)
+    )
+    qplan = _resolve_quantile_plan(schema, quantiles, pipe, design)
+    req_qs = qplan.req_qs
     ext_pool = _resolve_ext_pool(pool, met_cols)
 
     fwd_map: dict[str, _DirResult] | None = None
@@ -2132,6 +2556,7 @@ def normalise_in_context_multisite(
             quantiles=req_qs,
             external_pool=ext_pool is not None,
             schema=schema,
+            past_only_cols=tuple(past_only_cols),
         )
         out[name] = bank.aggregate()
     return out
@@ -2213,7 +2638,19 @@ def _eval_icn_coalitions_dir(
             for _c, c_items in coal_blocks:
                 flat_items.extend(c_items)
 
-        preds_med, _ = _run_univariate_batch(pipeline, flat_items, cols, target, None, [], 0)
+        preds_med, _ = _run_univariate_batch(
+            pipeline,
+            flat_items,
+            cols,
+            target,
+            _QuantilePlan(
+                req_qs=None,
+                ask_qs=[],
+                i50_ask=0,
+                dist_idx=[],
+                dist_q_arr=np.empty(0, dtype=float),
+            ),
+        )
         cursor = 0
         for s, e, _fact_item, coal_blocks in pending_anchors:
             pred_fact = preds_med[cursor]
@@ -2355,6 +2792,7 @@ def icn_decompose(
     pool: MetPool | pd.DataFrame | None = None,
     include_diagnostics: bool = False,
     return_interactions: bool = False,
+    past_only_covariates: Sequence[str] | None = None,
 ) -> Any:
     """In-context meteorological attribution and Shapley decomposition for Chronos-2.
 
@@ -2394,6 +2832,10 @@ def icn_decompose(
     return_interactions : bool, default False
         If True, compute exact second-order Grabisch–Roubens interactions and
         return a :class:`~normet.analysis.decomposition.ShapleyInteractionResult`.
+    past_only_covariates : sequence of str, optional
+        Context-only covariates (co-pollutants, activity series) that must not
+        be treated as met players nor swapped by the coalitions; defaults to
+        the estimator's own ``past_only_covariates``.
     """
     from math import factorial
 
@@ -2427,7 +2869,9 @@ def icn_decompose(
     design = design or ICNDesign.v1()
     if hasattr(estimator, "_check_index"):
         estimator._check_index(work.index)  # type: ignore[attr-defined]
-    cols, met_cols = _resolve_met_cols(estimator, work, target, met_features)
+    cols, met_cols, past_only_cols = _resolve_met_cols(
+        estimator, work, target, met_features, past_only_covariates=past_only_covariates
+    )
     if not met_cols:
         raise ValueError("icn_decompose requires at least one meteorological feature.")
 
@@ -2476,7 +2920,11 @@ def icn_decompose(
                     needed_set.add(cur)
 
     coalitions = sorted(needed_set, key=lambda s: (len(s), sorted(s)))
-    pipe = pipeline if pipeline is not None else Chronos2ICLPipeline(estimator)
+    pipe = (
+        pipeline
+        if pipeline is not None
+        else Chronos2ICLPipeline(estimator, past_only_cols=past_only_cols)
+    )
     ext_pool = _resolve_ext_pool(pool, met_cols)
 
     fwd_map = None
@@ -2618,4 +3066,244 @@ def icn_decompose(
         mean_matrix=mean_mat,
         std_matrix=std_mat,
         summary=summary_df,
+    )
+
+
+def debias_icn_residuals(
+    result: ICNResult,
+    df_met: pd.DataFrame,
+    *,
+    met_cols: Sequence[str] | None = None,
+    pool: MetPool | pd.DataFrame | None = None,
+    method: str = "ridge",
+    n_splits: int = 3,
+    min_rc_score: float = 0.0,
+    seed: int = 0,
+) -> ICNResult:
+    """Out-of-fold semiparametric residual debiasing for zero-shot ICN outputs.
+
+    When a frozen foundation predictor retains predictable meteorological
+    structure in its factual residuals :math:`R_t = Y_t - \\hat{\\mu}(H_t, w_t)`
+    (detected by the Appendix I Eq. 66 residual-correction score), Theorem 3.4
+    Eq. (22) implies an action-contrast bias :math:`c(w') - c(w_t)`. Fitting
+    an out-of-fold residual corrector :math:`\\hat{c}(w)` removes that contrast
+    bias without re-running the foundation model.
+
+    The correction shifts ``level``, ``paired`` and ``factual`` by the same
+    per-hour action contrast ``mean_pool(c) - c(w_t)``: the counterfactual
+    weather's mean correction minus the factual weather's correction.  It is
+    derived from the paired estimand (observed re-based through the weather
+    ratio), so ``paired`` improves; ``level`` inherits the same shift, which
+    leaves ``paired - level`` and ``observed - level`` (``weather_effect``)
+    unchanged.  Only these three series are rewritten; the quantile frames
+    keep their pre-debias values.
+
+    Parameters
+    ----------
+    result : ICNResult
+        ICN output carrying ``observed`` and ``factual`` (run
+        ``normalise_in_context`` / ``build_icn_draw_bank`` with the factual
+        baseline enabled, i.e. the current default).
+    df_met : pandas.DataFrame
+        Frame with a ``date`` column or DatetimeIndex and the meteorological
+        columns to fit the corrector on.
+    met_cols : sequence of str, optional
+        Corrector columns; inferred from ``df_met``'s numeric, non-time
+        columns when omitted.
+    pool : MetPool or DataFrame, optional
+        Counterfactual weather reservoir used for ``mean_pool(c)``.  Defaults
+        to the observed weather, which matches the default
+        ``pool="record_trajectory"`` design.
+    method : {"ridge", "extratrees"}, default "ridge"
+        Corrector family; ``"extratrees"`` costs a small sklearn forest per
+        fold but captures nonlinear residual structure.
+    n_splits : int, default 3
+        Blocked time-series folds (embargo 0); capped at ``n_ok // 5``.
+    min_rc_score : float, default 0.0
+        Skip the correction when the out-of-fold RC-score is below this
+        threshold -- on an unbiased factual forecast there is nothing to fit.
+    seed : int, default 0
+        ExtraTrees seed.
+
+    Returns
+    -------
+    ICNResult
+        Copy of ``result`` with the three series shifted when the gate passes,
+        and a ``diagnostics["residual_debias"]`` record
+        (``applied``, ``rc_score_before``, ``rc_score_after``,
+        ``mean_abs_adjustment``, ``method``) either way.
+    """
+    from ..analysis.diagnostics import _align_by_date
+    from ..analysis.normalise import _is_time_feature
+    from ..utils.cv import blocked_time_cv
+
+    if method not in ("ridge", "extratrees"):
+        raise ValueError(f"method must be 'ridge' or 'extratrees', got {method!r}")
+    if result.observed is None or result.factual is None:
+        raise ValueError("debias_icn_residuals requires result.observed and result.factual")
+
+    met_idx = _align_by_date(df_met)
+    if not met_idx.index.is_unique:
+        num_cols = met_idx.select_dtypes(include=[np.number]).columns
+        met_idx = met_idx[num_cols].groupby(level=0).mean()
+
+    obs_idx = pd.DatetimeIndex(result.observed.index)
+    met_aligned = met_idx.reindex(obs_idx)
+    if met_cols is None:
+        use_cols = [
+            c
+            for c in met_aligned.columns
+            if not _is_time_feature(c)
+            and c not in ("observed", "normalised", "level", "paired", "factual", "value")
+            and pd.api.types.is_numeric_dtype(met_aligned[c])
+        ]
+    else:
+        use_cols = [str(c) for c in met_cols]
+        missing = [c for c in use_cols if c not in met_aligned.columns]
+        if missing:
+            raise KeyError(f"met_cols absent from df_met: {missing}")
+    if not use_cols:
+        raise ValueError("No numeric meteorological columns available for debiasing")
+
+    obs_arr = result.observed.to_numpy(dtype=float)
+    fact_arr = result.factual.reindex(obs_idx).to_numpy(dtype=float)
+    X_df = met_aligned[use_cols].apply(pd.to_numeric, errors="coerce")
+    X_arr = X_df.to_numpy(dtype=float)
+
+    ok = np.isfinite(obs_arr) & np.isfinite(fact_arr) & np.all(np.isfinite(X_arr), axis=1)
+    n_ok = int(ok.sum())
+    if n_ok < 10:
+        diag_new = dict(result.diagnostics)
+        diag_new["residual_debias"] = {
+            "applied": False,
+            "rc_score_before": float("nan"),
+            "rc_score_after": float("nan"),
+            "method": method,
+        }
+        return replace(result, diagnostics=diag_new)
+
+    if pool is None:
+        pool_df = met_aligned.loc[met_aligned.index[ok], use_cols]
+    elif isinstance(pool, MetPool):
+        pool_df = pool.df[use_cols]
+    elif isinstance(pool, pd.DataFrame):
+        pool_df = pool[use_cols]
+    else:
+        raise TypeError(f"pool must be a MetPool or DataFrame, got {type(pool).__name__}")
+    X_pool_df = pool_df.apply(pd.to_numeric, errors="coerce").dropna()
+    X_pool = X_pool_df.to_numpy(dtype=float) if len(X_pool_df) else X_arr[ok]
+
+    X_ok = X_arr[ok]
+    r_ok = obs_arr[ok] - fact_arr[ok]
+    idx_ok = obs_idx[ok]
+    eff_splits = min(max(2, int(n_splits)), max(2, n_ok // 5))
+    if n_ok >= 15 and eff_splits >= 2:
+        folds = list(
+            blocked_time_cv(pd.DataFrame({"date": idx_ok}), n_splits=eff_splits, embargo=0)
+        )
+    else:
+        all_i = np.arange(n_ok)
+        folds = [(all_i, all_i)]
+
+    def _fit_predict_folds(
+        X_mat: np.ndarray, target_r: np.ndarray, X_p: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+        c_oof_arr = np.full(len(target_r), np.nan, dtype=float)
+        delta_arr = np.full(len(target_r), np.nan, dtype=float)
+        if method == "ridge":
+            for tr_idx, te_idx in folds:
+                x_tr, r_tr = X_mat[tr_idx], target_r[tr_idx]
+                mu = x_tr.mean(axis=0)
+                sd = x_tr.std(axis=0)
+                sd = np.where(sd > 1e-12, sd, 1.0)
+                z_tr = (x_tr - mu) / sd
+                z_te = (X_mat[te_idx] - mu) / sd
+                z_pl = (X_p - mu) / sd
+                d_tr = np.column_stack([np.ones(len(z_tr)), z_tr])
+                d_te = np.column_stack([np.ones(len(z_te)), z_te])
+                d_pl = np.column_stack([np.ones(len(z_pl)), z_pl])
+                gram = d_tr.T @ d_tr
+                reg = np.eye(gram.shape[0]) * 1e-4
+                reg[0, 0] = 0.0
+                coef = np.linalg.solve(gram + reg, d_tr.T @ r_tr)
+                c_te = d_te @ coef
+                c_pl = float(np.mean(d_pl @ coef))
+                c_oof_arr[te_idx] = c_te
+                delta_arr[te_idx] = c_pl - c_te
+        else:
+            from sklearn.ensemble import ExtraTreesRegressor
+
+            for f_i, (tr_idx, te_idx) in enumerate(folds):
+                reg_et = ExtraTreesRegressor(
+                    n_estimators=40,
+                    max_depth=8,
+                    min_samples_leaf=3,
+                    random_state=int(seed) + f_i,
+                    n_jobs=1,
+                )
+                reg_et.fit(X_mat[tr_idx], target_r[tr_idx])
+                c_te = reg_et.predict(X_mat[te_idx])
+                c_pl = float(np.mean(reg_et.predict(X_p)))
+                c_oof_arr[te_idx] = c_te
+                delta_arr[te_idx] = c_pl - c_te
+        return c_oof_arr, delta_arr
+
+    c_oof, delta_ok = _fit_predict_folds(X_ok, r_ok, X_pool)
+    fin = np.isfinite(c_oof) & np.isfinite(delta_ok)
+    if not np.any(fin):
+        rc_before = 0.0
+    else:
+        e0 = float(np.mean(r_ok[fin] ** 2))
+        e1 = float(np.mean((r_ok[fin] - c_oof[fin]) ** 2))
+        rc_before = float(max(0.0, (e0 - e1) / max(e0, 1e-12))) if e0 > 1e-12 else 0.0
+
+    if rc_before < float(min_rc_score) or not np.any(fin):
+        diag_new = dict(result.diagnostics)
+        diag_new["residual_debias"] = {
+            "applied": False,
+            "rc_score_before": float(rc_before),
+            "rc_score_after": float(rc_before),
+            "method": method,
+        }
+        return replace(result, diagnostics=diag_new)
+
+    r_after = r_ok - np.where(np.isfinite(c_oof), c_oof, 0.0)
+    c_after_oof, _ = _fit_predict_folds(X_ok, r_after, X_pool)
+    fin_a = np.isfinite(c_after_oof)
+    if np.any(fin_a):
+        e0_a = float(np.mean(r_after[fin_a] ** 2))
+        e1_a = float(np.mean((r_after[fin_a] - c_after_oof[fin_a]) ** 2))
+        rc_after = float(max(0.0, (e0_a - e1_a) / max(e0_a, 1e-12))) if e0_a > 1e-12 else 0.0
+    else:
+        rc_after = 0.0
+
+    c_full = np.zeros(len(obs_idx), dtype=float)
+    delta_full = np.zeros(len(obs_idx), dtype=float)
+    c_full[ok] = np.where(np.isfinite(c_oof), c_oof, 0.0)
+    delta_full[ok] = np.where(np.isfinite(delta_ok), delta_ok, 0.0)
+
+    new_level = result.level + pd.Series(delta_full, index=result.level.index)
+    new_level.name = result.level.name
+    new_paired = result.paired + pd.Series(delta_full, index=result.paired.index)
+    new_paired.name = result.paired.name
+    new_factual = result.factual + pd.Series(c_full, index=result.factual.index)
+    new_factual.name = result.factual.name
+    new_we = result.observed - new_level
+    new_we.name = result.weather_effect.name
+
+    diag_new = dict(result.diagnostics)
+    diag_new["residual_debias"] = {
+        "applied": True,
+        "rc_score_before": float(rc_before),
+        "rc_score_after": float(rc_after),
+        "mean_abs_adjustment": float(np.mean(np.abs(delta_ok[fin]))),
+        "method": method,
+    }
+    return replace(
+        result,
+        level=new_level,
+        paired=new_paired,
+        factual=new_factual,
+        weather_effect=new_we,
+        diagnostics=diag_new,
     )

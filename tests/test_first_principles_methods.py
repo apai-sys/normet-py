@@ -248,6 +248,8 @@ def test_icn_surprise_weighting_persistence_and_v1_hash(tmp_path: Path) -> None:
     v1 = ICNDesign.v1()
     v1_no_surp = dict(v1.__dict__)
     v1_no_surp.pop("surprise_tau")
+    v1_no_surp.pop("paired_mode")
+    v1_no_surp.pop("point_estimate")
     import hashlib
     import json
 
