@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -96,6 +97,28 @@ def _child_env() -> dict[str, str]:
 def command_line(argv: list[str]) -> str:
     """The job as a command a shell runs."""
     return "normet " + " ".join(shlex.quote(a) for a in argv)
+
+
+def _folder_mtime(folder: str) -> float:
+    """When the job was asked for, from its ``job.json`` (the folder's own time if
+    that is gone)."""
+    for path in (os.path.join(folder, "job.json"), folder):
+        try:
+            return os.path.getmtime(path)
+        except OSError:
+            continue
+    return 0.0
+
+
+def _dir_size(folder: str) -> int:
+    total = 0
+    for root, _dirs, files in os.walk(folder):
+        for name in files:
+            try:
+                total += os.path.getsize(os.path.join(root, name))
+            except OSError:
+                pass
+    return total
 
 
 class JobStore:
@@ -246,6 +269,63 @@ class JobStore:
         except OSError:
             return ""
         return text[-tail:] if tail and len(text) > tail else text
+
+    # -- pruning ----------------------------------------------------------------
+    def prune(
+        self,
+        *,
+        max_age_days: float | None = None,
+        states: list[str] | tuple[str, ...] | None = None,
+        keep_latest: int | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Remove finished job folders by age, state and retention.
+
+        Active jobs (``queued``, ``running``) are never removed. With no
+        argument only ``failed`` and ``cancelled`` jobs go; asking by age or by
+        ``keep_latest`` also allows finished ones. The age is read from the
+        job's ``job.json``, written when it was asked for, so a long job is
+        pruned by when it was submitted, not by when it ended.
+        """
+        if states is not None:
+            target_states = {str(s) for s in states} - {"queued", "running"}
+        elif max_age_days is not None or keep_latest is not None:
+            target_states = {"done", "failed", "cancelled"}
+        else:
+            target_states = {"failed", "cancelled"}
+
+        cutoff = None if max_age_days is None else time.time() - float(max_age_days) * 86400.0
+        keep_n = max(0, int(keep_latest)) if keep_latest is not None else 0
+
+        removed: list[str] = []
+        kept: list[str] = []
+        reclaimed = 0
+        with self._lock:
+            ids = self.ids()
+            protected = set(ids[-keep_n:]) if keep_n else set()
+            for job_id in ids:
+                state = self.state(job_id)
+                folder = self._folder(job_id)
+                if (
+                    state in ("queued", "running")
+                    or job_id in protected
+                    or state not in target_states
+                ):
+                    kept.append(job_id)
+                    continue
+                if cutoff is not None and _folder_mtime(folder) > cutoff:
+                    kept.append(job_id)
+                    continue
+                reclaimed += _dir_size(folder)
+                if not dry_run:
+                    shutil.rmtree(folder, ignore_errors=True)
+                removed.append(job_id)
+        return {
+            "removed": removed,
+            "kept": kept,
+            "reclaimed_bytes": int(reclaimed),
+            "dry_run": bool(dry_run),
+        }
 
     # -- running ----------------------------------------------------------------
     def pump(self) -> None:

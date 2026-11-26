@@ -1,0 +1,4 @@
+[mcp_servers.normet]
+enabled = true
+command = "normet-mcp"
+args = []

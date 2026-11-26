@@ -1,0 +1,8 @@
+- insert:
+    - id: mcp-normet
+      name: "@deepseek-ai/dsh-mcp-client"
+      config:
+        serverName: normet
+        transport: stdio
+        command: "normet-mcp"
+        args: []

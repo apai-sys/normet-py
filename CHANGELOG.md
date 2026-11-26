@@ -7,6 +7,18 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ## [Unreleased]
 
 ### Added
+- **Agent plugin and remote MCP transport**: `normet-plugin`
+  (`normet.agent.plugin`) installs the normet MCP server, guardrails and four
+  skills (`deweather-workflow`, `deweather-model-choice`, `scm-intervention`,
+  `transport-receptor`) into Antigravity, Claude Code, DeepSeek Harness
+  (`dsh`), OpenCode and OpenAI Codex, in user or project scope, with `--uvx`,
+  `--roots`, `--env`, `--toolset core`, and remote `--url` / `--auth-token`
+  options; `validate`, `status`, `doctor`, `print-config`, `prune` and
+  `uninstall` manage the installations. `normet-mcp` gains `--toolset core`
+  (the 14 tools of the standard workflow, out of 26) and
+  `--transport streamable-http` with the `--host`, `--port`, `--path`,
+  `--auth-token` and `--stateless` options for a remote GPU or HPC server,
+  backed by the new `JobStore.prune()` for retiring old job folders.
 - **First-principles normalisation, chemical conservation, causal-transport coupling, and benchmarking**:
   - Orthogonal partially linear Double-ML meteorological normalisation (`nm.dml_normalise`, `nm.DMLNormaliseResult`) separating low-frequency emission trajectories from nonlinear meteorological effects while excluding `date_unix`/`year` from tree split features.
   - Variance-reduced Monte Carlo control variates (`NormaliseConfig(control_variates=True)`) and seam-free Markov-bridge trajectory block resampling (`NormaliseConfig(block_mode="markov")`).

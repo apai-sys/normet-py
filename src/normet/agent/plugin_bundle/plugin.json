@@ -1,0 +1,21 @@
+{
+  "name": "normet",
+  "displayName": "normet",
+  "version": "0.3.0",
+  "description": "Meteorological normalisation (de-weathering) of air-quality time series and synthetic control for intervention effects: Monte-Carlo weather resampling, emission and meteorological decompositions, trends, events, in-context normalisation and trajectory-based receptor maps.",
+  "logo": "assets/logo.svg",
+  "author": {
+    "name": "normet contributors",
+    "url": "https://github.com/apai-sys/normet-py"
+  },
+  "homepage": "https://github.com/apai-sys/normet-py",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/apai-sys/normet-py"
+  },
+  "suggestedPrompts": [
+    "Inspect my air-quality CSV and propose the meteorological predictors for de-weathering",
+    "Run a de-weathering of NO2, judge the model's held-out fit, and show the normalised series",
+    "Run a synthetic control for a clean-air-zone intervention and check the placebo tests"
+  ]
+}

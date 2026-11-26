@@ -75,6 +75,7 @@ MCP server for AI assistants and a desktop app build on the same API.
 | `nm.make_run` / `nm.save_run` / `nm.generate_html_report` / `nm.report_to_markdown` | Provenance tracking and auto-generated HTML/Markdown run reports |
 | `nm.make_memory` | On-disk caching for expensive pipelines |
 | `normet.foundation` CLI (`impute`, `backtest`, `events`, `deweather`) | `normet impute`, `normet backtest`, `normet events --method chronos`, and `normet deweather --method icn --model-path ...` |
+| `normet-plugin` / `normet.agent.plugin` | Installs the normet MCP server, guardrails and four skills into Antigravity, Claude Code, DeepSeek Harness, OpenCode and OpenAI Codex (`install`, `status`, `doctor`, `prune`, `uninstall`); `normet-mcp --toolset core` exposes the 14 workflow tools, and `--transport streamable-http` serves a remote endpoint with bearer auth |
 | `normet.io` | Data adapters for ERA5, EEA, OpenAQ, Open-Meteo and the UK air-quality networks; NOAA GDAS1 downloads; HYSPLIT back-trajectory endpoints, BLH-coupled physical footprint features, and parallel runs (`read_trajectory_tdump`, `read_trajectory_endpoints`, `trajectory_endpoint_weights`, `trajectory_features`, `build_trajectory_features`, `join_trajectory_features`, `run_back_trajectories`, `load_source_regions`); table-file readers |
 
 ---
@@ -100,7 +101,7 @@ come as extras, which combine (`pip install "normet[gui,flaml]"`):
 | `finetune` | Fine-tuning the Chronos-2 checkpoint (`Chronos2Estimator.finetune`) — adds `accelerate` and `peft` to `foundation` |
 | `bayes` | Bayesian SCM (`nm.bayesian_scm`) — `pymc` and `arviz` |
 | `cli` | The `normet` command-line tool |
-| `mcp` | MCP server for AI assistants (Claude Code, Claude Desktop, ...) |
+| `mcp` | MCP server for AI assistants (Claude Code, Claude Desktop, ...) and its streamable-HTTP transport |
 | `gui` | The desktop app (`normet-gui`) |
 | `all` | Everything |
 
