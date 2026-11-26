@@ -151,7 +151,7 @@ it.
 
 \section{Key features}
 \begin{itemize}\nosep
-  \item AutoML training with FLAML (an estimator search within a time budget) or a
+  \item AutoML training with FLAML (an estimator search over a fixed number of trials) or a
         tuned LightGBM, with the held-out fit reported as $R^2$, RMSE and nine
         further statistics.
   \item Monte-Carlo meteorological normalisation, with a choice of which variables
@@ -213,9 +213,8 @@ The figures are screenshots of the real window, made by
 \code{docs/manual/make\_figures.py} on the record \nm{} ships with: hourly \NOtwo{} and
 ERA5 meteorology at London Marylebone Road (site MY1), January to August 2020, a window
 that spans the UK's first COVID-19 lockdown. The numbers quoted in the text are the ones
-that script printed. A run of your own will differ in the last digit or two: the AutoML
-search is bounded by wall-clock time, so it does not visit exactly the same candidates
-twice.
+that script printed. A run of your own reproduces these numbers: the search is bounded by trials rather than
+wall-clock time, and the split and the Monte-Carlo draws are seeded.
 
 This manual is also published in Chinese (\code{normet\_manual\_zh.pdf}), chapter for
 chapter, with its screenshots of the window in Chinese (Section~\ref{sec:appearance}).
@@ -346,15 +345,16 @@ Two backends are offered:
 \begin{description}\nosep
   \item[FLAML] An AutoML search over the estimators ticked (LightGBM alone by default;
         XGBoost, depth-limited XGBoost, random forest, extra trees and scikit-learn's
-        histogram gradient boosting can be added) within a wall-clock \emph{time budget},
-        maximising $R^2$. The library's default budget is 90~s; the window's is 60~s.
+        histogram gradient boosting can be added) over a fixed number of \emph{search
+        trials}, maximising $R^2$. The library and the window both default to 30.
   \item[LightGBM] LightGBM with a random hyperparameter search of a set number of
-        \emph{trials} (20 in the window).
+        \emph{trials} (6 in the window; the library's default is 50).
 \end{description}
-A longer budget rarely hurts and often helps on long records. Because the FLAML budget is
-wall-clock time, the same script on the same data can stop at a different candidate on a
-busier machine; set \code{max\_iter} in \code{model\_config} with \code{time\_budget=-1}
-for a search bounded by trials instead.
+More trials rarely hurt and often help on long records. The search is bounded by trials,
+not by wall-clock time, so a given seed and record visit the same candidates on any
+machine. Passing \code{time\_budget} in \code{model\_config} asks for a wall-clock search
+instead (the default trial cap is dropped); passing \code{max\_iter} as well keeps both,
+and the search stops at whichever is reached first.
 
 \subsection{Model statistics}\label{sec:modstats}
 \code{modStats} predicts the training rows, the testing rows and all rows, and reports
@@ -1016,7 +1016,7 @@ Its pages, and what each holds (a page's first box goes untitled, the tab naming
         \emph{Time zone} its times are kept on and how they were read
         (Section~\ref{sec:input}); then \emph{Columns}: the target and the predictors
         (Section~\ref{sec:columns}).
-  \item[Model] Backend, split, training fraction, time budget (or search trials),
+  \item[Model] Backend, split, training fraction, search trials,
         estimators, seed; for Chronos-2 the device and fine-tuning instead
         (Chapter~\ref{ch:train}).
   \item[Normalise] The variables resampled, the number of samples, CPU cores and the
@@ -1057,12 +1057,12 @@ Data        & overview, cycles, wind and pollution roses, statistics; rows left 
 Model       & verdict, statistics table, parity plot, feature importance, walk-forward CV & Train model; Walk-forward CV \\
 Normalise   & observed and normalised series, the quantile band, their cycles & Run normalisation \\
 Decompose   & the emission or meteorological components, the cycles & Run decomposition \\
-Rolling     & the mean of the rolling windows, with their spread & Run rolling normalisation \\
 Multi-scale & the scale-space cascade and the energy in each band & Multi-scale \\
 Trend       & the tested series with its Theil--Sen line, or its segments and marked break, the verdict and the p value & Trend analysis \\
 Events      & the anomaly-score strip with the flagged windows shaded, and the event table & Find events \\
-PDP         & one partial-dependence panel per variable & Compute PDP \\
 Uncertainty & the per-date spread stacked by source (weather, model, interaction) and the median's shares & Uncertainty decomposition \\
+Rolling     & the mean of the rolling windows, with their spread & Run rolling normalisation \\
+PDP         & one partial-dependence panel per variable & Compute PDP \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -1125,7 +1125,7 @@ cannot. One task runs at a time, on a background thread, so the window stays res
 while it runs the run buttons are disabled, \emph{Cancel} is enabled, and the status bar
 names the task with the time it has taken so far. Where the task says how far it has come
 --- the rolling windows, the decomposition's steps, LightGBM's trials, the receptor times
-HYSPLIT runs, FLAML's time budget --- the progress bar fills with it, and the line gives
+HYSPLIT runs, FLAML's trials --- the progress bar fills with it, and the line gives
 the share done and, once there is enough to go on, the time left; elsewhere the bar is a
 busy bar. When the task ends, the line its step writes says how long it took. Cancel \emph{abandons} the task: the window is
 free at once, but the computation cannot be interrupted, so it finishes in the background
@@ -1284,8 +1284,8 @@ the rows kept.
         (Section~\ref{sec:chronosui}). Chronos-2 is greyed out when its extra is not
         installed, its tooltip saying why.
   \item[Split method, Training fraction] Section~\ref{sec:split}; 0.75 by default.
-  \item[Time budget] FLAML's search time, 60~s by default. For LightGBM the row becomes
-        \emph{Search trials}, 20 by default; each backend's value is kept when you switch.
+  \item[Search trials] The number of candidates the search tries: 30 for FLAML by
+        default, 6 for LightGBM; each backend's value is kept when you switch.
   \item[Estimators] (FLAML only) LightGBM alone by default; add more to widen the search.
   \item[Seed] 7654321 by default: the split and the search are seeded with it.
 \end{description}
@@ -1305,21 +1305,21 @@ rows, the point forecast's score on the scale of the continuous ranked probabili
 A forecast that carries a spread scores its own CRPS, and only a score below this
 reference says the spread is worth carrying.
 
-\screenshot{ui_model.png}{MY1 trained with FLAML (LightGBM, 30~s budget, random split):
-on the 1,448 held-out hours $R^2 = 0.900$ and RMSE $= 8.00$~\ugm{}, against $1.000$ on
-the 4,345 training hours. Wind direction and speed, the boundary-layer height and the
-trend carry the most splits.}{fig:model}
+\screenshot{ui_model.png}{MY1 trained with FLAML (LightGBM, 30 search trials, random
+split): on the 1,448 held-out hours $R^2 = 0.900$ and RMSE $= 8.00$~\ugm{}, against
+$1.000$ on the 4,345 training hours. Wind speed and direction, relative humidity and the
+boundary-layer height carry the most splits.}{fig:model}
 
 A fit on the training rows much better than on the held-out rows is expected of boosted
 trees and is not by itself a problem; a poor held-out fit is. Before normalising with a
-moderate or poor model, try more predictors, a longer budget or more estimators. The
+moderate or poor model, try more predictors, more search trials or more estimators. The
 normalised series inherits the model's errors.
 
 A single random split flatters the model: every test hour's neighbours sit in the
 training rows, so an autocorrelated series can be forecast locally without being
 forecast well. \emph{Walk-forward CV} checks that number: the same backend retrains on
 an expanding window and scores the block of hours immediately after it, five times by
-default (\emph{CV folds}); it takes the training budget once per fold. The tab gains a
+default (\emph{CV folds}); it repeats the search once per fold. The tab gains a
 \emph{View} selector between the split's figures and the folds --- a bar of $R^2$ per
 fold with the split's value drawn across the bars, and a table of each fold's test
 window, its size and its $R^2$, RMSE and mean bias. When the split's line sits well
@@ -1329,7 +1329,7 @@ number.
 
 \section{Chronos-2}\label{sec:chronosui}
 With \code{chronos-2} chosen the training controls are hidden --- there is nothing to
-train, no budget, no split --- and the button reads \emph{Load Chronos-2}. The first load
+train, no search trials, no split --- and the button reads \emph{Load Chronos-2}. The first load
 downloads about 500~MB of weights. \emph{Device} chooses where it runs (\emph{auto}:
 CUDA, else Apple Silicon, else CPU). At least one meteorological predictor must be
 ticked: without covariates the model makes a plain forecast, not a de-weathering.
@@ -1610,8 +1610,8 @@ the ensemble on average does not. The three summands sum to the total per-date
 variance exactly --- an identity the package pins in a test --- so the
 attribution cannot quietly stop adding up. The \emph{Member backend} chooses how each member
 is trained: \code{lightgbm} (the default: a fast random search with the Model
-page's budget as its trials) or \code{flaml} (an AutoML search per member, at
-that member's budget each).
+page's \emph{Search trials} as its trial count) or \code{flaml} (an AutoML search per
+member, each with that many trials).
 
 The \tab{Uncertainty} tab (Figure~\ref{fig:uncertainty}) stacks the per-date
 variance, weather under model under interaction, the line over the stack the
@@ -1849,8 +1849,12 @@ should report the spread, not one number.
 
 \screenshot{ui_scm_placebo.png}{Placebo in space for the ULEZ: no donor's placebo effect
 comes near MY1's, so $p = 1/54 = 0.019$, the smallest 53 placebos allow. Every placebo is
-fitted by the same estimator, so this comparison is fair even where the pre-period fit
-is not informative.}{fig:scmplacebo}
+fitted by the same estimator, so the effect comparison is fair even where the pre-period
+fit is not informative. The screenshot's second line reports Abadie's RMSPE-ratio test:
+the treated post/pre RMSPE ratio is 115.65, rank 53 of 54 ($p = 0.981$). It divides by
+the pre-cutoff RMSPE; MY1's is 0.16 against 0.001--0.045 for every placebo (MY1 is the
+one unit above every donor), so it ranks MY1 low even though its post-cutoff effect is
+the largest. The verdict reads the placebo-effect comparison, not this line.}{fig:scmplacebo}
 
 \screenshot{ui_scm_bands.png}{Jackknife bands: the effect is recomputed 53 times, leaving
 out one donor each time. The mean post-cutoff effect is $-18.14$~\ugm{}, and the band
@@ -2101,7 +2105,7 @@ df = nm.datasets.load_my1()
 df_prep, model = build_model(df, 'NO2', backend='flaml',
                              covariates=['ws', 'wd', 'temp', 'RH', 'atmos_pres', 'blh', 'tcc', 'tp', 'ssrd', 'date_unix', 'day_julian', 'weekday', 'hour'],
                              split_method='random', train_fraction=0.75,
-                             model_config={'time_budget': 30, 'estimator_list': ['lgbm']},
+                             model_config={'max_iter': 30, 'estimator_list': ['lgbm']},
                              seed=7654321)
 
 # 21:10:11  Normalise
@@ -2124,9 +2128,8 @@ rolled = rolling(df_prep, model, covariates=[...],
                  variables_resample=[...the nine...],
                  window_days=14, rolling_every=7, n_samples=50)
 \end{lstlisting}
-Run again, it gives the same normalisation and decompositions from the same model; the
-model itself can differ slightly, since FLAML's search is bounded by wall-clock time
-(Section~\ref{sec:train}).
+Run again, it gives the same model, normalisation and decompositions: FLAML's search is
+bounded by a fixed number of trials and is seeded (Section~\ref{sec:train}).
 
 \section{Figures for publication}\label{sec:print}
 A figure on screen is drawn at the tab's size; shrunk into a journal's 89~mm column its
@@ -2211,7 +2214,7 @@ references.}{fig:methods}
 
 \section{Configurations and history}\label{sec:config}
 \tab{File $\rightarrow$ Save Config\ldots} writes every setting of the panel to JSON ---
-target, predictors, backend, split, budget, estimators, seed, and every step's settings
+target, predictors, backend, split, search trials, estimators, seed, and every step's settings
 --- and \tab{Load Config\ldots} sets the panel from one; the data are not part of it.
 \tab{File $\rightarrow$ Run History\ldots} lists every run with its time, task, target, backend, rows and a
 detail (the held-out $R^2$ for a training run, the samples for a normalisation).
@@ -2304,7 +2307,7 @@ print(nm.modStats(df_prep, model))   # training, testing and all rows
 Step by step:
 \begin{lstlisting}[language=Python]
 df_prep, model = nm.build_model(df, "NO2", backend="flaml", covariates=predictors,
-                                model_config={"time_budget": 120})
+                                model_config={"max_iter": 100})
 norm = nm.normalise(df_prep, model, covariates=predictors,
                     variables_resample=met, n_samples=300,
                     return_quantiles=[0.025, 0.975])
@@ -2338,7 +2341,7 @@ Function & Does \\
 \code{decompose\_uncertainty} & the total spread attributed to weather, model form and their interaction (the \tab{Uncertainty} tab, Section~\ref{sec:uncertainty}) \\
 \code{dml\_normalise}, \code{crossfit\_normalise} & Double-ML and cross-fitted de-weathering (Section~\ref{sec:dmltheory}) \\
 \code{normalise\_ox\_invariant}, \code{normalise\_regime\_conditioned} & conserved O\textsubscript{x} and precursor-regime de-weathering (Section~\ref{sec:chemtheory}) \\
-\code{normalise\_in\_context}, \code{ICNDesign}, \code{build\_icn\_draw\_bank} & in-context normalisation on Chronos-2 (Section~\ref{sec:icntheory}) \\
+\code{normalise\_in\_context}, \code{foundation.ICNDesign}, \code{build\_icn\_draw\_bank} & in-context normalisation on Chronos-2 (Section~\ref{sec:icntheory}) \\
 \code{ICNDrawBank}, \code{icn\_decompose} & draw-bank re-aggregation; in-context group-Shapley attribution \\
 \code{shapley\_interactions} & second-order Grabisch--Roubens interactions \\
 \code{make\_synthetic\_benchmark}, \code{evaluate\_benchmark} & the F1--F5 generators and scoring (Section~\ref{sec:benchtheory}) \\
@@ -2449,10 +2452,10 @@ Setting & Window & Library \\
 \midrule
 \endhead
 Split method / training fraction & random / 0.75 & random / 0.75 \\
-FLAML time budget              & 60 s & 90 s \\
+FLAML search trials            & 30 & 30 \\
 FLAML estimators               & lgbm & lgbm \\
 FLAML metric                   & $R^2$ & $R^2$ \\
-LightGBM search trials         & 20 & --- \\
+LightGBM search trials         & 6 & 50 \\
 Seed                           & 7654321 & 7654321 \\
 Normalisation samples          & 300 (Chronos-2: 8) & 300 (Chronos-2: 8) \\
 Resampled variables            & recognised meteorology & every non-calendar predictor \\
@@ -2470,7 +2473,7 @@ DML cutoff / blocks           & 30 d / 5 & 30 d / 5, embargo 24 rows \\
 Ox engine method / unit        & dml / \ugm{} & dml / \ugm{} \\
 Regime engine method           & dml & dml \\
 Pairwise interactions          & off (exact Shapley only) & exact Shapley coalitions only \\
-ICN design                     & \code{ICNDesign.v1()} from the checkpoint & \code{v1()}: block 336, stride 168, 5 resamples \\
+ICN design                     & \code{ICNDesign.v1()} from the checkpoint & \code{ICNDesign()}: block 168, stride 168, forward, 20 resamples; \code{v1()}: block 336, stride 168, bidirectional, 5 \\
 ICN surprise / min context     & 0 (off) / --- & 0 (off) / \code{None} \\
 ICN support gate / aggregate   & 0.5 / trimmed & 0.5 / trimmed \\
 SCM backend                    & scm & scm \\
@@ -2512,9 +2515,9 @@ text size and the report's language are kept in the settings store with the rest
   \item[``The CSV must contain a 'date' column''] Rename the timestamp column to
         \code{date}. Panel data (several units) belongs in the SCM Studio.
   \item[The model's verdict is red] The predictors do not explain the target. Check that
-        the meteorology is ticked and on the same time base as the target, lengthen the
-        budget, or add estimators. Normalising with a poor model returns little more than
-        the observed series.
+        the meteorology is ticked and on the same time base as the target, ask for more
+        search trials, or add estimators. Normalising with a poor model returns little
+        more than the observed series.
   \item[A meteorological column is not ticked] Only the names in
         Section~\ref{sec:columns} are recognised; tick others by hand, on the \tab{Data}
         and \tab{Normalise} pages.
@@ -2546,7 +2549,7 @@ text size and the report's language are kept in the settings store with the rest
         \emph{Placebo every}, or move the cutoff later.
   \item[A task runs too long] \emph{Cancel} frees the window at once; the computation
         finishes in the background and its result is discarded. Lower the samples, the
-        budget, or the number of variables decomposed.
+        search trials, or the number of variables decomposed.
   \item[A notice asks for a step first] It names what is missing and carries the step on
         a button; it goes by itself once the step has been taken.
   \item[The window closed before the results were saved] \tab{File $\rightarrow$ Reopen
