@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="300" viewBox="0 0 640 300">
+  <rect x="16" y="16" width="608" height="268" rx="18" fill="#F5F7FB" stroke="#C9D0DB" stroke-width="2"/>
+
+  <!-- weather-driven variation behind the observed record -->
+  <path d="M56 208 C96 168 128 138 168 146 C208 154 232 186 256 196" fill="none" stroke="#4B8BBE" stroke-width="14" opacity="0.18" stroke-linecap="round"/>
+
+  <!-- observed record -->
+  <path d="M56 196 L76 150 L96 178 L116 128 L136 164 L156 120 L176 158 L196 136 L216 176 L236 148 L256 188" fill="none" stroke="#ADB8C7" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- normalisation -->
+  <path d="M278 168 L302 168 M294 160 L302 168 L294 176" fill="none" stroke="#8A94A6" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <line x1="322" y1="64" x2="322" y2="236" stroke="#C9D0DB" stroke-width="2" stroke-dasharray="6 8"/>
+
+  <!-- the observed record, faint, for comparison -->
+  <path d="M356 108 C392 116 428 132 464 152 C504 174 548 188 584 194" fill="none" stroke="#ADB8C7" stroke-width="2" stroke-dasharray="4 7"/>
+
+  <!-- normalised series: the emission and policy signal -->
+  <path d="M356 124 C392 132 428 150 464 170 C504 192 548 202 584 206" fill="none" stroke="#660099" stroke-width="6" stroke-linecap="round"/>
+
+  <g stroke="#C9D0DB" stroke-width="2" stroke-linecap="round">
+    <line x1="56" y1="224" x2="256" y2="224"/>
+    <line x1="356" y1="224" x2="584" y2="224"/>
+  </g>
+</svg>

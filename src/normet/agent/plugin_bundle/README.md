@@ -68,6 +68,9 @@ normet-plugin uninstall --target all
     and for `--scope user` also patches existing `~/.dsh/profiles/*/cordis.patch.yml`
     files with `@deepseek-ai/dsh-mcp-client` so DeepSeek Harness Desktop picks it up
     automatically.
+  - A ready-made DSH bundle with a title, description, icon and detail page is in
+    [`dsh/`](dsh/README.md); add that directory through **Plugins > Add plugin**
+    instead of running the installer when you want the bundle entry.
 - **OpenCode**:
   - `--scope user` merges `mcp.normet` (`type: "local"`) into
     `~/.config/opencode/opencode.json` and installs skills into

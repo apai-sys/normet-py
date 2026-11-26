@@ -1,0 +1,15 @@
+# normet's MCP server as one DSH bundle row.
+#
+# The command is normet-mcp from the environment where normet[mcp] is
+# installed. Change command/args/env for another normet install, or replace
+# them with transport: streamable-http, url and headers to reach a remote
+# `normet-mcp --transport streamable-http` on a GPU or HPC host.
+- insert:
+    - id: mcp-normet
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: normet
+        transport: stdio
+        command: "normet-mcp"
+        args: []
+        startupTimeoutMs: 60000

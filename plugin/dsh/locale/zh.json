@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "normet",
+    "description": "通过 normet 的 MCP 服务器运行气象归一化（去气象）与空气质量时间序列的合成控制：检查数据表并提出气象预测变量，以后台作业训练并归一化，判断留出集拟合，读取归一化序列及其气象部分，分解排放与气象贡献，检验趋势、事件与趋势突变，运行带安慰剂检验的合成控制，构建基于轨迹的受体图，并输出 HTML 报告。该行以 stdio 方式启动 normet-mcp；换用其他 normet 安装时改该行的 command、args 与 env，接远程 GPU 或 HPC 主机时改用 transport: streamable-http 与 url。作业保存在 $NORMET_MCP_HOME（默认 ~/.normet/mcp），文件读取范围由 $NORMET_MCP_ROOTS 限定。关闭该包会移除 normet_* 工具；由 `normet-plugin install --target dsh` 安装的 4 个技能仍留在 ~/.dsh/skills。",
+    "detail": "docs/DETAIL.zh.md"
+  }
+}

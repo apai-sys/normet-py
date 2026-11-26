@@ -40,10 +40,17 @@ def test_plugin_bundle_is_valid():
     cc_manifest = json.loads(
         (source / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
     )
+    dsh_manifest = json.loads((source / "dsh" / "package.json").read_text(encoding="utf-8"))
+    dsh_en = json.loads((source / "dsh" / "locale" / "en.json").read_text(encoding="utf-8"))
+    dsh_zh = json.loads((source / "dsh" / "locale" / "zh.json").read_text(encoding="utf-8"))
     pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
     assert ag_manifest["version"] == __version__
     assert cc_manifest["version"] == __version__
+    assert dsh_manifest["version"] == __version__
+    assert dsh_manifest["dsh"]["bundle"]["patch"] == "./cordis.patch.yml"
+    assert (source / "dsh" / dsh_en["meta"]["detail"]).is_file()
+    assert (source / "dsh" / dsh_zh["meta"]["detail"]).is_file()
     assert pyproject["project"]["version"] == __version__
     assert pyproject["project"]["scripts"]["normet-plugin"] == "normet.agent.plugin:main"
 
@@ -334,6 +341,8 @@ def test_plugin_bundle_parity_with_package_data():
     repo_files = sorted(p.relative_to(repo_bundle) for p in repo_bundle.rglob("*") if p.is_file())
     pkg_files = sorted(p.relative_to(pkg_bundle) for p in pkg_bundle.rglob("*") if p.is_file())
     assert repo_files == pkg_files
+    assert Path("dsh/package.json") in repo_files
+    assert Path("dsh/docs/preview.svg") in repo_files
     for rel in repo_files:
         assert (repo_bundle / rel).read_bytes() == (pkg_bundle / rel).read_bytes(), str(rel)
 
@@ -342,6 +351,9 @@ def test_plugin_bundle_parity_with_package_data():
     assert "plugin_bundle/*" in pkg_data
     assert "plugin_bundle/.*" in pkg_data
     assert "plugin_bundle/.*/*" in pkg_data
+    assert "plugin_bundle/dsh/*" in pkg_data
+    assert "plugin_bundle/dsh/docs/*" in pkg_data
+    assert "plugin_bundle/dsh/locale/*" in pkg_data
     assert any(dep.startswith("tomli") for dep in pyproject["project"]["dependencies"])
 
 

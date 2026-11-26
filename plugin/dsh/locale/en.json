@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "normet",
+    "description": "Runs normet, meteorological normalisation (de-weathering) and synthetic control for air-quality time series, through its MCP server: inspect a table and propose the meteorological predictors, train and normalise as a background job, judge the held-out fit, read the normalised series and its weather part, decompose emissions and meteorology, test trends, events and trend breaks, run synthetic controls with placebo checks, build trajectory-based receptor maps, and write an HTML report. The row starts normet-mcp as a stdio process; change the row's command, args and env for another normet install, or use transport: streamable-http and url for a GPU or HPC host. Jobs are kept under $NORMET_MCP_HOME (~/.normet/mcp) and files are read under $NORMET_MCP_ROOTS. Turning the bundle off removes the normet_* tools; the four skills installed by `normet-plugin install --target dsh` stay in ~/.dsh/skills.",
+    "detail": "docs/DETAIL.md"
+  }
+}

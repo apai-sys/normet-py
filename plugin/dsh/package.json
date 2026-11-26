@@ -1,0 +1,26 @@
+{
+  "name": "@local/normet",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "description": "The normet MCP server as a DSH bundle: meteorological normalisation and synthetic control for air-quality time series.",
+  "engines": {
+    "dsh": "^0.2.3-alpha.2"
+  },
+  "exports": {
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "cordis.patch.yml",
+    "locale/*.json",
+    "docs",
+    "icon.svg",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

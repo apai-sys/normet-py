@@ -14,7 +14,10 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   (`dsh`), OpenCode and OpenAI Codex, in user or project scope, with `--uvx`,
   `--roots`, `--env`, `--toolset core`, and remote `--url` / `--auth-token`
   options; `validate`, `status`, `doctor`, `print-config`, `prune` and
-  `uninstall` manage the installations. `normet-mcp` gains `--toolset core`
+  `uninstall` manage the installations. A ready-made DeepSeek Harness bundle
+  (`plugin/dsh/`, with its manifest, locales, icon and detail page) presents
+  the server as one entry in DSH's **Plugins**. `normet-mcp` gains
+  `--toolset core`
   (the 14 tools of the standard workflow, out of 26) and
   `--transport streamable-http` with the `--host`, `--port`, `--path`,
   `--auth-token` and `--stateless` options for a remote GPU or HPC server,

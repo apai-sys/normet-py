@@ -63,3 +63,7 @@ the server through `uvx --from "normet[mcp]"`; `--roots` and `--env` pass
 `NORMET_MCP_ROOTS` and other environment variables; `--url`/`--auth-token`
 point the client at a remote HTTP server. `normet-plugin prune --days 30`
 retires old job folders under `NORMET_MCP_HOME`.
+
+DeepSeek Harness users can instead add the ready-made bundle in `plugin/dsh/`
+through **Plugins > Add plugin**; it carries a title, description, icon and
+detail page, and starts the same server.
