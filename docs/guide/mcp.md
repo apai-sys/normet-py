@@ -26,3 +26,40 @@ claude mcp add normet -- normet-mcp          # Claude Code
 
 Because each job is a CLI command, {doc}`cli` documents what the assistant can run.
 The desktop app has its own assistant panel, described in {doc}`gui`.
+
+## Fewer tools, or a remote server
+
+`normet-mcp --toolset core` registers only the 14 tools of the standard
+de-weathering workflow (inspect, start, status, read, trend, figure, report)
+instead of all 26. Fewer tools means a shorter menu for the assistant to choose
+from; the omitted ones are the specialised analyses (Chronos-2 and in-context
+de-weathering, conserved-Ox and regime normalisation, Shapley/ICN
+decomposition, benchmarks, met features, imputation and backtesting, event
+detection, trend breaks, multi-receptor inversion), still reachable through
+`normet` itself.
+
+For a GPU or an HPC login node, `normet-mcp --transport streamable-http
+--host 127.0.0.1 --port 8765 --path /mcp --auth-token "$TOKEN"` serves the
+same tools over HTTP; clients elsewhere connect to the URL. Without a token the
+server warns when bound to a non-loopback address. `--stateless` drops the
+per-client session, for servers behind a load balancer.
+
+## Installing into an agent
+
+`normet-plugin` (`pip install "normet[mcp]"`) writes the server, a guardrails
+rule and four skills (de-weathering workflow, model choice, SCM intervention,
+transport/receptor analysis) into Antigravity, Claude Code, DeepSeek Harness,
+OpenCode or OpenAI Codex:
+
+```bash
+normet-plugin install --target all --toolset core
+normet-plugin status
+normet-plugin doctor
+normet-plugin uninstall --target all
+```
+
+`--scope project` targets a workspace instead of your home folder; `--uvx` starts
+the server through `uvx --from "normet[mcp]"`; `--roots` and `--env` pass
+`NORMET_MCP_ROOTS` and other environment variables; `--url`/`--auth-token`
+point the client at a remote HTTP server. `normet-plugin prune --days 30`
+retires old job folders under `NORMET_MCP_HOME`.

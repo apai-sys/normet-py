@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "normet": {
+      "type": "stdio",
+      "command": "normet-mcp",
+      "args": []
+    }
+  }
+}

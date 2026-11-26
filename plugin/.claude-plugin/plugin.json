@@ -1,0 +1,20 @@
+{
+  "name": "normet",
+  "version": "0.3.0",
+  "description": "Meteorological normalisation (de-weathering) of air-quality time series and synthetic control for intervention effects.",
+  "author": {
+    "name": "normet contributors",
+    "url": "https://github.com/apai-sys/normet-py"
+  },
+  "homepage": "https://github.com/apai-sys/normet-py",
+  "repository": "https://github.com/apai-sys/normet-py",
+  "license": "MIT",
+  "keywords": [
+    "air-quality",
+    "meteorological-normalisation",
+    "de-weathering",
+    "synthetic-control",
+    "atmospheric-science",
+    "mcp"
+  ]
+}

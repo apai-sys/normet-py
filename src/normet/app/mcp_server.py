@@ -27,6 +27,9 @@ from __future__ import annotations
 import argparse
 import contextlib
 import functools
+import hmac
+import inspect
+import os
 import sys
 from collections.abc import Callable
 from typing import Any
@@ -131,9 +134,36 @@ def _quiet(fn: Callable[..., Any], tool_error: Any) -> Callable[..., Any]:
     return wrapper
 
 
-def build_server(tools: Any = None) -> Any:
+#: The standard de-weathering workflow, for a small context (``--toolset core``):
+#: inspect a table, train and normalise, watch the job, read the fit and the
+#: results, decompose or run a synthetic control, test a trend, draw a figure
+#: and write the report.
+CORE_TOOLS = frozenset(
+    {
+        "normet_list_examples",
+        "normet_inspect_data",
+        "normet_start_do_all",
+        "normet_start_decompose",
+        "normet_start_scm",
+        "normet_start_cv",
+        "normet_job_status",
+        "normet_cancel_job",
+        "normet_list_jobs",
+        "normet_read_run",
+        "normet_read_result",
+        "normet_trend",
+        "normet_figure",
+        "normet_write_report",
+    }
+)
+
+
+def build_server(tools: Any = None, toolset: str = "all") -> Any:
     """The MCP server over *tools* (a :class:`normet.agent.Tools`; one over the
-    default job store and folders otherwise)."""
+    default job store and folders otherwise). ``toolset`` selects 'all' (26
+    tools) or 'core' (the 14 of the standard de-weathering workflow)."""
+    if toolset not in ("all", "core"):
+        raise ValueError(f"Unknown toolset {toolset!r}; expected 'all' or 'core'.")
     from ..agent.tools import FIGURES, Tools
 
     Server, Image, ToolError = _sdk()
@@ -141,6 +171,8 @@ def build_server(tools: Any = None) -> Any:
     mcp = Server("normet", instructions=INSTRUCTIONS)
 
     def tool(fn: Callable[..., Any]) -> Callable[..., Any]:
+        if toolset != "all" and fn.__name__ not in CORE_TOOLS:
+            return fn
         mcp.tool(name=fn.__name__, description=fn.__doc__)(_quiet(fn, ToolError))
         return fn
 
@@ -785,19 +817,143 @@ def build_server(tools: Any = None) -> Any:
     return mcp
 
 
+class _BearerAuthMiddleware:
+    """ASGI middleware enforcing ``Authorization: Bearer <token>`` on HTTP requests."""
+
+    def __init__(self, app: Any, token: str) -> None:
+        self.app = app
+        self._expected = token.encode("utf-8")
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        headers = {k.lower(): v for k, v in (scope.get("headers") or ())}
+        auth = headers.get(b"authorization", b"")
+        provided = auth[7:] if auth.lower().startswith(b"bearer ") else b""
+        if not hmac.compare_digest(provided, self._expected):
+            body = b'{"error":"Unauthorized"}'
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 401,
+                    "headers": [
+                        (b"content-type", b"application/json"),
+                        (b"content-length", str(len(body)).encode("ascii")),
+                        (b"www-authenticate", b"Bearer"),
+                    ],
+                }
+            )
+            await send({"type": "http.response.body", "body": body})
+            return
+        await self.app(scope, receive, send)
+
+
+def create_http_app(
+    mcp: Any,
+    *,
+    path: str = "/mcp",
+    auth_token: str | None = None,
+    stateless: bool = False,
+    host: str = "127.0.0.1",
+) -> Any:
+    """Build a Streamable HTTP ASGI application for *mcp*, with optional Bearer auth.
+
+    The SDK's own app is asked for by name and its parameters by signature, so
+    both 1.x and 2.x serve: they spell the endpoint ``path`` or
+    ``streamable_http_path`` and some lack ``stateless_http`` or ``host``.
+    """
+    fn = getattr(mcp, "streamable_http_app", None)
+    if fn is None:
+        raise RuntimeError("Installed MCP SDK does not support streamable_http_app; upgrade mcp.")
+    params = inspect.signature(fn).parameters
+    kw: dict[str, Any] = {}
+    if "streamable_http_path" in params:
+        kw["streamable_http_path"] = path
+    elif "path" in params:
+        kw["path"] = path
+    if "stateless_http" in params:
+        kw["stateless_http"] = stateless
+    if "host" in params:
+        kw["host"] = host
+    app = fn(**kw)
+    if auth_token:
+        return _BearerAuthMiddleware(app, auth_token)
+    return app
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         prog="normet-mcp",
-        description="normet as an MCP server over stdio (Claude Desktop, Claude Code, ...). "
-        "Jobs are kept in $NORMET_MCP_HOME (~/.normet/mcp); files are read and written "
-        "under $NORMET_MCP_ROOTS (the home folder where unset).",
+        description="normet as an MCP server (stdio or Streamable HTTP), for Claude "
+        "Desktop, Claude Code and any other MCP client. Jobs are kept in "
+        "$NORMET_MCP_HOME (~/.normet/mcp); files are read and written under "
+        "$NORMET_MCP_ROOTS (the home folder where unset).",
     )
-    p.parse_args(argv)
+    p.add_argument(
+        "--toolset",
+        choices=("all", "core"),
+        default="all",
+        help="Tools to expose: 'all' (26) or 'core' (14, the standard de-weathering workflow).",
+    )
+    p.add_argument(
+        "--transport",
+        choices=("stdio", "streamable-http"),
+        default="stdio",
+        help="MCP transport protocol (default: stdio).",
+    )
+    p.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Bind host for --transport streamable-http (default: 127.0.0.1).",
+    )
+    p.add_argument(
+        "--port",
+        type=int,
+        default=8765,
+        help="Bind port for --transport streamable-http (default: 8765).",
+    )
+    p.add_argument(
+        "--path",
+        default="/mcp",
+        help="HTTP endpoint path for --transport streamable-http (default: /mcp).",
+    )
+    p.add_argument(
+        "--auth-token",
+        default=None,
+        help="Optional Bearer token for --transport streamable-http "
+        "(or set NORMET_MCP_AUTH_TOKEN).",
+    )
+    p.add_argument(
+        "--stateless",
+        action="store_true",
+        help="Run Streamable HTTP transport in stateless mode.",
+    )
+    args = p.parse_args(argv)
     from ..agent.tools import Tools
 
     tools = Tools()
     tools.store.start_pumping()
-    build_server(tools).run()
+    server = build_server(tools, toolset=args.toolset)
+    if args.transport == "stdio":
+        server.run()
+        return 0
+    token = args.auth_token or os.environ.get("NORMET_MCP_AUTH_TOKEN") or None
+    if args.host not in ("127.0.0.1", "localhost", "::1") and not token:
+        print(
+            "WARNING: exposing Streamable HTTP on non-loopback host without --auth-token.",
+            file=sys.stderr,
+        )
+    import uvicorn
+
+    app = create_http_app(
+        server,
+        path=args.path,
+        auth_token=token,
+        stateless=args.stateless,
+        host=args.host,
+    )
+    uvicorn.run(app, host=args.host, port=args.port)
     return 0
 
 

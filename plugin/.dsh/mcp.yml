@@ -1,0 +1,4 @@
+mcpServers:
+  - name: "normet"
+    command: "normet-mcp"
+    args: []
