@@ -1,0 +1,17 @@
+[package]
+name = "normet-python"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77"
+license = "MIT"
+description = "PyO3 bindings for normet-core (module `normet_rust`)"
+publish = false
+
+[lib]
+name = "normet_rust"
+crate-type = ["cdylib"]
+
+[dependencies]
+normet-core = { path = "../normet-core" }
+numpy = "0.30"
+pyo3 = { version = "0.30", features = ["extension-module", "abi3-py310"] }

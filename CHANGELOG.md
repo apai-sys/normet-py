@@ -7,6 +7,13 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ## [Unreleased]
 
 ### Added
+- **Optional Rust kernel for Theil–Sen**: `nm.theil_sen(..., backend="rust")`
+  runs the same estimator through the `normet_rust` extension built from
+  `rust/normet-python` on top of the pure `normet-core` crate (shared with the
+  R wrapper via extendr), returning bit-identical slopes and Sen intervals
+  without scipy's quadratic temporaries at any record length; the default
+  `backend="python"` path is untouched, and the extension is imported only
+  when a caller opts in.
 - **Agent plugin and remote MCP transport**: `normet-plugin`
   (`normet.agent.plugin`) installs the normet MCP server, guardrails and four
   skills (`deweather-workflow`, `deweather-model-choice`, `scm-intervention`,
