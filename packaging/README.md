@@ -9,7 +9,7 @@ in [`conda/`](conda/README.md).
 ## Local build (macOS only)
 
 ```bash
-packaging/macos/build_dmg.sh /path/to/python   # -> dist/macos/normet.app + .dmg
+packaging/macos/build_dmg.sh /path/to/python   # -> dist/macos/Normet.app + .dmg
 ```
 
 ## Local build (Windows only)

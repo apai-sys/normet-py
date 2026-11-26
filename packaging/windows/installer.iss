@@ -6,7 +6,7 @@
 ; Version is injected by CI from pyproject.toml via ISCC /DAppVersion=…
 ; The fallback here only applies when compiling the script by hand.
 #ifndef AppVersion
-  #define AppVersion "1.0.0"
+  #define AppVersion "0.3.0"
 #endif
 
 [Setup]

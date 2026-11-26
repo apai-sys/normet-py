@@ -285,6 +285,10 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
     the default `traj_*` column set is unchanged; Transport Studio passes it.
 
 ### Fixed
+- **Packaging docs and the Windows installer fallback**: `packaging/README.md`
+  names the macOS bundle `Normet.app`, as `build_dmg.sh` produces it, and
+  `installer.iss` falls back to version 0.3.0 (not 1.0.0) when compiled by
+  hand without `/DAppVersion`.
 - **Surface defects found by the remaining-todo audit**:
   - SCM Studio's `deweathered` / `transport` backends now see their
     meteorological covariates and the spillover-exposure column in the design
