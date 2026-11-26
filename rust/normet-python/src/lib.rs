@@ -1,15 +1,16 @@
 //! PyO3 bindings for `normet-core`, imported by Python as `normet_rust`.
 //!
 //! The module is optional and opt-in: `import normet` never imports it, and
-//! `normet.theil_sen(..., backend="rust")` asks for it explicitly. Arrays
-//! must be contiguous float64; the Python wrapper does the conversion and
-//! keeps the scipy quantile constant in the host, where the package's other
-//! constants live.
+//! `theil_sen(..., backend="rust")` / `crps_from_*(..., backend="rust")`
+//! ask for it explicitly. Arrays must be contiguous float64; the Python
+//! wrapper does the conversion and keeps the scipy quantile constant in the
+//! host, where the package's other constants live.
 
-use numpy::PyReadonlyArray1;
+use numpy::{PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
+use normet_core::crps_rows as core_crps_rows;
 use normet_core::theil_sen_interval as core_theil_sen;
 
 /// Theil-Sen slope and Sen (1968) interval from `(x, y, z_alpha)`.
@@ -38,9 +39,39 @@ fn theil_sen_interval(
     Ok((res.slope, res.low, res.high, res.n_pairs, res.degenerate))
 }
 
+/// Mean exact CRPS over a `(rows, levels)` block of quantile or ensemble
+/// forecasts, one observation per row.
+///
+/// The Python wrapper masks non-finite rows and converts to contiguous
+/// float64 before calling; `levels` are the host's own floats, so the
+/// interval weights match the pure-Python scorer bit for bit.
+#[pyfunction]
+#[pyo3(signature = (values, levels, obs))]
+fn crps_rows(
+    py: Python<'_>,
+    values: PyReadonlyArray2<'_, f64>,
+    levels: PyReadonlyArray1<'_, f64>,
+    obs: PyReadonlyArray1<'_, f64>,
+) -> PyResult<f64> {
+    let shape = values.shape();
+    let (n_rows, n_levels) = (shape[0], shape[1]);
+    let vals = values
+        .as_slice()
+        .map_err(|e| PyValueError::new_err(format!("values must be contiguous: {e}")))?;
+    let lev = levels
+        .as_slice()
+        .map_err(|e| PyValueError::new_err(format!("levels must be contiguous: {e}")))?;
+    let ob = obs
+        .as_slice()
+        .map_err(|e| PyValueError::new_err(format!("obs must be contiguous: {e}")))?;
+    py.detach(|| core_crps_rows(vals, n_rows, n_levels, lev, ob))
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
 #[pymodule]
 fn normet_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(theil_sen_interval, m)?)?;
+    m.add_function(wrap_pyfunction!(crps_rows, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }
