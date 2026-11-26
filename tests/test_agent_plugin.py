@@ -368,6 +368,12 @@ def test_remote_url_env_guardrails_status_uninstall_and_doctor(tmp_path, monkeyp
     assert spec_env["env"]["OMP_NUM_THREADS"] == "4"
     assert spec_env["env"]["FOO"] == "bar=baz"
 
+    python_spec = resolve_server_spec(use_python=True)
+    assert python_spec["command"] == sys.executable
+    assert python_spec["args"] == ["-m", "normet.mcp_server"]
+    with pytest.raises(ValueError):
+        resolve_server_spec(url="http://127.0.0.1:8765/mcp", use_uvx=True)
+
     http_spec = resolve_server_spec(url="http://127.0.0.1:8765/mcp", auth_token="tok123")
     assert (
         render_antigravity_mcp(http_spec)["mcpServers"]["normet"]["url"]
