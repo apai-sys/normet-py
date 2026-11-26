@@ -12,6 +12,12 @@ in-sample overfitting:
                                     per-variable Spearman attenuation & sign-flip
                                     over-correction detection, support audit, MC SE
                                     summary, and out-of-sample residual checks.
+- :func:`counterfactual_separability_audit` :
+                                    Factual-only audit of residual-reuse validity:
+                                    the Eq. 66 residual-correction score, the
+                                    interaction lower bound, and floor saturation,
+                                    with a recommended coordinate (raw / log1p /
+                                    conserved-or-rank).
 """
 
 from __future__ import annotations
@@ -28,6 +34,7 @@ from .normalise import _is_time_feature
 
 __all__ = [
     "NormalisationDiagnostics",
+    "counterfactual_separability_audit",
     "support_audit",
     "diagnose_normalisation",
 ]
@@ -150,15 +157,15 @@ def support_audit(
     }
 
 
-def _oof_r2_linear(
-    X: np.ndarray, y: np.ndarray, folds: list[tuple[np.ndarray, np.ndarray]]
-) -> float:
-    """Out-of-fold ridge-stabilised OLS R^2 bounded below at 0."""
+def _oof_ridge_predict(
+    X: np.ndarray, y: np.ndarray, folds: Sequence[tuple[np.ndarray, np.ndarray]]
+) -> np.ndarray:
+    """Out-of-fold ridge-stabilised OLS predictions."""
     n = len(y)
-    if n < 3 or X.shape[1] == 0:
-        return 0.0
     oof_pred = np.full(n, np.nan, dtype=float)
-    eval_folds = folds if folds else [(np.arange(n), np.arange(n))]
+    if n < 3 or X.shape[1] == 0:
+        return oof_pred
+    eval_folds = list(folds) if folds else [(np.arange(n), np.arange(n))]
     for tr_idx, te_idx in eval_folds:
         x_tr, y_tr = X[tr_idx], y[tr_idx]
         x_te = X[te_idx]
@@ -174,26 +181,40 @@ def _oof_r2_linear(
         reg[0, 0] = 0.0
         coef = np.linalg.solve(gram + reg, design_tr.T @ y_tr)
         oof_pred[te_idx] = design_te @ coef
+    return oof_pred
+
+
+def _oof_r2_raw(y: np.ndarray, oof_pred: np.ndarray) -> float | None:
+    """Unclamped OOF R^2 from aligned target and prediction arrays."""
     mask = np.isfinite(oof_pred) & np.isfinite(y)
     if not np.any(mask):
-        return 0.0
+        return None
     ym = y[mask]
     pm = oof_pred[mask]
     sst = float(np.sum((ym - np.mean(ym)) ** 2))
     if sst <= 1e-12:
         return 0.0
     sse = float(np.sum((ym - pm) ** 2))
-    return float(max(0.0, 1.0 - sse / sst))
+    return float(1.0 - sse / sst)
 
 
-def _oof_r2_nonlinear(
+def _oof_r2_linear(
+    X: np.ndarray, y: np.ndarray, folds: Sequence[tuple[np.ndarray, np.ndarray]]
+) -> float:
+    """Out-of-fold ridge-stabilised OLS R^2 bounded below at 0."""
+    oof_pred = _oof_ridge_predict(X, y, folds)
+    r2 = _oof_r2_raw(y, oof_pred)
+    return float(max(0.0, r2)) if r2 is not None else 0.0
+
+
+def _oof_extratrees_predict(
     X: np.ndarray,
     y: np.ndarray,
-    folds: list[tuple[np.ndarray, np.ndarray]],
+    folds: Sequence[tuple[np.ndarray, np.ndarray]],
     *,
     seed: int,
-) -> float | None:
-    """Out-of-fold ExtraTrees R^2 bounded below at 0 (returns None if sklearn absent)."""
+) -> np.ndarray | None:
+    """Out-of-fold ExtraTrees predictions (returns None if sklearn absent or too small)."""
     if len(y) < 15 or X.shape[1] == 0 or not folds:
         return None
     try:
@@ -214,17 +235,220 @@ def _oof_r2_nonlinear(
         )
         reg.fit(X[tr_idx], y[tr_idx])
         oof_pred[te_idx] = reg.predict(X[te_idx])
+    return oof_pred
 
-    mask = np.isfinite(oof_pred) & np.isfinite(y)
-    if not np.any(mask):
+
+def _oof_r2_nonlinear(
+    X: np.ndarray,
+    y: np.ndarray,
+    folds: Sequence[tuple[np.ndarray, np.ndarray]],
+    *,
+    seed: int,
+) -> float | None:
+    """Out-of-fold ExtraTrees R^2 bounded below at 0 (returns None if sklearn absent)."""
+    oof_pred = _oof_extratrees_predict(X, y, folds, seed=seed)
+    if oof_pred is None:
         return None
-    ym = y[mask]
-    pm = oof_pred[mask]
-    sst = float(np.sum((ym - np.mean(ym)) ** 2))
-    if sst <= 1e-12:
-        return 0.0
-    sse = float(np.sum((ym - pm) ** 2))
-    return float(max(0.0, 1.0 - sse / sst))
+    r2 = _oof_r2_raw(y, oof_pred)
+    return float(max(0.0, r2)) if r2 is not None else None
+
+
+def _oof_residual_correction_score(
+    X: np.ndarray,
+    r: np.ndarray,
+    folds: Sequence[tuple[np.ndarray, np.ndarray]],
+    *,
+    nonlinear: bool,
+    seed: int,
+) -> tuple[float, float | None]:
+    """Appendix I Eq. (66) residual-correction score: fraction of MSE explained by meteorology."""
+    e0 = float(np.mean(r**2))
+    if e0 <= 1e-12:
+        return 0.0, (0.0 if nonlinear else None)
+
+    c_lin = _oof_ridge_predict(X, r, folds)
+    m_lin = np.isfinite(c_lin)
+    if np.any(m_lin):
+        e0_lin = float(np.mean(r[m_lin] ** 2))
+        e1_lin = float(np.mean((r[m_lin] - c_lin[m_lin]) ** 2))
+        rc_lin = float(max(0.0, (e0_lin - e1_lin) / max(e0_lin, 1e-12))) if e0_lin > 1e-12 else 0.0
+    else:
+        rc_lin = 0.0
+
+    rc_nl: float | None = None
+    if nonlinear and len(r) >= 30 and folds and X.shape[1] > 0:
+        c_nl = _oof_extratrees_predict(X, r, folds, seed=seed)
+        if c_nl is not None:
+            m_nl = np.isfinite(c_nl)
+            if np.any(m_nl):
+                e0_nl = float(np.mean(r[m_nl] ** 2))
+                e1_nl = float(np.mean((r[m_nl] - c_nl[m_nl]) ** 2))
+                rc_nl = (
+                    float(max(0.0, (e0_nl - e1_nl) / max(e0_nl, 1e-12))) if e0_nl > 1e-12 else 0.0
+                )
+    return rc_lin, rc_nl
+
+
+def _interaction_rho_lower_bound(
+    X: np.ndarray,
+    r: np.ndarray,
+    folds: Sequence[tuple[np.ndarray, np.ndarray]],
+    *,
+    nonlinear: bool,
+    seed: int,
+) -> tuple[float, float]:
+    """Factual lower bound on action-disturbance interaction ratio rho_lb (Section 3.2)."""
+    if len(r) < 3 or X.shape[1] == 0:
+        return 0.0, 0.0
+    r2_target = r**2
+    v_lin = _oof_ridge_predict(X, r2_target, folds)
+    r2_lin = _oof_r2_raw(r2_target, v_lin)
+    best_r2 = float(r2_lin) if r2_lin is not None else float("-inf")
+    best_v = v_lin
+
+    if nonlinear and len(r) >= 30 and folds:
+        v_nl = _oof_extratrees_predict(X, r2_target, folds, seed=seed)
+        if v_nl is not None:
+            r2_nl = _oof_r2_raw(r2_target, v_nl)
+            if r2_nl is not None and float(r2_nl) > best_r2:
+                best_r2 = float(r2_nl)
+                best_v = v_nl
+
+    if not np.isfinite(best_r2) or best_r2 <= 0.0:
+        return 0.0, 0.0
+
+    mask = np.isfinite(best_v) & np.isfinite(r)
+    if not np.any(mask):
+        return 0.0, 0.0
+    v_hat = np.maximum(best_v[mask], 0.0)
+    sigma_hat = np.sqrt(v_hat)
+    denom = max(float(np.mean(r[mask] ** 2)), 1e-12)
+    rho_lb = float(np.clip(2.0 * np.var(sigma_hat) / denom, 0.0, 2.0))
+    return rho_lb, float(best_r2)
+
+
+def counterfactual_separability_audit(
+    y_obs: np.ndarray,
+    y_fact: np.ndarray,
+    X_met: np.ndarray,
+    *,
+    folds: Sequence[tuple[np.ndarray, np.ndarray]] | None = None,
+    nonlinear: bool = True,
+    seed: int = DEFAULT_SEED,
+) -> dict[str, Any]:
+    """Audit residual-reuse validity from factual residuals and meteorology alone.
+
+    Implements three factual diagnostics from Balestriero, LeCun & Varaku (2026):
+
+    1. **Residual-correction test** (``rc_score_linear``, ``rc_score_nonlinear``;
+       Appendix I Eq. 66): out-of-fold fraction of factual residual energy
+       :math:`R_t = Y_t - \\hat{\\mu}(H_t, w_t)` explained by meteorology, which
+       detects action-contrast bias in the factual predictor.
+    2. **Factual interaction lower bound** (``interaction_rho_lb_raw``,
+       ``interaction_rho_lb_log``; Section 3.2): heteroscedastic spread variation
+       across meteorology bounding the unidentifiable action-disturbance coupling.
+    3. **Floor / contact saturation rate** (``floor_saturation_rate``; Section 4.3):
+       fraction of non-negative observations collapsed onto the lower floor where
+       disturbance separability vanishes.
+    """
+    y_o = np.asarray(y_obs, dtype=float)
+    y_f = np.asarray(y_fact, dtype=float)
+    X_arr = np.asarray(X_met, dtype=float)
+    if X_arr.ndim == 1:
+        X_arr = X_arr[:, None]
+
+    ok = np.isfinite(y_o) & np.isfinite(y_f)
+    if X_arr.shape[0] != len(y_o):
+        raise ValueError(
+            f"Length mismatch between y_obs ({len(y_o)}) and X_met ({X_arr.shape[0]})."
+        )
+    if X_arr.shape[1] > 0:
+        ok &= np.all(np.isfinite(X_arr), axis=1)
+
+    n_ok = int(ok.sum())
+    if n_ok < 10:
+        return {
+            "n_obs": n_ok,
+            "rc_score_linear": float("nan"),
+            "rc_score_nonlinear": float("nan") if nonlinear else None,
+            "interaction_rho_lb_raw": float("nan"),
+            "interaction_rho_lb_log": float("nan"),
+            "spread_r2_raw": float("nan"),
+            "spread_r2_log": float("nan"),
+            "floor_saturation_rate": float("nan"),
+            "recommended_coordinate": "insufficient_data",
+        }
+
+    yo = y_o[ok]
+    yf = y_f[ok]
+    Xm = X_arr[ok]
+
+    use_folds: list[tuple[np.ndarray, np.ndarray]]
+    if folds is not None and bool(np.all(ok)):
+        use_folds = list(folds)
+    elif n_ok >= 15:
+        n_splits = min(3, n_ok // 5)
+        edges = np.linspace(0, n_ok, n_splits + 1, dtype=int)
+        all_idx = np.arange(n_ok)
+        use_folds = []
+        for s_i, e_i in zip(edges[:-1], edges[1:], strict=True):
+            te = np.arange(s_i, e_i)
+            tr = np.concatenate([all_idx[:s_i], all_idx[e_i:]])
+            if len(tr) > 0 and len(te) > 0:
+                use_folds.append((tr, te))
+        if not use_folds:
+            use_folds = [(all_idx, all_idx)]
+    else:
+        all_idx = np.arange(n_ok)
+        use_folds = [(all_idx, all_idx)]
+
+    r_raw = yo - yf
+    rc_lin, rc_nl = _oof_residual_correction_score(
+        Xm, r_raw, use_folds, nonlinear=nonlinear, seed=seed
+    )
+    rho_raw, spread_r2_raw = _interaction_rho_lower_bound(
+        Xm, r_raw, use_folds, nonlinear=nonlinear, seed=seed
+    )
+
+    if bool(np.all(yo >= -1e-9)) and bool(np.all(yf >= -1e-9)):
+        r_log = np.log1p(np.maximum(yo, 0.0)) - np.log1p(np.maximum(yf, 0.0))
+        rho_log, spread_r2_log = _interaction_rho_lower_bound(
+            Xm, r_log, use_folds, nonlinear=nonlinear, seed=seed
+        )
+    else:
+        rho_log = float("nan")
+        spread_r2_log = float("nan")
+
+    if float(np.nanmin(yo)) >= -1e-9:
+        med_abs = float(np.median(np.abs(yo)))
+        tol = max(1e-6, 0.01 * med_abs) if med_abs > 1e-6 else 1e-6
+        floor_rate = float(np.mean(yo <= tol))
+    else:
+        floor_rate = 0.0
+
+    if np.isfinite(rho_log):
+        if rho_raw >= 0.15 and rho_log >= 0.15:
+            rec_coord = "conserved_or_rank"
+        elif rho_raw >= 0.05 and rho_log < 0.6 * rho_raw:
+            rec_coord = "log1p"
+        elif rho_raw < 0.05 and rho_log < 0.05:
+            rec_coord = "raw_or_log"
+        else:
+            rec_coord = "log1p" if rho_log < rho_raw else "raw"
+    else:
+        rec_coord = "conserved_or_rank" if rho_raw >= 0.15 else "raw"
+
+    return {
+        "n_obs": n_ok,
+        "rc_score_linear": float(rc_lin),
+        "rc_score_nonlinear": float(rc_nl) if rc_nl is not None else None,
+        "interaction_rho_lb_raw": float(rho_raw),
+        "interaction_rho_lb_log": float(rho_log),
+        "spread_r2_raw": float(spread_r2_raw),
+        "spread_r2_log": float(spread_r2_log),
+        "floor_saturation_rate": float(floor_rate),
+        "recommended_coordinate": rec_coord,
+    }
 
 
 def _lag_autocorr(arr: np.ndarray, lag: int) -> float:
@@ -256,6 +480,7 @@ class NormalisationDiagnostics:
     extrapolation_rate: float | None
     mc_se_summary: dict[str, float] | None = None
     residual_diagnostics: dict[str, float] | None = None
+    counterfactual_diagnostics: dict[str, Any] | None = None
     warnings: list[str] = field(default_factory=list)
 
     def summary(self) -> pd.DataFrame:
@@ -277,6 +502,9 @@ class NormalisationDiagnostics:
         if self.residual_diagnostics:
             for k, v in self.residual_diagnostics.items():
                 rows.append((f"residual_{k}", v))
+        if self.counterfactual_diagnostics:
+            for k, v in self.counterfactual_diagnostics.items():
+                rows.append((f"cf_{k}", v))
         return pd.DataFrame(rows, columns=["metric", "value"])
 
     def __str__(self) -> str:
@@ -505,6 +733,7 @@ def diagnose_normalisation(
         except Exception:
             y_fact = None
 
+    cf_diag: dict[str, Any] | None = None
     if y_fact is not None:
         ok_f = np.isfinite(y_fact)
         if int(ok_f.sum()) >= 5:
@@ -525,6 +754,28 @@ def diagnose_normalisation(
                     residual_diag["train_rmse"] = tr_rmse
                     residual_diag["test_rmse"] = te_rmse
                     residual_diag["overfit_ratio"] = te_rmse / max(tr_rmse, 1e-12)
+        if int(ok_f.sum()) >= 10:
+            n_cf = int(ok_f.sum())
+            if bool(np.all(ok_f)) and folds:
+                sub_folds: list[tuple[np.ndarray, np.ndarray]] | None = folds
+            elif n_cf >= 15 and min(3, n_cf // 5) >= 2:
+                sub_folds = list(
+                    blocked_time_cv(
+                        pd.DataFrame({"date": norm_al.index[ok_f]}),
+                        n_splits=min(3, n_cf // 5),
+                        embargo=0,
+                    )
+                )
+            else:
+                sub_folds = None
+            cf_diag = counterfactual_separability_audit(
+                y_obs[ok_f],
+                y_fact[ok_f],
+                X_mat[ok_f],
+                folds=sub_folds,
+                nonlinear=nonlinear_wrf,
+                seed=seed,
+            )
 
     warn_list: list[str] = []
     if np.isfinite(wrf_lin) and wrf_lin < 0.5:
@@ -555,6 +806,36 @@ def diagnose_normalisation(
         warn_list.append(
             f"Train/test residual ratio {residual_diag['overfit_ratio']:.2f} > 1.50 suggests in-sample overfitting."
         )
+    if cf_diag is not None:
+        rc_lin = float(cf_diag.get("rc_score_linear", float("nan")))
+        rc_nl = cf_diag.get("rc_score_nonlinear")
+        if (np.isfinite(rc_lin) and rc_lin > 0.10) or (
+            rc_nl is not None and np.isfinite(float(rc_nl)) and float(rc_nl) > 0.15
+        ):
+            warn_list.append(
+                f"Factual residual retains meteorological predictability (RC-score={rc_lin:.2f}); "
+                "action-contrast bias may affect counterfactuals (consider debias_icn_residuals or refit)."
+            )
+        rho_raw = float(cf_diag.get("interaction_rho_lb_raw", float("nan")))
+        rho_log = float(cf_diag.get("interaction_rho_lb_log", float("nan")))
+        if np.isfinite(rho_raw) and rho_raw > 0.15:
+            if np.isfinite(rho_log) and rho_log < 0.6 * rho_raw:
+                warn_list.append(
+                    f"Raw-coordinate residual spread varies strongly with meteorology "
+                    f"(rho_lb_raw={rho_raw:.2f} vs rho_lb_log={rho_log:.2f}); "
+                    "recommend log_transform=True / paired='log_ratio'."
+                )
+            else:
+                warn_list.append(
+                    f"Non-separable meteorology-emission interaction detected in both raw and log "
+                    f"coordinates (rho_lb_raw={rho_raw:.2f}); recommend normalise_ox_invariant or paired_mode='rank'."
+                )
+        floor_rate = float(cf_diag.get("floor_saturation_rate", float("nan")))
+        if np.isfinite(floor_rate) and floor_rate > 0.10:
+            warn_list.append(
+                f"Lower-boundary saturation rate is {100 * floor_rate:.1f}% (> 10%); "
+                "disturbance separability weakens near the floor."
+            )
 
     return NormalisationDiagnostics(
         wrf_linear=float(wrf_lin),
@@ -570,5 +851,6 @@ def diagnose_normalisation(
         extrapolation_rate=float(sup["extrapolation_rate"]),
         mc_se_summary=mc_se_summary,
         residual_diagnostics=residual_diag,
+        counterfactual_diagnostics=cf_diag,
         warnings=warn_list,
     )

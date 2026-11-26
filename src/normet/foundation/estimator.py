@@ -1614,6 +1614,7 @@ class Chronos2Estimator:
         schema: str = "chronos",
         pool: Any = None,
         quantiles: Sequence[float] | None = None,
+        past_only_covariates: Sequence[str] | None = None,
     ) -> Any:
         """In-context normalisation (ICN) -- the future-only analogue of :meth:`deweather`.
 
@@ -1651,6 +1652,7 @@ class Chronos2Estimator:
             schema=schema,
             pool=pool,
             quantiles=quantiles,
+            past_only_covariates=past_only_covariates,
         )
 
     def normalise_in_context_multivariate(
@@ -1663,6 +1665,7 @@ class Chronos2Estimator:
         schema: str = "chronos",
         pool: Any = None,
         quantiles: Sequence[float] | None = None,
+        past_only_covariates: Sequence[str] | None = None,
     ) -> dict[str, Any]:
         """Jointly normalise co-varying targets via Chronos-2 multivariate inference."""
         from .in_context import normalise_in_context_multivariate as _nic_mv
@@ -1677,6 +1680,7 @@ class Chronos2Estimator:
             schema=schema,
             pool=pool,
             quantiles=quantiles,
+            past_only_covariates=past_only_covariates,
         )
 
     def normalise_in_context_multisite(
@@ -1690,6 +1694,7 @@ class Chronos2Estimator:
         pool: Any = None,
         quantiles: Sequence[float] | None = None,
         cross_learning: bool = True,
+        past_only_covariates: Sequence[str] | None = None,
     ) -> dict[str, Any]:
         """Normalise a multi-site network jointly via Chronos-2 cross-learning."""
         from .in_context import normalise_in_context_multisite as _nic_ms
@@ -1705,6 +1710,7 @@ class Chronos2Estimator:
             pool=pool,
             quantiles=quantiles,
             cross_learning=cross_learning,
+            past_only_covariates=past_only_covariates,
         )
 
     def covariate_sensitivity(
