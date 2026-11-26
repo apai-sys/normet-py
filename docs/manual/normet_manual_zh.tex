@@ -136,7 +136,7 @@
 
 \section{主要功能}
 \begin{itemize}\nosep
-  \item AutoML 训练：FLAML 在墙钟\emph{预算}内搜索估计器，或使用调参的 LightGBM；以
+  \item AutoML 训练：FLAML 在固定\emph{搜索次数}内搜索估计器，或使用调参的 LightGBM；以
         $R^2$、RMSE 及另外九项统计量报告留出集上的拟合。
   \item 蒙特卡洛气象归一化：重采样哪些变量可选，另有不确定性分位数、参考池和条件
         重采样；自适应版本会在序列收敛后自动停止。
@@ -181,8 +181,8 @@
 书中的图都是真实窗口的截图，由 \code{docs/manual/make\_figures.py} 在 \nm{} 自带的记录上
 生成：伦敦 Marylebone Road（站点 MY1）2020 年 1 月至 8 月的逐时 \NOtwo{} 和 ERA5 气象，
 这段时间跨越了英国第一次 COVID-19 封控。正文引用的数字就是该脚本打印出来的数字。你自己
-跑出来的结果会在最后一两位上不同：AutoML 搜索以墙钟时间为界，两次访问的候选模型不会完全
-一样。
+跑出来的结果应与这些数字一致：搜索以试验次数而不是墙钟时间为界，划分和蒙特卡洛抽样又都有
+种子。
 
 本手册另有英文版（\code{normet\_manual.pdf}），章节一一对应，截图为英文界面
 （第~\ref{sec:appearance}~节）。
@@ -294,14 +294,16 @@ $R^2$ 只是一个上界。对若干小时内保持不变的预测变量，这�
 \section{训练模型}\label{sec:train}
 \nm{} 默认训练梯度提升树，把预测变量映射到目标。后端有两种：
 \begin{description}\nosep
-  \item[FLAML] 在墙钟\emph{预算}内，对所勾选的估计器做 AutoML 搜索（默认只搜
+  \item[FLAML] 在固定的\emph{搜索次数}内，对所勾选的估计器做 AutoML 搜索（默认只搜
         LightGBM；也可加入 XGBoost、限深 XGBoost、随机森林、极端随机树和 scikit-learn 的
-        直方图梯度提升），目标是最大化 $R^2$。库的默认预算为 90~s，窗口为 60~s。
-  \item[LightGBM] LightGBM 加固定\emph{次数}的随机超参数搜索（窗口里是 20 次）。
+        直方图梯度提升），目标是最大化 $R^2$。库和窗口的默认都是 30 次。
+  \item[LightGBM] LightGBM 加固定\emph{次数}的随机超参数搜索（窗口里是 6 次；库的默认
+        是 50 次）。
 \end{description}
-预算加长很少有害，对长记录往往有益。FLAML 按墙钟计时，同一脚本、同一数据，在更忙的机器上
-可能停在不同的候选模型上；要以次数而不是时间设界，请在 \code{model\_config} 里设
-\code{max\_iter}，并把 \code{time\_budget=-1}。
+搜索次数加多很少有害，对长记录往往有益。搜索以次数而不是墙钟时间为界，所以同一个种子、
+同一份数据在任何机器上都访问同样的候选。若在 \code{model\_config} 里传入
+\code{time\_budget}，就改为按墙钟搜索（默认的次数上限随之去掉）；同时传 \code{max\_iter}
+则两者都保留，哪个先到就在哪里停。
 
 \subsection{模型统计量}\label{sec:modstats}
 \code{modStats} 分别对训练行、测试行和全部行做预测，逐组报告：$n$；FAC2（预测落在观测
@@ -641,7 +643,7 @@ Grabisch--Roubens 交互项，显示两个变量（比如温度与边界层高�
         的结果会在这里现形。
   \item[自助法区间] 在供体的随机子集上（默认 80\,\%）重复拟合 $B$ 次，可选对干预前时段
         做分块重采样。
-  \item[共形区间] \code{conformal\_effect\_interval} 给出干预后平均效应的有限样本区间
+  \item[保形区间] \code{conformal\_effect\_interval} 给出干预后平均效应的有限样本区间
         （Chernozhukov、W\"uthrich 和 Zhu，2021）；\code{rmspe\_ratio\_test} 给出 Abadie
         的干预后/干预前 RMSPE 比值检验。
 \end{description}
@@ -797,7 +799,7 @@ HYSPLIT（NOAA ARL）。
   \item[数据] \emph{打开数据…}、文件名及其行数列数、时间用的\emph{时区}，以及时间是
         怎么读出来的（第~\ref{sec:input}~节）；再往下是\emph{列}：目标和预测变量
         （第~\ref{sec:columns}~节）。
-  \item[模型] 后端、划分、训练集比例、时间预算（或搜索次数）、估计器、随机种子；换到
+  \item[模型] 后端、划分、训练集比例、搜索次数、估计器、随机种子；换到
         Chronos-2 则是设备和微调（第\ref{ch:train}章）。
   \item[归一化] 重采样哪些变量、样本数、CPU 核心数、分位数带（第\ref{ch:normalise}章）。
         \emph{引擎}在 \code{standard}、\code{dml}（带 \emph{DML 截止}和 \emph{DML
@@ -831,12 +833,12 @@ HYSPLIT（NOAA ARL）。
 模型     & 评估结论、统计表、散点对比图、特征重要性、前向滚动交叉验证 & 训练模型；前向滚动交叉验证 \\
 归一化   & 观测序列和归一化序列、分位数带及其周期 & 运行归一化 \\
 分解     & 排放分量或气象分量，以及周期 & 运行分解 \\
-滚动     & 各滚动窗口的均值及其离散度 & 运行滚动归一化 \\
 多尺度   & 尺度空间级联和各频带的能量 & 多尺度 \\
 趋势     & 被检验的序列及其 Theil--Sen 直线，或其各段折线与断点、评估结论和 p 值 & 趋势分析 \\
 事件     & 异常分数条，被标记的窗口以阴影显示，及其事件表 & 查找事件 \\
-PDP      & 每个变量一幅部分依赖图 & 计算 PDP \\
 不确定性 & 逐时刻的离散按来源堆叠（气象、模型形式、二者的交互）及中位数份额 & 不确定度分解 \\
+滚动     & 各滚动窗口的均值及其离散度 & 运行滚动归一化 \\
+PDP      & 每个变量一幅部分依赖图 & 计算 PDP \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -888,7 +890,7 @@ PDP      & 每个变量一幅部分依赖图 & 计算 PDP \\
 按钮只在能执行时可用；不能执行时，工具提示会说明缺什么。一次只跑一个任务，在后台线程上跑，
 窗口所以一直能响应；运行期间各运行按钮禁用，\emph{取消}可用，状态栏显示任务名和已用时间。
 任务能报进度时——滚动窗口、分解的各步、LightGBM 的各次试验、HYSPLIT 的各个受体时刻、FLAML
-的时间预算——进度条跟着走，状态栏给出完成比例，依据够了还会给剩余时间；报不出进度的任务，
+的搜索次数——进度条跟着走，状态栏给出完成比例，依据够了还会给剩余时间；报不出进度的任务，
 进度条是忙碌条。任务结束时，这一步写出的提示会说明用了多久。取消会\emph{放弃}该任务：窗口
 立刻空出来，但计算停不下来，它会在后台跑完，结果丢掉。每一步的调用成功时都进命令日志
 （第~\ref{sec:commandlog}~节）。
@@ -1013,8 +1015,8 @@ Ctrl、Cmd）拖动或点击可以加选，按住 Shift 点已选的点则取消
   \item[后端] \code{flaml}、\code{lightgbm} 或 \code{chronos-2}
         （第~\ref{sec:chronosui}~节）。没装 Chronos-2 的扩展时呈灰色，工具提示说明原因。
   \item[划分方法、训练集比例] 见第~\ref{sec:split}~节；默认 0.75。
-  \item[时间预算] FLAML 的搜索时间，默认 60~s。对 LightGBM，这一行变成\emph{搜索次数}，
-        默认 20；切换后端时各自的值都留着。
+  \item[搜索次数] 搜索尝试的候选数：FLAML 默认 30，LightGBM 默认 6；切换后端时各自的
+        值都留着。
   \item[估计器]（仅 FLAML）默认只搜 LightGBM；加更多以扩大搜索范围。
   \item[随机种子] 默认 7654321：划分和搜索都用它做种子。
 \end{description}
@@ -1030,24 +1032,24 @@ Ctrl、Cmd）拖动或点击可以加选，按住 Shift 点已选的点则取消
 评分（CRPS）尺度上的得分。带分布的预报算得出自己的 CRPS，只有低于这个参考值，才说明这个
 分布值得带。
 
-\screenshot{ui_model.png}{用 FLAML（LightGBM，30~s 预算，随机划分）训练 MY1：在 1,448 个
+\screenshot{ui_model.png}{用 FLAML（LightGBM，30 次搜索，随机划分）训练 MY1：在 1,448 个
 留出小时上 $R^2 = 0.900$、RMSE $= 8.00$~\ugm{}，而在 4,345 个训练小时上为 $1.000$。
-风向风速、边界层高度和趋势承担了最多的分裂。}{fig:model}
+风速风向、相对湿度和边界层高度承担了最多的分裂。}{fig:model}
 
 提升树在训练行上总比在留出行上拟合得好，这在意料之中，本身不是问题；留出集上拟合差才是
-问题。拿一般或差的模型去归一化之前，先试试更多预测变量、更长的预算或更多估计器。归一化
+问题。拿一般或差的模型去归一化之前，先试试更多预测变量、更多搜索次数或更多估计器。归一化
 序列会继承模型的误差。
 
 一次随机划分是在给模型化妆：每个测试小时的邻域都在训练行里，自相关的序列靠局部信息就能
 预测得很好，但这不代表整体预测得好。\emph{前向滚动交叉验证}正是对这个数字的检验：同一后端
-在扩展窗口上重训，给紧接其后的数据段打分，默认做五次（\emph{CV 折数}），每折花一次训练
-预算。标签页因此多了一个\emph{视图}选择器，在划分的图与各折之间切换——每折一根 $R^2$ 柱，
+在扩展窗口上重训，给紧接其后的数据段打分，默认做五次（\emph{CV 折数}），每折重做一次
+搜索。标签页因此多了一个\emph{视图}选择器，在划分的图与各折之间切换——每折一根 $R^2$ 柱，
 划分的取值以横线画在柱上；表里是各折的测试窗口、行数与 $R^2$、RMSE 和平均偏差。划分的
 横线要是明显高过柱群，评估结论会直说：请以各折为准。对状态会漂移的序列，随机划分抽未来
 和抽过去一样随意，各折的数字尤其可信。
 
 \section{Chronos-2}\label{sec:chronosui}
-选择 \code{chronos-2} 时，训练相关的控件藏起来——没有东西要训练，没有预算，没有划分——按钮
+选择 \code{chronos-2} 时，训练相关的控件藏起来——没有东西要训练，没有搜索次数，没有划分——按钮
 变成\emph{载入 Chronos-2}。第一次载入会下载约 500~MB 的权重。\emph{设备}选在哪里跑
 （\emph{auto}：先 CUDA，再 Apple Silicon，最后 CPU）。至少要勾一个气象预测变量：没有协变量，
 模型做的只是普通预测，不是去气象化。
@@ -1246,8 +1248,8 @@ $|x-\text{中位数}|/\mathrm{IQR}$，稳健的单变量分数，\emph{阈值 k}
 每个时刻的（成员 $\times$ 抽样）预测矩阵沿两个方向正交地拆方差：抽样之间的项是气象方差，
 成员之间的项是模型形式方差，交互项是某个成员对某次抽样有、而集成平均下来没有的反应。三项
 之和逐时刻精确等于总方差——这个恒等式由包内测试钉住，分摊不会悄悄加不回去。\emph{成员
-后端}决定每个成员怎么训练：\code{lightgbm}（默认，快速随机搜索，\emph{模型}页的预算就是
-试验次数）或 \code{flaml}（每个成员各跑一次 AutoML 搜索，各花各的预算）。
+后端}决定每个成员怎么训练：\code{lightgbm}（默认，快速随机搜索，试验次数取自\emph{模型}
+页的\emph{搜索次数}）或 \code{flaml}（每个成员各跑一次 AutoML 搜索，次数相同）。
 
 \tab{不确定性}标签页（图~\ref{fig:uncertainty}）把逐时刻的方差按气象、模型形式、交互叠成
 一条带，带顶上的线是总方差，图上方的结论给出要紧的一句：各来源的中位数份额。MY1 在图的
@@ -1433,7 +1435,11 @@ MY1 一样好，所以只有它的干预前 $R^2$ 不该解读。经典 SCM 根�
 
 \screenshot{ui_scm_placebo.png}{ULEZ 的空间安慰剂：没有哪个供体的安慰剂效应接近 MY1 的，
 所以 $p = 1/54 = 0.019$，即 53 个安慰剂允许的最小值。每个安慰剂都用同一个估计器拟合，所以
-哪怕干预前的拟合没有信息量，这一比较也是公平的。}{fig:scmplacebo}
+哪怕干预前的拟合没有信息量，效应的比较仍是公平的。截图第二行是 Abadie RMSPE 比值检验：
+处理单元干预后/干预前 RMSPE 比值为 115.65，在 54 个单元中排第 53（$p = 0.981$）。该比值
+除以干预前 RMSPE；MY1 的 0.16 高于每个安慰剂的 0.001--0.045（MY1 是唯一高于所有供体的
+单元），所以即便干预后效应最大，它仍把 MY1 排在后面；评估结论读的是上面的安慰剂效应比较，
+而不是这一行。}{fig:scmplacebo}
 
 \screenshot{ui_scm_bands.png}{刀切法区间：效应重算了 53 次，每次去掉一个供体。干预后平均
 效应为 $-18.14$~\ugm{}，区间在 55\,\% 的干预后日期上排除零（评估结论说的是“天”；面板是
@@ -1625,7 +1631,7 @@ df = nm.datasets.load_my1()
 df_prep, model = build_model(df, 'NO2', backend='flaml',
                              covariates=['ws', 'wd', 'temp', 'RH', 'atmos_pres', 'blh', 'tcc', 'tp', 'ssrd', 'date_unix', 'day_julian', 'weekday', 'hour'],
                              split_method='random', train_fraction=0.75,
-                             model_config={'time_budget': 30, 'estimator_list': ['lgbm']},
+                             model_config={'max_iter': 30, 'estimator_list': ['lgbm']},
                              seed=7654321)
 
 # 21:10:11  Normalise
@@ -1648,8 +1654,8 @@ rolled = rolling(df_prep, model, covariates=[...],
                  variables_resample=[...the nine...],
                  window_days=14, rolling_every=7, n_samples=50)
 \end{lstlisting}
-再跑一遍，同一个模型给出的归一化和分解完全一样；模型本身可能略有不同，因为 FLAML 的搜索以
-墙钟时间为界（第~\ref{sec:train}~节）。
+再跑一遍，得到同一个模型、同一份归一化和分解：FLAML 的搜索以固定次数为界，且有种子
+（第~\ref{sec:train}~节）。
 
 \section{打印用图}\label{sec:print}
 屏幕上的图按标签页大小画；缩到期刊 89~mm 的栏宽，文字就跟着变小。每幅图工具栏上的
@@ -1715,7 +1721,7 @@ Nature 指南对它的要求——唯一没过的是 4.9~pt 的下标，低于 N
 
 \section{配置和历史}\label{sec:config}
 \tab{文件 $\rightarrow$ 保存配置…}把参数面板的每一项设置写成 JSON——目标、预测变量、后端、
-划分、预算、估计器、随机种子，以及每一步的设置——\tab{载入配置…}从 JSON 设置参数面板；
+划分、搜索次数、估计器、随机种子，以及每一步的设置——\tab{载入配置…}从 JSON 设置参数面板；
 数据不在里面。\tab{文件 $\rightarrow$ 运行历史…}列出每次运行的时间、任务、目标、后端、行数，
 外加一项细节（训练运行给留出集 $R^2$，归一化给抽样次数）。
 
@@ -1791,7 +1797,7 @@ print(nm.modStats(df_prep, model))   # training, testing and all rows
 一步一步来：
 \begin{lstlisting}[language=Python]
 df_prep, model = nm.build_model(df, "NO2", backend="flaml", covariates=predictors,
-                                model_config={"time_budget": 120})
+                                model_config={"max_iter": 100})
 norm = nm.normalise(df_prep, model, covariates=predictors,
                     variables_resample=met, n_samples=300,
                     return_quantiles=[0.025, 0.975])
@@ -1815,7 +1821,7 @@ curves = nm.pdp(df_prep, model, var_list=["ws", "temp"])
 \code{run\_scm}, \code{scm\_all} & 一次合成控制；把每个单元都当作处理单元 \\
 \code{placebo\_in\_space}, \code{placebo\_in\_time} & 安慰剂检验 \\
 \code{uncertainty\_bands}, \code{effect\_bands\_space} & 刀切法/自助法区间和安慰剂区间 \\
-\code{scm\_diagnostics}, \code{conformal\_effect\_interval} & 拟合诊断；共形区间 \\
+\code{scm\_diagnostics}, \code{conformal\_effect\_interval} & 拟合诊断；保形区间 \\
 \code{bayesian\_scm}      & 贝叶斯 SCM（\code{bayes} 扩展） \\
 \code{detect\_events}, \code{anomaly\_scores} & 归一化序列中的事件 \\
 \code{normalise\_plot}, \code{decomposition\_stack}, \code{scm\_dashboard} & 窗口中的图 \\
@@ -1825,7 +1831,7 @@ curves = nm.pdp(df_prep, model, var_list=["ws", "temp"])
 \code{decompose\_uncertainty} & 把总离散分摊到气象、模型形式及二者交互（\tab{不确定性}标签页，第~\ref{sec:uncertainty}~节） \\
 \code{dml\_normalise}, \code{crossfit\_normalise} & Double-ML 与交叉拟合去气象化（第~\ref{sec:dmltheory}~节） \\
 \code{normalise\_ox\_invariant}, \code{normalise\_regime\_conditioned} & 守恒 O\textsubscript{x} 与前体物体制去气象化（第~\ref{sec:chemtheory}~节） \\
-\code{normalise\_in\_context}, \code{ICNDesign}, \code{build\_icn\_draw\_bank} & Chronos-2 上的上下文内归一化（第~\ref{sec:icntheory}~节） \\
+\code{normalise\_in\_context}, \code{foundation.ICNDesign}, \code{build\_icn\_draw\_bank} & Chronos-2 上的上下文内归一化（第~\ref{sec:icntheory}~节） \\
 \code{ICNDrawBank}, \code{icn\_decompose} & 抽样库重聚合；上下文内分组 Shapley 归因 \\
 \code{shapley\_interactions} & 二阶 Grabisch--Roubens 交互 \\
 \code{make\_synthetic\_benchmark}, \code{evaluate\_benchmark} & F1--F5 生成器与打分（第~\ref{sec:benchtheory}~节） \\
@@ -1926,10 +1932,10 @@ claude mcp add normet -- normet-mcp          # Claude Code
 \midrule
 \endhead
 划分方法 / 训练集比例          & random / 0.75 & random / 0.75 \\
-FLAML 时间预算                 & 60 s & 90 s \\
+FLAML 搜索次数                 & 30 & 30 \\
 FLAML 估计器                   & lgbm & lgbm \\
 FLAML 指标                     & $R^2$ & $R^2$ \\
-LightGBM 搜索次数              & 20 & --- \\
+LightGBM 搜索次数              & 6 & 50 \\
 随机种子                       & 7654321 & 7654321 \\
 归一化抽样次数                 & 300（Chronos-2：8） & 300（Chronos-2：8） \\
 重采样变量                     & 识别出的气象 & 所有非日历预测变量 \\
@@ -1947,7 +1953,7 @@ DML 截止 / 分块                & 30 d / 5 & 30 d / 5，禁带 24 行 \\
 OX 引擎方法 / 单位             & dml / \ugm{} & dml / \ugm{} \\
 体制引擎方法                   & dml & dml \\
 成对交互                       & 关（仅精确 Shapley） & 仅精确 Shapley 联盟 \\
-ICN 设计                       & 由检查点构建的 \code{ICNDesign.v1()} & \code{v1()}：块 336、步长 168、5 次抽样 \\
+ICN 设计                       & 由检查点构建的 \code{ICNDesign.v1()} & \code{ICNDesign()}：块 168、步长 168、单向、20 次抽样；\code{v1()} 预置：块 336、步长 168、双向、5 次 \\
 ICN 意外加权 / 最短上下文      & 0（关）/ --- & 0（关）/ \code{None} \\
 ICN 支持度门槛 / 聚合          & 0.5 / trimmed & 0.5 / trimmed \\
 SCM 后端                       & scm & scm \\
@@ -1989,7 +1995,7 @@ Chronos-2 权重                 & Hugging Face 缓存 \\
   \item[“The CSV must contain a 'date' column”] 把时间戳列改名为 \code{date}。面板数据
         （多个单元）请放到 SCM 工作室。
   \item[模型的评估结论为红色] 预测变量解释不了目标。检查气象是否已勾选、与目标的时间基准
-        是否一致，延长预算，或加入估计器。用差的模型归一化，得到的不过是观测序列而已。
+        是否一致，增加搜索次数，或加入估计器。用差的模型归一化，得到的不过是观测序列而已。
   \item[某个气象列没有被勾选] 只有第~\ref{sec:columns}~节列出的名字才认得出来；其他的请在\tab{数据}
         页和\tab{归一化}页上手动勾选。
   \item[Exact Shapley values over $k$ features need $2^k$ normalisations] 用 Shapley 分解
@@ -2017,7 +2023,7 @@ Chronos-2 权重                 & Hugging Face 缓存 \\
         之后的会话。
   \item[参数面板不见了] 它被收起了：点击操作栏上的\emph{展开面板}，或按 Ctrl+B。
   \item[任务运行太久] \emph{取消}立刻释放窗口；计算在后台跑完，结果被丢弃。减少抽样次数、
-        预算或分解的变量数。
+        搜索次数或分解的变量数。
   \item[任务失败] 对话框显示最后一行；完整回溯在\tab{日志}停靠窗里。
   \item[macOS：“无法打开 Normet”] 应用未签名：右键点击它，选择\emph{打开}，一次即可
         （第\ref{ch:install}章）。

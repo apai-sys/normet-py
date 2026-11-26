@@ -231,7 +231,10 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   backends (ASCM, SDID, Chronos-2, de-weathered, transport), the Transport
   Studio's receptor maps, clustering and footprint inversion, the 17 CLI
   subcommands and 26 MCP tools; the screenshots and the example numbers are
-  regenerated from the current package.
+  regenerated from the current package. A post-publication audit corrected the
+  FLAML trial-bounded search text and defaults, the result-tab order, the model
+  screenshot caption, the ICN design defaults, the SCM placebo RMSPE
+  explanation and the Chinese 保形 term, in both books.
 - **Package layout (`normet`)**: the loose top-level modules now live in
   subpackages — `normet.viz` (`plotting`, `style`, `figstyle`),
   `normet.reporting` (`report`), `normet.app` (`cli`, `mcp_server`),
