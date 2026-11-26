@@ -180,9 +180,8 @@ impl CrpsScratch {
             let ind = if self.grid[i] >= y { 1.0 } else { 0.0 };
             let c = right - ind;
             let slope = (left_next - right) / d;
-            self.segments.push(
-                c * c * d + c * slope * d * d + (slope * slope * d * d * d) / 3.0,
-            );
+            self.segments
+                .push(c * c * d + c * slope * d * d + (slope * slope * d * d * d) / 3.0);
         }
         pairwise_sum(&self.segments)
     }
@@ -204,10 +203,7 @@ pub fn crps_rows(
     let Some(total_len) = n_rows.checked_mul(n_levels) else {
         return Err(CrpsError::LengthMismatch);
     };
-    if n_levels == 0
-        || values.len() != total_len
-        || levels.len() != n_levels
-        || obs.len() != n_rows
+    if n_levels == 0 || values.len() != total_len || levels.len() != n_levels || obs.len() != n_rows
     {
         return Err(CrpsError::LengthMismatch);
     }
