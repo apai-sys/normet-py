@@ -528,6 +528,242 @@ def trajectory_endpoint_weights(
     return out
 
 
+def _endpoint_weights_flat(
+    age_h: np.ndarray,
+    height: np.ndarray,
+    blh: np.ndarray | None,
+    rainfall: np.ndarray | None,
+    codes: np.ndarray,
+    *,
+    blh_coupled: bool = True,
+    blh_factor: float = 1.0,
+    min_blh_m: float = 100.0,
+    fallback_height_m: float | None = 1500.0,
+    decay_hours: float | None = None,
+    scavenging_coeff: float | None = None,
+    exclude_receptor: bool = True,
+) -> np.ndarray:
+    """Vectorised :func:`trajectory_endpoint_weights` over many trajectories.
+
+    A per-trajectory call spends most of its time building pandas objects,
+    not doing arithmetic: on a 147k-endpoint table the loop took 355-400 ms,
+    about two thirds of it ``pd.to_numeric`` and Series construction per
+    group. This kernel takes one flat array per column plus a group code per
+    row, so a caller converts each column once and the arithmetic runs for
+    every trajectory at once. It is private plumbing: the public
+    per-trajectory function keeps its behaviour, and the call sites in
+    :mod:`normet.analysis.transport` use this one to avoid the pandas floor.
+
+    ``codes`` partitions the rows into trajectories. The codes' order does
+    not matter, but their equality classes do: one code is one trajectory,
+    and rows of the same trajectory may be interleaved arbitrarily. The
+    returned array aligns with the input row order.
+
+    Every operation deliberately mirrors the scalar function: a stable
+    descending-age sort *within* each trajectory, ``_endpoint_dt_hours``'
+    uniform/median branches, the BLH coupling fallback, a sequential
+    per-trajectory cumulative rainfall, and ``np.maximum`` (which
+    propagates NaN, where Rust's ``f64::max`` would not). Changing any of
+    these moves weights, so the two implementations are kept bit-identical;
+    the parity test compares their ``uint64`` views.
+    """
+    n = age_h.size
+    if n == 0:
+        return np.empty(0, dtype=float)
+    if float(blh_factor) <= 0.0:
+        raise ValueError(f"blh_factor must be positive, got {blh_factor}")
+    if float(min_blh_m) <= 0.0:
+        raise ValueError(f"min_blh_m must be positive, got {min_blh_m}")
+    if decay_hours is not None and float(decay_hours) <= 0.0:
+        raise ValueError(f"decay_hours must be positive, got {decay_hours}")
+    if scavenging_coeff is not None and float(scavenging_coeff) < 0.0:
+        raise ValueError(f"scavenging_coeff must be non-negative, got {scavenging_coeff}")
+
+    age = np.asarray(age_h, dtype=float)
+    hgt = np.asarray(height, dtype=float)
+    codes = np.asarray(codes, dtype=np.int64)
+
+    # Stable sort by (trajectory code, descending age), which is the
+    # per-trajectory argsort(kind="stable") without leaving numpy.
+    sort_key = np.where(np.isfinite(age), -age, np.inf)
+    order = np.lexsort((sort_key, codes))
+    age_s = age[order]
+    h_s = hgt[order]
+    codes_s = codes[order]
+    del sort_key
+
+    change = np.empty(n, dtype=bool)
+    change[0] = True
+    change[1:] = codes_s[1:] != codes_s[:-1]
+    starts = np.flatnonzero(change)
+    bounds = np.r_[starts, n]
+    counts = np.diff(bounds)
+    n_groups = starts.size
+    # Python ints, not numpy scalars: mypy under numpy 2.x otherwise infers
+    # the loop bounds from the scalar dtype, and slicing is cheaper anyway.
+    bounds_i = [int(v) for v in bounds]
+    del change, codes_s
+
+    finite = np.isfinite(age_s)
+    bad_group = np.add.reduceat((~finite).astype(np.int64), starts) > 0
+    bad_group |= counts < 2
+
+    # ---- dt: _endpoint_dt_hours, vectorised per group -------------------
+    last_row = np.zeros(n, dtype=bool)
+    last_row[bounds[1:] - 1] = True
+    step_valid = ~last_row
+    steps = np.zeros(n, dtype=float)
+    if n > 1:
+        steps[:-1] = np.abs(np.diff(age_s))
+    # A zero step can be genuine or the sentinel past a group's last row;
+    # step_valid separates them.
+
+    first_idx = starts
+    first_step = steps[first_idx].copy()
+    zero_any = np.add.reduceat((step_valid & (steps == 0.0)).astype(np.int64), starts) > 0
+    steps_corr = steps
+    if zero_any.any():
+        steps_corr = steps.copy()
+        # A distinct name: numpy 2.x types a np.flatnonzero loop variable as
+        # a numpy scalar, and reusing it for a later range() is a mypy error.
+        for gz in np.flatnonzero(zero_any):
+            s = bounds_i[int(gz)]
+            e = bounds_i[int(gz) + 1]
+            st = steps[s : e - 1]
+            pos = st > 0.0
+            med = float(np.median(st[pos])) if np.any(pos) else 1.0
+            steps_corr[s : e - 1] = np.where(pos, st, med)
+        first_step = steps_corr[first_idx].copy()
+
+    step0_b = np.repeat(first_step, counts)
+    dev = np.abs(steps_corr - step0_b) <= 1e-12 + 1e-9 * np.abs(step0_b)
+    uniform = np.add.reduceat((dev | ~step_valid).astype(np.int64), starts) == counts
+    uniform &= ~bad_group
+
+    prev = np.empty(n, dtype=float)
+    prev[0] = 0.0
+    prev[1:] = steps_corr[:-1]
+    nxt = steps_corr
+    dt = (prev + nxt) / 2.0
+    first_mask = np.zeros(n, dtype=bool)
+    first_mask[starts] = True
+    dt[first_mask] = nxt[first_mask] / 2.0
+    dt[last_row] = prev[last_row] / 2.0
+    dt = np.where(np.repeat(uniform, counts), np.repeat(first_step, counts), dt)
+    dt = np.where(np.repeat(bad_group, counts), 1.0, dt)
+
+    # ---- BLH coupling / inverse-mixing-depth dilution ------------------
+    if blh_coupled:
+        if blh is not None:
+            blh_s = np.asarray(blh, dtype=float)[order]
+            has_blh = np.isfinite(blh_s) & np.isfinite(h_s)
+            h_eff = np.maximum(np.where(has_blh, blh_s, float(min_blh_m)), float(min_blh_m))
+            coupled = has_blh & (h_s <= float(blh_factor) * h_eff)
+            sens = np.where(coupled, 1000.0 / h_eff, 0.0)
+            missing_blh = (~np.isfinite(blh_s)) & np.isfinite(h_s)
+            if missing_blh.any():
+                if fallback_height_m is not None:
+                    sens = np.where(
+                        missing_blh,
+                        np.where(h_s <= float(fallback_height_m), 1.0, 0.0),
+                        sens,
+                    )
+                else:
+                    sens = np.where(missing_blh, 1.0, sens)
+        elif fallback_height_m is not None:
+            sens = np.where(np.isfinite(h_s) & (h_s <= float(fallback_height_m)), 1.0, 0.0)
+        else:
+            sens = np.ones(n, dtype=float)
+    else:
+        sens = np.ones(n, dtype=float)
+
+    # ---- exponential decay ---------------------------------------------
+    # Exp is evaluated per trajectory with the same array length as the
+    # scalar path: some numpy builds dispatch transcendentals to SIMD loops
+    # whose tail handling could otherwise differ by a last bit.
+    if decay_hours is not None:
+        decay = np.ones(n, dtype=float)
+        tau = float(decay_hours)
+        for gi in range(n_groups):
+            s = bounds_i[gi]
+            e = bounds_i[gi + 1]
+            a = age_s[s:e]
+            decay[s:e] = np.where(np.isfinite(a), np.exp(-np.abs(a) / tau), 0.0)
+    else:
+        decay = np.ones(n, dtype=float)
+
+    # ---- causal wet scavenging -----------------------------------------
+    if scavenging_coeff is not None and float(scavenging_coeff) > 0.0 and rainfall is not None:
+        rain_s = np.asarray(rainfall, dtype=float)[order]
+        rain_mm = np.maximum(0.0, np.nan_to_num(rain_s, nan=0.0)) * dt
+        scav = np.ones(n, dtype=float)
+        coef = float(scavenging_coeff)
+        # Sequential per-group cumsum: a padded 2-D cumsum is faster but can
+        # allocate g * max-count memory when one trajectory is long.
+        for gi in range(n_groups):
+            s = bounds_i[gi]
+            e = bounds_i[gi + 1]
+            cum = np.cumsum(rain_mm[s : e - 1])
+            scav[s:e] = np.exp(-coef * np.concatenate((np.array([0.0]), cum)))
+    else:
+        scav = np.ones(n, dtype=float)
+
+    w_sorted = np.where(np.isfinite(age_s), dt * sens * decay * scav, 0.0)
+    if exclude_receptor:
+        multi = np.repeat(counts > 1, counts)
+        w_sorted = np.where(multi & (age_s == 0.0), 0.0, w_sorted)
+
+    out = np.empty(n, dtype=float)
+    out[order] = np.maximum(0.0, w_sorted)
+    return out
+
+
+def _endpoint_weights_flat_frame(
+    traj: pd.DataFrame,
+    codes: np.ndarray,
+    *,
+    blh_coupled: bool = True,
+    blh_factor: float = 1.0,
+    min_blh_m: float = 100.0,
+    fallback_height_m: float | None = 1500.0,
+    decay_hours: float | None = None,
+    scavenging_coeff: float | None = None,
+    exclude_receptor: bool = True,
+) -> np.ndarray:
+    """Convert a flat endpoint frame's columns once, then weight every row.
+
+    The per-column ``pd.to_numeric`` calls are the expensive part of
+    :func:`trajectory_endpoint_weights`; doing them here on the whole frame
+    instead of once per trajectory is what makes the flat path worthwhile.
+    """
+    age = pd.to_numeric(traj["age_h"], errors="coerce").to_numpy(dtype=float)
+    height = pd.to_numeric(traj["height"], errors="coerce").to_numpy(dtype=float)
+    blh = (
+        pd.to_numeric(traj["blh"], errors="coerce").to_numpy(dtype=float)
+        if "blh" in traj.columns
+        else None
+    )
+    rainfall = (
+        pd.to_numeric(traj["rainfall"], errors="coerce").to_numpy(dtype=float)
+        if "rainfall" in traj.columns
+        else None
+    )
+    return _endpoint_weights_flat(
+        age,
+        height,
+        blh,
+        rainfall,
+        codes,
+        blh_coupled=blh_coupled,
+        blh_factor=blh_factor,
+        min_blh_m=min_blh_m,
+        fallback_height_m=fallback_height_m,
+        decay_hours=decay_hours,
+        scavenging_coeff=scavenging_coeff,
+        exclude_receptor=exclude_receptor,
+    )
+
+
 def trajectory_features(
     traj: pd.DataFrame,
     *,

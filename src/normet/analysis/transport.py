@@ -20,11 +20,11 @@ import pandas as pd
 
 from ..core.exceptions import ConfigError
 from ..io.trajectory import (
+    _endpoint_weights_flat_frame,
     _haversine_km,
     _naive_utc,
     _region_mask,
     is_trajectory_qc_column,
-    trajectory_endpoint_weights,
 )
 from ..utils.logging import get_logger
 
@@ -219,6 +219,23 @@ def _normalise_endpoints_frame(endpoints: pd.DataFrame) -> pd.DataFrame:
     work["start_height"] = pd.to_numeric(work["start_height"], errors="coerce").fillna(0.0)
     work["traj_id"] = pd.to_numeric(work["traj_id"], errors="coerce").fillna(1).astype(int)
     return work
+
+
+def _trajectory_codes(frame: pd.DataFrame) -> np.ndarray:
+    """First-appearance integer code per row, one code per trajectory.
+
+    The values are irrelevant to endpoint weights (only the equality
+    classes are), and ``ngroup`` gives a cheap int64 array for the flat
+    kernel without building a per-group DataFrame. The three keys must be
+    non-null: ``_normalise_endpoints_frame`` fills ``start_height`` and
+    ``traj_id`` and drops NaT ``_t``, and pandas encodes a null key as NaN,
+    which would otherwise cast to code 0 and contaminate the first
+    trajectory (the per-group loops skip such rows instead).
+    """
+    codes = frame.groupby(["_t", "start_height", "traj_id"], sort=False).ngroup()
+    if codes.isna().any():
+        raise ValueError("trajectory grouping keys must be non-null")
+    return codes.to_numpy(dtype=np.int64)
 
 
 def _match_timestamps(
@@ -416,19 +433,22 @@ def gridded_receptor_model(
     if n_lon < 1 or n_lat < 1:
         raise ValueError("lon_edges and lat_edges must each have at least 2 boundary points.")
 
-    # Compute physical weights per individual trajectory, preserving ep_m's index order.
-    w_all: np.ndarray[Any, Any] = np.zeros(len(ep_m), dtype=float)
-    for _, g in ep_m.groupby("_traj_idx", sort=False):
-        w_all[g.index.to_numpy()] = trajectory_endpoint_weights(
-            g,
-            blh_coupled=blh_coupled,
-            blh_factor=blh_factor,
-            min_blh_m=min_blh_m,
-            fallback_height_m=fallback_height_m,
-            decay_hours=decay_hours,
-            scavenging_coeff=scavenging_coeff,
-            exclude_receptor=exclude_receptor,
-        )
+    # One flat pass over the matched table instead of a pandas extraction
+    # per trajectory (the extraction was ~2/3 of the weight loop's cost).
+    # ``merge`` returns a positional index and ``_traj_idx`` is already the
+    # trajectory code, so the result aligns with ep_m's rows.
+    ep_m = ep_m.reset_index(drop=True)
+    w_all: np.ndarray[Any, Any] = _endpoint_weights_flat_frame(
+        ep_m,
+        ep_m["_traj_idx"].to_numpy(dtype=np.int64),
+        blh_coupled=blh_coupled,
+        blh_factor=blh_factor,
+        min_blh_m=min_blh_m,
+        fallback_height_m=fallback_height_m,
+        decay_hours=decay_hours,
+        scavenging_coeff=scavenging_coeff,
+        exclude_receptor=exclude_receptor,
+    )
 
     if float(min_dist_km) > 0.0:
         d_rec = np.asarray(_haversine_km(rec_lat, rec_lon, lat_ep, lon_ep), dtype=float)
@@ -524,25 +544,35 @@ def build_footprint_matrix(
     """
     if not source_regions:
         raise ValueError("`source_regions` must be a non-empty mapping.")
-    ep = _normalise_endpoints_frame(endpoints)
+    ep = _normalise_endpoints_frame(endpoints).reset_index(drop=True)
     reg_names = [str(k) for k in source_regions]
+
+    # Weight and convert every endpoint once; the per-group loop below then
+    # only slices, so each region's ``np.sum`` keeps its element order.
+    w_all = _endpoint_weights_flat_frame(
+        ep,
+        _trajectory_codes(ep),
+        blh_coupled=blh_coupled,
+        blh_factor=blh_factor,
+        min_blh_m=min_blh_m,
+        fallback_height_m=fallback_height_m,
+        decay_hours=decay_hours,
+        scavenging_coeff=scavenging_coeff,
+        exclude_receptor=exclude_receptor,
+    )
+    lon_all = pd.to_numeric(ep["lon"], errors="coerce").to_numpy(dtype=float)
+    lat_all = pd.to_numeric(ep["lat"], errors="coerce").to_numpy(dtype=float)
 
     rows: list[dict[str, Any]] = []
     for (t_stamp, start_h, _tid), g in ep.groupby(["_t", "start_height", "traj_id"], sort=True):
-        w = trajectory_endpoint_weights(
-            g,
-            blh_coupled=blh_coupled,
-            blh_factor=blh_factor,
-            min_blh_m=min_blh_m,
-            fallback_height_m=fallback_height_m,
-            decay_hours=decay_hours,
-            scavenging_coeff=scavenging_coeff,
-            exclude_receptor=exclude_receptor,
-        )
-        lon = pd.to_numeric(g["lon"], errors="coerce").to_numpy(dtype=float)
-        lat = pd.to_numeric(g["lat"], errors="coerce").to_numpy(dtype=float)
+        pos = g.index.to_numpy()
+        w = w_all[pos]
+        lon = lon_all[pos]
+        lat = lat_all[pos]
         rec: dict[str, Any] = {"date": t_stamp, "_h": start_h}
         for name, region in source_regions.items():
+            # Per-trajectory masks: a table-wide mask would cost
+            # n_rows x n_regions bytes for no correctness gain.
             inside = np.asarray(_region_mask(region, lon, lat), dtype=bool)
             rec[str(name)] = float(w[inside].sum())
         rows.append(rec)
@@ -1521,7 +1551,7 @@ def screen_donor_transport(
         if c not in donors.columns:
             raise KeyError(f"`donors` missing required column {c!r}.")
 
-    ep = _normalise_endpoints_frame(endpoints)
+    ep = _normalise_endpoints_frame(endpoints).reset_index(drop=True)
     rows: list[dict[str, Any]] = []
     rad = float(radius_km)
 
@@ -1531,7 +1561,7 @@ def screen_donor_transport(
         ep[site_col] = ep[site_col].astype(str)
         for _, drow in donors.iterrows():
             unit = str(drow[unit_col])
-            sub = ep[ep[site_col] == unit]
+            sub = ep[ep[site_col] == unit].reset_index(drop=True)
             if sub.empty:
                 rows.append(
                     {
@@ -1544,26 +1574,37 @@ def screen_donor_transport(
                     }
                 )
                 continue
+            # Weight and convert this donor's table once; the group loop
+            # then only slices, so each hit sum keeps its element order.
+            # Computing on `sub` preserves the old semantics even if one
+            # trajectory's rows were split across sites.
+            w_sub = _endpoint_weights_flat_frame(
+                sub,
+                _trajectory_codes(sub),
+                blh_coupled=blh_coupled,
+                blh_factor=blh_factor,
+                min_blh_m=min_blh_m,
+                fallback_height_m=fallback_height_m,
+                exclude_receptor=True,
+            )
+            # Table-wide distances are elementwise; a SIMD transcendental
+            # build could in principle flip a distance sitting exactly on
+            # `rad`, so parity is pinned on the tested targets.
+            d_sub = np.asarray(
+                _haversine_km(
+                    float(treated_lat),
+                    float(treated_lon),
+                    pd.to_numeric(sub["lat"], errors="coerce").to_numpy(dtype=float),
+                    pd.to_numeric(sub["lon"], errors="coerce").to_numpy(dtype=float),
+                ),
+                dtype=float,
+            )
             hits = 0
             fps: list[float] = []
             for _, g in sub.groupby(["_t", "start_height", "traj_id"], sort=False):
-                w = trajectory_endpoint_weights(
-                    g,
-                    blh_coupled=blh_coupled,
-                    blh_factor=blh_factor,
-                    min_blh_m=min_blh_m,
-                    fallback_height_m=fallback_height_m,
-                    exclude_receptor=True,
-                )
-                d_km = np.asarray(
-                    _haversine_km(
-                        float(treated_lat),
-                        float(treated_lon),
-                        pd.to_numeric(g["lat"], errors="coerce").to_numpy(dtype=float),
-                        pd.to_numeric(g["lon"], errors="coerce").to_numpy(dtype=float),
-                    ),
-                    dtype=float,
-                )
+                pos = g.index.to_numpy()
+                w = w_sub[pos]
+                d_km = d_sub[pos]
                 hit_w = float(w[(d_km <= rad) & (w > 0.0)].sum())
                 if hit_w > 0.0:
                     hits += 1
@@ -1582,29 +1623,33 @@ def screen_donor_transport(
             )
     else:
         traj_groups = list(ep.groupby(["_t", "start_height", "traj_id"], sort=False))
-        traj_data: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
-        for _, g in traj_groups:
-            w = trajectory_endpoint_weights(
-                g,
-                blh_coupled=blh_coupled,
-                blh_factor=blh_factor,
-                min_blh_m=min_blh_m,
-                fallback_height_m=fallback_height_m,
-                exclude_receptor=True,
-            )
-            la = pd.to_numeric(g["lat"], errors="coerce").to_numpy(dtype=float)
-            lo = pd.to_numeric(g["lon"], errors="coerce").to_numpy(dtype=float)
-            traj_data.append((la, lo, w))
+        w_all = _endpoint_weights_flat_frame(
+            ep,
+            _trajectory_codes(ep),
+            blh_coupled=blh_coupled,
+            blh_factor=blh_factor,
+            min_blh_m=min_blh_m,
+            fallback_height_m=fallback_height_m,
+            exclude_receptor=True,
+        )
+        lat_all = pd.to_numeric(ep["lat"], errors="coerce").to_numpy(dtype=float)
+        lon_all = pd.to_numeric(ep["lon"], errors="coerce").to_numpy(dtype=float)
+        # Store row positions, not copies: weights and distances are sliced
+        # per trajectory below, preserving each hit sum's element order.
+        traj_pos: list[np.ndarray] = [g.index.to_numpy() for _, g in traj_groups]
 
-        n_t = len(traj_data)
+        n_t = len(traj_pos)
         for _, drow in donors.iterrows():
             unit = str(drow[unit_col])
             dlat = float(drow[lat_col])
             dlon = float(drow[lon_col])
+            # See the donor_back note above on table-wide distances.
+            d_all = np.asarray(_haversine_km(dlat, dlon, lat_all, lon_all), dtype=float)
             hits = 0
             fps = []
-            for la, lo, w in traj_data:
-                d_km = np.asarray(_haversine_km(dlat, dlon, la, lo), dtype=float)
+            for pos in traj_pos:
+                w = w_all[pos]
+                d_km = d_all[pos]
                 hit_w = float(w[(d_km <= rad) & (w > 0.0)].sum())
                 if hit_w > 0.0:
                     hits += 1
