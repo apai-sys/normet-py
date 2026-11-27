@@ -13,6 +13,8 @@ use pyo3::prelude::*;
 use normet_core::angle_distance_matrix as core_angle_matrix;
 use normet_core::crps_rows as core_crps_rows;
 use normet_core::theil_sen_interval as core_theil_sen;
+use normet_core::theil_sen_interval_with_config as core_theil_sen_cfg;
+use normet_core::TheilSenConfig;
 
 /// Theil-Sen slope and Sen (1968) interval from `(x, y, z_alpha)`.
 ///
@@ -36,6 +38,40 @@ fn theil_sen_interval(
         .map_err(|e| PyValueError::new_err(format!("y must be a contiguous float64 array: {e}")))?;
     let res = py
         .detach(|| core_theil_sen(xs, ys, z_alpha))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok((res.slope, res.low, res.high, res.n_pairs, res.degenerate))
+}
+
+/// Theil-Sen interval with explicit selection knobs (hidden; test use).
+///
+/// The public binding is the three-argument function above; this entry lets
+/// the parity tests force the window and radix-fallback branches on records
+/// too short to reach them with the production configuration. Every
+/// configuration must return the same bits.
+#[pyfunction]
+#[pyo3(signature = (x, y, z_alpha, full_below_pairs, pilot_pairs, window_cap))]
+fn theil_sen_interval_cfg(
+    py: Python<'_>,
+    x: PyReadonlyArray1<'_, f64>,
+    y: PyReadonlyArray1<'_, f64>,
+    z_alpha: f64,
+    full_below_pairs: u64,
+    pilot_pairs: usize,
+    window_cap: usize,
+) -> PyResult<(f64, f64, f64, u64, bool)> {
+    let xs = x
+        .as_slice()
+        .map_err(|e| PyValueError::new_err(format!("x must be a contiguous float64 array: {e}")))?;
+    let ys = y
+        .as_slice()
+        .map_err(|e| PyValueError::new_err(format!("y must be a contiguous float64 array: {e}")))?;
+    let cfg = TheilSenConfig {
+        full_below_pairs,
+        pilot_pairs,
+        window_cap,
+    };
+    let res = py
+        .detach(|| core_theil_sen_cfg(xs, ys, z_alpha, cfg))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((res.slope, res.low, res.high, res.n_pairs, res.degenerate))
 }
@@ -111,6 +147,7 @@ fn angle_distances<'py>(
 #[pymodule]
 fn normet_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(theil_sen_interval, m)?)?;
+    m.add_function(wrap_pyfunction!(theil_sen_interval_cfg, m)?)?;
     m.add_function(wrap_pyfunction!(crps_rows, m)?)?;
     m.add_function(wrap_pyfunction!(angle_distances, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
