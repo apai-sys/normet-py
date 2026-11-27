@@ -7,7 +7,10 @@
 //! package's seeds and provenance live; kernels receive index matrices.
 //!
 //! Started with the highest-ROI call of the 2026-11-26 audit: Theil-Sen
-//! order statistics (Python ~4-5x, R >100x, memory 2.76 GB -> O(pairs)).
+//! order statistics (Python ~4-5x, R >100x). Above 4.19 M pairs its peak
+//! memory is no longer O(pairs): a deterministic pilot window plus an exact
+//! radix fallback keep three-year hourly records at ~90 MB instead of the
+//! old 2.76 GB key array, with bit-identical results (2026-11-27).
 //! The second is the exact CRPS of quantile/ensemble rows, where the Python
 //! scorer's per-row loop dominates a normalise run's scoring pass.
 //! The third is the Sirois-Bottenheim pair loop behind
@@ -20,3 +23,6 @@ pub mod trend;
 pub use angles::{angle_distance_matrix, AngleError};
 pub use crps::{crps_rows, CrpsError, CrpsScratch};
 pub use trend::{theil_sen_interval, TheilSenError, TheilSenInterval};
+
+#[doc(hidden)]
+pub use trend::{theil_sen_interval_with_config, TheilSenConfig, THEIL_SEN_DEFAULT_CONFIG};

@@ -275,6 +275,23 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   468 → 58 ms (8.0×), `wcwt` 534 → 127 ms (4.2×), `build_footprint_matrix`
   630 → 182 ms (3.5×), `screen_donor_transport` `donor_back` 605 → 170 ms
   (3.6×) and `treated_back` 1245 → 459 ms (2.7×).
+- **Bounded-memory Theil–Sen selection for long records (Rust backend).**
+  `theil_sen(..., backend="rust")` no longer materialises the O(n²)
+  pairwise-slope key array above 4 194 304 pairs (~2 900 points with
+  distinct x). A deterministic pilot of 131 072 stratified pairs places a
+  key window; one exact pass counts the keys below and inside it and copies
+  at most 128 MiB of in-window keys; a 16-bit radix histogram with bounded
+  collection is the exact fallback when a rank is missed or the window
+  overflows. Every stage selects the same order statistics as the
+  materialised path, so slope and interval values stay bit-identical, and
+  the small path is the old code verbatim. Measured on macOS arm64
+  (release, interleaved A/B against the materialised kernel): n=8 760
+  0.063 s / 14.9 MB vs 0.150 s / 309.6 MB (2.4×); n=26 280 0.542 s /
+  87.4 MB vs 2.058 s / 2 763.9 MB (3.8×, 31.6× lower peak); n=52 400
+  5.4 s where the old path would need ~11 GB. Near-noiseless linear and
+  alternating ±1e308 records take the four-level fallback and cost up to
+  ~1.5× the old path. The default Python backend and the public `backend`
+  switch are unchanged.
 
 ### Changed
 - **User manual rebuilt for 0.3.0** (`docs/manual/normet_manual.tex` and
