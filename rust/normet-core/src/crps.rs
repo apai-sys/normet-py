@@ -55,6 +55,22 @@ const PW_BLOCKSIZE: usize = 128;
 /// ulps. This mirrors the host's algorithm so the two backends return the
 /// same bits.
 pub(crate) fn pairwise_sum(a: &[f64]) -> f64 {
+    // numpy reduces a contiguous array through its ufunc buffer, so arrays
+    // longer than NPY_BUFSIZE (8192 elements) are summed in consecutive
+    // chunks and the chunk totals are added sequentially; the tree alone
+    // differs in the last ulp above that length (measured: 16/40 random
+    // arrays). Both paths are identical at or below 8192 terms.
+    if a.len() > PW_BUFFER {
+        return a.chunks(PW_BUFFER).map(pairwise_sum_tree).sum();
+    }
+    pairwise_sum_tree(a)
+}
+
+/// numpy's `NPY_BUFSIZE`, in elements: the ufunc reduction buffer.
+const PW_BUFFER: usize = 8192;
+
+/// One buffer's worth of numpy's pairwise summation tree.
+fn pairwise_sum_tree(a: &[f64]) -> f64 {
     let n = a.len();
     if n < 8 {
         let mut res = 0.0;
@@ -87,7 +103,7 @@ pub(crate) fn pairwise_sum(a: &[f64]) -> f64 {
     }
     let mut n2 = n / 2;
     n2 -= n2 % 8;
-    pairwise_sum(&a[..n2]) + pairwise_sum(&a[n2..])
+    pairwise_sum_tree(&a[..n2]) + pairwise_sum_tree(&a[n2..])
 }
 
 /// Scratch buffers reused for every row, keeping the row loop allocation-free.
@@ -291,6 +307,20 @@ mod tests {
         let b: Vec<f64> = (0..200).map(|i| (i as f64) + 0.5).collect();
         let expected: f64 = b.iter().copied().sum();
         assert_eq!(pairwise_sum(&b), expected); // exact in binary for this set
+    }
+
+    #[test]
+    fn pairwise_sum_matches_numpy_above_the_ufunc_buffer() {
+        // numpy 1.26.4 reduces in 8192-element ufunc-buffer chunks; without
+        // the chunk loop this array's sum differs in the last bit.
+        let mut state: u64 = 7;
+        let a: Vec<f64> = (0..20_000)
+            .map(|_| {
+                state = (16807 * state) % 2_147_483_647;
+                state as f64 / 2_147_483_647.0
+            })
+            .collect();
+        assert_eq!(pairwise_sum(&a), 9989.011415038265);
     }
 
     #[test]

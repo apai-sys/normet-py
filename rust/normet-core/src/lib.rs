@@ -10,9 +10,13 @@
 //! order statistics (Python ~4-5x, R >100x, memory 2.76 GB -> O(pairs)).
 //! The second is the exact CRPS of quantile/ensemble rows, where the Python
 //! scorer's per-row loop dominates a normalise run's scoring pass.
+//! The third is the Sirois-Bottenheim pair loop behind
+//! `cluster_trajectories(metric="angle")`.
 
+pub mod angles;
 pub mod crps;
 pub mod trend;
 
+pub use angles::{angle_distance_matrix, AngleError};
 pub use crps::{crps_rows, CrpsError, CrpsScratch};
 pub use trend::{theil_sen_interval, TheilSenError, TheilSenInterval};
