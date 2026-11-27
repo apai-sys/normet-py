@@ -49,13 +49,19 @@ import numpy as np
 import pandas as pd
 
 from ..core.exceptions import ConfigError
+from ..model.predict import ml_predict
 from ..model.train import train_model
 from ..utils._config import DEFAULT_SEED
 from ..utils.logging import get_logger
-from ..utils.prepare import log1p_target, prepare_data
+from ..utils.prepare import compute_duan_smearing, log1p_target, prepare_data
 from ..viz import style as S
 from ..viz.style import styled
-from .normalise import normalise
+from .normalise import (
+    _back_transform_values,
+    _compute_paired_series,
+    _resolve_paired_mode,
+    normalise,
+)
 
 log = get_logger(__name__)
 
@@ -84,6 +90,7 @@ class UncDecomposition:
     n_weather_draws: int
     seed: int
     notes: list[str] = field(default_factory=list)
+    estimate: str = "level"
 
     @property
     def pct_weather(self) -> np.ndarray:
@@ -387,6 +394,8 @@ def decompose_uncertainty(
     block_hours: int | None = None,
     impute: str = "train_median",
     embargo: int = 0,
+    estimate: str = "level",
+    paired_mode: bool | str = "auto",
 ) -> UncDecomposition:
     """Attribute a de-weathered estimate's total spread to weather and model form.
 
@@ -464,6 +473,14 @@ def decompose_uncertainty(
         )
     if covariates is None or not covariates:
         raise ConfigError("`covariates` must be provided and non-empty.")
+    if estimate not in ("level", "paired"):
+        raise ConfigError(f"`estimate` must be 'level' or 'paired', got {estimate!r}.")
+    pmode_eff: str | None = None
+    if estimate == "paired":
+        pmode_eff = _resolve_paired_mode(
+            True if paired_mode == "auto" else paired_mode,
+            log_transform=log_transform,
+        )
     covariates = list(covariates)
 
     df_prep = prepare_data(
@@ -476,18 +493,25 @@ def decompose_uncertainty(
         impute=impute,
         embargo=embargo,
     )
+    obs_orig = df_prep["value"].to_numpy(dtype=float)
     if log_transform:
         df_prep = log1p_target(df_prep)
     member_rng = np.random.default_rng([seed, 1])
     member_seeds = [int(s) for s in member_rng.choice(1_000_000, size=n_models, replace=False)]
     log.info(
-        "decompose_uncertainty: %d members x %d met draws on %d timestamps (seed=%d)",
+        "decompose_uncertainty: %d members x %d met draws on %d timestamps (seed=%d, estimate=%s)",
         n_models,
         n_samples,
         len(df_prep),
         seed,
+        estimate,
     )
 
+    tr_mask = (
+        (df_prep["set"] == "training").to_numpy(dtype=bool)
+        if "set" in df_prep.columns and bool((df_prep["set"] == "training").any())
+        else np.ones(len(df_prep), dtype=bool)
+    )
     Z = np.empty((n_models, n_samples, len(df_prep)), dtype=float)
     for i, ms in enumerate(member_seeds):
         model_i = train_model(
@@ -502,7 +526,7 @@ def decompose_uncertainty(
         )
         # All members see the same met draws: anchor the resampling on the
         # user's seed, not the member seed, so draw j is identical across i.
-        Z[i] = _met_matrix(
+        norm_mat = _met_matrix(
             df_prep,
             model_i,
             covariates,
@@ -520,6 +544,31 @@ def decompose_uncertainty(
             sampling=sampling,
             block_hours=block_hours,
         )
+        if estimate == "paired":
+            assert pmode_eff is not None
+            pred_raw_i = np.asarray(ml_predict(model_i, df_prep, num_threads=n_cores), dtype=float)
+            if log_transform:
+                smear = (
+                    compute_duan_smearing(
+                        df_prep["value"].to_numpy(dtype=float)[tr_mask], pred_raw_i[tr_mask]
+                    )
+                    if back_transform == "smearing"
+                    else 1.0
+                )
+                fact_orig_i = np.maximum(
+                    _back_transform_values(pred_raw_i, smearing_factor=smear), 0.0
+                )
+            else:
+                fact_orig_i = pred_raw_i
+            Z[i] = _compute_paired_series(
+                obs_orig[None, :],
+                fact_orig_i[None, :],
+                norm_mat,
+                mode=pmode_eff,
+                floor=1e-6,
+            )
+        else:
+            Z[i] = norm_mat
         (log.info if verbose else log.debug)("member %d/%d done", i + 1, n_models)
 
     var_weather, var_model, var_interaction, var_total = _decompose(Z)
@@ -534,6 +583,12 @@ def decompose_uncertainty(
         "Call frame(scale='estimator') / summary(scale='estimator') for the unbiased "
         "EMS estimator-scale attribution dividing single-draw weather variance by n_samples.",
     ]
+    if estimate == "paired":
+        notes.append(
+            f"Paired action-contrast decomposition (paired_mode={pmode_eff!r}): decomposes "
+            "per-timestamp weather adjustments anchored at each observation, cancelling shared "
+            "offset bias across weather draws."
+        )
     return UncDecomposition(
         var_weather=var_weather,
         var_model=var_model,
@@ -545,4 +600,5 @@ def decompose_uncertainty(
         n_weather_draws=n_samples,
         seed=seed,
         notes=notes,
+        estimate=estimate,
     )

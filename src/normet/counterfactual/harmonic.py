@@ -385,6 +385,9 @@ class HarmonicCounterfactual:
         n_boot: int = 200,
         block_hours: int = 24,
         random_state: int = 7_654_321,
+        residual_carryover: bool = False,
+        carryover_min_phi: float = 0.2,
+        carryover_window: int = 6,
     ) -> HarmonicCounterfactualResult:
         """Run complete counterfactual policy impact estimation with confidence bounds.
 
@@ -495,13 +498,82 @@ class HarmonicCounterfactual:
             p10_full = pd.Series(np.quantile(boot_draws, 0.10, axis=0), index=index)
             p90_full = pd.Series(np.quantile(boot_draws, 0.90, axis=0), index=index)
 
-            if interv_mask.any():
-                y_obs_interv = full_series.to_numpy(dtype=float)[interv_mask]
-                boot_imp = np.nanmean(y_obs_interv[None, :] - boot_draws[:, interv_mask], axis=1)
-                boot_net_stats = {
-                    "net_impact_se": round(float(np.std(boot_imp, ddof=1)), 3),
-                    "net_impact_p10": round(float(np.quantile(boot_imp, 0.10)), 2),
-                    "net_impact_p90": round(float(np.quantile(boot_imp, 0.90)), 2),
+        # Optional persistence-gated AR(1) residual carryover across the intervention boundary
+        pre_mask = np.asarray(index < interv_ts, dtype=bool)
+        y_pre_vals = full_series.to_numpy(dtype=float)[pre_mask]
+        bau_pre_vals = bau_values[pre_mask]
+        fin_pre = np.isfinite(y_pre_vals) & np.isfinite(bau_pre_vals)
+        r_pre = y_pre_vals[fin_pre] - bau_pre_vals[fin_pre]
+        phi1 = 0.0
+        if len(r_pre) >= 12:
+            a, b = r_pre[:-1], r_pre[1:]
+            if float(np.std(a)) > 1e-12 and float(np.std(b)) > 1e-12:
+                phi1 = float(np.clip(np.corrcoef(a, b)[0, 1], 0.0, 0.99))
+
+        carryover_applied = False
+        carryover_r0 = 0.0
+        if (
+            residual_carryover
+            and interv_mask.any()
+            and phi1 >= float(carryover_min_phi)
+            and len(r_pre) > 0
+        ):
+            w_len = max(1, min(int(carryover_window), len(r_pre)))
+            carryover_r0 = float(np.mean(r_pre[-w_len:]))
+            n_post = int(interv_mask.sum())
+            steps = np.arange(1, n_post + 1, dtype=float)
+            carryover_vec = carryover_r0 * (phi1**steps)
+            bau_arr = bau_full.to_numpy(dtype=float).copy()
+            p10_arr = p10_full.to_numpy(dtype=float).copy()
+            p90_arr = p90_full.to_numpy(dtype=float).copy()
+            bau_arr[interv_mask] = np.maximum(0.0, bau_arr[interv_mask] + carryover_vec)
+            p10_arr[interv_mask] = np.maximum(0.0, p10_arr[interv_mask] + carryover_vec)
+            p90_arr[interv_mask] = np.maximum(0.0, p90_arr[interv_mask] + carryover_vec)
+            bau_full = pd.Series(bau_arr, index=index)
+            p10_full = pd.Series(p10_arr, index=index)
+            p90_full = pd.Series(p90_arr, index=index)
+            if unc_mode == "block_bootstrap":
+                boot_draws[:, interv_mask] = np.maximum(
+                    0.0, boot_draws[:, interv_mask] + carryover_vec[None, :]
+                )
+            carryover_applied = True
+
+        if unc_mode == "block_bootstrap" and interv_mask.any():
+            y_obs_interv = full_series.to_numpy(dtype=float)[interv_mask]
+            boot_imp = np.nanmean(y_obs_interv[None, :] - boot_draws[:, interv_mask], axis=1)
+            boot_net_stats = {
+                "net_impact_se": round(float(np.std(boot_imp, ddof=1)), 3),
+                "net_impact_p10": round(float(np.quantile(boot_imp, 0.10)), 2),
+                "net_impact_p90": round(float(np.quantile(boot_imp, 0.90)), 2),
+            }
+
+        pre_audit_metrics: dict[str, Any] = {}
+        if covariates is not None and int(fin_pre.sum()) >= 15:
+            cov_pre_df = covariates.reindex(index[pre_mask]).iloc[fin_pre]
+            num_cov_cols = [
+                c for c in cov_pre_df.columns if pd.api.types.is_numeric_dtype(cov_pre_df[c])
+            ]
+            if num_cov_cols:
+                from ..analysis.diagnostics import counterfactual_separability_audit
+
+                X_pre = (
+                    cov_pre_df[num_cov_cols]
+                    .apply(pd.to_numeric, errors="coerce")
+                    .fillna(0.0)
+                    .to_numpy(dtype=float)
+                )
+                pre_audit = counterfactual_separability_audit(
+                    y_pre_vals[fin_pre],
+                    bau_pre_vals[fin_pre],
+                    X_pre,
+                    nonlinear=False,
+                    met_names=num_cov_cols,
+                    n_boot=0,
+                    seed=int(random_state),
+                )
+                pre_audit_metrics = {
+                    "pre_rc_score_linear": round(float(pre_audit["rc_score_linear"]), 4),
+                    "pre_rho_lb_raw": round(float(pre_audit["interaction_rho_lb_raw"]), 4),
                 }
 
         # 4. Impacts
@@ -542,7 +614,12 @@ class HarmonicCounterfactual:
             "net_impact_pct": round(net_impact_pct, 2),
             "net_impact_hac_se": round(float(hac_se), 3) if np.isfinite(hac_se) else float("nan"),
             **boot_net_stats,
+            **pre_audit_metrics,
         }
+        if residual_carryover:
+            summary["residual_carryover_applied"] = bool(carryover_applied)
+            summary["pre_residual_phi1"] = round(float(phi1), 4)
+            summary["carryover_initial_residual"] = round(float(carryover_r0), 3)
 
         coef_dict: dict[str, float] = {}
         if self.model is not None:

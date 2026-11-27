@@ -14,6 +14,7 @@ All return a DataFrame of consecutive anomalous intervals, ranked by score.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
@@ -24,7 +25,12 @@ from ..utils.logging import get_logger
 
 log = get_logger(__name__)
 
-__all__ = ["detect_events", "anomaly_scores"]
+__all__ = [
+    "detect_events",
+    "anomaly_scores",
+    "HindsightEpisodeResult",
+    "hindsight_episode_counterfactual",
+]
 
 
 def _to_series(series: pd.Series | pd.DataFrame, value_col: str | None) -> pd.Series:
@@ -262,3 +268,207 @@ def detect_events(
     if events.empty:
         return events
     return events[events["n"] >= int(min_length)].reset_index(drop=True)
+
+
+@dataclass
+class HindsightEpisodeResult:
+    """Counterfactual trajectory and attribution for an observed episode window."""
+
+    episode_start: pd.Timestamp
+    episode_end: pd.Timestamp
+    n_steps: int
+    actual_mean: float
+    counterfactual_mean: float
+    attribution_abs: float
+    attribution_pct: float
+    trajectory: pd.DataFrame
+    summary_metrics: dict[str, Any] = field(default_factory=dict)
+
+
+def hindsight_episode_counterfactual(
+    df_norm: pd.DataFrame,
+    episode_start: str | pd.Timestamp,
+    episode_end: str | pd.Timestamp,
+    *,
+    observed_col: str = "observed",
+    normalised_col: str = "normalised",
+    factual_col: str = "factual",
+    coordinate: str = "auto",
+    alternative_residual: str | float | np.ndarray | pd.Series = "zero",
+) -> HindsightEpisodeResult:
+    """Construct a hindsight counterfactual trajectory for a specific episode window.
+
+    Combines the model's baseline prediction (``factual`` when available, falling
+    back to ``normalised``) with a baseline or user-supplied latent disturbance
+    in raw or ``log1p`` coordinates while preserving realized episode meteorology.
+
+    Parameters
+    ----------
+    df_norm : pandas.DataFrame
+        DataFrame with a DatetimeIndex (or ``date`` column) and ``observed`` plus
+        ``factual`` and/or ``normalised`` columns.
+    episode_start, episode_end : str or pandas.Timestamp
+        Inclusive boundaries of the hindsight episode window.
+    observed_col, normalised_col, factual_col : str
+        Column names for observed levels, deweathered levels, and factual predictions.
+    coordinate : {"auto", "raw", "log1p"}, default "auto"
+        Residual space. ``"auto"`` uses ``"log1p"`` when observed and baseline are
+        non-negative, else ``"raw"``.
+    alternative_residual : {"zero", "pre_mean", "pre_median"} or float/array/Series, default "zero"
+        Latent disturbance applied under the counterfactual hypothesis. ``"zero"``
+        ablates the episode's unmodeled disturbance (yielding the no-episode trajectory
+        under realized weather); ``"pre_mean"`` / ``"pre_median"`` substitutes pre-episode
+        background residual levels.
+
+    Returns
+    -------
+    HindsightEpisodeResult
+    """
+    if coordinate not in ("auto", "raw", "log1p"):
+        raise ValueError(f"`coordinate` must be 'auto', 'raw', or 'log1p', got {coordinate!r}.")
+
+    work = df_norm.copy()
+    if not isinstance(work.index, pd.DatetimeIndex):
+        if "date" not in work.columns:
+            raise ValueError("`df_norm` must have a DatetimeIndex or a 'date' column.")
+        work = work.set_index(pd.to_datetime(work["date"]))
+    work = work.sort_index()
+    idx = pd.DatetimeIndex(work.index)
+
+    if observed_col not in work.columns:
+        raise KeyError(f"Column {observed_col!r} not found in `df_norm`.")
+    has_factual = factual_col in work.columns
+    if has_factual:
+        base_col = factual_col
+    elif normalised_col in work.columns:
+        base_col = normalised_col
+    else:
+        raise KeyError(f"Neither {factual_col!r} nor {normalised_col!r} found in `df_norm`.")
+
+    def _align_ts(val: str | pd.Timestamp) -> pd.Timestamp:
+        ts = pd.Timestamp(val)
+        if idx.tz is None:
+            return ts.tz_localize(None) if ts.tzinfo is not None else ts
+        return ts.tz_localize(idx.tz) if ts.tzinfo is None else ts.tz_convert(idx.tz)
+
+    ep_s = _align_ts(episode_start)
+    ep_e = _align_ts(episode_end)
+    if ep_e < ep_s:
+        raise ValueError(f"`episode_end` ({ep_e}) precedes `episode_start` ({ep_s}).")
+
+    ep_mask = np.asarray((idx >= ep_s) & (idx <= ep_e), dtype=bool)
+    n_ep = int(ep_mask.sum())
+    if n_ep == 0:
+        raise ValueError("No timestamps fall inside the requested episode window.")
+
+    obs_full = pd.to_numeric(work[observed_col], errors="coerce").to_numpy(dtype=float)
+    base_full = pd.to_numeric(work[base_col], errors="coerce").to_numpy(dtype=float)
+    fin_full = np.isfinite(obs_full) & np.isfinite(base_full)
+
+    if coordinate == "auto":
+        non_neg = bool(np.all(obs_full[fin_full] >= -1e-9)) and bool(
+            np.all(base_full[fin_full] >= -1e-9)
+        )
+        coord_eff = "log1p" if (non_neg and np.any(fin_full)) else "raw"
+    else:
+        coord_eff = coordinate
+
+    if coord_eff == "log1p":
+        z_obs = np.log1p(np.maximum(obs_full, 0.0))
+        z_base = np.log1p(np.maximum(base_full, 0.0))
+        r_coord = z_obs - z_base
+    else:
+        r_coord = obs_full - base_full
+
+    pre_mask = np.asarray(idx < ep_s, dtype=bool) & fin_full
+    if isinstance(alternative_residual, str):
+        if alternative_residual == "zero":
+            r_alt = np.zeros(n_ep, dtype=float)
+        elif alternative_residual == "pre_mean":
+            fill = float(np.nanmean(r_coord[pre_mask])) if np.any(pre_mask) else 0.0
+            r_alt = np.full(n_ep, fill, dtype=float)
+        elif alternative_residual == "pre_median":
+            fill = float(np.nanmedian(r_coord[pre_mask])) if np.any(pre_mask) else 0.0
+            r_alt = np.full(n_ep, fill, dtype=float)
+        else:
+            raise ValueError(
+                "`alternative_residual` string must be 'zero', 'pre_mean', or 'pre_median', "
+                f"got {alternative_residual!r}."
+            )
+    elif isinstance(alternative_residual, pd.Series):
+        r_alt = pd.to_numeric(alternative_residual.reindex(idx[ep_mask]), errors="coerce").to_numpy(
+            dtype=float
+        )
+    elif np.ndim(alternative_residual) == 0:
+        r_alt = np.full(n_ep, float(alternative_residual), dtype=float)
+    else:
+        arr_alt = np.asarray(alternative_residual, dtype=float).reshape(-1)
+        if len(arr_alt) != n_ep:
+            raise ValueError(
+                f"Length of `alternative_residual` ({len(arr_alt)}) does not match episode length ({n_ep})."
+            )
+        r_alt = arr_alt
+
+    obs_ep = obs_full[ep_mask]
+    base_ep = base_full[ep_mask]
+    if coord_eff == "log1p":
+        cf_ep = np.maximum(np.expm1(np.log1p(np.maximum(base_ep, 0.0)) + r_alt), 0.0)
+    else:
+        cf_ep = base_ep + r_alt
+
+    diff_ep = obs_ep - cf_ep
+    traj = pd.DataFrame(
+        {
+            "actual": obs_ep,
+            "counterfactual": cf_ep,
+            "baseline": base_ep,
+            "difference": diff_ep,
+            "disturbance_raw": obs_ep - base_ep,
+        },
+        index=idx[ep_mask],
+    )
+
+    valid_ep = np.isfinite(obs_ep) & np.isfinite(cf_ep)
+    actual_mean = float(np.mean(obs_ep[valid_ep])) if np.any(valid_ep) else float("nan")
+    cf_mean = float(np.mean(cf_ep[valid_ep])) if np.any(valid_ep) else float("nan")
+    attr_abs = float(np.mean(diff_ep[valid_ep])) if np.any(valid_ep) else float("nan")
+    attr_tot = float(np.sum(diff_ep[valid_ep])) if np.any(valid_ep) else float("nan")
+    attr_pct = (
+        float(100.0 * attr_abs / max(abs(cf_mean), 1e-12))
+        if np.isfinite(attr_abs) and np.isfinite(cf_mean)
+        else float("nan")
+    )
+
+    r_ep_fin = r_coord[ep_mask & fin_full]
+    ep_ac1 = float("nan")
+    if len(r_ep_fin) >= 4:
+        a, b = r_ep_fin[:-1], r_ep_fin[1:]
+        if float(np.std(a)) > 1e-12 and float(np.std(b)) > 1e-12:
+            ep_ac1 = float(np.corrcoef(a, b)[0, 1])
+
+    summary: dict[str, Any] = {
+        "coordinate": coord_eff,
+        "baseline_col": base_col,
+        "has_factual": has_factual,
+        "alternative_residual": (
+            alternative_residual if isinstance(alternative_residual, str) else "custom"
+        ),
+        "n_steps": n_ep,
+        "actual_mean": actual_mean,
+        "counterfactual_mean": cf_mean,
+        "attribution_abs": attr_abs,
+        "attribution_total": attr_tot,
+        "attribution_pct": attr_pct,
+        "episode_residual_autocorr": ep_ac1,
+    }
+    return HindsightEpisodeResult(
+        episode_start=idx[ep_mask][0],
+        episode_end=idx[ep_mask][-1],
+        n_steps=n_ep,
+        actual_mean=actual_mean,
+        counterfactual_mean=cf_mean,
+        attribution_abs=attr_abs,
+        attribution_pct=attr_pct,
+        trajectory=traj,
+        summary_metrics=summary,
+    )

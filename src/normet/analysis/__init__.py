@@ -26,7 +26,12 @@ from .diagnostics import (
     diagnose_normalisation,
     support_audit,
 )
-from .events import anomaly_scores, detect_events
+from .events import (
+    HindsightEpisodeResult,
+    anomaly_scores,
+    detect_events,
+    hindsight_episode_counterfactual,
+)
 from .normalise import (
     CrossFitNormaliseResult,
     DMLNormaliseResult,
@@ -121,6 +126,8 @@ __all__ = [
     "window_columns",
     "detect_events",
     "anomaly_scores",
+    "HindsightEpisodeResult",
+    "hindsight_episode_counterfactual",
     "ReceptorGridResult",
     "FootprintInversionResult",
     "MultisiteInversionResult",

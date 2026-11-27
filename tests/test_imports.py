@@ -127,7 +127,10 @@ def test_top_level_symbols_present():
         "invert_multisite_footprints",
         "SyntheticBenchmark",
         "make_synthetic_benchmark",
+        "benchmark_interaction_diagnostics",
         "evaluate_benchmark",
+        "HindsightEpisodeResult",
+        "hindsight_episode_counterfactual",
     }
     missing = must_have - set(nm.__all__)
     assert not missing, f"Missing top-level exports: {sorted(missing)}"
