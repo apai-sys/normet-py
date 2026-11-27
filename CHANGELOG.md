@@ -7,6 +7,21 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ## [Unreleased]
 
 ### Added
+- **Optional Rust kernels for Theil–Sen, CRPS and trajectory angles**:
+  `nm.theil_sen(..., backend="rust")` runs the same estimator through the
+  `normet_rust` extension built from `rust/normet-python` on top of the pure
+  `normet-core` crate (shared with the R wrapper via extendr), returning
+  bit-identical slopes and Sen intervals without scipy's quadratic
+  temporaries at any record length; `nm.crps_from_quantiles(...,
+  backend="rust")` and `nm.crps_from_samples(..., backend="rust")` move the
+  exact per-row CRPS integration (about twenty temporary arrays per row in
+  Python) into the same kernel, with bit-identical scores;
+  `nm.cluster_trajectories(..., metric="angle", backend="rust")` computes
+  the Sirois–Bottenheim pairwise angle matrix in the kernel and returns
+  bit-identical distances, cluster labels, centroids and TSV (numpy may
+  dispatch SIMD `acos` on x86 builds, so parity is pinned per target). The
+  default `backend="python"` paths are untouched, and the extension is
+  imported only when a caller opts in.
 - **Agent plugin and remote MCP transport**: `normet-plugin`
   (`normet.agent.plugin`) installs the normet MCP server, guardrails and four
   skills (`deweather-workflow`, `deweather-model-choice`, `scm-intervention`,

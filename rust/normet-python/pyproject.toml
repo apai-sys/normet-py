@@ -1,0 +1,18 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "normet-rust"
+version = "0.1.0"
+description = "Optional Rust kernels for normet: Theil-Sen order statistics"
+requires-python = ">=3.10"
+license = "MIT"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+]
+
+[tool.maturin]
+module-name = "normet_rust"
+features = ["pyo3/extension-module"]

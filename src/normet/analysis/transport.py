@@ -18,6 +18,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from ..core.exceptions import ConfigError
 from ..io.trajectory import (
     _haversine_km,
     _naive_utc,
@@ -1195,6 +1196,59 @@ def _auto_tsv_elbow(tsv: np.ndarray) -> int:
     return 2
 
 
+def _angle_distance_matrix(dx: np.ndarray, dy: np.ndarray, backend: str = "python") -> np.ndarray:
+    """Sirois-Bottenheim mean directional-angle distances between trajectories.
+
+    Each trajectory pair is scored by the mean angle between its step
+    vectors from the receptor, normalised by pi (Sirois & Bottenheim 1995):
+    0 for parallel paths, 1 for opposite ones. A step whose receptor
+    distance product is at or below 1e-9 is stagnant and carries no
+    direction, so it is skipped for that pair; a pair with no valid step
+    scores exactly 0.
+
+    ``dx``/``dy`` are the resampled tangent-plane coordinates (rows are
+    trajectories, the first column is the receptor); steps are taken from
+    the second column on. The pair loop is quadratic and performs a handful
+    of small numpy calls per pair, so ``backend="rust"`` hands it to the
+    optional ``normet_rust`` extension. The norms are computed here with
+    ``np.hypot`` and passed in, and the per-pair mean keeps numpy's
+    summation order, so the matrix is bit-identical on the platforms tested
+    (numpy may dispatch SIMD ``arccos`` on some x86 builds, so parity is
+    pinned per target); the default path is untouched.
+    """
+    vx = dx[:, 1:]
+    vy = dy[:, 1:]
+    norms = np.hypot(vx, vy)
+    n_traj = int(vx.shape[0])
+    if backend == "rust":
+        from ..utils._rust import rust_core
+
+        core = rust_core()
+        flat = core.angle_distances(
+            np.ascontiguousarray(vx, dtype=float),
+            np.ascontiguousarray(vy, dtype=float),
+            np.ascontiguousarray(norms, dtype=float),
+        )
+        return np.asarray(flat, dtype=float).reshape(n_traj, n_traj)
+
+    dmat = np.zeros((n_traj, n_traj), dtype=float)
+    for i in range(n_traj):
+        for j in range(i + 1, n_traj):
+            denom = norms[i] * norms[j]
+            valid = denom > 1e-9
+            if valid.any():
+                cos_t = np.clip(
+                    (vx[i, valid] * vx[j, valid] + vy[i, valid] * vy[j, valid]) / denom[valid],
+                    -1.0,
+                    1.0,
+                )
+                d = float(np.mean(np.arccos(cos_t) / np.pi))
+            else:
+                d = 0.0
+            dmat[i, j] = dmat[j, i] = d
+    return dmat
+
+
 def cluster_trajectories(
     endpoints: pd.DataFrame,
     *,
@@ -1203,6 +1257,7 @@ def cluster_trajectories(
     n_points: int | None = None,
     z_scale: float = 0.0,
     metric: str = "euclidean",
+    backend: str = "python",
     series: pd.Series | pd.DataFrame | None = None,
     value_col: str | None = None,
     date_col: str = "date",
@@ -1219,9 +1274,23 @@ def cluster_trajectories(
     the number of groups ``fcluster`` actually returned: asking for more than
     the paths support (e.g. identical stagnant trajectories) yields fewer
     clusters rather than empty ones with NaN centroids.
+
+    With ``metric="angle"``, ``backend="rust"`` computes the pairwise angle
+    distances through the optional ``normet_rust`` extension; the distance
+    matrix and every downstream result (labels, centroids, TSV, summary) are
+    bit-identical on the platforms tested. The Euclidean path is scipy's
+    Ward linkage and has no Rust backend, so it requires the default
+    ``backend="python"``.
     """
     if metric not in ("euclidean", "angle"):
         raise ValueError(f"metric must be 'euclidean' or 'angle', got {metric!r}")
+    if backend not in ("python", "rust"):
+        raise ConfigError(f"`backend` must be 'python' or 'rust', got {backend!r}.")
+    if backend == "rust" and metric != "angle":
+        raise ConfigError(
+            "`backend='rust'` accelerates only `metric='angle'`; the Euclidean "
+            "path is scipy's Ward linkage."
+        )
     if float(z_scale) < 0.0:
         raise ValueError(f"z_scale must be non-negative, got {z_scale}")
     if n_clusters is not None and int(n_clusters) < 2:
@@ -1295,24 +1364,7 @@ def cluster_trajectories(
         Z = linkage(X, method="ward")
     else:
         # Sirois & Bottenheim (1995) angle distance over step vectors from receptor.
-        vx = dx[:, 1:]
-        vy = dy[:, 1:]
-        norms = np.hypot(vx, vy)
-        dmat = np.zeros((n_traj, n_traj), dtype=float)
-        for i in range(n_traj):
-            for j in range(i + 1, n_traj):
-                denom = norms[i] * norms[j]
-                valid = denom > 1e-9
-                if valid.any():
-                    cos_t = np.clip(
-                        (vx[i, valid] * vx[j, valid] + vy[i, valid] * vy[j, valid]) / denom[valid],
-                        -1.0,
-                        1.0,
-                    )
-                    d = float(np.mean(np.arccos(cos_t) / np.pi))
-                else:
-                    d = 0.0
-                dmat[i, j] = dmat[j, i] = d
+        dmat = _angle_distance_matrix(dx, dy, backend=backend)
         Z = linkage(squareform(dmat, checks=False), method="average")
 
     k_max_eff = min(int(max_clusters), n_traj)

@@ -43,7 +43,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from ..core.exceptions import DataError
+from ..core.exceptions import ConfigError, DataError
 from ..utils.logging import get_logger
 
 log = get_logger(__name__)
@@ -622,12 +622,45 @@ def _theil_sen_large(x: np.ndarray, y: np.ndarray, stats: Any) -> tuple[float, f
     return slope, float(slopes[rl]), float(slopes[ru])
 
 
+def _theil_sen_rust(x: np.ndarray, y: np.ndarray) -> tuple[float, float, float]:
+    """Theil-Sen slope and Sen interval from the optional Rust kernel.
+
+    The kernel repeats the pairwise arithmetic of :func:`_theil_sen_large`
+    (and of scipy's ``theilslopes``) and selects the same order statistics,
+    so the values agree bit for bit; the normal quantile is passed in from
+    here because the interval ranks are a function of the host's ``ppf``.
+    Requires the ``normet_rust`` extension; see
+    :func:`normet.utils._rust.rust_core`.
+    """
+    from ..utils._rust import rust_core
+
+    core = rust_core()
+    stats = require_scipy_stats()
+    z = float(stats.norm.ppf(0.025))
+    slope, low, high, _n_pairs, degenerate = core.theil_sen_interval(
+        np.ascontiguousarray(x, dtype=float),
+        np.ascontiguousarray(y, dtype=float),
+        z,
+    )
+    if degenerate:
+        warnings.warn("All `x` coordinates are identical.", RuntimeWarning, stacklevel=3)
+    return float(slope), float(low), float(high)
+
+
 def theil_sen(
     series: pd.Series | pd.DataFrame,
     *,
     value_col: str | None = None,
+    backend: str = "python",
 ) -> TrendSlope:
     """Robust Theil-Sen slope against time.
+
+    ``backend="rust"`` runs the same estimator through the optional
+    ``normet_rust`` extension (built from ``rust/normet-python``): identical
+    numbers, but the pairwise slopes are built in compiled code instead of a
+    per-row Python loop, and above a few thousand points the kernel avoids
+    scipy's quadratic temporaries at every n rather than above the 4 000-point
+    threshold. The default ``"python"`` path is untouched.
 
     The slope is the median pair-wise slope (``scipy.stats.theilslopes``),
     robust to the occasional extreme spike a pollution event leaves in the
@@ -641,6 +674,8 @@ def theil_sen(
     scipy's n x n temporaries -- a multi-year hourly record would otherwise
     need gigabytes for a matrix it immediately discards.
     """
+    if backend not in ("python", "rust"):
+        raise ConfigError(f"`backend` must be 'python' or 'rust', got {backend!r}.")
     stats = require_scipy_stats()
     s, positional = _to_series(series, value_col)
     x = s.dropna()
@@ -648,7 +683,9 @@ def theil_sen(
         raise DataError(f"theil_sen needs at least 4 observed values, got {x.size}.")
     xtime = _time_grid(s, x, positional)
     y = x.to_numpy()
-    if x.size > _THEIL_SEN_LARGE:
+    if backend == "rust":
+        slope, ci_low, ci_high = _theil_sen_rust(xtime, y)
+    elif x.size > _THEIL_SEN_LARGE:
         slope, ci_low, ci_high = _theil_sen_large(xtime, y, stats)
     else:
         res = stats.theilslopes(y, xtime)

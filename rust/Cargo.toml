@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = ["normet-core", "normet-python"]
+
+[profile.release]
+lto = true
+codegen-units = 1

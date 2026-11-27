@@ -40,7 +40,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from ..core.exceptions import DataError
+from ..core.exceptions import ConfigError, DataError
 from ..utils._config import DEFAULT_SEED
 
 __all__ = [
@@ -230,6 +230,34 @@ def _crps_rows(q: np.ndarray, levels: list[float], y: np.ndarray) -> float:
     return total / n
 
 
+def _crps_rows_rust(q: np.ndarray, levels: list[float], y: np.ndarray) -> float:
+    """The same score as :func:`_crps_rows`, through the optional kernel.
+
+    The row loop -- a Python iteration building about twenty temporary
+    arrays per row -- is what a normalise run's scoring pass spends its time
+    in; the kernel repeats the arithmetic natively with one scratch buffer.
+    The number is bit-identical: the kernel also reproduces numpy's pairwise
+    summation for each row's segment integral and accumulates the rows in the
+    same order. Requires ``normet_rust`` (``rust/normet-python``).
+    """
+    from ..utils._rust import rust_core
+
+    core = rust_core()
+    return float(
+        core.crps_rows(
+            np.ascontiguousarray(q, dtype=float),
+            np.ascontiguousarray(levels, dtype=float),
+            np.ascontiguousarray(y, dtype=float),
+        )
+    )
+
+
+def _check_backend(backend: str) -> None:
+    """Reject an unknown backend with the two names this module supports."""
+    if backend not in ("python", "rust"):
+        raise ConfigError(f"`backend` must be 'python' or 'rust', got {backend!r}.")
+
+
 def pinball_loss(preds: Any, obs: Any, q: float) -> float:
     """The quantile (pinball) loss of ``preds`` against ``obs`` at level ``q``.
 
@@ -274,6 +302,8 @@ def crps_from_quantiles(
     preds: pd.DataFrame | np.ndarray[Any, Any] | list,
     obs: Any,
     quantiles: None | list[float] = None,
+    *,
+    backend: str = "python",
 ) -> float:
     """The CRPS of a quantile forecast against the observation.
 
@@ -295,12 +325,18 @@ def crps_from_quantiles(
     quantiles : list, optional
         The levels the frame's columns (or the array's rows) carry, for
         when the frame's columns are not its ``qNNN`` names.
+    backend : {"python", "rust"}, default "python"
+        ``"rust"`` runs the same integration through the optional
+        ``normet_rust`` extension, moving the per-row loop out of Python;
+        the score is bit-identical (the kernel reproduces numpy's pairwise
+        summation). The default path is untouched.
 
     Returns
     -------
     float
         The CRPS over the finite rows, in the data's units.
     """
+    _check_backend(backend)
     p, lev = _levels_and_values(preds, quantiles)
     o = _obs_array(obs)
     if p.shape[0] != len(o):
@@ -308,10 +344,17 @@ def crps_from_quantiles(
     mask = np.isfinite(p).all(axis=1) & np.isfinite(o)
     if not mask.any():
         raise DataError("Nothing to score: no finite forecast-observation row.")
+    if backend == "rust":
+        return _crps_rows_rust(p[mask], lev, o[mask])
     return _crps_rows(p[mask], lev, o[mask])
 
 
-def crps_from_samples(samples: pd.DataFrame | np.ndarray[Any, Any] | list, obs: Any) -> float:
+def crps_from_samples(
+    samples: pd.DataFrame | np.ndarray[Any, Any] | list,
+    obs: Any,
+    *,
+    backend: str = "python",
+) -> float:
     """The CRPS of ensemble samples against the observation.
 
     Each sample carries its rank as a quantile level: a row's sorted
@@ -327,12 +370,17 @@ def crps_from_samples(samples: pd.DataFrame | np.ndarray[Any, Any] | list, obs: 
         The ensemble, one value per sample and per row.
     obs : array-like, pd.DataFrame or pd.Series
         The observation, one per row.
+    backend : {"python", "rust"}, default "python"
+        ``"rust"`` runs the same integration through the optional
+        ``normet_rust`` extension, moving the per-row loop out of Python;
+        the score is bit-identical. The default path is untouched.
 
     Returns
     -------
     float
         The CRPS over the finite rows, in the data's units.
     """
+    _check_backend(backend)
     s = (
         samples.to_numpy(dtype=float)
         if isinstance(samples, pd.DataFrame)
@@ -353,6 +401,8 @@ def crps_from_samples(samples: pd.DataFrame | np.ndarray[Any, Any] | list, obs: 
     if not mask.any():
         raise DataError("Nothing to score: no finite sample-observation row.")
     s = np.sort(s[mask], axis=1, kind="stable")  # the rank is the order
+    if backend == "rust":
+        return _crps_rows_rust(s, levels, o[mask])
     return _crps_rows(s, levels, o[mask])
 
 
