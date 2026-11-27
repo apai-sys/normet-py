@@ -594,6 +594,155 @@ class ICNDrawBank:
         """Partition cached ICN variance into weather and anchor sources (:func:`decompose_icn_uncertainty`)."""
         return decompose_icn_uncertainty(self, direction=direction)
 
+    def operating_window(
+        self,
+        df: pd.DataFrame | None = None,
+        met_cols: Sequence[str] | None = None,
+        *,
+        direction: str | None = None,
+        lead_bins: Sequence[int] | None = None,
+        max_rc: float = 0.10,
+        max_rho_lb: float = 0.15,
+        nonlinear: bool = False,
+        seed: int | None = None,
+    ) -> pd.DataFrame:
+        """Audit factual separability across horizon lead-time bins.
+
+        Partitions cached factual predictions by anchor lead offset ``[lead_start, lead_end)``
+        and runs :func:`~normet.analysis.diagnostics.counterfactual_separability_audit` on
+        each bin to locate the empirical operating window where residual reuse stays valid.
+        """
+        from ..analysis.diagnostics import counterfactual_separability_audit
+
+        dir_eff = self.design.direction if direction is None else direction
+        if dir_eff == "forward":
+            dirs = [d for d in (self.forward,) if d is not None]
+        elif dir_eff == "reverse":
+            dirs = [d for d in (self.reverse,) if d is not None]
+        elif dir_eff == "bidirectional":
+            dirs = [d for d in (self.forward, self.reverse) if d is not None]
+        else:
+            raise ValueError(
+                f"direction must be 'forward', 'reverse', or 'bidirectional', got {dir_eff!r}"
+            )
+
+        cols_out = [
+            "lead_start",
+            "lead_end",
+            "n_obs",
+            "factual_rmse",
+            "rc_score_linear",
+            "interaction_rho_lb_raw",
+            "interaction_rho_lb_log",
+            "separable",
+        ]
+        bh = max(1, int(self.design.block_h))
+        if lead_bins is None:
+            step = max(1, (bh + 3) // 4)
+            edges = sorted({0, *range(step, bh, step), bh})
+        else:
+            edges = [int(b) for b in lead_bins]
+            if len(edges) < 2:
+                raise ValueError("lead_bins must contain at least two sorted bin edges")
+
+        if not dirs:
+            return pd.DataFrame(columns=cols_out)
+
+        met_list: list[str] = []
+        X_full: np.ndarray | None = None
+        if df is not None:
+            df_al = df.reindex(self.index)
+            if met_cols is not None:
+                met_list = [c for c in met_cols if c in df_al.columns]
+            else:
+                met_list = [
+                    c
+                    for c in df_al.columns
+                    if c != self.target and c != "date" and pd.api.types.is_numeric_dtype(df_al[c])
+                ]
+            if met_list:
+                X_full = df_al[met_list].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
+
+        seed_eff = self.design.seed if seed is None else int(seed)
+        rows: list[dict[str, Any]] = []
+        for lo, hi in zip(edges[:-1], edges[1:], strict=True):
+            by_hour: dict[int, list[float]] = {}
+            for d_res in dirs:
+                for h, pairs in d_res.factual_draws.items():
+                    for val, lead in pairs:
+                        if lo <= lead < hi and np.isfinite(val):
+                            by_hour.setdefault(h, []).append(val)
+            h_idx = sorted(h for h in by_hour if 0 <= h < len(self.observed))
+            if not h_idx:
+                rows.append(
+                    {
+                        "lead_start": lo,
+                        "lead_end": hi,
+                        "n_obs": 0,
+                        "factual_rmse": float("nan"),
+                        "rc_score_linear": float("nan"),
+                        "interaction_rho_lb_raw": float("nan"),
+                        "interaction_rho_lb_log": float("nan"),
+                        "separable": False,
+                    }
+                )
+                continue
+
+            idx_arr = np.asarray(h_idx, dtype=int)
+            yo = self.observed[idx_arr]
+            yf = np.asarray([float(np.mean(by_hour[h])) for h in h_idx], dtype=float)
+            ok = np.isfinite(yo) & np.isfinite(yf)
+            if X_full is not None and X_full.shape[1] > 0:
+                X_bin = X_full[idx_arr]
+                ok &= np.all(np.isfinite(X_bin), axis=1)
+            else:
+                X_bin = np.empty((len(idx_arr), 0), dtype=float)
+
+            n_obs_bin = int(ok.sum())
+            if n_obs_bin == 0:
+                rmse = float("nan")
+            else:
+                rmse = float(np.sqrt(np.mean((yo[ok] - yf[ok]) ** 2)))
+
+            if n_obs_bin >= 10 and X_bin.shape[1] > 0:
+                audit = counterfactual_separability_audit(
+                    yo[ok],
+                    yf[ok],
+                    X_bin[ok],
+                    nonlinear=nonlinear,
+                    met_names=met_list,
+                    n_boot=0,
+                    seed=seed_eff,
+                )
+                rc = float(audit["rc_score_linear"])
+                rho_raw = float(audit["interaction_rho_lb_raw"])
+                rho_log = float(audit["interaction_rho_lb_log"])
+                sep = bool(
+                    np.isfinite(rc)
+                    and rc <= max_rc
+                    and np.isfinite(rho_raw)
+                    and rho_raw <= max_rho_lb
+                )
+            else:
+                rc = float("nan")
+                rho_raw = float("nan")
+                rho_log = float("nan")
+                sep = False
+
+            rows.append(
+                {
+                    "lead_start": lo,
+                    "lead_end": hi,
+                    "n_obs": n_obs_bin,
+                    "factual_rmse": rmse,
+                    "rc_score_linear": rc,
+                    "interaction_rho_lb_raw": rho_raw,
+                    "interaction_rho_lb_log": rho_log,
+                    "separable": sep,
+                }
+            )
+        return pd.DataFrame(rows, columns=cols_out)
+
     def save(self, path: str | Path) -> Path:
         """Persist raw :class:`ICNDrawBank` draws to a gzip-compressed JSON file.
 
@@ -1660,25 +1809,19 @@ def _sample_cf_futures(
     return cf_items
 
 
-def _record_anchor_draws(
-    acc: _DirResult,
-    s: int,
-    e: int,
+def _compute_anchor_paired(
     obs_seg: np.ndarray,
     z_obs_seg: np.ndarray,
     pred_fact: np.ndarray,
     pred_cf: np.ndarray,
-    preds_q_cf: np.ndarray | None,
     design: ICNDesign,
     has_met: bool,
-    quantiles: tuple[float, ...] | None,
-    ask_qs: list[float],
     *,
     pred_fact_dist_q: np.ndarray | None = None,
     preds_dist_q_cf: np.ndarray | None = None,
     dist_q_arr: np.ndarray | None = None,
-) -> None:
-    """Project factual/counterfactual anchor outputs onto linear/log level & paired draws."""
+) -> tuple[str, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Compute (paired_mode, fact_level, cf_levels, cf_level_mean, paired) for an anchor."""
     pmode = (
         ("log_ratio" if design.log_transform else "ratio")
         if design.paired_mode == "auto"
@@ -1729,6 +1872,39 @@ def _record_anchor_draws(
             with np.errstate(divide="ignore", invalid="ignore"):
                 ratio = np.where(np.abs(pred_fact) > 1e-6, cf_level_mean / pred_fact, np.nan)
             paired = obs_seg * ratio
+    return pmode, fact_level, cf_levels, cf_level_mean, paired
+
+
+def _record_anchor_draws(
+    acc: _DirResult,
+    s: int,
+    e: int,
+    obs_seg: np.ndarray,
+    z_obs_seg: np.ndarray,
+    pred_fact: np.ndarray,
+    pred_cf: np.ndarray,
+    preds_q_cf: np.ndarray | None,
+    design: ICNDesign,
+    has_met: bool,
+    quantiles: tuple[float, ...] | None,
+    ask_qs: list[float],
+    *,
+    pred_fact_dist_q: np.ndarray | None = None,
+    preds_dist_q_cf: np.ndarray | None = None,
+    dist_q_arr: np.ndarray | None = None,
+) -> None:
+    """Project factual/counterfactual anchor outputs onto linear/log level & paired draws."""
+    pmode, fact_level, cf_levels, cf_level_mean, paired = _compute_anchor_paired(
+        obs_seg,
+        z_obs_seg,
+        pred_fact,
+        pred_cf,
+        design,
+        has_met,
+        pred_fact_dist_q=pred_fact_dist_q,
+        preds_dist_q_cf=preds_dist_q_cf,
+        dist_q_arr=dist_q_arr,
+    )
 
     if design.log_transform:
         err_seg = np.abs(pred_fact - z_obs_seg)
@@ -2611,7 +2787,9 @@ def _eval_icn_coalitions_dir(
             res_c = [f for i, (_name, feats) in enumerate(players) if i not in c for f in feats]
             coal_res_cols.append((c, res_c))
 
-    can_batch = hasattr(pipeline, "forecast_batch")
+    has_met = bool(met_cols)
+    qplan = _resolve_quantile_plan("chronos", None, pipeline, design)
+    can_batch = bool(qplan.ask_qs) or hasattr(pipeline, "forecast_batch")
     est_bs = getattr(getattr(pipeline, "estimator", None), "batch_size", None)
     base_bs = int(est_bs) if est_bs is not None else 32
     items_per_anchor = 1 + len(coal_res_cols) * (design.n_resamples if met_cols else 0)
@@ -2638,22 +2816,23 @@ def _eval_icn_coalitions_dir(
             for _c, c_items in coal_blocks:
                 flat_items.extend(c_items)
 
-        preds_med, _ = _run_univariate_batch(
+        preds_med, preds_q = _run_univariate_batch(
             pipeline,
             flat_items,
             cols,
             target,
-            _QuantilePlan(
-                req_qs=None,
-                ask_qs=[],
-                i50_ask=0,
-                dist_idx=[],
-                dist_q_arr=np.empty(0, dtype=float),
-            ),
+            qplan,
+            point_estimate=design.point_estimate,
         )
         cursor = 0
         for s, e, _fact_item, coal_blocks in pending_anchors:
+            fact_cursor = cursor
             pred_fact = preds_med[cursor]
+            pred_fact_dist_q = (
+                preds_q[cursor, qplan.dist_idx, :]
+                if (preds_q is not None and qplan.dist_idx)
+                else None
+            )
             cursor += 1
             obs_seg = obs_arr[s:e]
             z_obs_seg = work_target[s:e]
@@ -2682,21 +2861,31 @@ def _eval_icn_coalitions_dir(
                 n_cf = len(c_items)
                 if n_cf > 0:
                     pred_cf = preds_med[cursor : cursor + n_cf]
+                    preds_q_cf = preds_q[cursor : cursor + n_cf] if preds_q is not None else None
                     cursor += n_cf
                 else:
                     pred_cf = np.repeat(pred_fact[None, :], design.n_resamples, axis=0)
-                if design.log_transform:
-                    cf_levels = np.maximum(np.expm1(pred_cf), 0.0)
-                    paired = np.maximum(
-                        np.expm1(z_obs_seg + (pred_cf.mean(axis=0) - pred_fact)), 0.0
+                    preds_q_cf = (
+                        np.repeat(preds_q[fact_cursor][None, :, :], design.n_resamples, axis=0)
+                        if preds_q is not None
+                        else None
                     )
-                else:
-                    cf_levels = pred_cf
-                    with np.errstate(divide="ignore", invalid="ignore"):
-                        ratio = np.where(
-                            np.abs(pred_fact) > 1e-6, cf_levels.mean(axis=0) / pred_fact, np.nan
-                        )
-                    paired = obs_seg * ratio
+                preds_dist_q_cf = (
+                    preds_q_cf[:, qplan.dist_idx, :]
+                    if (preds_q_cf is not None and qplan.dist_idx)
+                    else None
+                )
+                _pmode, _fl, cf_levels, _cm, paired = _compute_anchor_paired(
+                    obs_seg,
+                    z_obs_seg,
+                    pred_fact,
+                    pred_cf,
+                    design,
+                    has_met,
+                    pred_fact_dist_q=pred_fact_dist_q,
+                    preds_dist_q_cf=preds_dist_q_cf,
+                    dist_q_arr=qplan.dist_q_arr if qplan.dist_idx else None,
+                )
                 for offset, h in enumerate(range(s, e)):
                     if estimate == "paired":
                         draws_by_c[c].setdefault(h, []).append((float(paired[offset]), offset))

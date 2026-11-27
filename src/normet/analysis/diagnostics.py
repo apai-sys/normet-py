@@ -253,6 +253,49 @@ def _oof_r2_nonlinear(
     return float(max(0.0, r2)) if r2 is not None else None
 
 
+def _power_transform(y: np.ndarray, gamma: float) -> np.ndarray:
+    """Shifted Box-Cox power coordinate on non-negative values (gamma=0 matches log1p)."""
+    x = np.maximum(np.asarray(y, dtype=float), 0.0) + 1.0
+    if abs(gamma) <= 1e-6:
+        return np.log(x)
+    return (np.power(x, gamma) - 1.0) / float(gamma)
+
+
+def _rc_from_arrays(r: np.ndarray, c: np.ndarray) -> float:
+    m = np.isfinite(r) & np.isfinite(c)
+    if not np.any(m):
+        return 0.0
+    e0 = float(np.mean(r[m] ** 2))
+    if e0 <= 1e-12:
+        return 0.0
+    e1 = float(np.mean((r[m] - c[m]) ** 2))
+    return float(max(0.0, (e0 - e1) / max(e0, 1e-12)))
+
+
+def _oof_residual_correction_details(
+    X: np.ndarray,
+    r: np.ndarray,
+    folds: Sequence[tuple[np.ndarray, np.ndarray]],
+    *,
+    nonlinear: bool,
+    seed: int,
+) -> tuple[float, float | None, np.ndarray]:
+    """Appendix I Eq. (66) residual-correction score plus OOF linear correction predictions."""
+    e0 = float(np.mean(r**2))
+    if e0 <= 1e-12:
+        return 0.0, (0.0 if nonlinear else None), np.zeros(len(r), dtype=float)
+
+    c_lin = _oof_ridge_predict(X, r, folds)
+    rc_lin = _rc_from_arrays(r, c_lin)
+
+    rc_nl: float | None = None
+    if nonlinear and len(r) >= 30 and folds and X.shape[1] > 0:
+        c_nl = _oof_extratrees_predict(X, r, folds, seed=seed)
+        if c_nl is not None:
+            rc_nl = _rc_from_arrays(r, c_nl)
+    return rc_lin, rc_nl, c_lin
+
+
 def _oof_residual_correction_score(
     X: np.ndarray,
     r: np.ndarray,
@@ -262,30 +305,7 @@ def _oof_residual_correction_score(
     seed: int,
 ) -> tuple[float, float | None]:
     """Appendix I Eq. (66) residual-correction score: fraction of MSE explained by meteorology."""
-    e0 = float(np.mean(r**2))
-    if e0 <= 1e-12:
-        return 0.0, (0.0 if nonlinear else None)
-
-    c_lin = _oof_ridge_predict(X, r, folds)
-    m_lin = np.isfinite(c_lin)
-    if np.any(m_lin):
-        e0_lin = float(np.mean(r[m_lin] ** 2))
-        e1_lin = float(np.mean((r[m_lin] - c_lin[m_lin]) ** 2))
-        rc_lin = float(max(0.0, (e0_lin - e1_lin) / max(e0_lin, 1e-12))) if e0_lin > 1e-12 else 0.0
-    else:
-        rc_lin = 0.0
-
-    rc_nl: float | None = None
-    if nonlinear and len(r) >= 30 and folds and X.shape[1] > 0:
-        c_nl = _oof_extratrees_predict(X, r, folds, seed=seed)
-        if c_nl is not None:
-            m_nl = np.isfinite(c_nl)
-            if np.any(m_nl):
-                e0_nl = float(np.mean(r[m_nl] ** 2))
-                e1_nl = float(np.mean((r[m_nl] - c_nl[m_nl]) ** 2))
-                rc_nl = (
-                    float(max(0.0, (e0_nl - e1_nl) / max(e0_nl, 1e-12))) if e0_nl > 1e-12 else 0.0
-                )
+    rc_lin, rc_nl, _ = _oof_residual_correction_details(X, r, folds, nonlinear=nonlinear, seed=seed)
     return rc_lin, rc_nl
 
 
@@ -327,6 +347,116 @@ def _interaction_rho_lower_bound(
     return rho_lb, float(best_r2)
 
 
+def _interaction_w2_lower_bound(
+    X: np.ndarray,
+    r: np.ndarray,
+    folds: Sequence[tuple[np.ndarray, np.ndarray]],
+    *,
+    nonlinear: bool,
+    seed: int,
+) -> float:
+    """Distribution-free 1D Wasserstein-2 factual lower bound on action-disturbance coupling."""
+    n = len(r)
+    if n < 20 or X.shape[1] == 0:
+        return 0.0
+
+    r2_target = r**2
+    v_lin = _oof_ridge_predict(X, r2_target, folds)
+    r2_lin = _oof_r2_raw(r2_target, v_lin)
+    best_r2 = float(r2_lin) if r2_lin is not None else float("-inf")
+    score = v_lin
+
+    if nonlinear and n >= 30 and folds:
+        v_nl = _oof_extratrees_predict(X, r2_target, folds, seed=seed)
+        if v_nl is not None:
+            r2_nl = _oof_r2_raw(r2_target, v_nl)
+            if r2_nl is not None and float(r2_nl) > best_r2:
+                best_r2 = float(r2_nl)
+                score = v_nl
+
+    # Fallback to an OOF meteorological principal score when variance regression is flat.
+    if not np.isfinite(best_r2) or best_r2 <= 0.0 or not np.any(np.isfinite(score)):
+        score = np.full(n, np.nan, dtype=float)
+        for tr, te in folds:
+            if len(tr) == 0 or len(te) == 0:
+                continue
+            X_tr = X[tr]
+            mu = np.mean(X_tr, axis=0)
+            sd = np.std(X_tr, axis=0)
+            sd = np.where(sd > 1e-9, sd, 1.0)
+            Z_tr = (X_tr - mu) / sd
+            Z_te = (X[te] - mu) / sd
+            try:
+                _, _, vt = np.linalg.svd(Z_tr, full_matrices=False)
+                score[te] = Z_te @ vt[0]
+            except np.linalg.LinAlgError:
+                score[te] = Z_te[:, 0]
+
+    ok = np.isfinite(score) & np.isfinite(r)
+    if int(ok.sum()) < 20:
+        return 0.0
+    sc = score[ok]
+    rv = r[ok]
+    rv_c = rv - float(np.mean(rv))
+    denom = max(float(np.mean(rv_c**2)), 1e-12)
+
+    n_bins = min(6, max(2, len(rv_c) // 25))
+    order = np.argsort(sc, kind="mergesort")
+    bins = [b for b in np.array_split(order, n_bins) if len(b) >= 5]
+    if len(bins) < 2:
+        return 0.0
+
+    q_grid = np.linspace(0.05, 0.95, 19)
+
+    def _grouped_w2(vals: np.ndarray) -> float:
+        q_bar = np.quantile(vals, q_grid)
+        total = 0.0
+        w_sum = 0.0
+        for b in bins:
+            q_b = np.quantile(vals[b], q_grid)
+            total += float(len(b)) * float(np.mean((q_b - q_bar) ** 2))
+            w_sum += float(len(b))
+        return total / max(w_sum, 1.0)
+
+    w2_obs = _grouped_w2(rv_c)
+    rng = np.random.default_rng(seed)
+    n_perm = 8
+    w2_null = 0.0
+    for _ in range(n_perm):
+        w2_null += _grouped_w2(rng.permutation(rv_c))
+    w2_null /= float(n_perm)
+
+    w2_debiased = max(0.0, w2_obs - w2_null)
+    return float(np.clip(2.0 * w2_debiased / denom, 0.0, 2.0))
+
+
+def _block_bootstrap_rc_upper(
+    r: np.ndarray,
+    c_lin: np.ndarray,
+    *,
+    block_length: int,
+    n_boot: int,
+    seed: int,
+) -> float:
+    m = np.isfinite(r) & np.isfinite(c_lin)
+    r_m = r[m]
+    c_m = c_lin[m]
+    n_m = len(r_m)
+    if n_m < 10 or n_boot < 1:
+        return float("nan")
+    b = max(1, min(int(block_length), n_m // 2))
+    n_starts = n_m - b + 1
+    k = int(np.ceil(n_m / b))
+    rng = np.random.default_rng(seed)
+    boots = np.empty(n_boot, dtype=float)
+    offsets = np.arange(b)[None, :]
+    for i in range(n_boot):
+        starts = rng.integers(0, n_starts, size=k)[:, None]
+        idx = (starts + offsets).ravel()[:n_m]
+        boots[i] = _rc_from_arrays(r_m[idx], c_m[idx])
+    return float(np.nanpercentile(boots, 95.0))
+
+
 def counterfactual_separability_audit(
     y_obs: np.ndarray,
     y_fact: np.ndarray,
@@ -334,28 +464,42 @@ def counterfactual_separability_audit(
     *,
     folds: Sequence[tuple[np.ndarray, np.ndarray]] | None = None,
     nonlinear: bool = True,
+    met_names: Sequence[str] | None = None,
+    n_boot: int = 200,
+    block_length: int = 24,
     seed: int = DEFAULT_SEED,
 ) -> dict[str, Any]:
     """Audit residual-reuse validity from factual residuals and meteorology alone.
 
-    Implements three factual diagnostics from Balestriero, LeCun & Varaku (2026):
+    Implements factual diagnostics grounded in Balestriero, LeCun & Varaku (2026):
 
-    1. **Residual-correction test** (``rc_score_linear``, ``rc_score_nonlinear``;
-       Appendix I Eq. 66): out-of-fold fraction of factual residual energy
-       :math:`R_t = Y_t - \\hat{\\mu}(H_t, w_t)` explained by meteorology, which
-       detects action-contrast bias in the factual predictor.
-    2. **Factual interaction lower bound** (``interaction_rho_lb_raw``,
-       ``interaction_rho_lb_log``; Section 3.2): heteroscedastic spread variation
-       across meteorology bounding the unidentifiable action-disturbance coupling.
-    3. **Floor / contact saturation rate** (``floor_saturation_rate``; Section 4.3):
-       fraction of non-negative observations collapsed onto the lower floor where
-       disturbance separability vanishes.
+    1. **Residual-correction test** (``rc_score_linear``, ``rc_score_nonlinear``,
+       ``rc_score_linear_upper95``, ``rc_score_last_block``; Appendix I Eq. 66):
+       out-of-fold fraction of factual residual energy
+       :math:`R_t = Y_t - \\hat{\\mu}(H_t, w_t)` explained by meteorology.
+    2. **Factual interaction lower bounds** (``interaction_rho_lb_raw``,
+       ``interaction_rho_lb_log``, ``interaction_w2_lb_raw``, ``interaction_w2_lb_log``,
+       ``optimal_power_gamma``, ``interaction_rho_lb_optimal_power``; Section 3.2):
+       heteroscedastic spread and 1D Wasserstein-2 variation across meteorology plus
+       continuous shifted-power coordinate selection.
+    3. **Boundary saturation & persistence** (``floor_saturation_rate``,
+       ``ceiling_saturation_rate``, ``residual_fresh_share``; Section 4.3):
+       fraction collapsed on lower/upper bounds and non-persistent residual share.
+    4. **Per-feature attribution** (``rc_by_feature``, ``rho_lb_by_feature``,
+       ``top_rc_feature``, ``top_interaction_feature``): single-covariate RC and spread
+       lower bounds identifying which meteorological channels drive violation.
     """
     y_o = np.asarray(y_obs, dtype=float)
     y_f = np.asarray(y_fact, dtype=float)
     X_arr = np.asarray(X_met, dtype=float)
     if X_arr.ndim == 1:
         X_arr = X_arr[:, None]
+
+    n_features = X_arr.shape[1] if X_arr.ndim == 2 else 0
+    if met_names is not None and len(met_names) == n_features:
+        feat_names = [str(nm) for nm in met_names]
+    else:
+        feat_names = [f"x{j}" for j in range(n_features)]
 
     ok = np.isfinite(y_o) & np.isfinite(y_f)
     if X_arr.shape[0] != len(y_o):
@@ -371,11 +515,23 @@ def counterfactual_separability_audit(
             "n_obs": n_ok,
             "rc_score_linear": float("nan"),
             "rc_score_nonlinear": float("nan") if nonlinear else None,
+            "rc_score_linear_upper95": float("nan"),
+            "rc_score_last_block": float("nan"),
             "interaction_rho_lb_raw": float("nan"),
             "interaction_rho_lb_log": float("nan"),
+            "interaction_w2_lb_raw": float("nan"),
+            "interaction_w2_lb_log": float("nan"),
+            "optimal_power_gamma": float("nan"),
+            "interaction_rho_lb_optimal_power": float("nan"),
             "spread_r2_raw": float("nan"),
             "spread_r2_log": float("nan"),
             "floor_saturation_rate": float("nan"),
+            "ceiling_saturation_rate": float("nan"),
+            "residual_fresh_share": float("nan"),
+            "rc_by_feature": {},
+            "rho_lb_by_feature": {},
+            "top_rc_feature": None,
+            "top_interaction_feature": None,
             "recommended_coordinate": "insufficient_data",
         }
 
@@ -403,28 +559,91 @@ def counterfactual_separability_audit(
         use_folds = [(all_idx, all_idx)]
 
     r_raw = yo - yf
-    rc_lin, rc_nl = _oof_residual_correction_score(
+    rc_lin, rc_nl, c_lin = _oof_residual_correction_details(
         Xm, r_raw, use_folds, nonlinear=nonlinear, seed=seed
     )
+    rc_upper95 = _block_bootstrap_rc_upper(
+        r_raw, c_lin, block_length=block_length, n_boot=n_boot, seed=seed
+    )
+    if len(use_folds) >= 2:
+        _, te_last = use_folds[-1]
+        rc_last = _rc_from_arrays(r_raw[te_last], c_lin[te_last]) if len(te_last) > 0 else rc_lin
+    else:
+        rc_last = rc_lin
+
     rho_raw, spread_r2_raw = _interaction_rho_lower_bound(
         Xm, r_raw, use_folds, nonlinear=nonlinear, seed=seed
     )
+    w2_raw = _interaction_w2_lower_bound(Xm, r_raw, use_folds, nonlinear=nonlinear, seed=seed)
 
     if bool(np.all(yo >= -1e-9)) and bool(np.all(yf >= -1e-9)):
         r_log = np.log1p(np.maximum(yo, 0.0)) - np.log1p(np.maximum(yf, 0.0))
         rho_log, spread_r2_log = _interaction_rho_lower_bound(
             Xm, r_log, use_folds, nonlinear=nonlinear, seed=seed
         )
+        w2_log = _interaction_w2_lower_bound(Xm, r_log, use_folds, nonlinear=nonlinear, seed=seed)
+
+        gammas = (0.0, 0.25, 0.5, 0.75, 1.0)
+        best_gamma = 0.0
+        best_rho_gamma = float("inf")
+        for g in gammas:
+            r_g = _power_transform(yo, g) - _power_transform(yf, g)
+            rho_g, _ = _interaction_rho_lower_bound(
+                Xm, r_g, use_folds, nonlinear=nonlinear, seed=seed
+            )
+            if rho_g < best_rho_gamma - 1e-12:
+                best_rho_gamma = rho_g
+                best_gamma = g
+        opt_gamma = float(best_gamma)
+        rho_opt = float(best_rho_gamma)
     else:
         rho_log = float("nan")
         spread_r2_log = float("nan")
+        w2_log = float("nan")
+        opt_gamma = 1.0
+        rho_opt = float(rho_raw)
+
+    hi = float(np.nanmax(yo))
+    lo = float(np.nanmin(yo))
+    rng_y = hi - lo
 
     if float(np.nanmin(yo)) >= -1e-9:
         med_abs = float(np.median(np.abs(yo)))
         tol = max(1e-6, 0.01 * med_abs) if med_abs > 1e-6 else 1e-6
         floor_rate = float(np.mean(yo <= tol))
+        if floor_rate == 0.0 and rng_y > 1e-12:
+            tol_lo = max(1e-7, 1e-5 * rng_y)
+            n_lo = int(np.sum(yo <= lo + tol_lo))
+            if n_lo >= max(3, int(0.02 * n_ok)):
+                floor_rate = float(n_lo / n_ok)
     else:
         floor_rate = 0.0
+
+    if rng_y > 1e-12:
+        tol_hi = max(1e-7, 1e-5 * rng_y)
+        n_hi = int(np.sum(yo >= hi - tol_hi))
+        ceiling_rate = 0.0 if n_hi <= 1 else float(n_hi / n_ok)
+    else:
+        ceiling_rate = 1.0
+
+    ac1 = _lag_autocorr(r_raw, 1)
+    fresh_share = (
+        float(np.clip(1.0 - max(0.0, ac1), 0.0, 1.0)) if np.isfinite(ac1) else float("nan")
+    )
+
+    rc_by_feature: dict[str, float] = {}
+    rho_lb_by_feature: dict[str, float] = {}
+    for j, fname in enumerate(feat_names):
+        X_j = Xm[:, [j]]
+        rc_j, _ = _oof_residual_correction_score(X_j, r_raw, use_folds, nonlinear=False, seed=seed)
+        rho_j, _ = _interaction_rho_lower_bound(X_j, r_raw, use_folds, nonlinear=False, seed=seed)
+        rc_by_feature[fname] = float(rc_j)
+        rho_lb_by_feature[fname] = float(rho_j)
+
+    top_rc_feature = max(rc_by_feature, key=lambda k: rc_by_feature[k]) if rc_by_feature else None
+    top_interaction_feature = (
+        max(rho_lb_by_feature, key=lambda k: rho_lb_by_feature[k]) if rho_lb_by_feature else None
+    )
 
     if np.isfinite(rho_log):
         if rho_raw >= 0.15 and rho_log >= 0.15:
@@ -442,11 +661,23 @@ def counterfactual_separability_audit(
         "n_obs": n_ok,
         "rc_score_linear": float(rc_lin),
         "rc_score_nonlinear": float(rc_nl) if rc_nl is not None else None,
+        "rc_score_linear_upper95": float(rc_upper95),
+        "rc_score_last_block": float(rc_last),
         "interaction_rho_lb_raw": float(rho_raw),
         "interaction_rho_lb_log": float(rho_log),
+        "interaction_w2_lb_raw": float(w2_raw),
+        "interaction_w2_lb_log": float(w2_log),
+        "optimal_power_gamma": float(opt_gamma),
+        "interaction_rho_lb_optimal_power": float(rho_opt),
         "spread_r2_raw": float(spread_r2_raw),
         "spread_r2_log": float(spread_r2_log),
         "floor_saturation_rate": float(floor_rate),
+        "ceiling_saturation_rate": float(ceiling_rate),
+        "residual_fresh_share": float(fresh_share),
+        "rc_by_feature": rc_by_feature,
+        "rho_lb_by_feature": rho_lb_by_feature,
+        "top_rc_feature": top_rc_feature,
+        "top_interaction_feature": top_interaction_feature,
         "recommended_coordinate": rec_coord,
     }
 
@@ -504,6 +735,8 @@ class NormalisationDiagnostics:
                 rows.append((f"residual_{k}", v))
         if self.counterfactual_diagnostics:
             for k, v in self.counterfactual_diagnostics.items():
+                if isinstance(v, dict):
+                    continue
                 rows.append((f"cf_{k}", v))
         return pd.DataFrame(rows, columns=["metric", "value"])
 
@@ -774,6 +1007,7 @@ def diagnose_normalisation(
                 X_mat[ok_f],
                 folds=sub_folds,
                 nonlinear=nonlinear_wrf,
+                met_names=inferred,
                 seed=seed,
             )
 
@@ -835,6 +1069,12 @@ def diagnose_normalisation(
             warn_list.append(
                 f"Lower-boundary saturation rate is {100 * floor_rate:.1f}% (> 10%); "
                 "disturbance separability weakens near the floor."
+            )
+        ceiling_rate = float(cf_diag.get("ceiling_saturation_rate", float("nan")))
+        if np.isfinite(ceiling_rate) and ceiling_rate > 0.10:
+            warn_list.append(
+                f"Upper-boundary saturation rate is {100 * ceiling_rate:.1f}% (> 10%); "
+                "ceiling clipping weakens disturbance separability."
             )
 
     return NormalisationDiagnostics(

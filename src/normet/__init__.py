@@ -18,7 +18,12 @@ from .core.exceptions import (
     NormetError,
 )
 from .data import datasets
-from .eval.benchmarks import SyntheticBenchmark, evaluate_benchmark, make_synthetic_benchmark
+from .eval.benchmarks import (
+    SyntheticBenchmark,
+    benchmark_interaction_diagnostics,
+    evaluate_benchmark,
+    make_synthetic_benchmark,
+)
 
 # --- Modelling ---
 from .model import (
@@ -108,6 +113,7 @@ from .analysis import (
     DecomposeConfig,
     DMLNormaliseResult,
     FootprintInversionResult,
+    HindsightEpisodeResult,
     MultisiteInversionResult,
     NormalisationDiagnostics,
     NormaliseConfig,
@@ -146,6 +152,7 @@ from .analysis import (
     dml_normalise,
     fair_crps_from_samples,
     gridded_receptor_model,
+    hindsight_episode_counterfactual,
     interval_coverage,
     interval_score,
     invert_multisite_footprints,
@@ -290,6 +297,7 @@ __all__ = [
     "RollingConfig",
     "SyntheticBenchmark",
     "make_synthetic_benchmark",
+    "benchmark_interaction_diagnostics",
     "evaluate_benchmark",
     "SingleConfig",
     "UncConfig",
@@ -326,6 +334,8 @@ __all__ = [
     "compare_attributions",
     "detect_events",
     "anomaly_scores",
+    "HindsightEpisodeResult",
+    "hindsight_episode_counterfactual",
     "trend",
     "mann_kendall",
     "theil_sen",
