@@ -258,6 +258,24 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
     `fair_crps_from_samples`, `interval_score`, `interval_coverage`,
     `pit_diagnostics` and `calibration_curve` for probabilistic diagnostics.
 
+### Performance
+- **Flat-array endpoint weights across the transport family.**
+  `wcwt`/`wpscf`, `build_footprint_matrix` and `screen_donor_transport`
+  called `trajectory_endpoint_weights` once per trajectory, and about two
+  thirds of that loop was pandas column extraction rather than arithmetic.
+  They now convert each column once and run a flat numpy kernel over every
+  row (`_endpoint_weights_flat` / `_endpoint_weights_flat_frame`),
+  keeping per-group loops only where
+  sequential order matters (decay `exp`, causal rainfall cumsum, and each
+  region/hit `np.sum`). Results are bit-identical on the tested targets —
+  the parity suite compares `uint64` views and replays every public
+  function against its pre-flat scalar reference (numpy may dispatch SIMD
+  transcendentals on x86 builds). Measured on a 147k-endpoint table
+  (3,000 trajectories × 49 steps, macOS arm64, best-of-2): weight loop
+  468 → 58 ms (8.0×), `wcwt` 534 → 127 ms (4.2×), `build_footprint_matrix`
+  630 → 182 ms (3.5×), `screen_donor_transport` `donor_back` 605 → 170 ms
+  (3.6×) and `treated_back` 1245 → 459 ms (2.7×).
+
 ### Changed
 - **User manual rebuilt for 0.3.0** (`docs/manual/normet_manual.tex` and
   `normet_manual_zh.tex`, both PDFs): the books now document the v3 engines
