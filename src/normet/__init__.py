@@ -274,6 +274,31 @@ from .pipeline import (
     run_workflow,
 )
 
+# --- World Model (AC-JEPA & Separable Latent WM) ---
+from .world_model import (
+    JEPAResult,
+    JEPASCMResult,
+    LatentJEPA,
+    MultisiteDecompositionResult,
+    MultisiteWorldModel,
+    SeparableWorldModel,
+    TrajectoryRolloutResult,
+    WorldModelConfig,
+    WorldModelNormaliseResult,
+    benchmark_interaction_sweep,
+    benchmark_world_models,
+    detect_jepa_events,
+    fit_latent_jepa,
+    fit_multisite_world_model,
+    fit_world_model,
+    jepa_anomaly_scores,
+    jepa_scm,
+    jepa_select_donors,
+    plot_jepa_anomalies,
+    plot_rollout,
+    plot_separability_landscape,
+)
+
 __all__ = [
     # --- Example data ---
     "datasets",
@@ -535,6 +560,28 @@ __all__ = [
     # --- Counterfactual policy evaluation ---
     "HarmonicCounterfactual",
     "HarmonicCounterfactualResult",
+    # --- World Model (AC-JEPA & Separable Latent WM) ---
+    "JEPAResult",
+    "JEPASCMResult",
+    "LatentJEPA",
+    "fit_latent_jepa",
+    "jepa_anomaly_scores",
+    "detect_jepa_events",
+    "jepa_select_donors",
+    "jepa_scm",
+    "WorldModelConfig",
+    "WorldModelNormaliseResult",
+    "TrajectoryRolloutResult",
+    "SeparableWorldModel",
+    "fit_world_model",
+    "MultisiteDecompositionResult",
+    "MultisiteWorldModel",
+    "fit_multisite_world_model",
+    "plot_separability_landscape",
+    "plot_rollout",
+    "plot_jepa_anomalies",
+    "benchmark_world_models",
+    "benchmark_interaction_sweep",
     # --- Reporting ---
     "generate_html_report",
     "report_to_markdown",
