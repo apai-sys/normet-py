@@ -50,9 +50,19 @@ log = get_logger(__name__)
 #: cap off with ``0``.
 THREADS_ENV = "NORMET_TORCH_THREADS"
 
-#: Resolved once, so mypy cannot narrow ``sys.platform`` to the checking host and
-#: call the darwin-only code below unreachable on a Linux CI runner.
-_ON_DARWIN = sys.platform == "darwin"
+
+def _on_macos() -> bool:
+    """Whether this process is on macOS.
+
+    Asked at call time rather than resolved once, so a caller (or a test that
+    monkeypatches ``sys.platform``) sees the current answer. A plain
+    ``sys.platform == "darwin"`` at each use site would do the same at runtime,
+    but mypy narrows that comparison to the checking host and then calls the
+    darwin-only bodies unreachable on a Linux runner; a ``bool`` return does
+    not narrow.
+    """
+    return sys.platform == "darwin"
+
 
 #: Set once torch has been capped. Left false while no second runtime is loaded,
 #: so that a torch-first import followed by a LightGBM fit can still be capped by
@@ -68,7 +78,7 @@ def openmp_runtime_images() -> list[str]:
     dependency). Returns an empty list off macOS, where the question does not
     arise.
     """
-    if not _ON_DARWIN:
+    if not _on_macos():
         return []
     try:
         import ctypes
@@ -105,7 +115,7 @@ def _cap_torch_threads(torch: Any, foreign: list[str]) -> bool:
     global _CAPPED
     if _CAPPED:
         return False
-    if not _ON_DARWIN:
+    if not _on_macos():
         return False
 
     requested = os.environ.get(THREADS_ENV)
