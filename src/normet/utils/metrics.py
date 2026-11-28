@@ -415,7 +415,13 @@ def _wrap_log_predictor(
     back_transform: str,
     smearing_factor: float | None,
 ) -> tuple[pd.DataFrame, Callable[[object, pd.DataFrame], np.ndarray]]:
-    """Convert log1p-scale frame and predictor to original concentration scale."""
+    """Convert log1p-scale frame and predictor to original concentration scale.
+
+    ``back_transform="geometric"`` is accepted for API symmetry with
+    :func:`normet.normalise`, but on per-row predictions it is the same rule
+    as ``"arithmetic"``: a geometric mean of one value is that value. The two
+    only differ where several draws are averaged on the ``log1p`` scale first.
+    """
     from .prepare import compute_duan_smearing
 
     if back_transform not in ("arithmetic", "smearing", "geometric"):
@@ -448,6 +454,8 @@ def _wrap_log_predictor(
         z = np.asarray(raw_predictor(m, x), dtype=float)
         if back_transform == "smearing":
             return np.clip(phi * np.exp(z) - 1.0, 0.0, None)
+        # "geometric" == "arithmetic" here: predictions are per row, so there
+        # is no log1p-scale mean to take (see the docstring).
         return np.clip(np.expm1(z), 0.0, None)
 
     return df_orig, _orig_pred
@@ -479,8 +487,10 @@ def modStats(
     model : object
         Trained model compatible with the package's `ml_predict` interface.
     subset : {"training","testing","all"} | None
-        Which split to evaluate. If None and "set" exists, returns one row
-        per split plus "all".
+        Which rows to evaluate. If None and "set" exists, returns one row
+        per split plus "all". When ``by`` is given, ``subset`` still selects
+        the rows being evaluated (each group row and the ``include_all`` row
+        then cover the subset only).
     statistic : List[str] | None
         Metrics to compute; defaults to a comprehensive set.
     predictor : callable(model, df) -> np.ndarray | None
@@ -493,13 +503,17 @@ def modStats(
         the per-``set`` aggregation is *replaced* by a per-group aggregation.
     include_all : bool, default True
         When ``by`` is given, also append a single row with metrics computed
-        across all rows (group label ``"all"``).
+        across all evaluated rows (group label ``"all"``).
     log_transform : bool, default False
         If True and ``predictor`` is None, assume ``model`` was trained on
         ``log1p(value)`` and evaluate predictions against original units.
     back_transform : {"arithmetic", "smearing", "geometric"}, default "arithmetic"
         Inversion rule when ``log_transform=True`` (``"smearing"`` multiplies
         ``exp(z)`` by Duan's smearing factor before subtracting 1).
+        ``"geometric"`` is accepted but coincides with ``"arithmetic"`` for
+        per-row predictions; it differs only where a mean is taken on the
+        ``log1p`` scale before back-transforming (as in
+        :func:`normet.normalise`).
     smearing_factor : float or None, default None
         Optional precomputed Duan smearing factor; derived from ``"training"``
         rows when ``None`` and ``back_transform="smearing"``.
@@ -542,6 +556,16 @@ def modStats(
     else:
         df_eval = df
         predict_fn = base_pred
+
+    # `subset` says which rows are evaluated, not merely how they are
+    # aggregated, so it has to constrain the grouped (`by`) path too: that
+    # branch used to report metrics over every row even when a subset was
+    # requested. The validation mirrors the legacy path below, so a `subset`
+    # without a 'set' column still raises the same error.
+    if subset is not None and subset != "all":
+        if "set" not in df_eval.columns:
+            raise ValueError("DataFrame has no 'set' column but a `subset` was requested.")
+        df_eval = df_eval[df_eval["set"] == subset]
 
     def _one(df_in: pd.DataFrame, tag: str) -> pd.DataFrame:
         y_pred = predict_fn(model, df_in)
@@ -752,7 +776,8 @@ def compare_models(
         ``back_transform`` rule). The truth is *not* transformed implicitly:
         tell the function its scale with ``y_scale``.
     back_transform : {"arithmetic", "smearing", "geometric"}, default "arithmetic"
-        Inversion rule used when a log flag is set.
+        Inversion rule used when a log flag is set. ``"geometric"`` is
+        accepted but coincides with ``"arithmetic"`` for per-row predictions.
     smearing_a, smearing_b : float, default 1.0
         Duan smearing multipliers for ``back_transform="smearing"``.
     y_scale : {"original", "log1p"}, default "original"
@@ -827,13 +852,13 @@ def compare_models(
         pa = (
             np.clip(float(smearing_a) * np.exp(pa) - 1.0, 0.0, None)
             if back_transform == "smearing"
-            else np.clip(np.expm1(pa), 0.0, None)
+            else np.clip(np.expm1(pa), 0.0, None)  # "geometric" == "arithmetic"
         )
     if log_transform_b:
         pb = (
             np.clip(float(smearing_b) * np.exp(pb) - 1.0, 0.0, None)
             if back_transform == "smearing"
-            else np.clip(np.expm1(pb), 0.0, None)
+            else np.clip(np.expm1(pb), 0.0, None)  # "geometric" == "arithmetic"
         )
     # The truth is transformed only on explicit request: after a log flag the
     # predictions are in original units, so a log1p-scale target must be

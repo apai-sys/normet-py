@@ -497,3 +497,49 @@ def test_a_nat_index_entry_is_dropped_not_read_as_the_int64_minimum():
     assert res.ci_low == ref.ci_low
     assert res.n == len(y) - 1
     assert res.time_unit == "day"
+
+
+# ---------------------------------------------------------------------------
+# A non-datetime, non-RangeIndex index is a grid of steps, not a clock
+# ---------------------------------------------------------------------------
+
+
+def test_a_plain_integer_index_is_positional_not_nanoseconds():
+    """``pd.Index(arange(n))`` used to be read as ns since the epoch.
+
+    That is what a boolean mask, a ``.loc``, a ``dropna`` or a ``concat``
+    leaves behind, and it turned a 0.5-per-step ramp into a slope of ~4.3e13
+    "per day" with a fabricated ``slope_per_year`` of 1.6e16 -- while
+    ``mann_kendall`` on the same series stayed correct, so a report could show
+    a valid test beside a slope thirteen orders of magnitude wrong.
+    """
+    y = 0.5 * np.arange(120) + 10.0
+    res = theil_sen(pd.Series(y, index=pd.Index(np.arange(120))))
+    assert res.time_unit == "step"
+    assert res.slope == pytest.approx(0.5, rel=1e-12)
+    assert res.slope_per_year is None
+
+
+def test_a_masked_integer_index_keeps_its_own_step_coordinates():
+    """The gap is real: two index units between kept rows, not one."""
+    kept = np.arange(240) % 2 == 0
+    s = pd.Series(np.arange(240, dtype=float)[kept], index=pd.Index(np.arange(240)[kept]))
+    res = theil_sen(s)
+    assert res.time_unit == "step"
+    assert res.slope == pytest.approx(1.0, rel=1e-12)  # 2 units of value per 2 units of step
+
+
+def test_a_shifted_step_index_reports_the_same_slope():
+    y = 3.0 + 0.25 * np.arange(80)
+    res = theil_sen(pd.Series(y, index=pd.Index(np.arange(1000, 1080))))
+    assert res.slope == pytest.approx(0.25, rel=1e-12)
+    assert res.time_unit == "step"
+
+
+def test_date_strings_are_still_read_as_time():
+    """The fix is about numeric indices; date-like text keeps its calendar."""
+    idx = pd.Index([str(d)[:10] for d in pd.date_range("2020-01-01", periods=120, freq="D")])
+    res = theil_sen(pd.Series(0.5 * np.arange(120) + 10.0, index=idx))
+    assert res.time_unit == "day"
+    assert res.slope == pytest.approx(0.5, rel=1e-12)
+    assert res.slope_per_year == pytest.approx(0.5 * 365.25, rel=1e-12)

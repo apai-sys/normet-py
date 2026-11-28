@@ -256,7 +256,10 @@ def cv_score(
         If True, fit each fold on ``log1p(target)`` and evaluate OOF metrics
         on original units using ``back_transform``.
     back_transform : {"arithmetic", "smearing", "geometric"}, default "arithmetic"
-        Log-scale inversion rule when ``log_transform=True``.
+        Log-scale inversion rule when ``log_transform=True``. ``"geometric"``
+        is accepted but coincides with ``"arithmetic"`` for per-row
+        predictions; it differs only where a mean is taken on the ``log1p``
+        scale before back-transforming (as in :func:`normet.normalise`).
     include_pooled : bool, default False
         If True, append a ``fold="pooled"`` summary row computed over all
         concatenated out-of-fold predictions.
@@ -337,7 +340,11 @@ def cv_score(
             fold_work = impute_values(
                 fold_work,
                 dropna=False,
-                strategy=impute,
+                # "median" is the legacy full-frame fill; inside a fold it has
+                # to be fitted on the fold's training rows only, which is what
+                # this function's docstring promises ("strictly within each
+                # fold's training set"). Same shim do_all_unc uses.
+                strategy="train_median" if impute == "median" else impute,
                 max_gap=max_gap,
                 circular_cols=circular_cols,
             )
@@ -379,6 +386,7 @@ def cv_score(
             y_pred = (
                 np.clip(phi * np.exp(raw_pred) - 1.0, 0.0, None)
                 if back_transform == "smearing"
+                # "geometric" == "arithmetic" for per-row predictions.
                 else np.clip(np.expm1(raw_pred), 0.0, None)
             )
         else:

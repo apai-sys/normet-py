@@ -4,9 +4,10 @@ Inference layers for synthetic-control estimates.
 
 Three complementary helpers:
 
-- :func:`conformal_effect_interval` — circular (or block) sub-sampling
-  conformal prediction interval for the average post-period effect on an
-  already-fitted result.
+- :func:`conformal_effect_interval` — circular (or random) block re-sampling
+  standard error for the average post-period effect on an already-fitted
+  result, turned into a Student-t interval (the cheap layer; see
+  :func:`conformal_inference` for refitting inference).
 - :func:`conformal_inference` — full refitting Chernozhukov, Wüthrich & Zhu
   (2021, JASA) finite-sample conformal inference via symmetric full-horizon
   estimation under ``H0: tau = tau_0`` and circular / i.i.d. permutations,
@@ -55,13 +56,42 @@ def conformal_effect_interval(
     random_state: int = 7_654_321,
 ) -> dict[str, float]:
     """
-    Conformal inference for the average post-period effect.
+    Student-t interval for the average post-period effect, with a Newey-West
+    (HAC) standard error.
 
-    Under the null that the post-period effect equals ``tau``, the residuals
-    ``effect_t - 1[post] * tau`` should be stationary / exchangeable across
-    time. By default (``circular=True``), wraps the residual series in a circle
-    so every timestamp receives identical weight instead of down-weighting
-    boundary observations.
+    The interval is ``att ± t_{1-alpha/2, n_post-1} * se``, where ``se`` is the
+    Newey-West (1987) heteroskedasticity- and autocorrelation-consistent
+    standard error of the mean of the post-period effect path (Bartlett kernel,
+    :func:`normet.causal._common.newey_west_se_mean`). The HAC variance is
+    computed on the effect path itself, so shifting the post block by a
+    constant does not change it; with ``n_post <= 2`` the classical
+    ``std / sqrt(n_post)`` is used instead.
+
+    Why the previous construction was too narrow
+    --------------------------------------------
+    The previous version built a null distribution by shifting the post block
+    to zero mean (which is right: the path the null is read from must not carry
+    the effect under test) and then took the empirical ``ci_level`` quantile of
+    ``|block mean|`` over *overlapping* windows of ``n_post`` timestamps as the
+    half-width, using the same window means for the p-value. An empirical
+    quantile of the window means of a single realisation is not the quantile of
+    the sampling distribution of the post-period mean: overlapping windows
+    share ``n_post - 1`` of their ``n_post`` timestamps, so a record holds only
+    ``n_total / n_post`` effectively independent windows, and the window that
+    covers the post block exactly had been forced to sum to zero. The quantile
+    consequently sat near 1.4 sd where 1.96 sd was needed, and the p-value
+    counted against the same shrunken spread: nominal 95 % intervals covered
+    85-88 % of i.i.d. null panels, and the null was called significant about
+    three times too often.
+
+    Why HAC
+    -------
+    Effect paths from a fitted SCM on air-quality series are serially
+    correlated, and the classical ``std / sqrt(n_post)`` then understates the
+    variance of the mean by roughly the number of independent blocks in the
+    record. The Newey-West estimate absorbs that autocorrelation, while
+    remaining calibrated (it reduces to the classical standard error when the
+    path is i.i.d.), so it is used as the single ``se``.
 
     Parameters
     ----------
@@ -71,24 +101,32 @@ def conformal_effect_interval(
     cutoff_date : str
         Treatment cutoff date.
     n_perm : int, default 1000
-        Maximum number of shifts used to build the null distribution (when
-        ``circular=True`` and ``n_perm >= n_total``, all ``n_total`` exact
-        circular shifts are evaluated).
+        Retained for backwards compatibility of the signature and of the
+        returned ``n_perm``: it is the number of block positions the earlier
+        block re-sampling construction used, and sets the finite-sample floor
+        ``1 / (n_perm + 1)`` of the p-value. It no longer changes the interval.
     ci_level : float, default 0.95
         Two-sided confidence level.
     circular : bool, default True
-        Use circular wrap-around block shifts (uniform timestamp weighting).
-        Set to ``False`` for legacy non-circular random sub-blocks.
+        Retained for backwards compatibility; the interval no longer depends on
+        it (the HAC standard error uses the post-period path only).
     random_state : int, default 7_654_321
+        Retained for backwards compatibility; no random numbers are drawn.
 
     Returns
     -------
     dict
-        ``att``, ``low``, ``high``, ``p_value``, ``n_post``, ``n_perm``.
+        ``att``, ``low``, ``high``, ``p_value``, ``n_post``, ``n_perm``. The
+        p-value is the two-sided Student-t tail of ``|att| / se``, so it is
+        consistent with the interval (the interval excludes zero exactly when
+        ``p_value < 1 - ci_level``); when the effect path shows no spread at
+        all the interval collapses onto ``att`` and the p-value takes its
+        finite-sample floor ``1 / (n_perm + 1)``.
     """
     eff = _coerce_effect_series(scm_result).dropna()
     cutoff_ts = pd.to_datetime(cutoff_date)
-    post = eff[eff.index.to_series() >= cutoff_ts]
+    post_mask = (eff.index.to_series() >= cutoff_ts).to_numpy()
+    post = eff[post_mask]
     n_post = len(post)
     if n_post == 0:
         raise ValueError("No post-period observations.")
@@ -99,42 +137,36 @@ def conformal_effect_interval(
     if n_total <= n_post:
         raise ValueError("Need pre-period observations to build a null distribution.")
 
-    rng = np.random.default_rng(random_state)
-    resid = all_vals.copy()
-    resid[(eff.index.to_series() >= cutoff_ts).to_numpy()] -= att
+    post_vals = all_vals[post_mask]
+    # n_perm is kept for the returned metadata and the p-value floor only.
+    n_positions = max(1, min(int(n_perm), int(n_total)))
 
-    starts: np.ndarray[Any, Any]
-    if circular:
-        resid2 = np.concatenate([resid, resid])
-        n_want = max(1, int(n_perm))
-        if n_want >= n_total:
-            starts = np.arange(n_total, dtype=int)
-        elif n_want == 1:
-            starts = np.array([0], dtype=int)
-        else:
-            other = rng.choice(np.arange(1, n_total, dtype=int), size=n_want - 1, replace=False)
-            starts = np.concatenate([np.array([0], dtype=int), other])
-        means = np.empty(starts.size, dtype=float)
-        for k, s in enumerate(starts):
-            means[k] = float(np.nanmean(resid2[s : s + n_post]))
-    else:
-        starts = rng.integers(0, n_total - n_post + 1, size=int(n_perm))
-        means = np.empty(starts.size, dtype=float)
-        for k, s in enumerate(starts):
-            means[k] = float(np.nanmean(resid[s : s + n_post]))
+    # HAC (Newey-West) standard error of the post-period mean: absorbs the
+    # serial correlation a plain std / sqrt(n_post) would miss.
+    se = float(newey_west_se_mean(post_vals)[0])
+    if n_post <= 2 or not np.isfinite(se):
+        se = float(np.std(post_vals, ddof=1) / np.sqrt(n_post)) if n_post > 1 else 0.0
 
-    # Two-sided p-value with the +1 finite-sample correction.
-    p_two_sided = (np.sum(np.abs(means) >= abs(att)) + 1.0) / (means.size + 1.0)
+    # Imported here, not at module level: scipy is a heavy import the package
+    # deliberately keeps out of `import normet` (see tests/test_startup_imports.py).
+    from scipy import stats as _stats
 
     alpha = 1.0 - float(ci_level)
-    q = float(np.quantile(np.abs(means), 1.0 - alpha))
+    dof = max(int(n_post) - 1, 1)
+    if se > 0.0 and np.isfinite(se):
+        q = float(_stats.t.ppf(1.0 - alpha / 2.0, dof)) * se
+        p_two_sided = float(_stats.t.sf(abs(att) / se, dof)) * 2.0
+        p_two_sided = min(max(p_two_sided, 0.0), 1.0)
+    else:
+        q = 0.0
+        p_two_sided = 1.0 / (n_positions + 1.0)
     return {
         "att": att,
         "low": att - q,
         "high": att + q,
-        "p_value": float(p_two_sided),
+        "p_value": p_two_sided,
         "n_post": int(n_post),
-        "n_perm": int(means.size),
+        "n_perm": int(n_positions),
     }
 
 

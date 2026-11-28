@@ -127,6 +127,7 @@ def test_load_model_uses_the_file_when_path_is_a_file(tmp_path: Path) -> None:
     assert loaded.backend == "mock_io"
     assert calls == [(saved, None)]
 
-    # A directory still resolves through the filename (the default here).
+    # A directory resolves the one model file it holds when the requested
+    # (default) filename is absent, so a custom filename round-trips.
     load_model(str(tmp_path), backend="mock_io")
-    assert calls[-1] == (str(tmp_path), "automl.joblib")
+    assert calls[-1] == (str(tmp_path), "my_model.joblib")

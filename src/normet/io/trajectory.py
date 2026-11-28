@@ -224,7 +224,20 @@ def _bearings_unit_vec(
 
 
 def _is_bbox(region: Any) -> bool:
-    """A ``(lon_min, lat_min, lon_max, lat_max)`` box, numpy scalars included."""
+    """A ``(lon_min, lat_min, lon_max, lat_max)`` box, numpy arrays included.
+
+    The bounds often arrive as a numpy array (a config row, a fitted box);
+    without this, such a region fell through to the shapely branch and failed
+    with a broadcast error naming neither the region nor its type.
+    """
+    if isinstance(region, np.ndarray):
+        return (
+            region.ndim == 1
+            and region.size == 4
+            and np.issubdtype(region.dtype, np.number)
+            and not np.issubdtype(region.dtype, np.bool_)
+            and bool(np.all(np.isfinite(region)))
+        )
     return (
         isinstance(region, tuple | list)
         and len(region) == 4

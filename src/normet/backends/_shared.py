@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pandas as pd
 
@@ -39,6 +41,20 @@ def resolve_sample_weight(
                 f"or input frame ({len(df_full)})."
             )
 
-    if not np.all(np.isfinite(arr)) or np.any(arr < 0.0):
-        raise ValueError("`sample_weight` must contain finite non-negative values.")
+    if not np.all(np.isfinite(arr)):
+        # The documented contract for `build_model`/`train_model`: non-finite
+        # observation weights warn and are dropped -- they enter the fit as
+        # weight 0, so the affected rows carry no weight. Raising here instead
+        # meant the two entry points disagreed (build_model median-imputed the
+        # NaNs, a direct train_model call raised).
+        bad = ~np.isfinite(arr)
+        warnings.warn(
+            f"{int(np.sum(bad))} non-finite `sample_weight` value(s) were dropped "
+            "(given weight 0).",
+            UserWarning,
+            stacklevel=2,
+        )
+        arr = np.where(bad, 0.0, arr)
+    if np.any(arr < 0.0):
+        raise ValueError("`sample_weight` must contain non-negative values.")
     return arr

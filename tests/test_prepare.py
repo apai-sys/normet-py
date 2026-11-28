@@ -209,3 +209,63 @@ def test_impute_values_fills_a_nullable_integer_with_a_fractional_median():
     df = pd.DataFrame({"value": [1.0, 2.0, 3.0], "x": pd.array([1, pd.NA, 2], dtype="Int64")})
     out = impute_values(df, dropna=True)
     assert out["x"].tolist() == [pytest.approx(1.0), pytest.approx(1.5), pytest.approx(2.0)]
+
+
+# ---------------------------------------------------------------------------
+# An embargo that purges the record, not just the block boundaries
+# ---------------------------------------------------------------------------
+
+
+def _embargo_frame(n: int = 300) -> pd.DataFrame:
+    rng = np.random.default_rng(0)
+    return pd.DataFrame(
+        {
+            "date": pd.date_range("2020-01-01", periods=n, freq="h"),
+            "x": rng.normal(size=n),
+            "value": rng.normal(size=n) + 10.0,
+        }
+    )
+
+
+def test_random_split_embargo_that_leaves_a_handful_of_rows_raises():
+    """random + a wide embargo purges every test row's neighbours, and they overlap.
+
+    At ``embargo=6`` on 300 rows only 11 training rows survived; the run then
+    died inside LightGBM's fold builder with "range() arg 3 must not be zero",
+    which names neither embargo nor the split.
+    """
+    from normet.utils.prepare import prepare_data
+
+    with pytest.raises(ValueError, match="embargo=6.*leaves only"):
+        prepare_data(
+            _embargo_frame(),
+            target="value",
+            covariates=["x"],
+            split_method="random",
+            train_fraction=0.75,
+            embargo=6,
+        )
+
+
+def test_random_split_embargo_that_eats_half_the_record_warns():
+    from normet.utils.prepare import split_into_sets
+
+    with pytest.warns(UserWarning, match="purges"):
+        split_into_sets(_embargo_frame(), "random", 0.75, seed=1, embargo=1)
+
+
+def test_a_contiguous_split_purges_only_its_boundaries():
+    """The documented use of embargo: a block boundary, not every test row."""
+    from normet.utils.prepare import split_into_sets
+
+    out = split_into_sets(_embargo_frame(), "ts", 0.75, seed=1, embargo=6)
+    counts = out["set"].value_counts().to_dict()
+    assert counts["embargo"] == 6
+    assert counts["training"] > 200
+
+
+def test_zero_embargo_is_untouched():
+    from normet.utils.prepare import split_into_sets
+
+    out = split_into_sets(_embargo_frame(), "random", 0.75, seed=1, embargo=0)
+    assert set(out["set"].unique()) == {"training", "testing"}

@@ -299,11 +299,19 @@ def permutation_importance(
     Unlike tree split gain on training data, block permutation measures each
     predictor's true contribution to held-out generalization while preserving
     short-range autocorrelation inside blocks of length ``block_size``.
+
+    When ``log_transform=True``, ``back_transform="smearing"`` multiplies
+    ``exp(z)`` by the Duan smearing factor. ``"geometric"`` is accepted too,
+    but on per-row predictions it coincides with ``"arithmetic"``: the two
+    differ only where a mean is taken on the ``log1p`` scale before
+    back-transforming (as in :func:`normet.normalise`).
     """
     from ..model.predict import ml_predict
 
     metric_map = {"RMSE": "RMSE", "MGE": "MGE", "MAE": "MAE", "NSE": "NSE", "R2": "R2"}
-    metric_key = metric_map.get(metric.upper() if metric.upper() != "R2" else "R2")
+    # str() before .upper(): a non-string metric must reach the ValueError
+    # below, not die with AttributeError on `None.upper()`.
+    metric_key = metric_map.get(str(metric).strip().upper())
     if metric_key is None:
         raise ValueError(
             f"Unsupported `metric` {metric!r}; choose from ('RMSE', 'MGE', 'MAE', 'NSE', 'R2')."
@@ -354,6 +362,8 @@ def permutation_importance(
             return yhat
         if back_transform == "smearing":
             return np.clip(sf * np.exp(yhat) - 1.0, 0.0, None)
+        # "arithmetic" and "geometric" coincide for per-row predictions: a
+        # geometric mean of one value is that value (see the docstring).
         return np.clip(np.expm1(yhat), 0.0, None)
 
     base_score = _eval_metric_score(_predict_orig(work), y_true, metric_key)

@@ -45,6 +45,7 @@ __all__ = [
     "RegimeConditionedResult",
     "normalise_ox_invariant",
     "normalise_regime_conditioned",
+    "ox_conservation_error",
 ]
 
 # IUPAC standard molar masses (g/mol) for mass <-> molar-equivalent conversion.
@@ -57,7 +58,27 @@ _MOLAR_MASS: dict[str, float] = {
 
 @dataclass
 class ConservedOxResult:
-    """Output of :func:`normalise_ox_invariant`."""
+    """Output of :func:`normalise_ox_invariant`.
+
+    ``species`` reports every species in the input's concentration unit. The
+    totals are *constituent sums*, not a single species' equivalent: the odd
+    oxygen and NOx columns are
+
+    ``Ox_observed = O3_observed + NO2_observed`` and
+    ``NOx_observed = NO2_observed + NO_observed`` (and the same for the
+    ``*_normalised`` block), and ``O3_titration_effect`` stays O3-equivalent
+    mass. So the returned mass columns add up exactly, and the molar laws
+    ``Ox = O3 + NO2`` / ``NOx = NO + NO2`` are recovered from them with each
+    species' own IUPAC molar mass (:func:`ox_conservation_error`).
+
+    ``conservation_max_err`` is the largest absolute residual of those molar
+    identities over the record -- ``mol m^-3`` when ``unit='ug_m3'`` (a ug
+    m^-3 column divided by its species' molar mass in ug per mol) and
+    ppb-equivalent moles when ``unit='ppb'``; it is absolute, not relative.
+    A consistent fit leaves it at round-off (~1e-22 mol m^-3 at tens of
+    ug m^-3); it rises as soon as a reported column stops summing to its
+    total. See :func:`ox_conservation_error` for the exact definition.
+    """
 
     species: pd.DataFrame
     ox_result: pd.DataFrame
@@ -66,6 +87,117 @@ class ConservedOxResult:
     unit: str
     method: str
     conservation_max_err: float
+
+
+def _molar_scale(unit: str) -> dict[str, float]:
+    """Per-species divisor (in the frame's unit per mole) turning a column into ``mol``.
+
+    With ``unit='ug_m3'`` the columns are mass concentrations in ug m^-3, so a
+    species divides by its **own** IUPAC molar mass in ug per mol -- g/mol
+    times 1e6 (O3 48.0000, NO2 46.0055, NO 30.0061 g/mol) -- and the quotient
+    is mol m^-3. With ``unit='ppb'`` the columns are already molar (mole per
+    mole) and every divisor is 1.0.
+    """
+    if unit == "ug_m3":
+        return {name: mass * 1e6 for name, mass in _MOLAR_MASS.items()}
+    if unit == "ppb":
+        return {name: 1.0 for name in _MOLAR_MASS}
+    raise ConfigError(f"`unit` must be 'ug_m3' or 'ppb', got {unit!r}.")
+
+
+def ox_conservation_error(
+    species: pd.DataFrame,
+    *,
+    unit: str = "ug_m3",
+    ox_mol: np.ndarray | pd.Series | None = None,
+    nox_mol: np.ndarray | pd.Series | None = None,
+) -> float:
+    """Largest absolute violation of the molar O_x / NO_x conservation laws.
+
+    Both laws are written in **moles**, not in mass: odd oxygen is
+    ``Ox = O3 + NO2`` and ``NOx = NO + NO2`` in ppb-equivalent moles, and each
+    species enters with its *own* molar mass (1 umol of O3 is 48.00 ug, 1 umol
+    of NO2 is 46.0055 ug). A reported mass column is turned back into moles by
+    dividing it by that species' molar mass in ug per mol, so a fit whose
+    columns add up in their own units also satisfies the molar law.
+
+    Parameters
+    ----------
+    species : pandas.DataFrame
+        The ``*_normalised`` columns of a :class:`ConservedOxResult` frame
+        (the ones :func:`normalise_ox_invariant` reports). ``O3_normalised``
+        and ``NO2_normalised`` are required; ``Ox_normalised``,
+        ``NOx_normalised`` and ``NO_normalised`` are used when present.
+    unit : {"ug_m3", "ppb"}, default "ug_m3"
+        Unit of the columns; ``'ug_m3'`` divides by the species' molar mass
+        in ug per mol, ``'ppb'`` leaves the (already molar) values alone.
+    ox_mol, nox_mol : array-like, optional
+        The deweathered *molar* total odd oxygen / NOx series. When given,
+        the residual is also measured against them, which is the only part of
+        the check that cannot be reproduced from the frame alone.
+
+    Returns
+    -------
+    float
+        Maximum over samples of
+
+        - ``|O3_normalised + NO2_normalised - Ox_normalised| / M(O3)`` -- the
+          arithmetic a caller repeats on the returned frame, expressed in
+          O3-equivalent moles (``M`` in ug per mol, so the quotient is
+          mol m^-3);
+        - ``|NO2_normalised + NO_normalised - NOx_normalised| / M(NO2)`` --
+          the same for NOx (only when the frame carries ``NO_normalised``,
+          i.e. when the input had a NO column);
+        - ``|o3_mol + no2_mol - ox_mol|`` and ``|no_mol + no2_mol - nox_mol|``
+          when the molar totals are supplied.
+
+        An absolute residual, in ``mol m^-3`` for ``unit='ug_m3'`` and in
+        ppb-equivalent moles for ``unit='ppb'`` (not relative: divide by the
+        ``Ox_*`` column for a relative error). It is round-off -- 0 or ~1e-22
+        at concentrations of a few tens of ug m^-3 -- for a frame that adds up,
+        and grows linearly with any perturbation of a constituent column.
+        ``nan`` if ``species`` holds no usable rows.
+    """
+    mw = _molar_scale(unit)
+    missing = [c for c in ("O3_normalised", "NO2_normalised") if c not in species.columns]
+    if missing:
+        raise DataError(
+            f"`species` is missing the column(s) {missing}; expected the frame "
+            "`normalise_ox_invariant` returns."
+        )
+
+    def _column(name: str) -> np.ndarray:
+        return species[name].to_numpy(dtype=float)
+
+    o3_mass = _column("O3_normalised")
+    no2_mass = _column("NO2_normalised")
+    o3_moles = o3_mass / mw["O3"]
+    no2_moles = no2_mass / mw["NO2"]
+    no_moles = _column("NO_normalised") / mw["NO"] if "NO_normalised" in species.columns else None
+
+    residuals: list[np.ndarray] = []
+    # The totals the frame reports must be the sums of their constituents in
+    # the frame's own unit; divided by a molar mass they become O3- /
+    # NO2-equivalent moles, the unit the comparison is made in.
+    if "Ox_normalised" in species.columns:
+        residuals.append((_column("Ox_normalised") - (o3_mass + no2_mass)) / mw["O3"])
+    if "NOx_normalised" in species.columns and no_moles is not None:
+        nox_parts_mass = no2_mass + _column("NO_normalised")
+        residuals.append((_column("NOx_normalised") - nox_parts_mass) / mw["NO2"])
+    # The model-side closure: the molar series the deweathering models
+    # produced, which the repartition has to reproduce from the reported masses.
+    if ox_mol is not None:
+        residuals.append(o3_moles + no2_moles - np.asarray(ox_mol, dtype=float))
+    if nox_mol is not None:
+        parts = no2_moles if no_moles is None else no2_moles + no_moles
+        residuals.append(parts - np.asarray(nox_mol, dtype=float))
+
+    worst = np.nan
+    for residual in residuals:
+        finite = np.abs(residual[np.isfinite(residual)])
+        if finite.size:
+            worst = float(finite.max()) if np.isnan(worst) else max(worst, float(finite.max()))
+    return float(worst)
 
 
 @dataclass
@@ -279,6 +411,35 @@ def normalise_ox_invariant(
     Returns
     -------
     ConservedOxResult
+
+    Notes
+    -----
+    **What is conserved.** Odd oxygen and NOx are conserved in *moles*,
+    :math:`\\mathrm{O_x} = \\mathrm{O_3} + \\mathrm{NO_2}` and
+    :math:`\\mathrm{NO_x} = \\mathrm{NO} + \\mathrm{NO_2}` in ppb-equivalent
+    moles, with every species carrying its own IUPAC molar mass (O3 48.0000,
+    NO2 46.0055, NO 30.0061 g/mol) so that 1 umol of O3 (48.00 ug) and 1 umol
+    of NO2 (46.0055 ug) each count as one mole of Ox. With ``unit='ppb'`` the
+    columns are already molar and the molar masses are 1.0.
+
+    **How the columns report it.** ``species`` keeps every column in the input
+    unit. The two legs are reported in each species' own mass, and the totals
+    are their **constituent sums** --
+    ``Ox_* = O3_* + NO2_*`` and ``NOx_* = NO2_* + NO_*`` -- so the mass
+    columns add up exactly. (Reporting Ox as O3-*equivalent* mass, as earlier
+    versions did, made ``Ox_normalised - O3_normalised - NO2_normalised``
+    reach ~4 % of the Ox level, about 1.7 ug m^-3 at 40 ug m^-3 of O3.)
+    ``O3_titration_effect`` remains an O3-equivalent mass, as named.
+
+    **How the error is normalised.**
+    :attr:`ConservedOxResult.conservation_max_err` is an **absolute** molar
+    residual -- ``mol m^-3`` for ``unit='ug_m3'`` (mass columns divided by
+    g/mol) and ppb-equivalent moles for ``unit='ppb'`` -- of the identities
+    above, measured on the returned frame (:func:`ox_conservation_error`).
+    It is round-off (0 or ~1e-22 at tens of ug m^-3) for a consistent fit and
+    grows as soon as a reported column stops summing to its total; divide by
+    the ``Ox_*`` column if a relative error is wanted. When the input has no
+    NO column there is no NO leg, so only the Ox identity is checked there.
     """
     if unit not in ("ug_m3", "ppb"):
         raise ConfigError(f"`unit` must be 'ug_m3' or 'ppb', got {unit!r}.")
@@ -452,7 +613,14 @@ def normalise_ox_invariant(
     no2_mol_dew = np.clip(f_dew * ox_dew, 0.0, np.minimum(ox_dew, nox_dew))
     o3_mol_dew = np.maximum(0.0, ox_dew - no2_mol_dew)
     no_mol_dew = np.maximum(0.0, nox_dew - no2_mol_dew)
-    cons_err = float(np.nanmax(np.abs((o3_mol_dew + no2_mol_dew) - ox_dew)))
+    # Each leg is converted to mass with its own molar mass. The totals are
+    # the *constituent sums* of those masses, so the reported columns add up
+    # in the frame's own unit and the molar law is recoverable from them
+    # (see `ox_conservation_error`); the previous `Ox = ox_mol * M(O3)`
+    # reported O3-equivalent mass and was ~4 % away from O3 + NO2.
+    o3_mass_dew = o3_mol_dew * mw_o3
+    no2_mass_dew = no2_mol_dew * mw_no2
+    no_mass_dew = no_mol_dew * mw_no
 
     titration_mol = (f_clim - f_dew) * ox_dew
     titration_series = pd.Series(
@@ -466,32 +634,53 @@ def normalise_ox_invariant(
                 "O3_observed": o3_obs,
                 "NO2_observed": no2_obs,
                 "NO_observed": no_obs,
-                "Ox_observed": ox_mol * mw_o3,
-                "NOx_observed": nox_mol * mw_no2,
             }
         )
         .groupby("date", as_index=True)
         .mean()
         .reindex(common_idx)
     )
+    o3_obs_g = obs_frame["O3_observed"].to_numpy(dtype=float)
+    no2_obs_g = obs_frame["NO2_observed"].to_numpy(dtype=float)
+    no_obs_g = obs_frame["NO_observed"].to_numpy(dtype=float)
 
     species_dict: dict[str, Any] = {
-        "O3_observed": obs_frame["O3_observed"].to_numpy(dtype=float),
-        "O3_normalised": o3_mol_dew * mw_o3,
-        "NO2_observed": obs_frame["NO2_observed"].to_numpy(dtype=float),
-        "NO2_normalised": no2_mol_dew * mw_no2,
-        "Ox_observed": obs_frame["Ox_observed"].to_numpy(dtype=float),
-        "Ox_normalised": ox_dew * mw_o3,
-        "NOx_observed": obs_frame["NOx_observed"].to_numpy(dtype=float),
-        "NOx_normalised": nox_dew * mw_no2,
+        "O3_observed": o3_obs_g,
+        "O3_normalised": o3_mass_dew,
+        "NO2_observed": no2_obs_g,
+        "NO2_normalised": no2_mass_dew,
+        "Ox_observed": o3_obs_g + no2_obs_g,
+        "Ox_normalised": o3_mass_dew + no2_mass_dew,
+        # Without a NO leg there is nothing to add to NO2, so NOx is the
+        # reported NO2 (the deweathered NOx series itself stays in
+        # `nox_result`).
+        "NOx_observed": no2_obs_g + no_obs_g if has_no else no2_obs_g,
+        "NOx_normalised": no2_mass_dew + no_mass_dew if has_no else no2_mass_dew,
         "O3_titration_effect": titration_series.to_numpy(dtype=float),
         "f_no2_normalised": f_dew,
     }
     if has_no:
-        species_dict["NO_observed"] = obs_frame["NO_observed"].to_numpy(dtype=float)
-        species_dict["NO_normalised"] = no_mol_dew * mw_no
+        species_dict["NO_observed"] = no_obs_g
+        species_dict["NO_normalised"] = no_mass_dew
 
     species_df = pd.DataFrame(species_dict, index=pd.Index(common_idx, name="date"))
+    # Measured on the frame that is returned, so it is the same number a
+    # caller recomputing O3 + NO2 against Ox sees. The molar totals are the
+    # model-side reference and are passed only when the frame can express
+    # them: with no NO column, NOx = NO2 is a *repartition* choice, not a
+    # conservation law the frame can violate.
+    #
+    # `ox_dew`/`nox_dew` are the deweathered `_Ox_mol`/`_NOx_mol` series,
+    # i.e. a ug m^-3 column over g/mol -- umol m^-3, not mol m^-3 -- so they
+    # are scaled to the mol m^-3 the diagnostic is reported in. (With
+    # `unit='ppb'` the series are already molar and the factor is 1.)
+    micro_to_mol = 1e-6 if unit == "ug_m3" else 1.0
+    cons_err = ox_conservation_error(
+        species_df,
+        unit=unit,
+        ox_mol=ox_dew * micro_to_mol,
+        nox_mol=nox_dew * micro_to_mol if has_no else None,
+    )
     return ConservedOxResult(
         species=species_df,
         ox_result=ox_df,

@@ -63,7 +63,12 @@ def _import_foundation() -> tuple[Any, Any]:
     if sys.platform == "darwin":
         os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
     try:
-        import torch
+        # Through the helper, not ``import torch``: it caps torch's intra-op pool
+        # when a second OpenMP runtime (LightGBM's, scikit-learn's) is already
+        # loaded, without which a forward pass can segfault on macOS.
+        from ..utils._omp import import_torch
+
+        torch = import_torch()
         from chronos import Chronos2Pipeline
     except ImportError as err:  # pragma: no cover - depends on optional extra
         raise ImportError(

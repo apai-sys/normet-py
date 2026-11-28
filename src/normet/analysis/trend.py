@@ -226,11 +226,14 @@ class TrendBreaks:
     for "is the best split better than pure noise searched over every
     candidate position", and ``significant`` whether it passed ``alpha``.
     When the gate fails, ``n_segments`` is 1 and the gate's numbers stay in
-    ``sse_single`` / ``sse_segmented`` / ``p_value`` / ``notes`` so a report
-    can say why the record was kept as one regime. ``best_break`` is the
-    position (index value) of the first round's best cut -- the start of the
-    would-be second regime -- and ``best_split_pct`` its SSE reduction,
-    reported even when the gates rejected it.
+    ``sse_single`` / ``sse_segmented`` / ``notes`` so a report can say why the
+    record was kept as one regime -- and ``p_value`` too when the bootstrap
+    gate is what failed, but not when the BIC gate stopped the search first:
+    the bootstrap is only run for ``k >= 2``, so a record kept as one regime
+    by BIC has ``p_value is None``. ``best_break`` is the position (index
+    value) of the first round's best cut -- the start of the would-be second
+    regime -- and ``best_split_pct`` its SSE reduction, reported even when the
+    gates rejected it.
     """
 
     name: str
@@ -321,12 +324,19 @@ def _to_series(series: pd.Series | pd.DataFrame, value_col: str | None) -> tuple
     """Reduce a DataFrame via ``value_col``, or pass a Series through.
 
     Returns the sorted float series and ``positional``: True when the input
-    carries no real timestamps -- a :class:`~pandas.RangeIndex` left as
-    0..n-1 (the default when no index is given), or one with a
-    :class:`~pandas.Timedelta` frequency, which *is* read as time. Such
-    positional records are tested on the 0..n-1 grid and their slopes are
-    per *step* -- the series is not assumed hourly, which a blanket
-    ``to_datetime`` conversion of positions would silently be.
+    carries no real timestamps -- a numeric index (the 0..n-1 a
+    :class:`~pandas.RangeIndex` starts with, and every plain integer or float
+    index pandas leaves behind after a mask, a ``dropna``, a sort or a
+    ``concat``). Such positional records are tested on the 0..n-1 grid and
+    their slopes are per *step* -- the series is not assumed hourly, which a
+    blanket ``to_datetime`` conversion of positions would silently be.
+
+    A non-numeric index (dates as strings, ``pd.Timestamp`` objects,
+    ``PeriodIndex``) is read as time. The distinction matters: reading an
+    integer index as nanoseconds since the epoch -- what the old RangeIndex-only
+    test did for anything else -- turned a 0.5-per-step ramp on
+    ``pd.Index(arange(n))`` into a slope of 4.3e13 "per day", and left
+    ``slope_per_year`` a fabricated 1.6e16.
     """
     if isinstance(series, pd.DataFrame):
         if value_col is None:
@@ -338,7 +348,7 @@ def _to_series(series: pd.Series | pd.DataFrame, value_col: str | None) -> tuple
         s = series
     idx = s.index
     positional = not isinstance(idx, pd.DatetimeIndex) and (
-        isinstance(idx, pd.RangeIndex) and not isinstance(getattr(idx, "freq", None), pd.Timedelta)
+        isinstance(idx, pd.RangeIndex) or pd.api.types.is_numeric_dtype(idx.dtype)
     )
     s = s.astype(float)
     if not positional:
@@ -371,8 +381,11 @@ def _time_grid(s: pd.Series, x: pd.Series, positional: bool) -> np.ndarray:
     if not positional:
         assert isinstance(x.index, pd.DatetimeIndex)
         return x.index.to_numpy(dtype="datetime64[ns]").astype("int64") / (10**9 * 86400)
+    # The index *is* the grid: a RangeIndex gives 0..n-1, and an integer or
+    # float index carries the step coordinate the caller meant -- a masked or
+    # gap-ed record keeps its real stops instead of being renumbered 0..n_kept.
     finite = np.isfinite(s.to_numpy())
-    return np.arange(len(s), dtype=float)[finite]
+    return np.asarray(s.index, dtype=float)[finite]
 
 
 def _has_time_spacing(s: pd.Series, is_dt: bool) -> bool:

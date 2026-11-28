@@ -827,8 +827,34 @@ def split_into_sets(
             for k in range(stop, min(n, stop + emb)):
                 if labels[k] == "training":
                     labels[k] = "embargo"
-        if not np.any(labels == "training"):
+        n_train = int(np.sum(labels == "training"))
+        if n_train == 0:
             raise ValueError(f"`embargo={emb}` excludes all training rows across {n} samples.")
+        # A scattered ("random") test set purges ``emb`` rows on *both* sides of
+        # every single test row, and the purges overlap: at emb=6 on 300 rows
+        # only 11 training rows survive (at emb=12, none). Left to fail later,
+        # the symptom is LightGBM's "range() arg 3 must not be zero" from the
+        # CV fold builder, which names neither embargo nor the split. Refuse
+        # here, where the cause is still visible, and warn when the run is
+        # legal but the purge has eaten half the record.
+        if split_method == "random":
+            n_test = int(np.sum(labels == "testing"))
+            if n_train < max(20, n // 20):
+                raise ValueError(
+                    f"`embargo={emb}` leaves only {n_train} of {n} rows for training: with "
+                    "split_method='random' each test row purges its neighbours too, so the "
+                    "embargoes overlap. Use a contiguous split ('ts', 'blocked', 'month_ts') "
+                    "for purging, or a smaller embargo."
+                )
+            if n_train < n // 2:
+                warnings.warn(
+                    f"`embargo={emb}` with split_method='random' purges "
+                    f"{n - n_train - n_test} of {n} rows and leaves {n_train} for training; "
+                    "a contiguous split ('ts', 'blocked', 'month_ts') purges only the block "
+                    "boundaries.",
+                    UserWarning,
+                    stacklevel=2,
+                )
         out["set"] = labels
 
     return out

@@ -304,6 +304,15 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   switch are unchanged.
 
 ### Changed
+- **`normalise_ox_invariant` reports its Ox and NOx totals as constituent sums.**
+  `Ox_observed`/`Ox_normalised` are now `O3 + NO2` and
+  `NOx_observed`/`NOx_normalised` are `NO2 + NO` in the frame's own unit,
+  where they were O3-/NO2-*equivalent* masses (a constant molar-mass
+  rescaling: about -1.4 % for Ox and -15 % for NOx at typical mixes). The
+  columns now add up, so `Ox - O3 - NO2` is round-off rather than ~1.7
+  ug m^-3, and the molar law is recoverable with each species' own molar
+  mass. `ox_result`/`nox_result` are unchanged (molar, umol m^-3), so the
+  O3-equivalent Ox remains available from them.
 - **User manual rebuilt for 0.3.0** (`docs/manual/normet_manual.tex` and
   `normet_manual_zh.tex`, both PDFs): the books now document the v3 engines
   (DML, conserved Ox–NOx, regime-conditioned, ICN and its draw bank), the
@@ -353,6 +362,98 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
     the default `traj_*` column set is unchanged; Transport Studio passes it.
 
 ### Fixed
+- **A first-principles audit of the numeric surface** (five parallel reviews, each
+  finding reproduced by execution). Defects fixed:
+  - **macOS: the two OpenMP runtimes no longer crash Chronos-2.** PyTorch,
+    LightGBM and scikit-learn each link their own libomp; LLVM's runtime
+    tolerates the second copy only under `KMP_DUPLICATE_LIB_OK`, which warns it
+    "may cause crashes". It did -- a LightGBM fit followed by a torch forward
+    pass segfaulted, taking the full test suite (and any user combining
+    `do_all` with `nm.ChronosEmbedder`) down with it. `normet` now imports torch
+    through `normet.utils._omp.import_torch`, which caps torch's intra-op pool
+    at one thread when a second OpenMP runtime is already loaded
+    (`NORMET_TORCH_THREADS` overrides, `0` disables); the whole suite runs in
+    one process again, and `CONTRIBUTING.md`'s two-process workaround is gone.
+  - **`theil_sen` read a plain integer index as nanoseconds.** Any non-datetime
+    numeric index -- what a boolean mask, a `.loc`, a `dropna` or a `concat`
+    leaves behind -- was converted to `DatetimeIndex` (integers as ns since the
+    epoch), so a 0.5-per-step ramp reported a slope of 4.3e13 "per day" and a
+    fabricated `slope_per_year`, while `mann_kendall` on the same series stayed
+    right. A numeric index is now a step grid (its own values, gaps
+    preserved), and date-like text keeps its calendar. `detect_trend_breaks`
+    also documents that `p_value` is `None` when the BIC gate is what rejected
+    a record.
+  - **An embargo could purge the training set and fail inside LightGBM.**
+    With the default `split_method="random"` every test row purges its
+    neighbours, and the purges overlap: `embargo=6` on 300 rows left 11
+    training rows and the run died with LightGBM's "range() arg 3 must not be
+    zero". `split_into_sets` now refuses a purge that leaves fewer than
+    `max(20, n/20)` training rows (naming the embargo and the split) and warns
+    when a random split loses more than half the record.
+  - **`cv_score(impute="median")` imputed from the whole frame**, not the
+    fold, contradicting its docstring: validation rows set the fill values.
+    The fold call now uses the training-only fill (`"train_median"`), as
+    `do_all_unc` already did.
+  - **`dataframe_hash` ignored column names and dtypes**, so a renamed frame
+    (or a bool column against an int one) reused another frame's cache entry
+    and provenance `data_hash`. The digest now folds in the column names and
+    dtypes. Cache keys change once.
+  - **`do_all(normalise_method="dml")` returned a frame on the wrong scale**:
+    the third tuple item was not `log1p`-scaled under `log_transform=True`
+    and ignored `impute`/`max_gap`, unlike every other engine's.
+  - **`cluster_trajectories` died on one coordinate-less endpoint** (HYSPLIT
+    writes NaN where a path leaves the domain) with scipy's "condensed
+    distance matrix must contain only finite values", naming nothing; the
+    located rows are now used, as the footprint path already did.
+  - **A source region given as a numpy box was not recognised as a bbox** and
+    failed inside shapely with a broadcast error; `(lon_min, lat_min,
+    lon_max, lat_max)` arrays are accepted.
+  - **`normalise_ox_invariant`'s `conservation_max_err` was a tautology**
+    (O3 was defined as `Ox - NO2`, so the residual it measured was zero by
+    algebra) **and its Ox/NOx totals mixed molar masses**, leaving
+    `O3_normalised + NO2_normalised - Ox_normalised` up to 1.7 ug m^-3.
+    `conservation_max_err` is now the largest *molar* residual of
+    `Ox = O3 + NO2` / `NOx = NO + NO2` on the returned frame, computed with
+    each species' own IUPAC molar mass in mol m^-3 (ppb-equivalent for
+    `unit='ppb'`); the new `nm.ox_conservation_error` recomputes it, and a
+    perturbed column grows it linearly. See **Changed** for the redefined
+    totals.
+  - **Two quantiles that format to the same column name silently collapsed**
+    into one (`return_quantiles=[0.05, 0.0501]` produced just `q050`). They
+    now raise a `ValueError` naming both values and the shared column, before
+    any resampling, keeping the documented `q025`/`q500`/`q975` names.
+  - **`conditional_on` could not filter on a `df` column that is not a
+    covariate** (`conditional_on={"site": ...}` died with a pool-column
+    error); the column is now carried into the default resampling pool (and
+    into the cache key), and the error names the pool.
+  - **`replace=False` with a pool smaller than the frame** raised numpy's bare
+    "Cannot take a larger sample than population"; a `ConfigError` now names
+    `replace`, the pool size and the drawn size.
+  - **`make_synthetic_benchmark` dropped a whole day for any `freq` other
+    than "h"/"D"** (a fixed 24 h was subtracted; 10 days of 6-hourly data
+    produced 37 rows instead of 40, while `metadata["n_days"]` said 10); the
+    record now ends one sampling step early, so rows, span and metadata
+    agree at every frequency.
+  - **`load_model(<dir>)` could not reload a model saved under another
+    filename** (it pinned `automl.joblib`): the directory's single
+    `*.joblib`/`*.pkl` is now loaded, several candidates raise unless
+    `filename` names one, and none falls back to the backend's own default.
+  - **Non-finite `sample_weight` was silently median-imputed on the array
+    path** while `train_model` raised and the docstring promised "warn and
+    drop". Both paths now warn and enter the fit as weight 0.
+  - **A short record with the default `cv_folds=5` died inside LightGBM**
+    ("range() arg 3 must not be zero"); a `ValueError` now names the row
+    count, `cv_folds` and the minimum.
+  - **`permutation_importance(metric=None)` escaped as `AttributeError`**;
+    it is the documented `ValueError` now. `native_nan` is no longer logged
+    as an unsupported `model_config` key although the backend honours it.
+  - **`modStats(subset=..., by=...)` ignored `subset`** and reported metrics
+    over every row; the grouped path now evaluates the requested rows only.
+  - Documentation: `build_model`/`train_model` now state the real `verbose`
+    default (`False`), that `covariates` is required, and what a non-finite
+    `sample_weight` does; `back_transform="geometric"` is documented as
+    coinciding with `"arithmetic"` for per-row predictions; the DML basis is
+    described as the half-range cosine series it is, not "DCT-II".
 - **Packaging docs and the Windows installer fallback**: `packaging/README.md`
   names the macOS bundle `Normet.app`, as `build_dmg.sh` produces it, and
   `installer.iss` falls back to version 0.3.0 (not 1.0.0) when compiled by

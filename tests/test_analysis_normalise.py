@@ -8,10 +8,12 @@ import pytest
 
 from normet.analysis.normalise import (
     _apply_conditional_filter,
+    _draw_rows,
     _format_quantile_name,
+    _quantile_column_names,
     generate_resampled,
 )
-from normet.core.exceptions import DataError
+from normet.core.exceptions import ConfigError, DataError
 
 # ---------------------------------------------------------------------------
 # _format_quantile_name
@@ -467,3 +469,303 @@ def test_stratified_draw_plan_keeps_strata_apart_and_falls_back_for_missing():
     np.testing.assert_array_equal(pool_strata[draw[:4]], df_strata[:4])
     balanced = _draw_rows_stratified_balanced(0, 21, 0, df_strata, pool_strata)
     np.testing.assert_array_equal(pool_strata[balanced[:4]], df_strata[:4])
+
+
+# ---------------------------------------------------------------------------
+# Regression: distinct quantiles that format to one column name (finding 2)
+# ---------------------------------------------------------------------------
+
+
+def test_quantile_column_names_keep_the_documented_convention():
+    """The common quantiles keep their q025/q500/q975 names, one column each."""
+    assert _quantile_column_names([0.025, 0.5, 0.975]) == ["q025", "q500", "q975"]
+    assert _quantile_column_names([0.05, 0.06]) == ["q050", "q060"]
+    # Exact repeats are one request, not a collision.
+    assert _quantile_column_names([0.1, 0.1]) == ["q100", "q100"]
+
+
+def test_two_quantiles_that_share_a_column_name_are_refused(monkeypatch):
+    """0.05 and 0.0501 both round to ``q050``; the run used to return one band.
+
+    ``_format_quantile_name`` keeps three decimals of a percent, so the two
+    requests collapsed into a single column -- the second overwrote the first
+    on the per-seed path and duplicated it on the quantile path. It now fails
+    before any resampling work instead of silently dropping a requested band.
+    """
+    import sys
+
+    from normet.analysis.normalise import normalise
+
+    normalise_mod = sys.modules["normet.analysis.normalise"]
+    calls: list[int] = []
+
+    def mock_ml_predict(model, df, **kwargs):
+        calls.append(len(df))
+        return np.full(len(df), 10.0)
+
+    monkeypatch.setattr(normalise_mod, "ml_predict", mock_ml_predict)
+    with pytest.raises(ValueError, match="both format to the column name"):
+        normalise(
+            df=_weather_df(n=20),
+            model="dummy-model",
+            covariates=["ws", "wd"],
+            variables_resample=["ws", "wd"],
+            n_samples=3,
+            n_cores=1,
+            return_quantiles=[0.05, 0.0501],
+        )
+    assert calls == [], "a refused quantile request should not reach the model"
+
+    # The documented case still produces one column per quantile.
+    out = normalise(
+        df=_weather_df(n=20),
+        model="dummy-model",
+        covariates=["ws", "wd"],
+        variables_resample=["ws", "wd"],
+        n_samples=3,
+        n_cores=1,
+        return_quantiles=[0.025, 0.975],
+    )
+    assert {"q025", "q975"} <= set(out.columns)
+
+
+# ---------------------------------------------------------------------------
+# Regression: conditional_on on a column that is not a covariate (finding 3)
+# ---------------------------------------------------------------------------
+
+
+def test_conditional_on_accepts_a_column_that_is_not_a_covariate(monkeypatch):
+    """``{"site": ...}`` filters the pool although ``site`` is not a model feature.
+
+    The default pool is ``check_data(df, covariates, "value")`` -- covariates +
+    ``date`` + the target only -- so a filter on any other column of ``df``
+    used to fail with "not found in resample pool columns", even though the
+    column was right there in the caller's frame.
+    """
+    import sys
+
+    from normet.analysis.normalise import normalise
+
+    normalise_mod = sys.modules["normet.analysis.normalise"]
+    drawn: list[np.ndarray] = []
+
+    def mock_ml_predict(model, df, **kwargs):
+        drawn.append(df["ws"].to_numpy(dtype=float))
+        return np.full(len(df), 10.0)
+
+    monkeypatch.setattr(normalise_mod, "ml_predict", mock_ml_predict)
+    rng = np.random.default_rng(5)
+    n = 40
+    df = pd.DataFrame(
+        {
+            "date": pd.date_range("2024-01-01", periods=n, freq="h"),
+            "value": rng.normal(20.0, 5.0, n),
+            "ws": rng.uniform(0.5, 10.0, n),
+            "site": np.where(np.arange(n) % 2 == 0, "urban", "rural"),
+        }
+    )
+    urban_pool = {round(float(v), 12) for v in df.loc[df["site"] == "urban", "ws"]}
+
+    out = normalise(
+        df=df,
+        model="dummy-model",
+        covariates=["ws"],
+        variables_resample=["ws"],
+        n_samples=4,
+        n_cores=1,
+        conditional_on={"site": "urban"},
+    )
+    assert "normalised" in out.columns
+    values = {round(float(v), 12) for v in np.concatenate(drawn)}
+    assert values <= urban_pool, "resampled ws came from a row the filter excluded"
+    assert len(values) > 1
+
+    # A column in neither the frame nor the pool still raises, and says where
+    # the lookup happened.
+    with pytest.raises(ValueError, match="not found in the resampling pool"):
+        normalise(
+            df=df,
+            model="dummy-model",
+            covariates=["ws"],
+            variables_resample=["ws"],
+            n_samples=3,
+            n_cores=1,
+            conditional_on={"country": "FR"},
+        )
+
+
+# ---------------------------------------------------------------------------
+# Regression: replace=False on a pool smaller than the frame (finding 4)
+# ---------------------------------------------------------------------------
+
+
+def test_draw_rows_replace_false_needs_a_pool_of_the_frames_size():
+    """The message names ``replace=False``, the pool size and the sample size."""
+    with pytest.raises(ConfigError, match="the pool has 5 row"):
+        _draw_rows(0, 1, n_pool=5, n_rows=6, replace=False)
+    with pytest.raises(ConfigError, match="6 row"):
+        _draw_rows(0, 1, n_pool=5, n_rows=6, replace=False)
+    idx = _draw_rows(0, 1, n_pool=6, n_rows=6, replace=False)
+    assert sorted(int(i) for i in idx) == list(range(6))
+
+
+def test_normalise_replace_false_with_a_shrunken_pool_explains_itself(monkeypatch):
+    """A ``resample_df`` subset smaller than ``df`` used to raise numpy's message."""
+    import sys
+
+    from normet.analysis.normalise import normalise
+
+    normalise_mod = sys.modules["normet.analysis.normalise"]
+    monkeypatch.setattr(normalise_mod, "ml_predict", lambda model, df, **kw: np.full(len(df), 10.0))
+    df = _weather_df(n=30)
+    common = dict(
+        df=df,
+        model="dummy-model",
+        covariates=["ws", "wd"],
+        variables_resample=["ws", "wd"],
+        n_samples=3,
+        n_cores=1,
+        replace=False,
+        verbose=False,
+    )
+    with pytest.raises(ConfigError, match="the pool has 10 row.*30 row"):
+        normalise(**common, resample_df=df.head(10))
+    # A pool as long as the frame is what replace=False documents; it works.
+    out = normalise(**common, resample_df=df)
+    assert "normalised" in out.columns
+
+
+# ---------------------------------------------------------------------------
+# Regression: the Ox conservation diagnostic is falsifiable (finding 1)
+# ---------------------------------------------------------------------------
+
+
+def test_ox_conservation_error_flags_an_o3_equivalent_ox_column():
+    """Ox reported as O3-*equivalent* mass is a real gap, not ``2e-16``.
+
+    The old diagnostic was algebraically identical to the repartition that
+    built the columns, so it read 0 for every input while the reported
+    ``Ox_normalised`` sat ~4 % (about 0.9 ug m^-3 here) away from
+    ``O3_normalised + NO2_normalised``. Measuring the frame the caller gets
+    turns that into a number.
+    """
+    from normet.analysis.chemistry import ox_conservation_error
+
+    o3 = np.full(4, 40.0)
+    no2 = np.full(4, 20.0)
+    ox_as_o3_equivalent = (o3 / 48.0 + no2 / 46.0055) * 48.0
+    frame = pd.DataFrame(
+        {
+            "O3_normalised": o3,
+            "NO2_normalised": no2,
+            "Ox_normalised": ox_as_o3_equivalent,
+        }
+    )
+    gap_ug = float(np.abs(ox_as_o3_equivalent[0] - (o3[0] + no2[0])))
+    assert gap_ug > 0.5
+    err = ox_conservation_error(frame, unit="ug_m3")
+    np.testing.assert_allclose(err, gap_ug / 48.0e6, rtol=1e-12)
+    assert err > 1e-8  # mol m^-3
+
+    # The constituent-sum convention the fix reports closes it to round-off.
+    frame["Ox_normalised"] = o3 + no2
+    assert ox_conservation_error(frame, unit="ug_m3") == 0.0
+    # A perturbed constituent column registers, however.
+    frame["O3_normalised"] = frame["O3_normalised"] * 1.01
+    assert ox_conservation_error(frame, unit="ug_m3") > 1e-9
+
+
+@pytest.fixture(scope="module")
+def ox_deweather_result():
+    """One F3 deweathering used by the two Ox-column tests below."""
+    from normet.analysis.chemistry import normalise_ox_invariant
+
+    rng = np.random.default_rng(0)
+    n = 120
+    df = pd.DataFrame(
+        {
+            "date": pd.date_range("2024-01-01", periods=n, freq="h"),
+            "O3": 40.0 + 10.0 * rng.normal(size=n).clip(-2, 4),
+            "NO2": 20.0 + 8.0 * rng.normal(size=n).clip(-2, 3),
+            "NO": 10.0 + 5.0 * rng.normal(size=n).clip(-2, 3),
+            "ws": rng.gamma(2, 2, n),
+            "blh": rng.gamma(3, 200, n),
+            "t2m": rng.normal(10, 5, n),
+        }
+    )
+    return normalise_ox_invariant(
+        df,
+        covariates=["ws", "blh", "t2m"],
+        method="standard",
+        n_samples=4,
+        n_cores=1,
+    )
+
+
+def test_ox_columns_are_constituent_sums(ox_deweather_result):
+    """``Ox_*``/``NOx_*`` are the sums of their species, each in its own mass."""
+    sp = ox_deweather_result.species
+    np.testing.assert_allclose(
+        sp["Ox_observed"], sp["O3_observed"] + sp["NO2_observed"], rtol=0, atol=1e-12
+    )
+    np.testing.assert_allclose(
+        sp["Ox_normalised"], sp["O3_normalised"] + sp["NO2_normalised"], rtol=0, atol=1e-12
+    )
+    np.testing.assert_allclose(
+        sp["NOx_observed"], sp["NO2_observed"] + sp["NO_observed"], rtol=0, atol=1e-12
+    )
+    np.testing.assert_allclose(
+        sp["NOx_normalised"], sp["NO2_normalised"] + sp["NO_normalised"], rtol=0, atol=1e-12
+    )
+    # ... which is *not* the O3-equivalent mass of the molar total: the two
+    # conventions differ by several per cent of the Ox level.
+    o3_equivalent = (sp["O3_normalised"] / 48.0 + sp["NO2_normalised"] / 46.0055) * 48.0
+    assert float((o3_equivalent - sp["Ox_normalised"]).abs().max()) > 0.1
+    # The molar deweathering frames are unchanged: Ox is still there in
+    # molar units, so the O3-equivalent convention stays available.
+    assert set(ox_deweather_result.ox_result.columns) >= {"observed", "normalised"}
+
+
+def test_conservation_max_err_is_roundoff_and_grows_when_perturbed(ox_deweather_result):
+    """A consistent fit leaves round-off; perturbing a column raises it."""
+    from normet.analysis.chemistry import ox_conservation_error
+
+    sp = ox_deweather_result.species
+    assert 0.0 <= ox_deweather_result.conservation_max_err < 1e-12
+    assert ox_conservation_error(sp, unit=ox_deweather_result.unit) == 0.0
+
+    for column in ("O3_normalised", "NO2_normalised"):
+        perturbed = sp.copy()
+        perturbed[column] = perturbed[column] * 1.01
+        grown = ox_conservation_error(perturbed, unit=ox_deweather_result.unit)
+        assert grown > 1e-10, f"1 % on {column} did not register ({grown:g})"
+
+    # The model-side closure is the part the frame alone cannot fake: shift the
+    # whole NO2 leg (and the totals with it, so the frame still adds up) and
+    # the residual against the deweathered molar totals registers.
+    idx = sp.index
+    ox_mol = ox_deweather_result.ox_result["paired"].reindex(idx).to_numpy(dtype=float)
+    nox_mol = ox_deweather_result.nox_result["paired"].reindex(idx).to_numpy(dtype=float)
+    micro_to_mol = 1e-6 if ox_deweather_result.unit == "ug_m3" else 1.0
+    assert (
+        ox_conservation_error(
+            sp,
+            unit=ox_deweather_result.unit,
+            ox_mol=ox_mol * micro_to_mol,
+            nox_mol=nox_mol * micro_to_mol,
+        )
+        < 1e-12
+    )
+    shifted = sp.copy()
+    shifted["NO2_normalised"] = shifted["NO2_normalised"] * 1.05
+    shifted["Ox_normalised"] = shifted["O3_normalised"] + shifted["NO2_normalised"]
+    shifted["NOx_normalised"] = shifted["NO2_normalised"] + shifted["NO_normalised"]
+    assert (
+        ox_conservation_error(
+            shifted,
+            unit=ox_deweather_result.unit,
+            ox_mol=ox_mol * micro_to_mol,
+            nox_mol=nox_mol * micro_to_mol,
+        )
+        > 1e-10
+    )

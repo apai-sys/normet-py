@@ -121,14 +121,17 @@ def scm(
         Treatment start date in "YYYY-MM-DD" format. Required.
     donors : List[str] | None, optional
         Donor pool. If None, uses all units except `treated_unit` that appear in `df`.
+        Any non-empty pool works, including a single donor: the residual-balancing
+        step then has a one- or two-dimensional weight vector, and the ridge
+        augmentation is fitted per timestamp (a single donor is predicted as
+        itself, so the synthetic unit is that donor).
     pre_covariates : List[str] | None, optional
         Additional unit-level covariates to augment ridge features using *pre-period means*.
         If provided, rows with missing pre-period means are dropped for affected units.
     alphas : List[float] | None, optional
-        RidgeCV alpha grid. Default is `[0.1, 0.2, ..., 10.0]`.
-    allow_negative_weights : bool, optional
-        If True, donor weights may be negative (sum-to-one constraint retained).
-        If False (default), simplex constraints are enforced: w_j ≥ 0, ∑ w_j = 1.
+        RidgeCV alpha grid. Default is `[0.1, 0.2, ..., 10.0]`. With a single
+        observed donor per timestamp no alpha is selected (the fit is exact at
+        any penalty) and the returned ``alpha`` entry is NaN.
 
     Returns
     -------
@@ -142,15 +145,18 @@ def scm(
               "weights": pandas.Series,
                   # donor weights indexed by donor unit (sum=1 if negatives not allowed)
               "alpha": dict,
-                  # mapping timestamp -> chosen RidgeCV alpha (diagnostics)
+                  # mapping timestamp -> chosen RidgeCV alpha (diagnostics;
+                  # NaN where the timestamp had a single observed donor)
             }
 
     Raises
     ------
     ValueError
         If required inputs are missing, the treated unit is not in the panel,
-        no valid donors remain after filtering, or there are insufficient aligned
-        pre-period rows to estimate weights.
+        no valid donors remain after filtering, or there are fewer than three
+        complete pre-period rows (after dropping NaNs) on which to fit the
+        donor ridge / balance the residuals. The donor count is not itself a
+        restriction.
 
     Notes
     -----
@@ -256,8 +262,20 @@ def scm(
     ) -> tuple[float, float, np.ndarray]:
         """Fit RidgeCV (donor outcomes y at time t) ~ Xd; predict for treated Xt and donors Xd."""
         mask = np.isfinite(y_donors)
-        if mask.sum() < 3:
+        n_finite = int(mask.sum())
+        if n_finite == 0:
             return np.nan, np.nan, np.full(n_donors, np.nan, dtype=float)
+        if n_finite == 1:
+            # One observed donor: a ridge model with an intercept fits that
+            # single point exactly, at any penalty, so the prediction is the
+            # donor's own value for the treated unit and for the donor alike
+            # (residual zero). RidgeCV cannot select an alpha for one sample
+            # (its leave-one-out mean square divides by zero), so it is
+            # bypassed here rather than warned through.
+            y_hat = float(y_donors[mask][0])
+            pred_donors = np.full(n_donors, np.nan, dtype=float)
+            pred_donors[mask] = y_hat
+            return np.nan, y_hat, pred_donors
         mdl = RidgeCV(alphas=alphas, fit_intercept=True)
         mdl.fit(Xd[mask], y_donors[mask])
         return mdl.alpha_, float(mdl.predict(Xt)[0]), mdl.predict(Xd)
@@ -268,6 +286,10 @@ def scm(
     # single SVD of X_donors (exact LOO alpha selection), which is equivalent to
     # — but far cheaper than — refitting RidgeCV at every timestamp. Any
     # missingness falls back to the exact per-timestamp loop.
+    # The batched path also needs at least three donors: its leave-one-out
+    # inflator 1 - 1/J - (U^2 d) has to stay positive (J donors are the samples
+    # of the per-timestamp regression), which fails for J = 1, 2 — the per
+    # timestamp loop handles those pools exactly instead.
     log.info("Fitting ridge augmentation across %d timestamps …", len(panel.index))
     Y = panel[donors].to_numpy()  # (n_times, n_donors)
     alphas_grid = np.asarray(alphas, dtype=float)

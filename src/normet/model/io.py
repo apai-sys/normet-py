@@ -54,6 +54,35 @@ def _resolve_model_file(path: str | Path, filename: str | None) -> Path | None:
     return max(candidates, key=lambda f: f.stat().st_mtime) if candidates else None
 
 
+def _discover_model_file(folder: Path, filename: str | None) -> Path | None:
+    """Resolve the one model file a directory holds, if it is unambiguous.
+
+    ``filename`` wins when it names an existing file. Otherwise a directory
+    holding exactly one ``*.joblib``/``*.pkl`` model resolves to that file, so
+    a model saved under a custom name can be re-loaded from its directory.
+    Discovery is *additive*: a directory with no candidate returns ``None`` and
+    the caller hands ``filename`` to the backend as before (the backend decides
+    or raises its own error). Several candidates raise instead of silently
+    picking one.
+    """
+    if filename:
+        named = folder / filename
+        if named.is_file():
+            return named
+    candidates = sorted(
+        f for f in folder.iterdir() if f.is_file() and f.suffix.lower() in {".joblib", ".pkl"}
+    )
+    if len(candidates) == 1:
+        return candidates[0]
+    if not candidates:
+        return None
+    names = ", ".join(f.name for f in candidates)
+    raise ValueError(
+        f"Several model files found in '{folder}': {names}. "
+        "Pass `filename=` to choose which one to load."
+    )
+
+
 def load_model_metadata(
     path: str | Path = ".",
     filename: str = "automl.joblib",
@@ -98,8 +127,12 @@ def load_model(
     backend : str, default="flaml"
         Backend name registered in :data:`backend_registry`.
     filename : str, default "automl.joblib"
-        Expected filename if ``path`` is a directory; ignored when ``path``
-        is a file. Interpretation is backend-specific.
+        Expected filename if ``path`` is a directory. When that file is absent
+        and the directory holds exactly one ``*.joblib``/``*.pkl`` model, that
+        single file is loaded; a directory with several candidates raises
+        ``ValueError`` unless ``filename`` names one, and an empty directory is
+        left to the backend's own resolution/error. Ignored when ``path`` is a
+        file. Interpretation is backend-specific.
     return_metadata : bool, default False
         If True, return ``(model, metadata_dict_or_none)`` by also reading the
         adjacent ``.meta.json`` sidecar when available.
@@ -114,7 +147,8 @@ def load_model(
     FileNotFoundError
         If no suitable model file is found.
     ValueError
-        If backend is not registered.
+        If backend is not registered, or a directory holds several model files
+        and ``filename`` names none of them.
     """
     be = backend_registry.get(backend)
     # A file path is the model; ``filename`` only names the file inside a
@@ -122,10 +156,26 @@ def load_model(
     # ``load_model(p)`` look for ``p/automl.joblib`` after ``p`` came back
     # from ``save_model``, so a saved model could not be loaded by its own
     # path (and a directory holding both names loaded the wrong one).
-    filename_arg: str | None = None if Path(path).is_file() else filename
+    p = Path(path)
+    resolved: Path | None = None
+    if p.is_file():
+        filename_arg: str | None = None
+    elif p.is_dir():
+        # Honour ``filename`` when present, otherwise fall back to the single
+        # model file the directory holds (so ``save_model(model, d, "m.joblib")``
+        # round-trips through ``load_model(d)``). An empty directory keeps the
+        # historical behaviour: ``filename`` goes to the backend, which decides
+        # (or raises its own error).
+        resolved = _discover_model_file(p, filename)
+        filename_arg = resolved.name if resolved is not None else filename
+    else:
+        filename_arg = filename
     model = be.load(path=str(path), filename=filename_arg)
     if return_metadata:
-        return model, load_model_metadata(path=path, filename=filename)
+        return model, load_model_metadata(
+            path=str(resolved) if resolved is not None else path,
+            filename=filename,
+        )
     return model
 
 

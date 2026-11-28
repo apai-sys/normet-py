@@ -876,3 +876,30 @@ Path(out_name).write_text("\\n".join(out) + "\\n")
         vert_motion=0,
     )
     assert ctrl.splitlines()[1:4] == ["2", "51.5000 -0.1300 100.0", "51.5000 -0.1300 500.0"]
+
+
+def test_a_source_region_given_as_a_numpy_box_is_a_box():
+    """Bounds from a config array are a bbox, not a shapely geometry.
+
+    ``_is_bbox`` accepted only tuple/list, so a numpy array fell through to
+    ``shapely.contains_xy`` and failed with a broadcast error that named
+    neither the region nor its type.
+    """
+    from normet.io.trajectory import trajectory_features
+
+    df = pd.DataFrame(
+        {
+            "age_h": [-2.0, -1.0, 0.0],
+            "lat": [40.0, 40.5, 41.0],
+            "lon": [-3.0, -2.5, -2.0],
+            "height": [500.0, 600.0, 700.0],
+        }
+    )
+    out = trajectory_features(
+        df, source_regions={"b": np.array([-4.0, 39.0, -1.0, 42.0])}, prefix="t_"
+    )
+    assert out["t_resid_b"] == pytest.approx(1.0)
+    outside = trajectory_features(
+        df, source_regions={"b": np.array([10.0, 10.0, 20.0, 20.0])}, prefix="t_"
+    )
+    assert outside["t_resid_b"] == pytest.approx(0.0)

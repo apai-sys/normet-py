@@ -1333,6 +1333,21 @@ def cluster_trajectories(
     counts: list[int] = []
     for (t_stamp, _sh, _tid), g in ep.groupby(["_t", "start_height", "traj_id"], sort=True):
         gs = g.sort_values("age_h", ascending=False).reset_index(drop=True)
+        # A path that leaves the model domain has no coordinates on those rows
+        # (HYSPLIT writes NaN). Interpolating over them spreads the NaN down
+        # the whole path and scipy then refuses the distance matrix with "must
+        # contain only finite values" -- an error that names neither the
+        # trajectory nor the column. Drop them here, as the footprint path
+        # does; a path with fewer than two located points is not a path.
+        located = np.isfinite(
+            pd.to_numeric(gs["lat"], errors="coerce").to_numpy(dtype=float)
+        ) & np.isfinite(pd.to_numeric(gs["lon"], errors="coerce").to_numpy(dtype=float))
+        if float(z_scale) > 0.0:
+            located &= np.isfinite(
+                pd.to_numeric(gs["height"], errors="coerce").to_numpy(dtype=float)
+            )
+        if not located.all():
+            gs = gs[located].reset_index(drop=True)
         if len(gs) < 2:
             continue
         ages = pd.to_numeric(gs["age_h"], errors="coerce").to_numpy(dtype=float)

@@ -43,7 +43,7 @@ _DEFAULT_CONFIG: dict[str, Any] = {
 }
 
 _KNOWN_CONFIG_KEYS: frozenset[str] = frozenset(
-    set(_DEFAULT_CONFIG) | {"num_leaves_min", "num_leaves_max"}
+    set(_DEFAULT_CONFIG) | {"num_leaves_min", "num_leaves_max", "native_nan"}
 )
 
 _OBJECTIVE_DEFAULT_METRIC: dict[str, str] = {
@@ -647,6 +647,19 @@ def train_lgb(
             fold_frame = pd.DataFrame({"date": pd.date_range("2000-01-01", periods=n, freq="h")})
         cv_folds_list = list(
             blocked_time_cv(fold_frame, n_splits=int(cfg["cv_folds"]), embargo=cv_embargo)
+        )
+
+    # lgb.cv computes its fold step as len(train)//nfold and dies with an opaque
+    # "range() arg 3 must not be zero" when that is 0, i.e. when the training
+    # rows cannot fill the requested folds. Validate here so short records get
+    # an error that names the cause. `blocked_time_cv` already validates its
+    # own n_splits against the row count.
+    n_folds = int(cfg["cv_folds"])
+    if cv_folds_list is None and n < n_folds:
+        raise ValueError(
+            f"`cv_folds`={n_folds} but only {n} training row(s) are available; "
+            f"{n_folds}-fold CV needs at least {n_folds} training rows. "
+            f"Set model_config['cv_folds'] <= {n} or provide more training rows."
         )
 
     best_score = float("inf")

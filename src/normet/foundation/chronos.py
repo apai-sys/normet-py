@@ -47,11 +47,18 @@ EMBED_DIM = 768
 
 
 def _no_grad_ctx() -> Any:
-    """Return ``torch.no_grad()`` if torch is loaded, else a no-op context."""
-    torch = sys.modules.get("torch")
-    if torch is not None:
-        return torch.no_grad()
-    return contextlib.nullcontext()
+    """Return ``torch.no_grad()`` if torch is loaded, else a no-op context.
+
+    Going through :func:`normet.utils._omp.import_torch` rather than reading
+    ``sys.modules`` also applies the macOS multi-OpenMP guard: the embedder can
+    be handed a pipeline loaded by the caller (``Chronos2Embedder._pipeline``),
+    so this is sometimes the first normet call in a torch process.
+    """
+    if "torch" not in sys.modules:
+        return contextlib.nullcontext()
+    from ..utils._omp import import_torch
+
+    return import_torch().no_grad()
 
 
 def _to_numpy_f32(tensor_or_array: Any) -> np.ndarray:
@@ -59,7 +66,9 @@ def _to_numpy_f32(tensor_or_array: Any) -> np.ndarray:
     if isinstance(tensor_or_array, np.ndarray):
         return np.asarray(tensor_or_array, dtype=np.float32)
     if hasattr(tensor_or_array, "detach"):
-        import torch
+        from ..utils._omp import import_torch
+
+        torch = import_torch()
 
         return np.asarray(
             tensor_or_array.detach().cpu().to(torch.float32).numpy(), dtype=np.float32

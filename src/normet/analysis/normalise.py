@@ -151,6 +151,13 @@ class NormaliseConfig:
     variables_resample: list[str] | None = None
     n_samples: int = 300
     replace: bool = True
+    """Draw pool rows with replacement -- the default, and what a Monte Carlo
+    over a weather pool normally wants (any pool row may serve any number of
+    samples). ``replace=False`` draws a distinct pool row for every target row,
+    so it needs a pool at least as long as the frame; a shorter pool (a
+    ``conditional_on`` filter, a ``resample_df`` subset) raises ``ConfigError``
+    naming both sizes. The ``stratify_by`` path instead falls back to
+    replacement within a stratum too small for it."""
     aggregate: bool = True
     seed: int = 7_654_321
     n_cores: int | None = None
@@ -164,6 +171,14 @@ class NormaliseConfig:
     return_quantiles: Sequence[float] | None = None
     conditional_on: Mapping[str, Any] | None = None
     """Filter the resampling pool to rows matching ``{column: condition}``.
+
+    The column may be any column of the caller's ``df`` -- it does **not**
+    have to be a model covariate, so ``{"site": "urban"}``,
+    ``{"season": "winter"}`` or ``{"country": ["FR", "DE"]}`` all work. When
+    ``resample_df`` is given, that frame is the pool and has to carry the
+    column itself; otherwise the column is carried from ``df`` into the
+    default pool (``check_data`` otherwise narrows it to the covariates,
+    ``date`` and the target). A column in neither raises ``ValueError``.
 
     A condition is a scalar, a list/tuple/set/array of allowed values, or a
     callable. The condition joins the cache key by value: sequences are
@@ -329,10 +344,50 @@ def _resolve_normalise_config(
 
 
 def _format_quantile_name(q: float) -> str:
-    """Map 0.025 → 'q025', 0.5 → 'q500', 0.975 → 'q975'."""
+    """Map 0.025 → 'q025', 0.5 → 'q500', 0.975 → 'q975'.
+
+    The name keeps three decimals of a *percent* (``round(q * 1000)``), which
+    is what the documented convention ``q025``/``q500``/``q975`` means. Two
+    distinct quantiles can therefore share a name -- ``0.05`` and ``0.0501``
+    both round to 50 -- so a *set* of requested quantiles goes through
+    :func:`_quantile_column_names`, which refuses such a request instead of
+    silently returning one band for two.
+    """
     if not (0.0 <= float(q) <= 1.0):
         raise ValueError(f"Quantile must be in [0,1]: got {q}")
     return f"q{int(round(float(q) * 1000)):03d}"
+
+
+def _quantile_column_names(quantiles: Sequence[float]) -> list[str]:
+    """Column names for ``quantiles``, in the order given; refuses collisions.
+
+    ``return_quantiles`` is documented as *one column per requested quantile*,
+    but the names keep three decimals of a percent, so quantiles closer than
+    0.001 apart can format to the same column: ``[0.05, 0.0501]`` both name
+    ``q050``. The second one then overwrote the first (per-seed path) or
+    produced a duplicated column (quantile path), and one requested band
+    disappeared without a word. Requesting two quantiles that share a name
+    now raises instead, and the message says which values collided.
+
+    The three-decimal convention is kept unchanged for the common cases
+    (``q025``, ``q500``, ``q975``), so no existing column is renamed.
+    """
+    names: list[str] = []
+    seen: dict[str, float] = {}
+    for raw in quantiles:
+        q = float(raw)
+        name = _format_quantile_name(q)
+        previous = seen.get(name)
+        if previous is not None and previous != q:
+            raise ValueError(
+                f"Quantiles {previous!r} and {q!r} both format to the column name "
+                f"{name!r} (quantile names keep three decimals of a percent). "
+                "Request quantiles at least 0.001 apart -- e.g. 0.05 and 0.06 "
+                "rather than 0.05 and 0.0501 -- or ask for one of them."
+            )
+        seen[name] = q
+        names.append(name)
+    return names
 
 
 def _conditional_mask(
@@ -355,7 +410,12 @@ def _conditional_mask(
     mask = pd.Series(True, index=pool.index)
     for col, cond in conditional_on.items():
         if col not in pool.columns:
-            raise ValueError(f"`conditional_on` key '{col}' not found in resample pool columns.")
+            raise ValueError(
+                f"`conditional_on` column {col!r} was not found in the resampling "
+                f"pool (pool columns: {list(pool.columns)[:8]}). A column of `df` "
+                "is carried into the default pool; when an explicit `resample_df` "
+                "is given, that frame has to carry the column."
+            )
         s = pool[col]
         if callable(cond):
             mask &= s.map(cond).astype(bool)
@@ -364,6 +424,36 @@ def _conditional_mask(
         else:
             mask &= s == cond
     return mask
+
+
+def _carry_condition_columns(
+    pool: pd.DataFrame,
+    source: pd.DataFrame,
+    conditional_on: Mapping[str, Any] | None,
+) -> pd.DataFrame:
+    """Re-attach ``conditional_on`` columns that ``check_data`` dropped from the pool.
+
+    ``conditional_on`` filters the resampling pool on a column of the caller's
+    frame -- ``{"site": "urban"}``, ``{"season": "winter"}`` -- and nothing
+    says that column is a model covariate. The default pool is
+    ``check_data(df, covariates, "value")``, i.e. covariates + ``date`` +
+    ``value`` only, so any other column of ``df`` was gone by the time the
+    filter looked for it. The missing columns are copied across positionally:
+    ``check_data`` returns the same rows in the same order, and a positional
+    copy stays correct when the pool index repeats (a concat of sites).
+
+    A condition column in neither frame is left for :func:`_conditional_mask`
+    to report.
+    """
+    if not conditional_on:
+        return pool
+    missing = [col for col in conditional_on if col not in pool.columns and col in source.columns]
+    if not missing:
+        return pool
+    pool = pool.copy()
+    for col in missing:
+        pool[col] = source[col].to_numpy()
+    return pool
 
 
 def _apply_conditional_filter(
@@ -510,7 +600,21 @@ def _draw_rows(stream: int, seed: int, n_pool: int, n_rows: int, replace: bool) 
     a call happens to take. Stream 0 keeps the generator the default
     ``normalise`` path has always used, so its results are unchanged; stream
     k > 0 gets an independent generator derived from the same seed.
+
+    ``replace=False`` needs a pool at least as long as the frame, which a
+    shrunken pool (``conditional_on``, a ``resample_df`` subset) can break.
+    The stratified path falls back to replacement per stratum; this one cannot
+    do that without changing every row's semantics, so it says so instead of
+    leaving numpy's bare "Cannot take a larger sample than population".
     """
+    if not replace and n_rows > n_pool:
+        raise ConfigError(
+            f"`replace=False` needs a resampling pool of at least as many rows as the "
+            f"frame: the pool has {n_pool} row(s) but {n_rows} row(s) are drawn per "
+            f"sample. Widen the pool (`resample_df`, or loosen `conditional_on`), "
+            "let `replace` keep its default of True, or `stratify_by`, which falls "
+            "back to replacement within a stratum too small for it."
+        )
     rng = np.random.default_rng(seed if stream == 0 else [seed, stream])
     return rng.choice(n_pool, size=n_rows, replace=replace)
 
@@ -1196,7 +1300,13 @@ def normalise(
             Indexed by ``date`` with columns:
               - observed
               - normalised
-              - one column per requested quantile (when ``return_quantiles``)
+              - one column per requested quantile (when ``return_quantiles``),
+                named ``q`` + three decimals of a percent: ``0.025`` → ``q025``,
+                ``0.5`` → ``q500``, ``0.975`` → ``q975``. That is the documented
+                convention, so quantiles must be at least 0.001 apart to get a
+                column each; a request such as ``[0.05, 0.0501]`` -- two values
+                that both format to ``q050`` -- raises ``ValueError`` rather
+                than returning one band for two requested ones.
         If ``aggregate=False``:
             Indexed by ``date`` with columns:
               - observed
@@ -1258,6 +1368,12 @@ def normalise(
             "`block_mode='markov'` needs `block_hours` > 1; with None or 1 the "
             "draws are the same as independent resampling."
         )
+    if _cfg.return_quantiles:
+        # Validate the request (range, and distinct quantiles producing
+        # distinct column names) before any resampling work, so a request that
+        # cannot be honoured fails loudly instead of dropping one band at the
+        # far end of the run.
+        _quantile_column_names([float(q) for q in _cfg.return_quantiles])
 
     required_features: set[str] | None = None
     if _cfg.covariates is None:
@@ -1339,6 +1455,11 @@ def normalise(
     # results and must not share a cache entry.
     set_key = dataframe_hash(df_dated_key[["set"]]) if "set" in df_dated_key.columns else None
     resample_pool = df_keyed if _cfg.resample_df is None else _cfg.resample_df
+    if _cfg.resample_df is None:
+        # The pool actually drawn from carries `conditional_on`'s columns
+        # (`_normalise_uncached`); hash the same frame, or two frames that
+        # differ only in the filter column's values would share a cache entry.
+        resample_pool = _carry_condition_columns(resample_pool, df_dated_key, _cfg.conditional_on)
     # `month`/`season` strata are derived from a pool's own `date` column, so
     # changing the pool's date composition changes which rows serve each
     # stratum while leaving the served covariate values (and therefore the
@@ -1624,7 +1745,7 @@ def _aggregate_draws_frame(
                         index=q_df.index,
                         columns=q_df.columns,
                     )
-            q_df.columns = pd.Index([_format_quantile_name(float(q)) for q in q_df.columns])
+            q_df.columns = pd.Index(_quantile_column_names([float(q) for q in q_df.columns]))
             df_out = df_out.join(q_df, how="left")
         return df_out
 
@@ -1716,6 +1837,14 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
         raise DataError("`df` must contain a 'date' column.")
 
     resample_df = df if _cfg.resample_df is None else _cfg.resample_df
+    if _cfg.resample_df is None:
+        # `conditional_on` filters the pool on a column of the caller's frame,
+        # not necessarily on a model covariate; `check_data` narrows the
+        # default pool to covariates + `date` + `value`, so a filter on
+        # `site`/`country`/a season label would look for a column the pool no
+        # longer has. Carry those columns over positionally (`check_data` keeps
+        # every row in order) before the filter runs.
+        resample_df = _carry_condition_columns(resample_df, df_dated, _cfg.conditional_on)
     base_strata_source = df_dated if _cfg.resample_df is None else resample_df
     variables_resample = (
         _cfg.variables_resample
@@ -1896,7 +2025,7 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
                     q_df = pd.DataFrame(
                         np.expm1(q_df.to_numpy(dtype=float)), index=q_df.index, columns=q_df.columns
                     )
-                q_df.columns = pd.Index([_format_quantile_name(float(q)) for q in q_df.columns])
+                q_df.columns = pd.Index(_quantile_column_names([float(q) for q in q_df.columns]))
                 df_out = df_out.join(q_df, how="left")
             df_out = _attach_paired_columns(
                 df_out,
@@ -2188,8 +2317,8 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
                     q_mat = np.quantile(q_vals, q_arr, axis=0)
                     if _cfg.log_transform:
                         q_mat = np.expm1(q_mat)
-                for qi, q_val in enumerate(q_arr):
-                    df_out[_format_quantile_name(q_val)] = q_mat[qi]
+                for qi, q_col in enumerate(_quantile_column_names(q_arr)):
+                    df_out[q_col] = q_mat[qi]
         else:
             df_out = pd.DataFrame(
                 {"observed": obs_mean, "normalised": norm_raw_mean},
@@ -2232,7 +2361,7 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
                         index=q_df.index,
                         columns=q_df.columns,
                     )
-                q_df.columns = pd.Index([_format_quantile_name(float(q)) for q in q_df.columns])
+                q_df.columns = pd.Index(_quantile_column_names([float(q) for q in q_df.columns]))
                 df_out = df_out.join(q_df, how="left")
 
         if q_buf is not None:
@@ -2939,7 +3068,17 @@ def _build_dml_basis(
     cutoff_days: float,
     n_harmonics: int | None,
 ) -> tuple[np.ndarray, int]:
-    """Construct smooth DCT-II low-pass cosine nuisance basis for :func:`dml_normalise`."""
+    """Construct the smooth low-pass cosine nuisance basis for :func:`dml_normalise`.
+
+    The basis is a **half-range cosine series** ``cos(pi * k * u)`` for
+    ``k = 1..k_harm`` over ``u = (t - t0) / span`` in ``[0, 1]`` -- *not* a
+    DCT-II, whose terms are ``cos(pi * (n + 1/2) * k / N)``. The estimator only
+    needs a smooth low-pass basis, so either would serve, but the names are not
+    interchangeable: each term here has ``k`` half-periods across the record,
+    i.e. a period of ``2 * span / k``, which is how ``cutoff_days`` maps to
+    ``k_harm = round(2 * span_days / cutoff_days)`` (a period of about
+    ``cutoff_days`` for the highest kept harmonic).
+    """
     span_s = max(float(span_seconds), 3600.0)
     span_days = max(span_s / 86400.0, 1.0)
     k_harm = (
@@ -3308,8 +3447,11 @@ def dml_normalise(
                 mc_se_raw = smear_use * np.exp(m_te_aligned) * mc_se_raw
             fold_out["mc_se"] = mc_se_raw
         if return_quantiles:
-            for q_val in sorted({float(q) for q in return_quantiles}):
-                q_col = _format_quantile_name(q_val)
+            # `_quantile_column_names` also refuses a request whose quantiles
+            # would share a column name, so one requested band cannot be
+            # silently dropped in favour of another.
+            q_requested = sorted({float(q) for q in return_quantiles})
+            for q_col in _quantile_column_names(q_requested):
                 if q_col in g_norm_df.columns:
                     q_res = g_norm_df[q_col].to_numpy(dtype=np.float64)
                     if log_transform:

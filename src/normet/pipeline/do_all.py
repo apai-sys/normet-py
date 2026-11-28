@@ -463,7 +463,14 @@ def _do_all_dml(df: pd.DataFrame, cfg: SingleConfig) -> tuple[pd.DataFrame, obje
         train_fraction=cfg.train_fraction,
         seed=cfg.seed,
         embargo=_prepare_embargo(cfg.embargo),
+        # The standard, cross_fit and chronos paths forward this; without it
+        # this engine's third tuple item was on a different scale (and had been
+        # re-imputed) than every other path's.
+        impute=cfg.impute,
+        max_gap=cfg.max_gap,
     )
+    if cfg.log_transform:
+        df_prep = log1p_target(df_prep)
     log.info("do_all finished (dml): %d timestamps", len(res.normalised))
     return res.normalised, res, df_prep
 

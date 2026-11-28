@@ -60,17 +60,16 @@ pytest --cov=normet --cov-report=term-missing --cov-fail-under=70
 Tests marked `slow` load the real Chronos-2 checkpoint and take minutes;
 `pytest -m "not slow"` skips them.
 
-**Known local hang on macOS.** In one process, the LightGBM tests
-(`test_lgb_backend.py`, `test_assistant.py`, ...) followed by the Chronos-2 tests
-(`test_foundation_embedder.py`, `test_foundation_estimator.py`) can hang or segfault,
-because the two libomp runtimes collide. This is not caused by your change. For a full
-local run, deselect those two foundation files and run them in a separate process:
-
-```bash
-pytest -q --ignore=tests/test_foundation_embedder.py \
-          --ignore=tests/test_foundation_estimator.py
-pytest -q tests/test_foundation_embedder.py tests/test_foundation_estimator.py
-```
+**macOS and the two libomp runtimes.** PyTorch, LightGBM and scikit-learn each ship
+their own OpenMP runtime; LLVM's libomp tolerates the second copy only under
+`KMP_DUPLICATE_LIB_OK`, which it warns "may cause crashes or silently produce incorrect
+results". It did: the LightGBM tests followed by the Chronos-2 tests
+(`test_foundation_embedder.py`) could hang or segfault inside a torch forward pass. The
+full suite now runs in one process, because `normet` imports torch through
+`normet.utils._omp.import_torch`, which caps torch's intra-op pool at one thread when a
+second runtime is already loaded. `NORMET_TORCH_THREADS=<n>` sets the count yourself
+and `NORMET_TORCH_THREADS=0` turns the cap off. `tests/test_omp_guard.py` pins the
+decision logic; the crash itself needs the real libraries.
 
 ### Documentation
 

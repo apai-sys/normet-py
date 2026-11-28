@@ -654,7 +654,9 @@ class SeparableWorldModel:
         self._tree_met_mean = np.mean(g1, axis=0)
 
     def _fit_torch(self, Y: np.ndarray, X_cal: np.ndarray, X_met: np.ndarray) -> None:
-        import torch
+        from ..utils._omp import import_torch
+
+        torch = import_torch()
         import torch.nn as nn
 
         torch.manual_seed(self.config.seed)
@@ -839,7 +841,9 @@ class SeparableWorldModel:
     def _predict_latent_torch(
         self, X_cal: np.ndarray, X_met: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray]:
-        import torch
+        from ..utils._omp import import_torch
+
+        torch = import_torch()
 
         cal_mu, cal_sd = self._cal_stats
         Zc = _standardize_apply(X_cal, cal_mu, cal_sd)

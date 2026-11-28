@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,32 @@ from ..utils.prepare import log1p_target, prepare_data
 log = get_logger(__name__)
 
 __all__ = ["build_model", "train_model"]
+
+
+def _clean_sample_weight(weights: np.ndarray, *, where: str) -> tuple[np.ndarray, int]:
+    """Warn about non-finite observation weights and replace them by weight 0.
+
+    A zero weight carries no influence in the backend's objective, so the
+    affected rows are effectively dropped from the fit -- the contract
+    ``build_model``/``train_model`` document for non-finite weights. Without
+    this, preparation's median imputation quietly turned a missing weight into
+    a *usable* weight (the column median).
+
+    Returns the (possibly new) array and the number of replaced values.
+    """
+    bad = ~np.isfinite(weights)
+    n_bad = int(np.sum(bad))
+    if n_bad:
+        warnings.warn(
+            f"{n_bad} non-finite `sample_weight` value(s) in the {where} "
+            "were dropped (given weight 0).",
+            UserWarning,
+            stacklevel=3,
+        )
+        weights = np.where(bad, 0.0, weights)
+    if np.any(weights < 0.0):
+        raise ValueError("`sample_weight` must contain non-negative values.")
+    return weights, n_bad
 
 
 def _train_backend(_cache_key: str, *, be: Any, df: pd.DataFrame, **train_kw: Any) -> object:
@@ -64,8 +91,8 @@ def build_model(
         Target column in `df`.
     backend : str, default="flaml"
         AutoML backend name. Must be registered in :data:`backend_registry`.
-    covariates : List[str], optional
-        Predictors to use. Must be non-empty when training a model. The
+    covariates : List[str]
+        Predictors to use; required and must be non-empty. The
         time variables ``date_unix``/``day_julian``/``weekday``/``hour``
         are opt-in, not automatic: :func:`normet.utils.prepare.add_date_variables`
         always computes all four internally, but only whichever of them
@@ -82,7 +109,7 @@ def build_model(
         Backend-specific configuration passed through to the trainer.
     seed : int, default=7654321
         Random seed.
-    verbose : bool, default=True
+    verbose : bool, default=False
         Verbose logging.
     drop_time_features : bool, default=False
         If True, force-drop all four helper time features from
@@ -122,8 +149,9 @@ def build_model(
         transformed target so later predictions can be back-transformed.
     sample_weight : str, ndarray, or Series, optional
         Observation weights: a column name (kept through preparation) or a
-        per-row array aligned with the input ``df``. Non-finite weights
-        warn and are dropped by the backend.
+        per-row array aligned with the input ``df``. Non-finite weights warn
+        and are dropped (they enter the fit as weight 0, i.e. the affected
+        rows carry no weight); negative weights raise ``ValueError``.
     local_time : bool, default False
         Forwarded to :func:`normet.utils.prepare.prepare_data`: derive
         ``day_julian``/``weekday``/``hour`` from the frame's local civil
@@ -164,6 +192,14 @@ def build_model(
     if isinstance(sample_weight, str):
         if sample_weight not in df_in.columns:
             raise ValueError(f"sample_weight column {sample_weight!r} not found in DataFrame.")
+        # Prepare_data's imputer would median-fill a NaN weight column, turning
+        # a missing weight into a usable one; clean the weights first so the
+        # documented "warn and drop" contract holds on the column path too.
+        col_arr = pd.to_numeric(df_in[sample_weight], errors="coerce").to_numpy(dtype=float)
+        clean_col, n_bad = _clean_sample_weight(col_arr, where=f"column {sample_weight!r}")
+        if n_bad:
+            df_in = df_in.copy()
+            df_in[sample_weight] = clean_col
         if sample_weight not in prep_covs:
             prep_covs.append(sample_weight)
     elif sample_weight is not None:
@@ -172,8 +208,9 @@ def build_model(
             raise ValueError(
                 f"sample_weight length ({len(raw_sw)}) must match input df ({len(df_in)})."
             )
+        clean_sw, _ = _clean_sample_weight(raw_sw, where="array")
         df_in = df_in.copy()
-        df_in[_tmp_sw_col] = raw_sw
+        df_in[_tmp_sw_col] = clean_sw
         prep_covs.append(_tmp_sw_col)
 
     # Prepare data (ensures 'date', renames target to 'value', splits sets, etc.)
@@ -262,13 +299,13 @@ def train_model(
         Name of the target column.
     backend : str, default="flaml"
         AutoML backend name. Must be registered in :data:`backend_registry`.
-    covariates : list[str], optional
-        Predictor names. Must be non-empty and unique.
+    covariates : list[str]
+        Predictor names; required, non-empty and unique.
     model_config : dict, optional
         Backend-specific configuration options.
     seed : int, default=7654321
         Random seed for reproducibility.
-    verbose : bool, default=True
+    verbose : bool, default=False
         Verbose logging.
     cache : str or pathlib.Path, optional
         If given, memoize the trained model to this directory (a
@@ -290,13 +327,15 @@ def train_model(
     ------
     ValueError
         If covariates are missing, empty, duplicated, or not present in ``df``.
-    RuntimeError
-        If backend training fails.
+        Backend training errors propagate unchanged (this function does not
+        wrap them), e.g. a backend's ``ValueError`` for an invalid
+        ``model_config``.
 
     Notes
     -----
     - If a 'set' column exists, only rows with ``set == 'training'`` are used.
     - ``model_config`` keys are backend-specific; see the backend's docstring.
+    - Non-finite ``sample_weight`` values warn and enter the fit as weight 0.
 
     Examples
     --------

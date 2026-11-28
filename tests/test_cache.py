@@ -425,3 +425,27 @@ def test_normalise_cache_key_hashes_a_long_condition_by_content(tmp_path, synthe
 
     normalise(df, model, **{**kw, "conditional_on": {"cluster": other}})
     assert _StubPredictor.calls > first
+
+
+def test_dataframe_hash_distinguishes_column_names_and_dtypes(synthetic_aq):
+    """A renamed or re-typed frame must not reuse another frame's cache entry.
+
+    ``hash_pandas_object`` hashes values in column order, so the names never
+    entered the digest: ``dataframe_hash(a) == dataframe_hash(a.rename(...))``
+    and a bool column hashed like an int one. A cache key or a provenance
+    ``data_hash`` that cannot tell the two apart serves stale results after a
+    rename.
+    """
+    base = synthetic_aq[["t2m", "blh"]].copy()
+    renamed = base.rename(columns={"t2m": "temperature", "blh": "boundary_layer"})
+    assert dataframe_hash(base) != dataframe_hash(renamed)
+
+    as_bool = pd.DataFrame({"flag": [True, False, True]})
+    as_int = pd.DataFrame({"flag": [1, 0, 1]})
+    assert dataframe_hash(as_bool) != dataframe_hash(as_int)
+
+
+def test_dataframe_hash_is_still_stable_and_column_subset_aware(synthetic_aq):
+    df = synthetic_aq.copy()
+    assert dataframe_hash(df) == dataframe_hash(df.copy())
+    assert dataframe_hash(df, cols=["t2m"]) != dataframe_hash(df, cols=["t2m", "blh"])

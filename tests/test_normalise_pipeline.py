@@ -1565,3 +1565,38 @@ def test_top_level_exports_available():
         "ale",
     ):
         assert hasattr(nm, name), f"Missing export: {name}"
+
+
+@needs_lgb
+def test_dml_do_all_returns_the_same_prepared_scale_and_imputation(synthetic_aq):
+    """``do_all(normalise_method="dml")`` must prepare its frame like every other path.
+
+    The standard, ``cross_fit`` and chronos paths return a third tuple item on
+    the ``log1p`` scale when ``log_transform=True`` and with the caller's
+    ``impute``; the DML path used to call ``prepare_data`` without either, so
+    an archiver or a caller that treats ``df_prep`` uniformly got a frame on a
+    different scale (and silently median-filled behind ``impute="none"``).
+    """
+    df = synthetic_aq.iloc[:240].copy()
+    df.loc[10, "t2m"] = np.nan  # a gap only the caller's impute setting decides about
+    out, _res, df_prep = do_all(
+        df,
+        target="PM2.5",
+        covariates=["t2m", "blh", "u10"],
+        variables_resample=["t2m", "blh"],
+        backend="lightgbm",
+        model_config=FAST_LGB,
+        normalise_method="dml",
+        log_transform=True,
+        impute="none",
+        n_samples=3,
+        seed=3,
+        n_cores=1,
+    )
+    assert not out.empty
+    # log1p scale, as documented for the third tuple item
+    assert float(df_prep["value"].max()) == pytest.approx(
+        float(np.log1p(df["PM2.5"]).max()), rel=1e-9
+    )
+    # and impute="none" reached prepare_data: the gap was not median-filled
+    assert bool(df_prep["t2m"].isna().any())

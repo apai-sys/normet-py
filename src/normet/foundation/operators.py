@@ -736,7 +736,9 @@ def _extract_attentions(
         input_patch_size = int(getattr(pipe, "input_patch_size", 16))
         return g_list, t_list, int(n_ctx_patches), int(n_out_patches), input_patch_size
 
-    import torch
+    from ..utils._omp import import_torch
+
+    torch = import_torch()
     from chronos.chronos2.dataset import Chronos2Dataset, DatasetMode
 
     patch_out = int(pipe.model_output_patch_size)

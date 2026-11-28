@@ -7,6 +7,7 @@ adoption, SCM estimators, conformal inference and HonestDiD bounds.
 from __future__ import annotations
 
 import importlib.util
+import warnings
 
 import matplotlib
 
@@ -1138,3 +1139,198 @@ def test_harmonic_counterfactual_val_split_auto_cv_covariates_and_block_bootstra
     assert "net_impact_se" in res_cov.summary_metrics
     assert "net_impact_hac_se" in res_cov.summary_metrics
     assert (res_cov.counterfactual_p10 <= res_cov.counterfactual_p90 + 1e-12).all()
+
+
+# ---------------------------------------------------------------------------
+# Conformal effect interval: calibration and effect-size invariance
+# ---------------------------------------------------------------------------
+def _iid_effect_frame(reps_seed: int, n_pre: int, n_post: int) -> tuple[pd.DataFrame, str]:
+    """One i.i.d. N(0, 1) effect path with a true ATT of zero."""
+    rng = np.random.default_rng(reps_seed)
+    n = n_pre + n_post
+    idx = pd.date_range("2020-01-01", periods=n, freq="D")
+    eff = rng.normal(0.0, 1.0, n)
+    frame = pd.DataFrame({"observed": np.zeros(n), "synthetic": -eff, "effect": eff}, index=idx)
+    return frame, idx[n_pre].strftime("%Y-%m-%d")
+
+
+def test_conformal_effect_interval_is_calibrated_on_iid_null_panels():
+    """Nominal 95 % must cover ~95 % of true-zero effects, and p must be uniform-ish.
+
+    The old empirical-quantile construction covered 85-88 % here: the 95 %
+    quantile of |block mean| over overlapping windows of a single realisation
+    is not the 95 % quantile of the sampling distribution of the post-period
+    mean (a record holds only ``n_total / n_post`` effectively independent
+    windows, and the post block had been forced to sum to zero).
+    """
+    rng = np.random.default_rng(20_240_517)
+    reps = 300
+    for n_pre, n_post in ((60, 40), (70, 30), (200, 100), (240, 60)):
+        covered = 0
+        accepted = 0
+        widths = []
+        for i in range(reps):
+            frame, cutoff = _iid_effect_frame(int(rng.integers(2**31)), n_pre, n_post)
+            out = conformal_effect_interval({"synthetic": frame}, cutoff, n_perm=1000)
+            covered += int(out["low"] <= 0.0 <= out["high"])
+            accepted += int(out["p_value"] > 0.05)
+            widths.append(out["high"] - out["low"])
+        coverage = covered / reps
+        assert 0.90 <= coverage <= 0.98, (n_pre, n_post, coverage)
+        # the p-value must be consistent with the interval: calling a true null
+        # significant must happen about 5 % of the time, not 15 %
+        assert abs(accepted / reps - coverage) <= 0.06, (n_pre, n_post, accepted / reps)
+        # and the width must sit near the exact 2 * 1.96 / sqrt(n_post)
+        exact = 2.0 * 1.96 / np.sqrt(n_post)
+        assert 0.85 * exact <= float(np.mean(widths)) <= 1.35 * exact, (
+            n_pre,
+            n_post,
+            np.mean(widths),
+        )
+
+
+def test_conformal_effect_interval_width_does_not_depend_on_the_effect_tested():
+    """The null must be read off an effect-free path, not off the raw series."""
+    # A noiseless step carries no noise at all: the interval must collapse.
+    idx = pd.date_range("2023-01-01", periods=200, freq="D")
+    step = pd.DataFrame({"effect": np.r_[np.zeros(100), np.full(100, 10.0)]}, index=idx)
+    out = conformal_effect_interval(step, cutoff_date="2023-04-11", n_perm=200)
+    assert out["att"] == pytest.approx(10.0)
+    assert out["low"] == pytest.approx(10.0)
+    assert out["high"] == pytest.approx(10.0)
+    assert out["p_value"] < 0.01
+
+    # With noise, the width must be (nearly) the same for a zero effect and for
+    # a large one; de-meaning the whole record instead of the post block lets
+    # the effect under test into the null and inflates the width with it.
+    rng = np.random.default_rng(4_242)
+    widths = {}
+    for tau in (0.0, 3.0):
+        w = []
+        for _ in range(25):
+            n_pre, n_post = 100, 60
+            idx = pd.date_range("2021-01-01", periods=n_pre + n_post, freq="D")
+            eff = rng.normal(0.0, 1.0, n_pre + n_post)
+            eff[n_pre:] += tau
+            frame = pd.DataFrame({"effect": eff}, index=idx)
+            ci = conformal_effect_interval(
+                frame, cutoff_date=idx[n_pre].strftime("%Y-%m-%d"), n_perm=1000
+            )
+            w.append(ci["high"] - ci["low"])
+            if tau:
+                assert ci["p_value"] < 0.01
+        widths[tau] = float(np.mean(w))
+    ratio = widths[3.0] / widths[0.0]
+    assert 0.9 <= ratio <= 1.2, (widths, ratio)
+
+
+# ---------------------------------------------------------------------------
+# scm() with one or two donors
+# ---------------------------------------------------------------------------
+def _three_unit_panel(n_periods: int = 60, seed: int = 0) -> pd.DataFrame:
+    dates = pd.date_range("2020-01-01", periods=n_periods, freq="D")
+    rng = np.random.default_rng(seed)
+    rows = []
+    for unit, level in (("T", 0.0), ("D1", 1.0), ("D2", 2.0)):
+        y = level + 2.0 * np.sin(2.0 * np.pi * np.arange(n_periods) / 11.0)
+        y = y + rng.normal(0.0, 0.2, n_periods)
+        for d, v in zip(dates, y, strict=True):
+            rows.append({"date": d, "code": unit, "poll": v})
+    return pd.DataFrame(rows)
+
+
+@pytest.mark.parametrize("donors", [["D1"], ["D1", "D2"]])
+def test_scm_fits_with_one_or_two_donors(donors):
+    """A one- or two-donor pool is a well-defined SCM; it must not raise.
+
+    The ridge augmentation used to demand three donors (its batched
+    leave-one-out inflator needs J >= 3 samples), and every augmented
+    prediction came back NaN, so the pre-period residual matrix was empty and
+    the caller saw "Insufficient aligned pre-period residual rows" — a message
+    blaming the pre-period data.
+    """
+    df = _three_unit_panel()
+    cutoff = pd.Timestamp("2020-02-01")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        out = scm(
+            df,
+            "date",
+            "code",
+            "poll",
+            treated_unit="T",
+            cutoff_date="2020-02-01",
+            donors=donors,
+        )
+    assert not [w for w in caught if issubclass(w.category, RuntimeWarning)]
+
+    weights = out["weights"]
+    assert list(weights.index) == donors
+    assert float(weights.sum()) == pytest.approx(1.0)
+    assert (weights.to_numpy() >= -1e-12).all()
+    synthetic = out["synthetic"]
+    assert np.isfinite(synthetic.to_numpy()).all()
+
+    if len(donors) == 1:
+        # a single donor must get all the weight, so the counterfactual is that
+        # donor: the same answer scm_ascm / scm_abadie / sdid give
+        assert float(weights.iloc[0]) == pytest.approx(1.0)
+        panel = df.pivot_table(index="date", columns="code", values="poll")
+        direct = (panel["T"] - panel["D1"]).loc[panel.index >= cutoff]
+        effect = synthetic.loc[synthetic.index >= cutoff, "effect"]
+        assert np.allclose(effect.to_numpy(), direct.to_numpy(), atol=1e-9)
+        # no alpha can be selected from one sample
+        assert all(np.isnan(a) for a in out["alpha"].values())
+
+
+def test_scm_names_the_pre_period_when_it_is_short_not_the_donor_count():
+    """The remaining ValueError must describe the pre-period, not the donors."""
+    dates = list(pd.date_range("2020-01-01", periods=3, freq="D")) + [pd.Timestamp("2020-01-31")]
+    rows = []
+    for unit in ("T", "D1", "D2"):
+        for d, v in zip(dates, [1.0, 2.0, 3.0, 4.0], strict=True):
+            if unit == "D1" and d == dates[1]:
+                continue
+            rows.append({"date": d, "code": unit, "poll": v})
+    with pytest.raises(ValueError, match="pre-treatment rows"):
+        scm(
+            pd.DataFrame(rows),
+            "date",
+            "code",
+            "poll",
+            treated_unit="T",
+            cutoff_date="2020-01-04",
+            donors=["D1", "D2"],
+        )
+
+
+def test_conformal_effect_interval_survives_serially_correlated_effect_paths():
+    """An AR(1) effect path must not collapse the interval (the HAC term).
+
+    ``std / sqrt(n_post)`` on an AR(1) path with phi = 0.5 understates the
+    variance of the mean by roughly the number of independent blocks in the
+    post period, so a nominal 95 % interval built on it covers ~0.83; the
+    Newey-West standard error absorbs most of the autocorrelation (measured
+    0.877 at n_post=100 and 0.873 at n_post=30, against 0.85-0.88 before the
+    fix, i.e. still short of nominal: the default bandwidth of 3-4 lags is
+    short for phi = 0.5).
+    """
+    rng = np.random.default_rng(9_877)
+    reps = 250
+    for n_pre, n_post, floor in ((70, 30, 0.82), (200, 100, 0.84)):
+        n = n_pre + n_post
+        idx = pd.date_range("2020-01-01", periods=n, freq="D")
+        cutoff = idx[n_pre].strftime("%Y-%m-%d")
+        covered = 0
+        for _ in range(reps):
+            err = rng.normal(0.0, 1.0, n)
+            eff = np.empty(n)
+            eff[0] = err[0]
+            for t in range(1, n):
+                eff[t] = 0.5 * eff[t - 1] + err[t]
+            frame = pd.DataFrame(
+                {"observed": np.zeros(n), "synthetic": -eff, "effect": eff}, index=idx
+            )
+            out = conformal_effect_interval({"synthetic": frame}, cutoff, n_perm=1000)
+            covered += int(out["low"] <= 0.0 <= out["high"])
+        assert covered / reps >= floor, (n_pre, n_post, covered / reps)

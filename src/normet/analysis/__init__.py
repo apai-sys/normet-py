@@ -5,6 +5,7 @@ from .chemistry import (
     RegimeConditionedResult,
     normalise_ox_invariant,
     normalise_regime_conditioned,
+    ox_conservation_error,
 )
 from .decomposition import (
     MET_PHYSICAL_GROUPS,
@@ -107,6 +108,7 @@ __all__ = [
     "dml_normalise",
     "normalise_ox_invariant",
     "normalise_regime_conditioned",
+    "ox_conservation_error",
     "NormalisationDiagnostics",
     "counterfactual_separability_audit",
     "diagnose_normalisation",

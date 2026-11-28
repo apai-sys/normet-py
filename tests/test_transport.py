@@ -485,3 +485,65 @@ def test_stratified_cache_key_includes_pool_dates(tmp_path):
     # Pre-fix the second call hit A's entry and returned A's stratified draws.
     pd.testing.assert_frame_equal(b_cached, b_fresh)
     assert not np.allclose(a["normalised"], b_cached["normalised"])
+
+
+def test_cluster_trajectories_survives_an_endpoint_without_coordinates():
+    """A domain-exit row has NaN lat/lon and used to poison the distance matrix.
+
+    ``gridded_receptor_model`` already filters non-finite coordinates; the
+    clustering path did not, and scipy answered with "The condensed distance
+    matrix must contain only finite values" -- naming neither the trajectory
+    nor the column.
+    """
+    from normet.analysis.transport import cluster_trajectories
+
+    rows = []
+    for i in range(6):
+        for k in range(6):
+            rows.append(
+                {
+                    "receptor_date": pd.Timestamp("2021-01-01") + pd.Timedelta(hours=6 * i),
+                    "start_height": 0.0,
+                    "traj_id": 1,
+                    "age_h": -float(k),
+                    "lat": 40 + 0.1 * i + 0.2 * k,
+                    "lon": -3 + 0.2 * k,
+                    "height": 500.0 + 10 * k,
+                }
+            )
+    ep = pd.DataFrame(rows)
+    ep.loc[
+        (ep.traj_id == 1)
+        & (ep.receptor_date == pd.Timestamp("2021-01-01 12:00"))
+        & (ep.age_h == -3.0),
+        "lat",
+    ] = np.nan
+    res = cluster_trajectories(ep)
+    assert res.n_clusters >= 2
+    assert res.labels.notna().all()
+
+
+def test_cluster_trajectories_skips_a_path_with_no_located_points():
+    """Two located points are the minimum for a path; one is not."""
+    from normet.analysis.transport import cluster_trajectories
+
+    rows = []
+    for i in range(4):
+        for k in range(5):
+            rows.append(
+                {
+                    "receptor_date": pd.Timestamp("2021-01-01") + pd.Timedelta(hours=6 * i),
+                    "start_height": 0.0,
+                    "traj_id": 1,
+                    "age_h": -float(k),
+                    "lat": 40 + 0.1 * i + 0.2 * k,
+                    "lon": -3 + 0.2 * k,
+                    "height": 500.0 + 10 * k,
+                }
+            )
+    ep = pd.DataFrame(rows)
+    lost = (ep.receptor_date == pd.Timestamp("2021-01-01 06:00")) & (ep.age_h <= -3.0)
+    ep.loc[lost, "lat"] = np.nan
+    # The 06:00 path keeps only two located points, so it stays in the fit.
+    res = cluster_trajectories(ep)
+    assert res.n_clusters >= 2

@@ -218,7 +218,15 @@ def make_synthetic_benchmark(
 
     rng = np.random.default_rng(int(seed))
     t0 = pd.Timestamp(start_date)
-    t_end = t0 + pd.Timedelta(days=int(n_days)) - pd.Timedelta(hours=1 if freq == "h" else 24)
+    # The record ends one *sampling step* before t0 + n_days, so the row count,
+    # the span and ``metadata["n_days"]`` agree for every frequency. A fixed
+    # 24-h deduction dropped a whole day for any sub-daily `freq` other than "h"
+    # (e.g. "6h" produced 37 rows where 10 days holds 40).
+    try:
+        step = pd.tseries.frequencies.to_offset(freq)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid `freq` {freq!r}: {exc}") from exc
+    t_end = t0 + pd.Timedelta(days=int(n_days)) - step
     dates = pd.date_range(t0, t_end, freq=freq)
     n = len(dates)
 

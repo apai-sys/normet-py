@@ -209,8 +209,15 @@ def dataframe_hash(
     """
     sub = df[list(cols)] if cols else df
     row_hash = pd.util.hash_pandas_object(sub, index=include_index, encoding="utf8")
-    digest = hashlib.sha1(row_hash.values.tobytes()).hexdigest()  # type: ignore[union-attr]
-    return digest
+    # The row hash covers values only, so a frame whose columns were renamed
+    # (or whose columns changed dtype -- bool vs int rows hash alike) would
+    # collide with the original and a cache entry or provenance ``data_hash``
+    # could not tell them apart. Fold the names and dtypes in as well.
+    digest = hashlib.sha1()
+    digest.update("|".join(f"{name}:{dtype}" for name, dtype in sub.dtypes.items()).encode("utf-8"))
+    digest.update(b"\x00")
+    digest.update(row_hash.values.tobytes())  # type: ignore[union-attr]
+    return digest.hexdigest()
 
 
 def model_hash(model: Any) -> str:
