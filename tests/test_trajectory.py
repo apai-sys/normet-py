@@ -117,6 +117,7 @@ def test_overlapping_regions_are_detected():
 
 
 def test_overlap_check_handles_polygons_and_numpy_boxes():
+    pytest.importorskip("shapely")
     from shapely.geometry import Polygon
 
     tri = Polygon([(-5.0, 50.0), (5.0, 50.0), (0.0, 58.0)])
@@ -601,6 +602,7 @@ def test_a_dateline_crossing_box_matches_its_two_sides():
 
 
 def test_overlap_check_handles_a_dateline_crossing_box():
+    pytest.importorskip("shapely")
     from shapely.geometry import Polygon
 
     poly = Polygon([(-178.0, -5.0), (-172.0, -5.0), (-172.0, 5.0), (-178.0, 5.0)])

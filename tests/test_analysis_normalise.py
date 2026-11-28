@@ -388,3 +388,82 @@ def test_duplicate_timestamps_give_one_row_per_date(monkeypatch):
     assert len(batched) == len(vectorised) == 10
     np.testing.assert_allclose(batched["normalised"], vectorised["normalised"])
     np.testing.assert_allclose(batched["observed"], vectorised["observed"])
+
+
+# ---------------------------------------------------------------------------
+# Stratified draws: cached plan parity and stratum membership
+# ---------------------------------------------------------------------------
+
+
+def _strata_frames() -> tuple[pd.DataFrame, pd.DataFrame]:
+    rng = np.random.default_rng(0)
+    n_rows, n_pool = 180, 240
+    df = pd.DataFrame({"month": rng.integers(1, 7, n_rows), "hour": rng.integers(0, 8, n_rows)})
+    pool = pd.DataFrame({"month": rng.integers(1, 7, n_pool), "hour": rng.integers(0, 8, n_pool)})
+    return df, pool
+
+
+def test_stratified_draws_are_unchanged_by_the_shared_plan_cache():
+    """The cached stratum grouping must not move a single draw.
+
+    The grouping depends only on the two label arrays, so it is built once
+    per resampling call instead of inside every draw (``_stratified_draw_plan``).
+    The RNG call sequence must stay exactly as before: a draw planned cold,
+    a draw planned into a warm cache, and repeated draws sharing one cache
+    all have to agree bit for bit, and every drawn pool row must carry the
+    target row's stratum.
+    """
+    from normet.analysis.normalise import (
+        _draw_rows_stratified,
+        _draw_rows_stratified_balanced,
+        _extract_strata,
+    )
+
+    df, pool = _strata_frames()
+    df_strata = _extract_strata(df, ("month", "hour"), label="df")
+    pool_strata = _extract_strata(pool, ("month", "hour"), label="pool")
+    cache: dict = {}
+
+    for seed in (3, 4, 5):
+        cold = _draw_rows_stratified(0, seed, df_strata, pool_strata, True)
+        warm = _draw_rows_stratified(0, seed, df_strata, pool_strata, True, cycle_cache=cache)
+        np.testing.assert_array_equal(cold, warm)
+        np.testing.assert_array_equal(pool_strata[cold], df_strata)
+
+    for pos in (0, 1, 7):
+        cold = _draw_rows_stratified_balanced(0, 11, pos, df_strata, pool_strata)
+        warm = _draw_rows_stratified_balanced(0, 11, pos, df_strata, pool_strata, cycle_cache=cache)
+        np.testing.assert_array_equal(cold, warm)
+        np.testing.assert_array_equal(pool_strata[warm], df_strata)
+
+
+def test_stratified_draw_plan_keeps_strata_apart_and_falls_back_for_missing():
+    """A stratum absent from the pool still draws (from the full pool) and is reported."""
+    from normet.analysis.normalise import (
+        _draw_rows_stratified,
+        _draw_rows_stratified_balanced,
+        _extract_strata,
+        _stratified_draw_plan,
+    )
+
+    df = pd.DataFrame({"month": [1, 1, 2, 2, 13], "hour": [0, 1, 0, 1, 5]})
+    pool = pd.DataFrame({"month": [1, 2, 2, 1], "hour": [0, 1, 0, 1]})
+    df_strata = _extract_strata(df, ("month", "hour"), label="df")
+    pool_strata = _extract_strata(pool, ("month", "hour"), label="pool")
+
+    plan = _stratified_draw_plan(0, df_strata, pool_strata)
+    # Five month x hour strata in the target frame; the 13/5 one has no pool
+    # rows and falls back to the full pool, the other four keep their subset.
+    assert len(plan) == 5
+    fallbacks = [cands for _s_idx, _pos, cands in plan if len(cands) == len(pool_strata)]
+    assert len(fallbacks) == 1
+    np.testing.assert_array_equal(fallbacks[0], np.arange(len(pool_strata)))
+    for _s_idx, pos, cands in plan:
+        if len(cands) < len(pool_strata):
+            np.testing.assert_array_equal(pool_strata[cands], df_strata[pos])
+
+    draw = _draw_rows_stratified(0, 21, df_strata, pool_strata, True)
+    # Rows of the first two strata keep to their own stratum.
+    np.testing.assert_array_equal(pool_strata[draw[:4]], df_strata[:4])
+    balanced = _draw_rows_stratified_balanced(0, 21, 0, df_strata, pool_strata)
+    np.testing.assert_array_equal(pool_strata[balanced[:4]], df_strata[:4])

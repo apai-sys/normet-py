@@ -780,29 +780,17 @@ def do_all(
             df_prep_cf = log1p_target(df_prep_cf)
         return cf_res.normalised, cf_res, df_prep_cf
 
-    df_prep = prepare_data(
-        df,
-        target=_cfg.target,
-        covariates=_cfg.covariates,
-        split_method=_cfg.split_method,
-        train_fraction=_cfg.train_fraction,
-        seed=_cfg.seed,
-        impute=_cfg.impute,
-        max_gap=_cfg.max_gap,
-        embargo=_prepare_embargo(_cfg.embargo),
-    )
-    if _cfg.log_transform:
-        df_prep = log1p_target(df_prep)
-    log.info(
-        "Data prepared: %d rows (%d training, %d testing)",
-        len(df_prep),
-        int((df_prep["set"] == "training").sum()) if "set" in df_prep.columns else len(df_prep),
-        int((df_prep["set"] == "testing").sum()) if "set" in df_prep.columns else 0,
-    )
-
+    # One preparation, not two. This used to prepare the frame here and then
+    # hand it to ``build_model``, which prepares (and re-splits) whatever it is
+    # given: the second pass dropped the first one's ``set`` column and
+    # re-split with ``build_model``'s own defaults, so ``do_all(embargo=24)``
+    # trained on the 24 embargo rows it had just excluded and an
+    # ``impute="none"`` caller had its gaps filled behind its back. Letting
+    # ``build_model`` do the single preparation, with the settings forwarded,
+    # makes the fitted frame and the returned one the same frame.
     df_prep, model = build_model(
-        df=df_prep,
-        target="value",
+        df=df,
+        target=_cfg.target,
         backend=_cfg.backend,
         covariates=_cfg.covariates,
         split_method=_cfg.split_method,
@@ -812,6 +800,16 @@ def do_all(
         n_cores=_cfg.n_cores,
         verbose=_cfg.verbose,
         cache=_cfg.cache,
+        impute=_cfg.impute,
+        max_gap=_cfg.max_gap,
+        embargo=_prepare_embargo(_cfg.embargo),
+        log_transform=bool(_cfg.log_transform),
+    )
+    log.info(
+        "Data prepared: %d rows (%d training, %d testing)",
+        len(df_prep),
+        int((df_prep["set"] == "training").sum()) if "set" in df_prep.columns else len(df_prep),
+        int((df_prep["set"] == "testing").sum()) if "set" in df_prep.columns else 0,
     )
     log.info("Model trained with backend=%s", _cfg.backend)
 

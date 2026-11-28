@@ -322,6 +322,50 @@ def test_batch_reduce_parity_quantiles_mc_se_and_duplicate_dates():
         np.testing.assert_allclose(vec[col], mem[col], rtol=1e-10, atol=1e-10)
 
 
+def test_stratified_resampling_paths_agree_bit_for_bit():
+    """``stratify_by`` must draw the same rows whichever execution path runs.
+
+    The vectorised, batch-reduce and ``memory_save`` paths share
+    ``_draw_sample_indices``; caching the seed-independent stratum grouping
+    changes only how often the grouping is built, never which row each draw
+    takes -- so the three aggregations have to agree exactly, strided
+    ``month``/``hour`` strata included.
+    """
+    rng = np.random.default_rng(43)
+    n = 96
+    dates = pd.date_range("2024-01-01", periods=n, freq="h")
+    df = pd.DataFrame(
+        {
+            "date": dates,
+            "value": 20.0 + rng.uniform(0.0, 5.0, n),
+            "ws": rng.uniform(1.0, 10.0, n),
+            "t2m": rng.normal(15.0, 4.0, n),
+            "month": dates.month,
+        }
+    )
+    model = _StubModel(
+        ["ws", "t2m"],
+        lambda X: 1.0 + 0.1 * X["ws"].to_numpy(float) + 0.05 * X["t2m"].to_numpy(float),
+    )
+    common = dict(
+        df=df,
+        model=model,
+        covariates=["ws", "t2m"],
+        variables_resample=["ws", "t2m"],
+        stratify_by=("month", "hour"),
+        n_samples=8,
+        seed=17,
+        n_cores=1,
+        return_quantiles=[0.1, 0.9],
+        return_mc_se=True,
+    )
+    vec = normalise(**common, batch_size=0)
+    bat = normalise(**common, batch_size=3)
+    mem = normalise(**common, memory_save=True)
+    pd.testing.assert_frame_equal(vec, bat)
+    pd.testing.assert_frame_equal(vec, mem)
+
+
 def test_default_variables_resample_excludes_cyclical_time_keeps_wd_sin_cos():
     """hour_sin/dow_sin/doy_cos are held fixed while ws/wd_sin/wd_cos are resampled."""
     n = 48
@@ -987,6 +1031,66 @@ def test_do_all_cross_fit_embargo_default_and_explicit_zero():
     fold0_default = stats_default.loc[stats_default["fold"].astype(str) == "0"]
     fold0_zero = stats_zero.loc[stats_zero["fold"].astype(str) == "0"]
     assert int(fold0_default["n_train"].iloc[0]) < int(fold0_zero["n_train"].iloc[0])
+
+
+def test_do_all_ordinary_split_keeps_embargo_and_impute_settings():
+    """The non-cross-fit path must fit on the frame ``do_all`` prepared.
+
+    ``do_all`` prepared the frame and then handed it to ``build_model``,
+    which prepares (and re-splits) whatever it is given: the second pass
+    dropped the first one's ``set`` column and re-split with ``build_model``'s
+    own defaults (``embargo=0``, ``impute="median"``). The model therefore
+    trained on the very rows the caller had embargoed, and an
+    ``impute="none"`` caller had its gaps filled behind its back -- while the
+    returned frame was the second split's, so nothing visibly disagreed.
+    """
+    rng = np.random.default_rng(37)
+    n = 120
+    w = rng.normal(0.0, 1.0, n)
+    df = pd.DataFrame(
+        {
+            "date": pd.date_range("2024-01-01", periods=n, freq="h"),
+            "pm": 20.0 + 2.0 * w + rng.normal(0.0, 0.2, n),
+            "w": w,
+        }
+    )
+    df.loc[df.index[:5], "w"] = np.nan
+    be = _FixedBackend("mock_emb2", lambda X: 20.0 + 2.0 * X["w"].to_numpy(float))
+    backend_registry._backends["mock_emb2"] = be
+    try:
+        common = dict(
+            target="pm",
+            backend="mock_emb2",
+            covariates=["w"],
+            variables_resample=["w"],
+            split_method="ts",
+            n_samples=3,
+            seed=9,
+            n_cores=1,
+            embargo=24,
+        )
+        _, _, df_prep = do_all(df, **common)
+        _, _, df_none = do_all(df, impute="none", **common)
+    finally:
+        backend_registry._backends.pop("mock_emb2", None)
+
+    assert int((df_prep["set"] == "embargo").sum()) == 24
+    expected = prepare_data(
+        df,
+        target="pm",
+        covariates=["w"],
+        split_method="ts",
+        train_fraction=0.75,
+        seed=7654321,
+        impute="median",
+        max_gap=6,
+        embargo=24,
+    )
+    pd.testing.assert_frame_equal(
+        df_prep[sorted(df_prep.columns)], expected[sorted(expected.columns)]
+    )
+    # ``impute="none"`` must leave the five gaps it was asked to leave.
+    assert int(df_none["w"].isna().sum()) == 5
 
 
 def test_icn_spread_columns_follow_level_units_under_log_transform():

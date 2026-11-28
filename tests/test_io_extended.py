@@ -1023,6 +1023,7 @@ def test_fetch_era5_timeseries_caching(monkeypatch, tmp_path):
     assert len(retrieve_calls) == 0
 
 
+@pytest.mark.skipif(not cdsapi_available, reason="cdsapi not installed")
 def test_era5_cache_is_keyed_by_variables_and_coordinates(monkeypatch, tmp_path):
     """A cache named only by site and dates reuses the wrong download.
 

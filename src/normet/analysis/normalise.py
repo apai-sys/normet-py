@@ -545,40 +545,81 @@ def _draw_rows_balanced(
     return perm[(offsets + pos_in_cycle) % n_pool]
 
 
+def _stratified_draw_plan(
+    stream: int,
+    df_strata: np.ndarray,
+    pool_strata: np.ndarray,
+    *,
+    cycle_cache: dict[tuple[Any, ...], Any] | None = None,
+    log_missing: bool = True,
+) -> list[tuple[int, np.ndarray, np.ndarray]]:
+    """Group target and pool rows by stratum, once per ``(stream, arrays)``.
+
+    The grouping depends only on the two stratum label arrays -- never on the
+    draw seed, the sample position or the RNG -- so it is built once per
+    resampling call and reused by every Monte Carlo draw. Building it inside
+    each draw was the stratified path's dominant cost: the per-draw
+    ``np.flatnonzero(strata == key)`` over an object array is O(n_pool) per
+    stratum, so a 5,793-row record stratified by ``month`` x ``hour`` (192
+    levels) cost ~22 ms a draw against ~0.1 ms for the plain iid path. The
+    plan is keyed by
+    the identity of the two arrays, whose ids stay valid for the lifetime of
+    the caller's ``cycle_cache`` (one resampling call), so a cache shared by
+    several coalitions or frames never serves one frame's grouping for
+    another.
+
+    Returns the groups in the sorted-key order the draws consume them, so the
+    RNG call sequence -- and therefore the indices drawn for a given seed --
+    is unchanged from the per-draw construction.
+    """
+    key = ("stratified_plan", stream, id(df_strata), id(pool_strata))
+    cached = cycle_cache.get(key) if cycle_cache is not None else None
+    if cached is not None:
+        return cached  # type: ignore[no-any-return]
+
+    pool_idx: dict[Any, np.ndarray] = {
+        stratum: np.flatnonzero(pool_strata == stratum) for stratum in sorted(set(pool_strata))
+    }
+    full_pool = np.arange(len(pool_strata), dtype=np.int64)
+    missing_keys: list[str] = []
+    groups: list[tuple[int, np.ndarray, np.ndarray]] = []
+    for s_idx, stratum in enumerate(sorted(set(df_strata))):
+        pos = np.flatnonzero(df_strata == stratum)
+        cands = pool_idx.get(stratum)
+        if cands is None or cands.size == 0:
+            missing_keys.append(str(stratum))
+            cands = full_pool
+        groups.append((s_idx, pos, cands))
+
+    if missing_keys and stream in (0, 1) and log_missing:
+        log.warning(
+            "stratify_by: %d stratum value(s) absent from pool (%s); fell back to full pool.",
+            len(missing_keys),
+            ", ".join(missing_keys[:4]),
+        )
+    if cycle_cache is not None:
+        cycle_cache[key] = groups
+    return groups
+
+
 def _draw_rows_stratified(
     stream: int,
     seed: int,
     df_strata: np.ndarray,
     pool_strata: np.ndarray,
     replace: bool,
+    *,
+    cycle_cache: dict[tuple[Any, ...], Any] | None = None,
 ) -> np.ndarray:
     """Draw pool row indices matching each target row's stratum deterministically."""
     rng = np.random.default_rng(seed if stream == 0 else [seed, stream])
-    n_rows = len(df_strata)
-    n_pool = len(pool_strata)
-    out = np.empty(n_rows, dtype=np.int64)
+    out = np.empty(len(df_strata), dtype=np.int64)
 
-    pool_idx: dict[str, np.ndarray] = {}
-    for key in sorted(set(pool_strata)):
-        pool_idx[key] = np.flatnonzero(pool_strata == key)
-
-    full_pool = np.arange(n_pool, dtype=np.int64)
-    missing_keys: list[str] = []
-    for key in sorted(set(df_strata)):
-        pos = np.flatnonzero(df_strata == key)
-        candidates = pool_idx.get(key)
-        if candidates is None or candidates.size == 0:
-            missing_keys.append(str(key))
-            candidates = full_pool
+    for _s_idx, pos, candidates in _stratified_draw_plan(
+        stream, df_strata, pool_strata, cycle_cache=cycle_cache
+    ):
         use_replace = replace or len(pos) > len(candidates)
         out[pos] = rng.choice(candidates, size=len(pos), replace=use_replace)
-
-    if missing_keys and stream in (0, 1):
-        log.warning(
-            "stratify_by: %d stratum value(s) absent from pool (%s); fell back to full pool.",
-            len(missing_keys),
-            ", ".join(missing_keys[:4]),
-        )
     return out
 
 
@@ -592,35 +633,16 @@ def _draw_rows_stratified_balanced(
     cycle_cache: dict[tuple[Any, ...], Any] | None = None,
 ) -> np.ndarray:
     """Balanced cyclic permutation draw within each stratum."""
-    n_rows = len(df_strata)
-    n_pool = len(pool_strata)
-    out = np.empty(n_rows, dtype=np.int64)
+    out = np.empty(len(df_strata), dtype=np.int64)
+    groups = _stratified_draw_plan(
+        stream,
+        df_strata,
+        pool_strata,
+        cycle_cache=cycle_cache,
+        log_missing=int(sample_pos) == 0,
+    )
 
-    map_key = ("strata_map", stream)
-    cached_map = cycle_cache.get(map_key) if cycle_cache is not None else None
-    if cached_map is None:
-        pool_idx = {key: np.flatnonzero(pool_strata == key) for key in sorted(set(pool_strata))}
-        full_pool = np.arange(n_pool, dtype=np.int64)
-        missing_keys: list[str] = []
-        target_groups: list[tuple[int, np.ndarray, np.ndarray]] = []
-        for s_idx, key in enumerate(sorted(set(df_strata))):
-            pos = np.flatnonzero(df_strata == key)
-            cands = pool_idx.get(key)
-            if cands is None or cands.size == 0:
-                missing_keys.append(str(key))
-                cands = full_pool
-            target_groups.append((s_idx, pos, cands))
-        if missing_keys and stream in (0, 1) and int(sample_pos) == 0:
-            log.warning(
-                "stratify_by: %d stratum value(s) absent from pool (%s); fell back to full pool.",
-                len(missing_keys),
-                ", ".join(missing_keys[:4]),
-            )
-        cached_map = target_groups
-        if cycle_cache is not None:
-            cycle_cache[map_key] = cached_map
-
-    for s_idx, pos, cands in cached_map:
+    for s_idx, pos, cands in groups:
         p_s = len(cands)
         cycle = int(sample_pos) // p_s
         pos_in_cycle = int(sample_pos) % p_s
@@ -667,15 +689,27 @@ def _draw_rows_block(
     pool_strata: np.ndarray | None = None,
     z_pool: np.ndarray | None = None,
     block_mode: str = "independent",
+    cycle_cache: dict[tuple[Any, ...], Any] | None = None,
 ) -> np.ndarray:
     """Draw contiguous meteorological blocks of length ``block_hours`` from the pool."""
     rng = np.random.default_rng(seed if stream == 0 else [seed, stream])
     b_len = int(block_hours)
     out = np.empty(n_rows, dtype=np.int64)
 
-    pool_idx_map: dict[str, np.ndarray] | None = None
+    pool_idx_map: dict[Any, np.ndarray] | None = None
     if df_strata is not None and pool_strata is not None:
-        pool_idx_map = {key: np.flatnonzero(pool_strata == key) for key in sorted(set(pool_strata))}
+        # The pool's stratum -> rows grouping is seed-independent, so it is
+        # built once per (stream, pool) and shared by every draw rather than
+        # re-sorted and re-scanned for each one (see _stratified_draw_plan).
+        group_key = ("block_pool_map", stream, id(pool_strata))
+        pool_idx_map = cycle_cache.get(group_key) if cycle_cache is not None else None
+        if pool_idx_map is None:
+            pool_idx_map = {
+                stratum: np.flatnonzero(pool_strata == stratum)
+                for stratum in sorted(set(pool_strata))
+            }
+            if cycle_cache is not None:
+                cycle_cache[group_key] = pool_idx_map
 
     use_markov = block_mode == "markov" and z_pool is not None and len(z_pool) == n_pool
     all_starts_cache: np.ndarray | None = None
@@ -904,6 +938,7 @@ def _draw_sample_indices(
             pool_strata=p_strata,
             z_pool=z_pool,
             block_mode=block_mode,
+            cycle_cache=cycle_cache,
         )
     if knn_spec is not None:
         if sampling == "balanced":
@@ -926,7 +961,9 @@ def _draw_sample_indices(
                 p_strata,
                 cycle_cache=cycle_cache,
             )
-        return _draw_rows_stratified(stream, draw_seed, df_strata, p_strata, replace)
+        return _draw_rows_stratified(
+            stream, draw_seed, df_strata, p_strata, replace, cycle_cache=cycle_cache
+        )
     if sampling == "balanced":
         return _draw_rows_balanced(
             stream,
@@ -1011,6 +1048,7 @@ def generate_resampled(
     z_pool_map: Mapping[int, np.ndarray | None] | None = None,
     base_seed: int | None = None,
     sample_pos: int = 0,
+    cycle_cache: dict[tuple[Any, ...], Any] | None = None,
 ) -> pd.DataFrame:
     """Generate a resampled copy of the dataset.
 
@@ -1034,6 +1072,11 @@ def generate_resampled(
         serves.
     resample_pools : mapping of str to pandas.DataFrame, optional
         Extra pools; see :attr:`NormaliseConfig.resample_pools`.
+    cycle_cache : dict, optional
+        Scratch cache shared by the draws of one resampling call. It holds
+        the seed-independent stratum groupings, so a caller that draws once
+        per call (``memory_save=True``) can build them once instead of for
+        every sample; leave it out and each call builds its own.
 
     Returns
     -------
@@ -1080,6 +1123,7 @@ def generate_resampled(
             df_strata=df_strata,
             p_strata=p_strata,
             knn_spec=knn_spec,
+            cycle_cache=cycle_cache,
         )
         out.loc[:, cols] = pool[cols].to_numpy()[idx]
     out.loc[:, "seed"] = seed
@@ -1799,6 +1843,17 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
     rng = np.random.default_rng(_cfg.seed)
     random_seeds = rng.choice(1_000_000, size=_cfg.n_samples, replace=False)
 
+    # One scratch cache for the whole call. The stratum groupings (and a block
+    # draw's pool map) depend on the strata columns, not on the seed, so every
+    # draw of every path below reuses the plan built by the first; a
+    # ``memory_save=True`` call draws one sample per call and would otherwise
+    # rebuild the grouping O(n_samples) times.
+    draw_cycle_cache: dict[tuple[Any, ...], Any] = {}
+    if strat_cols and df_strata is not None:
+        for stream, _draw_cols, _pool_vals, p_strata in draw_arrays:
+            if p_strata is not None:
+                _stratified_draw_plan(stream, df_strata, p_strata, cycle_cache=draw_cycle_cache)
+
     if not variables_resample:
         preds = ml_predict(model, df, num_threads=n_cores_eff)
         obs_raw = df["value"].to_numpy(dtype=float)
@@ -1946,6 +2001,7 @@ def _normalise_uncached(df: pd.DataFrame, model: object, _cfg: NormaliseConfig) 
                 z_pool_map=z_pool_map,
                 base_seed=_cfg.seed,
                 sample_pos=int(sample_pos),
+                cycle_cache=draw_cycle_cache,
             )
             preds = ml_predict(model, df_resampled, num_threads=1)
             out_dict: dict[str, Any] = {

@@ -59,6 +59,7 @@ def test_rolling_reports_its_windows_and_keeps_a_window_inside_its_share(monkeyp
 
 
 def test_durations_read_at_a_glance():
+    pytest.importorskip("PySide6")
     from normet.gui._clock import format_duration
 
     assert [format_duration(s) for s in (0.4, 42, 61, 12 * 60 + 20, 80 * 60)] == [
