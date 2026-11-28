@@ -908,6 +908,54 @@ it the frame is treated as one record and one site's air mass feeds the next sit
 features. Decay is applied per elapsed hour, so hourly, daily and irregular records
 share the same physical kernel.
 
+\section{Counterfactual separability and hindsight}\label{sec:separability}
+A de-weathering is only as good as the counterfactual behind it, and that cannot be read
+from the fit alone. \code{counterfactual\_separability\_audit} asks the narrower, testable
+question: does the factual residual carry structure a counterfactual could reuse?
+\begin{itemize}\nosep
+  \item the \emph{residual-correction score} (RC score) --- the out-of-fold $R^2$ a
+        corrector gains by regressing the residual on the action, the quantity of
+        Appendix~I Eq.~66;
+  \item an \emph{interaction lower bound} in raw and $\log(1+x)$ coordinates, the
+        same bound in 1-D Wasserstein-2 distance, and a continuous \emph{shifted-power}
+        scan that reports the coordinate with the weakest interaction;
+  \item floor and ceiling \emph{saturation} rates, and the coordinate the audit
+        recommends;
+  \item a moving-block bootstrap 95\,\% upper bound on the RC score, the chronological
+        \emph{last-block} score, and the share of the residual that does not persist;
+  \item per-feature attribution of the score and of the interaction bound.
+\end{itemize}
+\code{diagnose\_normalisation} runs the audit whenever a factual series is available and
+warns when the score, the interaction bound or the saturation says the counterfactual is
+weak. \code{debias\_icn\_residuals} then applies the correction out of fold --- a ridge or
+ExtraTrees corrector, admitted only when the RC score clears its gate --- and shifts
+\code{level}, \code{paired} and \code{factual} without re-running the foundation model.
+
+The in-context path exposes the same choice of pairing. \code{ICNDesign.paired\_mode}
+is \code{auto}, \code{additive}, \code{ratio}, \code{log\_ratio} or \code{rank}; rank
+transport moves the observed value through each anchor's factual and counterfactual
+quantile fans, which keeps a multiplicative shock without clipping it. The point estimate
+is the \code{median} or the \code{quantile\_mean} of the fan, the latter removing the
+median's downward bias when the fan is skewed. \code{ICNResult.factual} (and
+\code{to\_normet\_frame(..., include\_factual=True)}) returns the factual baseline
+beside the counterfactual one.
+
+Hindsight asks the complementary question --- what would this episode have looked like
+under another period's weather? \code{hindsight\_episode\_counterfactual} answers it for
+a chosen episode, and \code{HarmonicCounterfactual.evaluate\_intervention} gains
+\code{residual\_carryover} (a persistence-gated AR(1) term) and pre-period separability
+checks, so a post-period residual is not attributed to the intervention when the
+pre-period already showed the same structure.
+
+The benchmark side carries the same idea. \code{F6\_interaction\_dial} varies a known
+meteorology--emission interaction from separable to strongly interacting, and
+\code{benchmark\_interaction\_diagnostics} scores a method across that dial;
+\code{evaluate\_benchmark} reports \code{cf\_r2} (the counterfactual's fit),
+\code{factual\_copy\_r2} (how much of the factual series is merely copied) and an
+optional \code{shuffle\_control}. What the audit bounds is the \emph{reusable} structure,
+not the true counterfactual: a high RC score says a residual corrector could help, not
+that its correction is unbiased.
+
 \section{The world model}\label{sec:worldmodeltheory}
 The models in \code{normet.world\_model} treat de-weathering as a latent state
 problem rather than a regression on observed concentrations. Three pieces are
@@ -1348,10 +1396,11 @@ prediction, square, with the 1:1 line and, in its corner, the number of rows, th
 predicted on observed (below 1: the extremes are pulled in) and the mean bias --- as a
 density of hexagons where the rows run to thousands; the bars are the model's feature
 importance (split counts for LightGBM). Under the table, one line reads the point
-forecast's \emph{CRPS reference} --- $\sqrt{\pi/2}\cdot\mathrm{MAE}$ over the held-out
-rows, the point forecast's score on the scale of the continuous ranked probability score.
-A forecast that carries a spread scores its own CRPS, and only a score below this
-reference says the spread is worth carrying.
+forecast's \emph{CRPS reference} --- its mean absolute error over the held-out rows.
+A point forecast is a point mass, whose CRPS is the absolute error, so this is the point
+forecast's own score on the continuous ranked probability scale. A forecast that carries a
+spread scores its own CRPS; below this reference the spread is worth carrying, and above it
+the band is worse than forecasting the median alone.
 
 \screenshot{ui_model.png}{MY1 trained with FLAML (LightGBM, 30 search trials, random
 split): on the 1,448 held-out hours $R^2 = 0.900$ and RMSE $= 8.00$~\ugm{}, against
@@ -2443,7 +2492,7 @@ normet info                     # version and the backends installed
 Every command takes \code{--config file.yaml}, whose keys are the options' names; an
 option on the command line overrides the file. \code{--run-path} also saves a
 \code{NormetRun} archive (\code{.joblib} with a \code{.meta.json} sidecar) that
-\code{normet report} turns into HTML or Markdown. The 17 subcommands:
+\code{normet report} turns into HTML or Markdown. The 18 subcommands:
 \begin{center}\small
 \begin{tabular}{@{}p{3.5cm}p{11.4cm}@{}}
 \toprule
@@ -2458,6 +2507,7 @@ Command & Does \\
 \code{impute}, \code{backtest}, \code{events} & Chronos-2 gap imputation, probabilistic backtesting, event detection \\
 \code{benchmark} & generate an F1--F5 record and score a normalised series against it \\
 \code{met-features} & derive the meteorological physics features \\
+\code{world-model} & fit the separable latent world model and de-weather its species \\
 \code{invert-footprints} & joint multi-receptor footprint inversion \\
 \code{report}, \code{info} & HTML/Markdown from a run archive; version and installed backends \\
 \bottomrule
@@ -2472,10 +2522,11 @@ claude mcp add normet -- normet-mcp          # Claude Code
 # Claude Desktop, claude_desktop_config.json:
 #   {"mcpServers": {"normet": {"command": "normet-mcp"}}}
 \end{lstlisting}
-The server exposes 26 tools. The assistant can list the examples, inspect a table,
+The server exposes 27 tools. The assistant can list the examples, inspect a table,
 start \code{do-all}, \code{decompose}, \code{scm}, \code{cv}, \code{impute},
 \code{backtest} and \code{events} jobs, the conserved Ox and regime-conditioned
-normalisations, the ICN decomposition and the Shapley-interaction decomposition,
+normalisations, the separable world model's de-weathering, the ICN decomposition
+and the Shapley-interaction decomposition,
 generate a synthetic benchmark or the physics features, invert several receptors'
 footprints, follow and cancel jobs, read a run or a result, run the trend analyses,
 draw a figure and write a report. Each fit is a \nm{} command run in its own

@@ -31,7 +31,7 @@ The desktop app has its own assistant panel, described in {doc}`gui`.
 
 `normet-mcp --toolset core` registers only the 14 tools of the standard
 de-weathering workflow (inspect, start, status, read, trend, figure, report)
-instead of all 26. Fewer tools means a shorter menu for the assistant to choose
+instead of all 27. Fewer tools means a shorter menu for the assistant to choose
 from; the omitted ones are the specialised analyses (Chronos-2 and in-context
 de-weathering, conserved-Ox and regime normalisation, Shapley/ICN
 decomposition, benchmarks, met features, imputation and backtesting, event

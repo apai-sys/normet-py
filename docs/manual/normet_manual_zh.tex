@@ -714,6 +714,43 @@ Grabisch--Roubens 交互项，显示两个变量（比如温度与边界层高�
 下一个站点的特征。衰减按实际经过的小时计算，逐时、逐日和不规则的记录因此共享同一个
 物理核。
 
+\section{反事实可分离性与事后对照}\label{sec:separability}
+去气象化能做到多好，取决于它背后的反事实，而这一点读拟合本身是看不出来的。
+\code{counterfactual\_separability\_audit} 问的是一个更窄、可检验的问题：事实侧的残差里
+是否还留着反事实可以复用的结构？
+\begin{itemize}\nosep
+  \item \emph{残差修正得分}（RC 得分）——用动作回归残差、样本外能拿到的 $R^2$，即附录~I
+        式~66 的那个量；
+  \item 原始坐标与 $\log(1+x)$ 坐标下的\emph{交互下界}，同一界的一维 Wasserstein-2 形式，
+        以及连续\emph{移位幂}扫描（给出交互最弱的坐标）；
+  \item 下限与上限的\emph{饱和率}，以及审计推荐的坐标；
+  \item RC 得分的移动块自助 95\,\% 上界、按时间顺序的\emph{最后一块}得分，以及残差中不
+        持续部分的占比；
+  \item 得分与交互下界按特征的归因。
+\end{itemize}
+只要事实序列在，\code{diagnose\_normalisation} 就会跑这套审计，并在得分、交互下界或饱和
+率说明反事实偏弱时给出警告。\code{debias\_icn\_residuals} 随后在样本外施加修正——岭回归或
+ExtraTrees，只有 RC 得分过门槛才启用——直接平移 \code{level}、\code{paired} 与
+\code{factual}，不必重跑基础模型。
+
+上下文路径把同一组选择暴露出来。\code{ICNDesign.paired\_mode} 可取 \code{auto}、
+\code{additive}、\code{ratio}、\code{log\_ratio} 或 \code{rank}；秩搬运让观测值沿每个锚点
+的事实/反事实分位扇形移动，既保住乘性冲击又不会被截断。点估计取扇形的 \code{median} 或
+\code{quantile\_mean}，后者在扇形偏斜时去掉中位数的下偏。\code{ICNResult.factual}（以及
+\code{to\_normet\_frame(..., include\_factual=True)}）把事实基线与反事实基线并排返回。
+
+事后对照问的是另一半问题：这段事件若换到另一段时期的气象下会是什么样？
+\code{hindsight\_episode\_counterfactual} 对指定事件给出答案；
+\code{HarmonicCounterfactual.evaluate\_intervention} 新增 \code{residual\_carryover}
+（由持续性门槛控制的 AR(1) 项）与前期可分离性检查，当前期已出现同样结构时，后期残差就不会
+被算到干预头上。
+
+基准侧同理：\code{F6\_interaction\_dial} 把已知的气象—排放交互从可分离调到强交互，
+\code{benchmark\_interaction\_diagnostics} 在这条标尺上给方法打分；\code{evaluate\_benchmark}
+报告 \code{cf\_r2}（反事实的拟合）、\code{factual\_copy\_r2}（事实序列有多少只是被照抄）
+以及可选的 \code{shuffle\_control}。审计给出的是\emph{可复用}结构的界，不是真实反事实：
+RC 得分高只说明残差修正可能有帮助，不说明这个修正无偏。
+
 \section{世界模型}\label{sec:worldmodeltheory}
 \code{normet.world\_model} 里的模型把去气象化当作潜状态问题，而不是对观测浓度的回归。
 对外是三块，共同的前提只有一条：拟合只看干预前的记录，干预后的气象差异因此不会被当成
@@ -1059,9 +1096,9 @@ Ctrl、Cmd）拖动或点击可以加选，按住 Shift 点已选的点则取消
 （第~\ref{sec:modstats}~节）；散点对比图显示留出行的观测与预测，画成正方形，附 1:1 线，
 角上标出行数、预测对观测的回归斜率（小于 1：极值被拉向中间）和平均偏差——行数上千时改用
 六边形密度图；条形图是模型的特征重要性（LightGBM 为分裂次数）。表格下方一行给出点预测的
-\emph{CRPS 参考值}——留出行上的 $\sqrt{\pi/2}\cdot\mathrm{MAE}$，即点预测在连续分级概率
-评分（CRPS）尺度上的得分。带分布的预报算得出自己的 CRPS，只有低于这个参考值，才说明这个
-分布值得带。
+\emph{CRPS 参考值}——留出行上的平均绝对误差（MAE）。点预测是一个点质量分布，它的
+CRPS 就是绝对误差，所以这就是点预测在连续分级概率评分（CRPS）尺度上的自身得分。带分布的
+预报算得出自己的 CRPS：低于这个参考值说明这份分布值得带，高于它则比只报中位数还差。
 
 \screenshot{ui_model.png}{用 FLAML（LightGBM，30 次搜索，随机划分）训练 MY1：在 1,448 个
 留出小时上 $R^2 = 0.900$、RMSE $= 8.00$~\ugm{}，而在 4,345 个训练小时上为 $1.000$。
@@ -1912,7 +1949,7 @@ normet info                     # version and the backends installed
 每条命令都接受 \code{--config file.yaml}，键就是选项名；命令行上的选项覆盖文件里的。
 \code{--run-path} 还会存一个 \code{NormetRun} 档案（\code{.joblib} 加一个
 \code{.meta.json} 附属文件），\code{normet report} 可以把它转成 HTML 或 Markdown。
-17 个子命令：
+18 个子命令：
 \begin{center}\small
 \begin{tabular}{@{}p{3.5cm}p{11.4cm}@{}}
 \toprule
@@ -1927,6 +1964,7 @@ normet info                     # version and the backends installed
 \code{impute}, \code{backtest}, \code{events} & Chronos-2 缺口插补、概率回测、事件检测 \\
 \code{benchmark} & 生成 F1--F5 记录并对归一化序列打分 \\
 \code{met-features} & 派生气象物理特征 \\
+\code{world-model} & 拟合可分离潜空间世界模型并对其物种去气象化 \\
 \code{invert-footprints} & 跨受体联合足迹反演 \\
 \code{report}, \code{info} & 由运行档案生成 HTML/Markdown；版本与已装后端 \\
 \bottomrule
@@ -1940,9 +1978,9 @@ claude mcp add normet -- normet-mcp          # Claude Code
 # Claude Desktop, claude_desktop_config.json:
 #   {"mcpServers": {"normet": {"command": "normet-mcp"}}}
 \end{lstlisting}
-服务器提供 26 个工具。助手可以列出示例、检查表格，启动 \code{do-all}、\code{decompose}、
+服务器提供 27 个工具。助手可以列出示例、检查表格，启动 \code{do-all}、\code{decompose}、
 \code{scm}、\code{cv}、\code{impute}、\code{backtest} 和 \code{events} 任务，做守恒 Ox 与
-体制条件归一化、ICN 分解和 Shapley 交互分解，生成合成基准或物理特征，反演多个受体的
+体制条件归一化、可分离世界模型的去气象化、ICN 分解和 Shapley 交互分解，生成合成基准或物理特征，反演多个受体的
 足迹，跟踪和取消任务，读取运行或结果，跑趋势分析，画图和写报告。每次拟合都是一条 \nm{}
 命令，跑在自己的
 进程和文件夹（\code{\$NORMET\_MCP\_HOME}，默认 \code{\textasciitilde/.normet/mcp}）里，所以
