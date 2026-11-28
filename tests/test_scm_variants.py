@@ -1,5 +1,6 @@
 """Sanity checks for the alternative SCM backends."""
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -164,3 +165,70 @@ def test_mcnnm_randomized_rank_runs(scm_panel):
     syn = out["synthetic"]
     assert {"observed", "synthetic", "effect"} <= set(syn.columns)
     assert len(syn) == 200
+
+
+def _low_rank_null_panel(n_dates: int = 70, n_donors: int = 6, seed: int = 0):
+    """A clean rank-2 panel (one common seasonal factor) with no treatment."""
+    rng = np.random.default_rng(seed)
+    dates = pd.date_range("2020-01-01", periods=n_dates, freq="D")
+    t = np.arange(n_dates)
+    common = 2.0 * np.sin(2.0 * np.pi * t / 12.0) + 0.05 * t
+    rows = []
+    for j in range(n_donors):
+        y = (j * 1.5) + (0.7 + 0.05 * j) * common + rng.normal(0.0, 0.05, n_dates)
+        rows.extend({"date": d, "code": f"D{j}", "poll": v} for d, v in zip(dates, y, strict=True))
+    y = 3.0 + 0.75 * common + rng.normal(0.0, 0.05, n_dates)
+    rows.extend({"date": d, "code": "T", "poll": v} for d, v in zip(dates, y, strict=True))
+    frame = pd.DataFrame(rows)
+    frame["date"] = pd.to_datetime(frame["date"])
+    return frame, dates[n_dates // 2]
+
+
+def test_mcnnm_default_lambda_is_cross_validated_not_the_heuristic():
+    """The default must not be the biased ``0.1 * sigma_max`` heuristic.
+
+    On this clean rank-2 null panel the heuristic leaves a pre-period RMSE of
+    ~0.41 and a spurious post-period ATT of +0.34; three-fold CV selects a
+    lambda whose fit error is ~0.05 and ATT ~0.00. The bias adds
+    symmetrically to a real effect too, so it does not cancel.
+    """
+    df, cutoff = _low_rank_null_panel()
+    donors = [f"D{j}" for j in range(6)]
+    out = scm_mcnnm(
+        df,
+        "date",
+        "code",
+        "poll",
+        "T",
+        cutoff.strftime("%Y-%m-%d"),
+        donors,
+    )
+    syn = out["synthetic"]
+    pre = syn[syn.index < cutoff]
+    post = syn[syn.index >= cutoff]
+    assert float(np.sqrt((pre["effect"] ** 2).mean())) < 0.10
+    assert abs(float(post["effect"].mean())) < 0.05
+
+    # cv=0 keeps the legacy heuristic, and its bias is what the default avoids.
+    legacy = scm_mcnnm(
+        df,
+        "date",
+        "code",
+        "poll",
+        "T",
+        cutoff.strftime("%Y-%m-%d"),
+        donors,
+        cv=0,
+    )
+    legacy_pre = legacy["synthetic"]
+    legacy_post = legacy_pre[legacy_pre.index >= cutoff]
+    assert abs(float(legacy_post["effect"].mean())) > 0.20
+
+
+def test_mcnnm_default_lambda_is_reproducible_without_a_random_state():
+    """Unseeded CV folds would make the default counterfactual differ per call."""
+    df, cutoff = _low_rank_null_panel()
+    donors = [f"D{j}" for j in range(6)]
+    first = scm_mcnnm(df, "date", "code", "poll", "T", cutoff.strftime("%Y-%m-%d"), donors)
+    second = scm_mcnnm(df, "date", "code", "poll", "T", cutoff.strftime("%Y-%m-%d"), donors)
+    assert first["rank_lambda"] == second["rank_lambda"]

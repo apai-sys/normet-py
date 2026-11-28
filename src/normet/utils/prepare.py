@@ -332,43 +332,55 @@ def check_data(
 
 
 def _eligible_interior_gap_mask(is_na: np.ndarray, max_gap: int | None) -> np.ndarray:
-    """Mark interior NA runs flanked by valid values with length <= ``max_gap``."""
+    """Mark interior NA runs flanked by valid values with length <= ``max_gap``.
+
+    Run boundaries come from one ``diff`` of the mask rather than a Python
+    scan: this runs once per column per contiguous split slice, so a frame cut
+    into many runs paid the loop thousands of times.
+    """
     n = len(is_na)
     elig = np.zeros(n, dtype=bool)
-    i = 0
-    while i < n:
-        if not is_na[i]:
-            i += 1
-            continue
-        start = i
-        while i < n and is_na[i]:
-            i += 1
-        stop = i
-        run_len = stop - start
-        if start > 0 and stop < n and (max_gap is None or run_len <= max_gap):
-            elig[start:stop] = True
+    if n == 0 or not bool(is_na.any()):
+        return elig
+    edges = np.diff(np.concatenate(([0], is_na.astype(np.int8), [0])))
+    starts = np.flatnonzero(edges == 1)
+    stops = np.flatnonzero(edges == -1)
+    lengths = stops - starts
+    interior = (starts > 0) & (stops < n)
+    if max_gap is not None:
+        interior &= lengths <= int(max_gap)
+    for start, stop in zip(starts[interior], stops[interior], strict=True):
+        elig[start:stop] = True
     return elig
 
 
 def _interp_segment_1d(vals: np.ndarray, *, max_gap: int | None, is_circular: bool) -> np.ndarray:
-    """Interpolate strictly interior short gaps inside one contiguous split slice."""
+    """Interpolate strictly interior short gaps inside one contiguous split slice.
+
+    ``Series.interpolate(method="linear", limit_area="inside")`` is exactly
+    ``np.interp`` over the positions that are not NaN (``inf`` counts as
+    present, as pandas counts it), and the loop asked for one or two of those
+    per column per split slice. Reading the interpolation off one ``np.interp``
+    is the same number and several times cheaper; the eligible positions are
+    the only ones written back, so the leading/trailing gaps pandas would have
+    left alone are still left alone.
+    """
     out_vals = vals.astype(float, copy=True)
     is_na = ~np.isfinite(out_vals)
     elig = _eligible_interior_gap_mask(is_na, max_gap)
     if not np.any(elig):
         return out_vals
+    idx = np.arange(out_vals.size)
     if is_circular:
         rad = np.deg2rad(out_vals)
-        sin_raw = (
-            pd.Series(np.sin(rad))
-            .interpolate(method="linear", limit_area="inside")
-            .to_numpy(dtype=float)
-        )
-        cos_raw = (
-            pd.Series(np.cos(rad))
-            .interpolate(method="linear", limit_area="inside")
-            .to_numpy(dtype=float)
-        )
+        sin_vals = np.sin(rad)
+        cos_vals = np.cos(rad)
+        sin_ok = ~np.isnan(sin_vals)
+        cos_ok = ~np.isnan(cos_vals)
+        if not (sin_ok.any() and cos_ok.any()):
+            return out_vals
+        sin_raw = np.interp(idx, idx[sin_ok], sin_vals[sin_ok])
+        cos_raw = np.interp(idx, idx[cos_ok], cos_vals[cos_ok])
         ok = (
             elig
             & np.isfinite(sin_raw)
@@ -377,11 +389,10 @@ def _interp_segment_1d(vals: np.ndarray, *, max_gap: int | None, is_circular: bo
         )
         out_vals[ok] = np.rad2deg(np.arctan2(sin_raw[ok], cos_raw[ok])) % 360.0
     else:
-        lin_raw = (
-            pd.Series(out_vals)
-            .interpolate(method="linear", limit_area="inside")
-            .to_numpy(dtype=float)
-        )
+        valid = ~np.isnan(out_vals)
+        if not valid.any():
+            return out_vals
+        lin_raw = np.interp(idx, idx[valid], out_vals[valid])
         out_vals[elig] = lin_raw[elig]
     return out_vals
 

@@ -269,3 +269,75 @@ def test_zero_embargo_is_untouched():
 
     out = split_into_sets(_embargo_frame(), "random", 0.75, seed=1, embargo=0)
     assert set(out["set"].unique()) == {"training", "testing"}
+
+
+def _pandas_interp_reference(vals: np.ndarray, *, max_gap: int | None, is_circular: bool):
+    """The previous implementation, kept as the oracle for the numpy rewrite.
+
+    ``Series.interpolate(method="linear", limit_area="inside")`` fills every
+    NaN in a series with the straight line through its neighbours; the
+    segmented path then writes back only the eligible interior runs.
+    """
+    out_vals = vals.astype(float, copy=True)
+    is_na = ~np.isfinite(out_vals)
+    elig = np.zeros(len(is_na), dtype=bool)
+    i = 0
+    while i < len(is_na):
+        if not is_na[i]:
+            i += 1
+            continue
+        start = i
+        while i < len(is_na) and is_na[i]:
+            i += 1
+        stop = i
+        if start > 0 and stop < len(is_na) and (max_gap is None or stop - start <= max_gap):
+            elig[start:stop] = True
+    if not np.any(elig):
+        return out_vals
+    if is_circular:
+        rad = np.deg2rad(out_vals)
+        sin_raw = (
+            pd.Series(np.sin(rad)).interpolate(method="linear", limit_area="inside").to_numpy()
+        )
+        cos_raw = (
+            pd.Series(np.cos(rad)).interpolate(method="linear", limit_area="inside").to_numpy()
+        )
+        ok = (
+            elig
+            & np.isfinite(sin_raw)
+            & np.isfinite(cos_raw)
+            & (np.hypot(sin_raw, cos_raw) > 1e-12)
+        )
+        out_vals[ok] = np.rad2deg(np.arctan2(sin_raw[ok], cos_raw[ok])) % 360.0
+    else:
+        lin_raw = pd.Series(out_vals).interpolate(method="linear", limit_area="inside").to_numpy()
+        out_vals[elig] = lin_raw[elig]
+    return out_vals
+
+
+def test_segment_interpolation_is_bit_identical_to_the_pandas_path():
+    """The numpy rewrite must reproduce the old numbers exactly, not approximately.
+
+    The interpolation runs once per column per split slice, so it is on the hot
+    path of ``cv_score``/``prepare_data`` with ``impute="time_interp"``; the
+    rewrite is several times cheaper, but any change in the filled values would
+    change every downstream model.
+    """
+    from normet.utils.prepare import _interp_segment_1d
+
+    rng = np.random.default_rng(11)
+    for trial in range(120):
+        n = int(rng.integers(1, 90))
+        vals = rng.normal(size=n)
+        for _ in range(int(rng.integers(0, 4))):
+            start = int(rng.integers(0, n))
+            vals[start : min(n, start + int(rng.integers(1, 6)))] = rng.choice(
+                [np.nan, np.inf, -np.inf]
+            )
+        circular = trial % 3 == 0
+        if circular:
+            vals = np.abs(vals) * 360.0 / (np.nanmax(np.abs(vals)) + 1e-9)
+        max_gap = [None, 1, 2, 6][trial % 4]
+        expected = _pandas_interp_reference(vals, max_gap=max_gap, is_circular=circular)
+        got = _interp_segment_1d(vals, max_gap=max_gap, is_circular=circular)
+        assert np.array_equal(got, expected, equal_nan=True), (trial, n, circular, max_gap)

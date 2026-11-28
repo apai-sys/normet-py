@@ -269,6 +269,16 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
     `pit_diagnostics` and `calibration_curve` for probabilistic diagnostics.
 
 ### Performance
+- **Time-interpolation imputation is several times cheaper, bit for bit.**
+  `_interp_segment_1d` built one or two temporary `pd.Series` per column per
+  contiguous split slice to call `Series.interpolate`; it now reads the same
+  line off one `np.interp` over the present positions (pandas uses exactly
+  that) and takes the eligible-run mask from one `diff` instead of a Python
+  scan. Measured on 400 segments x 20 columns: 1.10 s -> 0.32 s (3.5x);
+  `impute_values(strategy="time_interp")` end-to-end on 24 000 rows x 14
+  numeric columns with alternating split runs: 0.09 s -> 0.04 s (2.6x),
+  identical frames (verified value-by-value, including NaN/inf and the
+  circular-column path).
 - **Flat-array endpoint weights across the transport family.**
   `wcwt`/`wpscf`, `build_footprint_matrix` and `screen_donor_transport`
   called `trajectory_endpoint_weights` once per trajectory, and about two
@@ -362,6 +372,15 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
     the default `traj_*` column set is unchanged; Transport Studio passes it.
 
 ### Fixed
+- **`scm_mcnnm`'s default lambda was the arbitrary `0.1 * sigma_max` heuristic.**
+  On a clean rank-2 null panel that left a pre-period RMSE of 0.41 and a
+  spurious post-period ATT of +0.34 (the bias adds symmetrically to a real
+  effect, so it does not cancel: +5.34 for a true 5.0). The default is now
+  three-fold cross-validation over the same grid (pre-RMSE 0.05, ATT +0.005,
+  lambda selected from the data), seeded by `random_state` — the package
+  default seed when it is `None`, so a default run is reproducible. `cv=0`
+  keeps the old heuristic for callers who want speed over calibration, and an
+  explicit `lam=` still wins.
 - **A first-principles audit of the numeric surface** (five parallel reviews, each
   finding reproduced by execution). Defects fixed:
   - **macOS: the two OpenMP runtimes no longer crash Chronos-2.** PyTorch,
