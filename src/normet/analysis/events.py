@@ -5,7 +5,7 @@ Event / anomaly detection on environmental time-series.
 Provides three complementary methods:
 
 - ``"iqr"``           : robust univariate threshold (median ± k·IQR).
-- ``"isolation"``     : sklearn IsolationForest on lagged features.
+- ``"isolation"``     : sklearn IsolationForest on lagged features (IQR-standardised).
 - ``"stl_residual"``  : STL decomposition (statsmodels) then IQR on residuals.
 
 All return a DataFrame of consecutive anomalous intervals, ranked by score.
@@ -170,6 +170,8 @@ def anomaly_scores(
 
     if method == "isolation":
         sk = require("sklearn.ensemble", hint="pip install scikit-learn")
+        if len(s) == 0:
+            return pd.Series(dtype=float, index=s.index, name="score")
         # Feature engineering: value + a small lag bank for context
         feats = pd.DataFrame({"x": s})
         for lag in (1, 2, 3, 6, 12):
@@ -177,9 +179,16 @@ def anomaly_scores(
         feats = feats.bfill().ffill().fillna(0.0)
         iso = sk.IsolationForest(contamination="auto", random_state=int(seed))
         iso.fit(feats.values)
-        # Higher = more anomalous: invert sklearn's decision_function (higher = normal)
+        # Higher = more anomalous: invert sklearn's decision_function (higher = normal),
+        # then standardise via median/IQR onto the same k·IQR scale used by iqr and
+        # stl_residual so k tunes sensitivity and constant series return 0.
         raw = -iso.decision_function(feats.values)
-        return pd.Series(raw, index=s.index, name="score")
+        med = float(np.median(raw))
+        q1, q3 = float(np.quantile(raw, 0.25)), float(np.quantile(raw, 0.75))
+        iqr = q3 - q1
+        if iqr <= 1e-12:
+            return pd.Series(0.0, index=s.index, name="score")
+        return pd.Series((raw - med) / iqr, index=s.index, name="score")
 
     if method == "stl_residual":
         sm = require("statsmodels.tsa.seasonal", hint="pip install statsmodels")
@@ -260,8 +269,8 @@ def detect_events(
     )
     arr = score.to_numpy(dtype=float)
 
-    # IsolationForest uses 0 as the natural decision boundary; other methods use k·IQR.
-    threshold = 0.0 if method == "isolation" else float(k)
+    # All univariate/residual methods (iqr, isolation, stl_residual) return IQR-scaled scores.
+    threshold = float(k)
 
     mask = (arr > threshold) & np.isfinite(arr)
     events = _intervals_from_mask(pd.DatetimeIndex(score.index), mask, arr)

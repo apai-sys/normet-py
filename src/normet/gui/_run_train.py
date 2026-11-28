@@ -33,10 +33,10 @@ _BACKTEST_Q = (0.1, 0.5, 0.9)
 
 
 def crps_reference(obs: Any, pred: Any) -> float | None:
-    """The point forecast's CRPS reference (``sqrt(pi/2)`` x its MAE), or None
-    where it cannot be read. A spread forecast earns its spread only by scoring
-    below this: the number puts a point model on the probabilistic scale the
-    CRPS measures on."""
+    """The point forecast's CRPS reference (its MAE, the exact CRPS of a point
+    distribution), or None where it cannot be read. A spread forecast earns its
+    spread only by scoring below this: the number puts a point model on the
+    probabilistic scale the CRPS measures on."""
     try:
         from normet.analysis import crps_observed
 

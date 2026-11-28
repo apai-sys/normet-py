@@ -385,3 +385,105 @@ def test_decomposition_stack_diverging_and_shapley_heatmap():
     fig_mean = plot_shapley_interactions(dummy_res, stat="mean")
     assert fig_s is not None and fig_mean is not None
     plt.close("all")
+
+
+def test_polar_plot_handles_empty_bins_a_short_record_and_a_coarse_direction_grid():
+    """A direction sector or speed class that never occurs must not break the mesh.
+
+    `groupby(observed=True)` dropped the empty bins, so the grid's shape no
+    longer matched the theta x r centres and `pcolormesh` raised
+    ``TypeError: Dimensions of C (35, 8) should be one smaller than X(8) and
+    Y(36)``. A week of hours, or a wind direction reported on a 10-degree
+    grid, was enough: the plot is the package's headline figure, and it must
+    draw the empty bins as gaps.
+    """
+    import matplotlib.pyplot as plt
+
+    rng = np.random.default_rng(0)
+    n = 720
+    coarse_wd = pd.DataFrame(
+        {
+            "ws": np.abs(rng.normal(3, 1.5, n)),
+            "wd": np.round(rng.uniform(0, 360, n), -1) % 360,  # 10-degree report resolution
+            "pm": np.abs(rng.normal(20, 5, n)),
+        }
+    )
+    ax = polar_plot(coarse_wd, target="pm")
+    raw_mesh = ax.collections[0].get_array()
+    assert raw_mesh.shape == (36, 8)  # the full direction x speed grid
+    assert np.ma.count_masked(raw_mesh) > 0  # empty bins are holes, not a shrunken array
+    assert ax.figure is not None
+
+    week = pd.DataFrame(
+        {
+            "ws": np.abs(rng.normal(3, 1.5, 168)),
+            "wd": rng.uniform(0, 360, 168),
+            "pm": np.abs(rng.normal(20, 5, 168)),
+        },
+        index=pd.date_range("2021-01-01", periods=168, freq="h"),
+    )
+    ax_week = polar_plot(week, target="pm", statistic="median")
+    assert np.asarray(ax_week.collections[0].get_array()).shape == (36, 8)
+
+    # a 22.5-degree grid with a percentile statistic, as openair's roses use
+    fine = pd.DataFrame(
+        {
+            "ws": np.abs(rng.normal(3, 1.5, 500)),
+            "wd": (np.arange(500) * 22.5) % 360,
+            "pm": np.abs(rng.normal(20, 5, 500)),
+        }
+    )
+    ax_fine = polar_plot(fine, target="pm", statistic="p95", n_bins_wd=16)
+    assert np.asarray(ax_fine.collections[0].get_array()).shape == (16, 8)
+    plt.close("all")
+
+
+def test_polar_plot_closes_the_figure_it_creates_when_the_draw_fails():
+    """A figure made here belongs to the caller only if the plot returns."""
+    import matplotlib.pyplot as plt
+
+    df = pd.DataFrame(
+        {
+            "ws": np.abs(np.random.default_rng(1).normal(3, 1, 200)),
+            "wd": np.arange(200.0) * 1.8,
+            "pm": np.abs(np.random.default_rng(2).normal(20, 5, 200)),
+        }
+    )
+    before = len(plt.get_fignums())
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            plt.Axes, "pcolormesh", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+        )
+        with pytest.raises(RuntimeError):
+            polar_plot(df, target="pm")
+    assert len(plt.get_fignums()) == before  # no figure left in pyplot's registry
+    plt.close("all")
+
+
+def test_resample_averages_the_numeric_series_beside_label_columns():
+    """`resample=` must not choke on the run's own label columns.
+
+    A frame carrying a "set" column (what `prepare_data` adds), a station
+    name or a wind sector is a plausible input to these generic helpers;
+    ``df.resample(rule).mean()`` raised ``TypeError: agg function failed
+    [how->mean,dtype->object]`` on it in pandas 2.x.
+    """
+    import matplotlib.pyplot as plt
+
+    from normet.viz.plotting import normalise_plot, time_series_plot
+
+    rng = np.random.default_rng(0)
+    idx = pd.date_range("2021-01-01", periods=200, freq="h")
+    df = pd.DataFrame(
+        {
+            "observed": rng.normal(size=200),
+            "normalised": rng.normal(size=200),
+            "set": ["training"] * 150 + ["test"] * 50,
+        },
+        index=idx,
+    )
+    ax_n = normalise_plot(df, resample="D")
+    assert ax_n is not None and len(ax_n.lines) >= 2
+    ax_t = time_series_plot(df, "observed", resample="D")
+    assert ax_t is not None and len(ax_t.lines) >= 1
+    plt.close("all")

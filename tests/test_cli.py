@@ -731,3 +731,68 @@ def test_cli_impute_backtest_events_and_model_path(monkeypatch, tmp_path):
         ],
     )
     assert bad_scm.exit_code != 0
+
+
+@needs_click
+def test_cli_missing_required_options_return_usage_error(tmp_path):
+    """Omitting effectively-required options must raise click.UsageError (exit 2), not KeyError."""
+    import pandas as pd
+    from click.testing import CliRunner
+
+    from normet.app.cli import _build_cli
+
+    src = tmp_path / "site.csv"
+    pd.DataFrame(
+        {"date": pd.date_range("2024-01-01", periods=10, freq="h"), "NO2": range(10), "ws": 2.0}
+    ).to_csv(src, index=False)
+    out = str(tmp_path / "out.csv")
+
+    runner = CliRunner()
+    cases = [
+        (["do-all", str(src), "--out", out], "--target"),
+        (["decompose", str(src), "--out", out], "--target"),
+        (["deweather", str(src), "--met-vars", "ws", "--out", out], "--target"),
+        (["icn-decompose", str(src), "--met-vars", "ws", "--out", out], "--target"),
+        (["shapley-interactions", str(src), "--out", out], "--target"),
+        (["normalise-regime", str(src), "--precursors", "ws", "--out", out], "--target"),
+        (["impute", str(src), "--out", out], "--target"),
+        (["backtest", str(src), "--out", out], "--target"),
+        (["cv", str(src), "--out", out], "--target"),
+        (["events", str(src), "--out", out], "--value-col"),
+        (["scm", str(src), "--out", out], "--treated"),
+        (["scm", str(src), "--treated", "T", "--out", out], "--cutoff"),
+    ]
+    for argv, flag in cases:
+        res = runner.invoke(_build_cli(), argv)
+        assert res.exit_code == 2, (argv, res.exit_code, res.output)
+        assert flag in res.output, (argv, res.output)
+        assert res.exception is None or isinstance(res.exception, SystemExit)
+
+
+@needs_click
+def test_cli_malformed_or_non_mapping_config_returns_usage_error(tmp_path):
+    """Malformed YAML or a non-mapping YAML root in --config must exit 2 cleanly."""
+    import pandas as pd
+    from click.testing import CliRunner
+
+    from normet.app.cli import _build_cli
+
+    src = tmp_path / "site.csv"
+    pd.DataFrame(
+        {"date": pd.date_range("2024-01-01", periods=10, freq="h"), "NO2": range(10), "ws": 2.0}
+    ).to_csv(src, index=False)
+    out = str(tmp_path / "out.csv")
+
+    bad_yaml = tmp_path / "bad.yaml"
+    bad_yaml.write_text("target: NO2\ncovariates: [ws, wd\n", encoding="utf-8")
+
+    list_yaml = tmp_path / "list.yaml"
+    list_yaml.write_text("- target\n- NO2\n", encoding="utf-8")
+
+    runner = CliRunner()
+    for cfg_file in (bad_yaml, list_yaml):
+        res = runner.invoke(
+            _build_cli(), ["do-all", str(src), "--config", str(cfg_file), "--out", out]
+        )
+        assert res.exit_code == 2, (cfg_file, res.exit_code, res.output)
+        assert "Error:" in res.output

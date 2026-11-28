@@ -33,6 +33,10 @@ from typing import Any
 #: How long a job asked to stop has to stop before it is killed.
 CANCEL_GRACE = 10.0
 
+#: How long an un-PID'd ``launched`` marker is treated as starting before
+#: assuming the launch never completed.
+LAUNCH_GRACE = 15.0
+
 STATES = ("queued", "running", "done", "failed", "cancelled")
 
 
@@ -79,6 +83,15 @@ def _alive(pid: int | None) -> bool:
         return done == 0
     except ChildProcessError:
         return True
+
+
+def _folder_pid_alive(folder: str) -> bool:
+    """True when ``started.json`` or ``launched`` records a live process id."""
+    for name in ("started.json", "launched"):
+        meta = _read_json(os.path.join(folder, name))
+        if meta and _alive(meta.get("pid")):
+            return True
+    return False
 
 
 def _child_env() -> dict[str, str]:
@@ -164,8 +177,9 @@ class JobStore:
         with self._lock:
             open(os.path.join(folder, "cancel"), "w").close()
             started = _read_json(os.path.join(folder, "started.json")) or {}
+            launched = _read_json(os.path.join(folder, "launched")) or {}
             proc = self._procs.get(job_id)
-            pid = proc.pid if proc is not None else started.get("pid")
+            pid = proc.pid if proc is not None else (started.get("pid") or launched.get("pid"))
 
             def running() -> bool:
                 # This server's own child is asked through its Popen, which reaps it;
@@ -229,10 +243,29 @@ class JobStore:
                 return "running"
         else:
             started = _read_json(os.path.join(folder, "started.json"))
-            if started and _alive(started.get("pid")):
+            if _folder_pid_alive(folder):
                 return "running"
-            if not started and not os.path.exists(os.path.join(folder, "launched")):
-                return "cancelled" if os.path.exists(os.path.join(folder, "cancel")) else "queued"
+            if not started:
+                launched_path = os.path.join(folder, "launched")
+                if not os.path.exists(launched_path):
+                    return (
+                        "cancelled" if os.path.exists(os.path.join(folder, "cancel")) else "queued"
+                    )
+                launched = _read_json(launched_path)
+                if not (launched and launched.get("pid") is not None):
+                    # A freshly spawned child may not have written started.json yet (or
+                    # `launched` may not yet carry its pid); allow a short startup grace
+                    # window before classifying an orphaned marker as failed.
+                    try:
+                        age = time.time() - os.path.getmtime(launched_path)
+                    except OSError:
+                        age = 0.0
+                    if age < LAUNCH_GRACE:
+                        return "running"
+        # Re-check exit.json in case the child finished and exited while we checked.
+        ended = _read_json(os.path.join(folder, "exit.json"))
+        if ended:
+            return str(ended["state"])
         # Ended without saying how: killed, or the machine stopped.
         return "cancelled" if os.path.exists(os.path.join(folder, "cancel")) else "failed"
 
@@ -306,8 +339,13 @@ class JobStore:
             for job_id in ids:
                 state = self.state(job_id)
                 folder = self._folder(job_id)
+                proc = self._procs.get(job_id)
+                still_alive = (proc is not None and proc.poll() is None) or (
+                    not _read_json(os.path.join(folder, "exit.json")) and _folder_pid_alive(folder)
+                )
                 if (
                     state in ("queued", "running")
+                    or still_alive
                     or job_id in protected
                     or state not in target_states
                 ):
@@ -344,7 +382,8 @@ class JobStore:
 
     def _launch(self, job_id: str) -> None:
         folder = self._folder(job_id)
-        open(os.path.join(folder, "launched"), "w").close()
+        launched_path = os.path.join(folder, "launched")
+        _write_json(launched_path, {"launched": time.time()})
         kw: dict[str, Any] = {}
         if os.name == "nt":  # pragma: no cover - Windows
             kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
@@ -354,15 +393,24 @@ class JobStore:
             open(os.path.join(folder, "stdout.txt"), "wb") as out,
             open(os.path.join(folder, "stderr.txt"), "wb") as err,
         ):
-            self._procs[job_id] = subprocess.Popen(
-                [self.python, "-m", "normet.agent.runner", folder],
-                cwd=folder,
-                stdin=subprocess.DEVNULL,
-                stdout=out,
-                stderr=err,
-                env=_child_env(),
-                **kw,
-            )
+            try:
+                proc = subprocess.Popen(
+                    [self.python, "-m", "normet.agent.runner", folder],
+                    cwd=folder,
+                    stdin=subprocess.DEVNULL,
+                    stdout=out,
+                    stderr=err,
+                    env=_child_env(),
+                    **kw,
+                )
+            except OSError:
+                _write_json(
+                    os.path.join(folder, "exit.json"),
+                    {"state": "failed", "code": 1, "finished": time.time()},
+                )
+                raise
+            self._procs[job_id] = proc
+            _write_json(launched_path, {"pid": proc.pid, "launched": time.time()})
 
     def wait(self, job_id: str, timeout: float | None = None, poll: float = 0.2) -> dict[str, Any]:
         """Wait for a job to end (for tests and scripts; a server polls :meth:`status`)."""

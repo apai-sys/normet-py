@@ -81,3 +81,60 @@ def test_a_label_head_and_a_text_of_several_lines():
     assert tr("Features (predictors)\n  ws", "zh") == "特征（预测变量）\n  ws"
     assert tr("mean $\\mathregular{NO_{2}}$", "zh") == "$\\mathregular{NO_{2}}$ 均值"
     assert tr("mean absolute error", "zh") == "mean absolute error"
+
+
+def test_dock_toggle_action_keeps_mnemonic_across_language_switches():
+    code = """
+import os
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+os.environ.setdefault("MPLBACKEND", "Agg")
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication, QDockWidget, QMainWindow, QWidget
+from normet.gui import uilang
+from normet.gui.main_window import MainWindow
+
+app = QApplication.instance() or QApplication([])
+uilang.install(app)
+uilang.set_language("en")
+win = QMainWindow()
+dock = QDockWidget("Assistant", win)
+dock.setWidget(QWidget())
+win.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+act = dock.toggleViewAction()
+act.setText("&Assistant")
+
+main = MainWindow()
+try:
+    main_act = main.assistant.toggleViewAction()
+    assert act.text() == "&Assistant"
+    assert main_act.text() == "&Assistant"
+
+    uilang.set_language("zh")
+    assert act.text() == "&Assistant"
+    assert main_act.text() == "&Assistant"
+    assert uilang._orig["QAction.text"](act) == "助手(&A)"
+    assert uilang._orig["QAction.text"](main_act) == "助手(&A)"
+
+    uilang.set_language("en")
+    assert act.text() == "&Assistant"
+    assert main_act.text() == "&Assistant"
+    assert uilang._orig["QAction.text"](act) == "&Assistant"
+    assert uilang._orig["QAction.text"](main_act) == "&Assistant"
+finally:
+    main.close()
+    win.close()
+print("dock mnemonic OK")
+"""
+    env = {**os.environ, "QT_QPA_PLATFORM": "offscreen", "NORMET_UI_LANGUAGE": "en"}
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=120,
+    )
+    assert proc.returncode == 0 and "dock mnemonic OK" in proc.stdout, (
+        proc.returncode,
+        proc.stdout[-1000:],
+        proc.stderr[-2000:],
+    )

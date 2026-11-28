@@ -510,3 +510,23 @@ def test_job_store_prune_and_cli(tmp_path, capsys):
     assert not (Path(store.root) / "j1").exists()
     assert main(["prune", "--mcp-home", str(tmp_path / "mcp_home"), "--dry-run"]) == 0
     assert "removed" in capsys.readouterr().out
+
+
+def test_url_with_non_default_toolset_errors_clearly(capsys):
+    with pytest.raises(ValueError, match="--toolset"):
+        resolve_server_spec(url="http://127.0.0.1:8765/mcp", toolset="core")
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "print-config",
+                "--target",
+                "claude-code",
+                "--url",
+                "http://127.0.0.1:8765/mcp",
+                "--toolset",
+                "core",
+            ]
+        )
+    assert exc.value.code == 2
+    assert "--toolset" in capsys.readouterr().err

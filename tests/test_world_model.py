@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import gzip
+import json
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -538,3 +541,157 @@ def test_world_model_diagnostic_plots_smoke() -> None:
     fig3, _ = nm.plot_jepa_anomalies(bm.df, sc, value_col=bm.target, events=ev)
     for fig in (fig1, fig2, fig3):
         plt.close(fig)
+
+
+def test_separable_world_model_calendar_basis_pinned_across_window_spans(tmp_path) -> None:
+    """F1: fit/eval windows crossing 90/180d thresholds match basis width, trend scale, and legacy load."""
+    import matplotlib.pyplot as plt
+
+    rng = np.random.default_rng(3)
+    n = 24 * 100  # 100 days (>= 90d threshold -> 8 calendar columns)
+    idx = pd.date_range("2023-01-01", periods=n, freq="h")
+    t_h = np.arange(n, dtype=float)
+    ws = np.clip(4.0 + 2.0 * np.sin(2.0 * np.pi * t_h / 24.0) + rng.normal(0.0, 0.4, n), 0.3, 12.0)
+    blh = np.clip(
+        500.0 + 200.0 * np.sin(2.0 * np.pi * (t_h - 6.0) / 24.0) + rng.normal(0.0, 30.0, n),
+        80.0,
+        2000.0,
+    )
+    a = np.maximum(
+        0.5,
+        20.0
+        + 8.0 * np.sin(2.0 * np.pi * t_h / 24.0)
+        + 15.0 * np.exp(-ws / 2.5)
+        + 3.0 * np.sin(2.0 * np.pi * t_h / (24.0 * 60.0))
+        + 0.002 * t_h
+        + rng.normal(0.0, 0.5, n),
+    )
+    df = pd.DataFrame({"a": a, "ws": ws, "blh": blh}, index=idx)
+    wm = SeparableWorldModel(WorldModelConfig(seed=1)).fit(df, "a", ["ws", "blh"])
+    assert wm._n_cal == 8
+
+    # 5-day subset (< 90d threshold -> would be 7 calendar columns if unpinned)
+    ep = df.iloc[24 * 40 : 24 * 45]
+    norm_full = wm.normalise(df, n_samples=10, seed=1)
+    norm_ep = wm.normalise(ep, n_samples=10, seed=1)
+    np.testing.assert_allclose(
+        norm_full.df.loc[ep.index, "factual"].to_numpy(),
+        norm_ep.df["factual"].to_numpy(),
+        atol=1e-10,
+    )
+
+    roll_full = wm.counterfactual_rollout(
+        df, start=idx[24 * 40], end=idx[24 * 45 - 1], disturbance_scale=0.0, ar_carryover=False
+    )
+    roll_ep = wm.counterfactual_rollout(
+        ep, start=idx[24 * 40], end=idx[24 * 45 - 1], disturbance_scale=0.0, ar_carryover=False
+    )
+    np.testing.assert_allclose(
+        roll_full.counterfactual["a"].to_numpy(),
+        roll_ep.counterfactual["a"].to_numpy(),
+        atol=1e-10,
+    )
+
+    audit_ep = wm.audit(ep)
+    assert np.isfinite(audit_ep["separability_gain"]["mean_rc_latent"])
+    ow_ep = wm.operating_window(ep, horizons=(1, 6))
+    assert list(ow_ep["horizon"]) == [1, 6]
+    fig, _ = nm.plot_separability_landscape(wm, ep)
+    plt.close(fig)
+
+    # Legacy archive load() without "calendar_basis" infers the 90/180d bucket from _n_cal
+    legacy_path = tmp_path / "wm_legacy.json.gz"
+    wm.save(legacy_path)
+    with gzip.open(legacy_path, "rt", encoding="utf-8") as fh:
+        payload = json.load(fh)
+    assert "calendar_basis" in payload
+    payload.pop("calendar_basis")
+    with gzip.open(legacy_path, "wt", encoding="utf-8") as fh:
+        json.dump(payload, fh, allow_nan=False)
+
+    legacy = SeparableWorldModel.load(legacy_path)
+    assert legacy._cal_basis is None
+    legacy_norm = legacy.normalise(ep, n_samples=10, seed=1)
+    assert len(legacy_norm.df) == len(ep)
+    legacy_roll = legacy.counterfactual_rollout(ep, start=idx[24 * 40], end=idx[24 * 45 - 1])
+    assert len(legacy_roll.counterfactual) == len(ep)
+
+
+def test_jepa_scm_survives_pre_and_full_crossing_calendar_thresholds() -> None:
+    """F2: jepa_scm handles pre-cutoff (<90d) and full record (>=180d) crossing calendar buckets."""
+    rng = np.random.default_rng(5)
+    n_pre, n_post = 24 * 40, 24 * 150  # 40d pre (7 cal cols) vs 190d full (12 cal cols)
+    n = n_pre + n_post
+    idx = pd.date_range("2024-01-01", periods=n, freq="h")
+    t_h = np.arange(n, dtype=float)
+    cutoff = idx[n_pre]
+
+    e = (
+        40.0
+        + 10.0 * np.sin(2.0 * np.pi * t_h / (24.0 * 7.0))
+        + 4.0 * np.sin(2.0 * np.pi * t_h / 24.0)
+    )
+    w_tr = np.clip(
+        4.0 + 2.0 * np.sin(2.0 * np.pi * t_h / 60.0) + rng.normal(0.0, 0.3, n), 0.6, 12.0
+    )
+    w_don = np.clip(
+        4.0 - 2.0 * np.sin(2.0 * np.pi * t_h / 60.0) + rng.normal(0.0, 0.3, n), 0.6, 12.0
+    )
+    y_tr = np.maximum(1.0, e + 26.0 * np.exp(-w_tr / 2.4) + rng.normal(0.0, 0.4, n))
+    y_don = np.maximum(1.0, e + 26.0 * np.exp(-w_don / 2.4) + rng.normal(0.0, 0.4, n))
+    y_tr[n_pre:] = np.maximum(1.0, y_tr[n_pre:] - 12.0)
+
+    panel = pd.concat(
+        [
+            pd.DataFrame({"date": idx, "ID": "Treated", "value": y_tr, "ws": w_tr}),
+            pd.DataFrame({"date": idx, "ID": "Donor", "value": y_don, "ws": w_don}),
+        ],
+        ignore_index=True,
+    )
+    res = nm.jepa_scm(panel, met_cols=["ws"], treated_unit="Treated", cutoff_date=cutoff, top_k=1)
+    assert res.pre_rmspe < 1.5
+    assert -13.5 < res.att < -10.5
+
+
+def test_jepa_anomaly_scores_cover_tail_remainder_when_not_stride_multiple() -> None:
+    """F3: AC-JEPA detects a burst in the final (n - L) % stride timestamps and pins calendar basis."""
+    rng = np.random.default_rng(101)
+    n_train = 24 * 35
+    n_tail = 245  # (245 - 6) % 6 == 5 != 0 -> last rows sit past stride grid
+    n_tot = n_train + n_tail
+    idx = pd.date_range("2024-01-01", periods=n_tot, freq="h")
+    t_h = np.arange(n_tot, dtype=float)
+    ws = np.clip(
+        4.0 + 1.2 * np.sin(2.0 * np.pi * t_h / 24.0) + rng.normal(0.0, 0.5, n_tot), 0.4, 14.0
+    )
+    blh = np.clip(
+        500.0 + 250.0 * np.sin(2.0 * np.pi * (t_h - 6.0) / 24.0) + rng.normal(0.0, 35.0, n_tot),
+        90.0,
+        1800.0,
+    )
+    y = np.maximum(
+        1.0,
+        30.0
+        + 5.0 * np.sin(2.0 * np.pi * (t_h - 6.0) / 24.0)
+        + 22.0 * np.exp(-ws / 2.8)
+        + 10.0 * (300.0 / blh)
+        + rng.normal(0.0, 0.6, n_tot),
+    )
+    df = pd.DataFrame({"value": y, "ws": ws, "blh": blh}, index=idx)
+
+    jepa = LatentJEPA(patch_length=6, stride=6, latent_dim=6, met_degree=2, seed=7).fit(
+        df.iloc[:n_train], "value", ["ws", "blh"]
+    )
+    frame = df.iloc[n_train:]
+    base_tail = jepa.anomaly_scores(frame).iloc[-4:]
+
+    burst = frame.copy()
+    burst.iloc[-4:, burst.columns.get_loc("value")] += 45.0
+    burst_scores = jepa.anomaly_scores(burst)
+    assert float(burst_scores.iloc[-4:].min()) > max(10.0, float(base_tail.max()) * 2.0)
+
+    events = detect_jepa_events(
+        burst, "value", ["ws", "blh"], jepa=jepa, threshold=3.0, min_length=4
+    )
+    assert not events.empty
+    assert events.iloc[0]["end"] == frame.index[-1]

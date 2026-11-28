@@ -80,7 +80,7 @@ def make_deweather_example(
             "tp": tp,
             "rh2m": rh2m,
             "ws": ws,
-            "wd": (np.degrees(np.arctan2(v10, u10)) + 360) % 360,
+            "wd": (np.degrees(np.arctan2(-u10, -v10)) + 360.0) % 360.0,
         }
     )
 

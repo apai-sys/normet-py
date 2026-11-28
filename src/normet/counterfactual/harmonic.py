@@ -30,6 +30,9 @@ _DOW_HOUR_CATEGORIES: list[str] = [f"dow_{d}_h_{h:02d}" for d in range(7) for h 
 #: what ``counterfactual_p10`` / ``counterfactual_p90`` name.
 _Z90 = 1.2815515655446004
 
+#: Shared denominator floor for percentage impact and validation bias metrics.
+_PCT_DENOM_FLOOR = 1e-3
+
 
 def _on_index_clock(value: str | pd.Timestamp, index: pd.DatetimeIndex) -> pd.Timestamp:
     """``value`` as a timestamp comparable with ``index``'s clock."""
@@ -42,7 +45,12 @@ def _on_index_clock(value: str | pd.Timestamp, index: pd.DatetimeIndex) -> pd.Ti
 
 @dataclass
 class HarmonicCounterfactualResult:
-    """Container for Harmonic Counterfactual outputs."""
+    """Container for Harmonic Counterfactual outputs.
+
+    ``relative_impact_pct``, ``summary_metrics['net_impact_pct']``, and
+    ``validation_bias_pct`` all floor denominators with ``1e-3`` so sub-unit
+    series (e.g. ppb or AOD) remain consistent while avoiding zero division.
+    """
 
     observed: pd.Series
     counterfactual_bau: pd.Series
@@ -231,6 +239,8 @@ class HarmonicCounterfactual:
         index = series.index
         if not isinstance(index, pd.DatetimeIndex):
             raise ValueError("Input series must have a pd.DatetimeIndex.")
+        if len(series) == 0:
+            raise ValueError("Input series is empty; cannot fit HarmonicCounterfactual.")
 
         clean_s = series.interpolate().bfill().ffill()
         t0 = index[0]
@@ -315,7 +325,7 @@ class HarmonicCounterfactual:
             val_obs_m = float(np.mean(val_obs))
             val_pred_m = float(np.mean(val_preds))
             self.validation_bias_pct_ = float(
-                ((val_pred_m - val_obs_m) / max(val_obs_m, 1e-3)) * 100.0
+                ((val_pred_m - val_obs_m) / max(val_obs_m, _PCT_DENOM_FLOOR)) * 100.0
             )
             self.validation_rmse_ = float(np.sqrt(np.mean((val_obs - val_preds) ** 2)))
         else:
@@ -415,6 +425,14 @@ class HarmonicCounterfactual:
         block_hours : int, default 24
             Moving-block length (rows) for block-bootstrap uncertainty.
         random_state : int, default 7_654_321
+
+        Notes
+        -----
+        ``train_end_date`` must cover at least one baseline timestamp and precede
+        ``intervention_start_date`` with at least one post-intervention
+        timestamp. Percentage metrics (``relative_impact_pct``,
+        ``net_impact_pct``, and ``validation_bias_pct``) floor their
+        denominators with ``_PCT_DENOM_FLOOR`` (``1e-3``).
         """
         unc_mode = (uncertainty or "parametric").lower()
         if unc_mode not in {"parametric", "block_bootstrap"}:
@@ -425,13 +443,33 @@ class HarmonicCounterfactual:
         index = full_series.index
         if not isinstance(index, pd.DatetimeIndex):
             raise ValueError("full_series must have a pd.DatetimeIndex.")
+        if len(full_series) == 0:
+            raise ValueError("full_series is empty; cannot evaluate intervention.")
 
         train_ts = _on_index_clock(train_end_date, index)
         interv_ts = _on_index_clock(intervention_start_date, index)
         val_ts = _on_index_clock(val_start_date, index) if val_start_date else train_ts
 
-        # 1. Fit on baseline
-        train_mask = index <= train_ts
+        # 1. Validate baseline / intervention windows and fit on baseline
+        train_mask = np.asarray(index <= train_ts, dtype=bool)
+        if not np.any(train_mask):
+            raise ValueError(
+                "Empty baseline window: no observations fall on or before "
+                f"train_end_date={train_ts} (series starts at {index[0]})."
+            )
+        if interv_ts <= train_ts:
+            raise ValueError(
+                f"intervention_start_date ({interv_ts}) must be strictly after "
+                f"train_end_date ({train_ts}) so baseline training and "
+                "post-intervention evaluation windows do not overlap."
+            )
+        interv_mask = np.asarray(index >= interv_ts, dtype=bool)
+        if not np.any(interv_mask):
+            raise ValueError(
+                "Empty post-intervention window: no observations fall on or after "
+                f"intervention_start_date={interv_ts} (series ends at {index[-1]})."
+            )
+
         cov_train = covariates.reindex(index[train_mask]) if covariates is not None else None
         self.fit(full_series[train_mask], covariates=cov_train)
 
@@ -441,7 +479,6 @@ class HarmonicCounterfactual:
         bau_values = bau_full.to_numpy(dtype=float)
 
         # 3. Confidence Intervals (p10 / p90 = 80% prediction interval)
-        interv_mask = np.asarray(index >= interv_ts, dtype=bool)
         boot_net_stats: dict[str, float] = {}
         if unc_mode == "parametric":
             p10_full = pd.Series(np.maximum(0.0, bau_values - _Z90 * self.res_std), index=index)
@@ -578,14 +615,16 @@ class HarmonicCounterfactual:
 
         # 4. Impacts
         impact_abs = full_series - bau_full
-        impact_pct = (impact_abs / np.maximum(bau_full, 1.0)) * 100.0
+        impact_pct = (impact_abs / np.maximum(bau_full, _PCT_DENOM_FLOOR)) * 100.0
 
         # 5. Pre-intervention Validation Bias (between train_ts and interv_ts)
         val_mask = (index >= val_ts) & (index < interv_ts)
         if val_mask.sum() > 0:
             val_obs_mean = float(full_series[val_mask].mean())
             val_bau_mean = float(bau_full[val_mask].mean())
-            val_bias_pct = float(((val_bau_mean - val_obs_mean) / max(val_obs_mean, 1e-3)) * 100.0)
+            val_bias_pct = float(
+                ((val_bau_mean - val_obs_mean) / max(val_obs_mean, _PCT_DENOM_FLOOR)) * 100.0
+            )
         else:
             val_bias_pct = 0.0
 
@@ -595,7 +634,7 @@ class HarmonicCounterfactual:
         )
         mean_bau_interv = float(bau_full[interv_mask].mean()) if interv_mask.any() else float("nan")
         net_impact_ugm3 = float(mean_obs_interv - mean_bau_interv)
-        net_impact_pct = float((net_impact_ugm3 / max(mean_bau_interv, 1e-3)) * 100.0)
+        net_impact_pct = float((net_impact_ugm3 / max(mean_bau_interv, _PCT_DENOM_FLOOR)) * 100.0)
         hac_se, _ = (
             newey_west_se_mean(impact_abs.to_numpy(dtype=float)[interv_mask])
             if int(interv_mask.sum()) >= 2

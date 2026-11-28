@@ -51,6 +51,39 @@ def _plain_call(args, kwargs) -> dict:  # noqa: ANN001
     return out
 
 
+#: Known record cadences (median step in seconds) to (English, Chinese) words.
+_STEP_WORDS: dict[int, tuple[str, str]] = {
+    1800: ("half-hourly", "半小时"),
+    3600: ("hourly", "逐时"),
+    10800: ("3-hourly", "每 3 小时"),
+    21600: ("6-hourly", "每 6 小时"),
+    43200: ("12-hourly", "每 12 小时"),
+    86400: ("daily", "逐日"),
+    604800: ("weekly", "逐周"),
+}
+
+
+def _step_words(step: float) -> tuple[str, str]:
+    """English and Chinese cadence words for a median step in seconds."""
+    exact = _STEP_WORDS.get(round(step))
+    if exact is not None:
+        return exact
+    if 28 * 86400 <= step <= 31 * 86400:
+        return ("monthly", "逐月")
+    if 365 * 86400 <= step <= 366 * 86400:
+        return ("annual", "逐年")
+    if step < 3600:
+        mins = round(step / 60)
+        if mins >= 1 and abs(step - mins * 60) < 1:
+            return (f"{mins}-minute", f"每 {mins} 分钟")
+        return (f"{step:g}-second", f"每 {step:g} 秒")
+    if step < 86400:
+        hours = step / 3600
+        return (f"{hours:g}-hourly", f"每 {hours:g} 小时")
+    days = step / 86400
+    return (f"{days:g}-day", f"每 {days:g} 天")
+
+
 #: The run history's steps (``_log_history``), as its table names them.
 _TASK_WORDS = {
     "load": "Load",
@@ -118,19 +151,20 @@ class SessionMixin(QMainWindow):
         info: dict = {"version": normet.__version__, "ran": dict(self._ran)}
         if self.df_raw is not None and "date" in self.df_raw.columns:
             dates = pd.to_datetime(self.df_raw["date"]).dropna().sort_values()
-            info.update(
-                rows=len(self.df_raw),
-                start=f"{dates.iloc[0]:%Y-%m-%d}",
-                end=f"{dates.iloc[-1]:%Y-%m-%d}",
-                target=self.target_combo.currentText(),
-            )
-            step = float(
-                np.median(np.diff(dates.to_numpy()).astype("timedelta64[s]").astype(float))
-            )
-            for limit, en, zh in ((3600 * 1.5, "hourly", "逐时"), (86400 * 1.5, "daily", "逐日")):
-                if step <= limit:
+            if len(dates):
+                info.update(
+                    rows=len(self.df_raw),
+                    start=f"{dates.iloc[0]:%Y-%m-%d}",
+                    end=f"{dates.iloc[-1]:%Y-%m-%d}",
+                    target=self.target_combo.currentText(),
+                )
+            if len(dates) >= 2:
+                step = float(
+                    np.median(np.diff(dates.to_numpy()).astype("timedelta64[s]").astype(float))
+                )
+                if np.isfinite(step) and step > 0:
+                    en, zh = _step_words(step)
                     info.update(step=en, step_zh=zh)
-                    break
         stats = self.results.get("train")
         if stats is not None and "set" in stats.columns:
             row = stats[stats["set"] == "testing"]
@@ -230,6 +264,7 @@ class SessionMixin(QMainWindow):
             "ms_fast": self.ms_fast.value(),
             "ms_meso": self.ms_meso.value(),
             "ms_slow": self.ms_slow.value(),
+            "ms_samples": self.ms_samples.value(),
             "trend_series": self.trend_series.currentText(),
             "tre_seasonal": self.tre_seasonal.currentText(),
             "tre_segments": self.tre_segments.value(),
@@ -305,6 +340,7 @@ class SessionMixin(QMainWindow):
         self.ms_fast.setValue(c.get("ms_fast", 14))
         self.ms_meso.setValue(c.get("ms_meso", 90))
         self.ms_slow.setValue(c.get("ms_slow", 365))
+        self.ms_samples.setValue(c.get("ms_samples", 100))
         # Segments before the series: raising the row moves a still-default
         # emission-part choice to the long-term one, and the restored choice
         # must stand after it.

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import gzip
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -187,3 +188,32 @@ def test_a_clock_without_a_date_is_refused_rather_than_dated_today():
     df = pd.DataFrame({"time": ["13:00", "14:00"], "NO2": [1.0, 2.0]})
     with pytest.raises(ValueError, match="only a time of day"):
         find_dates(df)
+
+
+def test_parse_dates_reads_early_epoch_seconds_without_colliding_with_excel():
+    """Unix seconds from 1970-1972 (1e6..1e8) must parse without breaking Excel serials."""
+    dates, how = parse_dates(pd.Series([31_536_000, 31_539_600]))
+    assert how == "as Unix seconds"
+    assert [str(t) for t in dates] == ["1971-01-01 00:00:00", "1971-01-01 01:00:00"]
+
+    early, how_early = parse_dates(pd.Series([1_000_000, 1_003_600]))
+    assert how_early == "as Unix seconds"
+    assert [str(t) for t in early] == ["1970-01-12 13:46:40", "1970-01-12 14:46:40"]
+
+    excel, how_excel = parse_dates(pd.Series([43831, 43832]))
+    assert how_excel == "as Excel serial days"
+    assert [str(t) for t in excel] == ["2020-01-01 00:00:00", "2020-01-02 00:00:00"]
+
+
+def test_parse_dates_reports_empty_or_invalid_numeric_columns_cleanly():
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        with pytest.raises(ValueError, match="no numbers"):
+            parse_dates(pd.Series([np.nan, np.nan]))
+        with pytest.raises(ValueError, match="no numbers"):
+            parse_dates(pd.Series([], dtype=float))
+
+    with pytest.raises(ValueError, match="not times normet can read"):
+        parse_dates(pd.Series([20200131.0, 1.5]))

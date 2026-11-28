@@ -1075,6 +1075,7 @@ class AnalyseRunMixin(QMainWindow):
             window_days=self.roll_window.value(),
             rolling_every=self.roll_step.value(),
             n_samples=self.roll_samples.value(),
+            n_cores=self._n_cores(self.norm_cores),
             seed=self.seed_spin.value(),
         )
 
@@ -1170,7 +1171,7 @@ class AnalyseRunMixin(QMainWindow):
             fast_days=self.ms_fast.value(),
             meso_days=self.ms_meso.value(),
             slow_days=self.ms_slow.value(),
-            n_samples=self.roll_samples.value(),
+            n_samples=self.ms_samples.value(),
             n_cores=self._n_cores(self.norm_cores),
             seed=self.seed_spin.value(),
         )

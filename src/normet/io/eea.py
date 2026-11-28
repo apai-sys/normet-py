@@ -66,7 +66,16 @@ EEA_POLLUTANT_CODES = {
     "CO": 10,
 }
 
-_NOTATION_BY_CODE = {code: name for name, code in EEA_POLLUTANT_CODES.items()}
+# The station-level Parquet blobs also serve NO (EIONET 20) and NOXasNO2
+# (EIONET 9), which appear in the ArcGIS popup anchors and are advertised by
+# list_eea_stations alongside the six bulk-service pollutants.
+_STATION_POLLUTANT_CODES: dict[str, int] = {
+    **EEA_POLLUTANT_CODES,
+    "NO": 20,
+    "NOXasNO2": 9,
+}
+
+_NOTATION_BY_CODE = {code: name for name, code in _STATION_POLLUTANT_CODES.items()}
 
 #: The service's "no measurement" sentinels: the bulk download writes -99, the
 #: per-station Parquet blobs -999 (both measured; see :func:`_tidy`).
@@ -100,20 +109,28 @@ def _month_windows(year_from: int, year_to: int) -> list[tuple[str, str]]:
     ]
 
 
-def _resolve_pollutant_notation(pollutant: str | int) -> str:
+def _resolve_pollutant_notation(
+    pollutant: str | int,
+    *,
+    codes: dict[str, int] = EEA_POLLUTANT_CODES,
+    aliases: dict[str, str] | None = None,
+) -> str:
     """The pollutant as the service names it: a notation, not a numeric code.
 
-    Accepts the notations in :data:`EEA_POLLUTANT_CODES` (case-insensitive)
-    and the EEA codes they map to, so the names that worked against the FME
+    Accepts the notations in ``codes`` (case-insensitive, including mixed-case
+    names such as ``"NOXasNO2"``), optional lowercase ``aliases``, and the
+    EEA/EIONET codes they map to, so the names that worked against the FME
     service keep working with the same meanings.
     """
-    if isinstance(pollutant, int):
-        notation = _NOTATION_BY_CODE.get(pollutant)
+    if isinstance(pollutant, int) and not isinstance(pollutant, bool):
+        by_code = {code: name for name, code in codes.items()}
+        notation = by_code.get(pollutant)
     else:
-        key = str(pollutant).upper()
-        notation = key if key in EEA_POLLUTANT_CODES else None
+        key = " ".join(str(pollutant).lower().split())
+        by_lower = {name.lower(): name for name in codes}
+        notation = by_lower.get(key) or (aliases or {}).get(key)
     if notation is None:
-        valid = ", ".join(EEA_POLLUTANT_CODES)
+        valid = ", ".join(codes)
         raise ValueError(f"Unknown pollutant '{pollutant}'. Known: {valid}")
     return notation
 
@@ -444,7 +461,7 @@ def fetch_eea_station(
     *,
     station: str,
     country: str,
-    pollutant: str,
+    pollutant: str | int,
 ) -> pd.DataFrame:
     """One station's full history for one pollutant, from its public blob.
 
@@ -459,15 +476,21 @@ def fetch_eea_station(
         ArcGIS layer (one map-service call).
     country : str
         ISO-2 code; narrows the station lookup to one feature set.
-    pollutant : str
-        A normet notation in :data:`EEA_POLLUTANT_CODES`.
+    pollutant : str or int
+        A normet notation advertised by :func:`list_eea_stations` (``"PM2.5"``,
+        ``"PM10"``, ``"NO2"``, ``"NO"``, ``"NOXasNO2"``, ``"O3"``, ``"SO2"``,
+        ``"CO"``; case-insensitive) or its EIONET numeric code.
 
     Raises
     ------
+    ValueError
+        On an unknown pollutant notation or code.
     RuntimeError
         If the station has no blob for that pollutant or it fails to download.
     """
-
+    notation = _resolve_pollutant_notation(
+        pollutant, codes=_STATION_POLLUTANT_CODES, aliases=_NOTATION_BY_ANCHOR
+    )
     feats = _list_features(country)
     links: dict[str, str] = {}
     site_name = ""
@@ -479,10 +502,10 @@ def fetch_eea_station(
             break
     if not links:
         raise RuntimeError(f"No EEA station {station!r} found for country {country!r}.")
-    url = links.get(pollutant)
+    url = links.get(notation)
     if url is None:
         raise RuntimeError(
-            f"EEA station {station} ({site_name}) reports no {pollutant} blob. "
+            f"EEA station {station} ({site_name}) reports no {notation} blob. "
             f"Its pollutants: {', '.join(links) or 'none'}."
         )
     resp = request_with_retry(url, timeout=300.0, source="EEA:blob")
@@ -491,7 +514,7 @@ def fetch_eea_station(
     if raw.empty:
         return pd.DataFrame()
     df = _tidy(raw, country)
-    df = df[df["pollutant"] == pollutant]
+    df = df[df["pollutant"] == notation]
     df["site"] = site_name or str(station)
     df["lat"] = lat
     df["lon"] = lon

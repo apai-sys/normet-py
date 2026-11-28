@@ -33,6 +33,8 @@ from ._common import (
     _build_calendar_basis,
     _build_fold_projector,
     _build_met_design,
+    _calendar_basis_state,
+    _calendar_basis_width,
     _day_interleaved_folds,
     _ensure_datetime_frame,
     _fast_oof_separability_proj,
@@ -165,6 +167,34 @@ def _serialize_met_state(state: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _serialize_calendar_basis(state: dict[str, Any] | None) -> dict[str, Any] | None:
+    """JSON form of a :func:`_calendar_basis_state` dict (``t0`` as ISO text)."""
+    if state is None:
+        return None
+    t0 = state.get("t0")
+    return {
+        "t0": None if t0 is None else str(pd.Timestamp(t0)),
+        "span_sec": float(state["span_sec"]),
+        "span_days": float(state["span_days"]),
+        "n_harmonics": int(state["n_harmonics"]),
+        "n_cols": int(state["n_cols"]),
+    }
+
+
+def _deserialize_calendar_basis(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Inverse of :func:`_serialize_calendar_basis`; ``None`` for old archives."""
+    if payload is None:
+        return None
+    t0_raw = payload.get("t0")
+    return {
+        "t0": None if t0_raw is None else pd.Timestamp(t0_raw),
+        "span_sec": float(payload["span_sec"]),
+        "span_days": float(payload["span_days"]),
+        "n_harmonics": int(payload["n_harmonics"]),
+        "n_cols": int(payload["n_cols"]),
+    }
+
+
 def _deserialize_met_state(payload: dict[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = {"met_head": str(payload["met_head"])}
     if "degree" in payload:
@@ -230,6 +260,7 @@ class SeparableWorldModel:
         self._x_mu: np.ndarray = np.empty(0, dtype=float)
         self._x_sd: np.ndarray = np.empty(0, dtype=float)
         self._n_cal: int = 0
+        self._cal_basis: dict[str, Any] | None = None
         self._phi: np.ndarray = np.empty(0, dtype=float)
         self._train_resid_centered: np.ndarray = np.empty((0, 0), dtype=float)
 
@@ -244,6 +275,50 @@ class SeparableWorldModel:
     def _require_fitted(self) -> None:
         if not self._is_fitted:
             raise RuntimeError("SeparableWorldModel must be fitted via .fit() before use.")
+
+    def _calendar_basis(self, index: pd.DatetimeIndex) -> np.ndarray:
+        """Calendar design for ``index`` on the basis pinned at fit time.
+
+        The basis width (quadratic past 90 d, annual past 180 d) and the trend
+        normalisation both come from the fitted window, so any evaluation
+        window -- a rollout episode, a normalisation subset, a persistence
+        pre-window -- gets the same design the coefficients were fitted on.
+        """
+        state = self._cal_basis
+        if state is None:
+            state = self._legacy_calendar_basis(index)
+        return _build_calendar_basis(index, n_harmonics=self.config.n_harmonics, state=state)
+
+    def _legacy_calendar_basis(self, index: pd.DatetimeIndex) -> dict[str, Any]:
+        """Best-effort basis for an archive saved before the spec was serialised.
+
+        The fit epoch and span are not recoverable from a v1 payload that
+        predates ``calendar_basis``, so the evaluation window keeps its own epoch
+        and span; only the 90 d / 180 d bucket is inferred back from the fitted
+        column count, which keeps the design width (and so the model runnable)
+        without inventing a span. Re-``save()`` such an archive to pin the spec.
+        """
+        state = _calendar_basis_state(index, n_harmonics=self.config.n_harmonics)
+        width = int(self._n_cal)
+        if width <= 0:
+            return state
+        k = max(1, int(self.config.n_harmonics))
+        if width == _calendar_basis_width(0.0, k):
+            level = 0
+        elif width == _calendar_basis_width(90.0, k):
+            level = 1
+        elif width == _calendar_basis_width(180.0, k):
+            level = 2
+        else:
+            return state
+        span_days = float(state["span_days"])
+        if level == 0:
+            span_days = min(span_days, 89.0)
+        elif level == 1:
+            span_days = min(max(span_days, 90.0), 179.0)
+        else:
+            span_days = max(span_days, 180.0)
+        return {**state, "span_days": span_days, "n_cols": width}
 
     def _apply_power_encode(self, Y: np.ndarray) -> np.ndarray:
         Z = np.empty_like(Y, dtype=float)
@@ -372,9 +447,9 @@ class SeparableWorldModel:
         self._species = tcols
         self._met_cols = mcols
 
-        X_cal = _build_calendar_basis(
-            pd.DatetimeIndex(df_tr.index), n_harmonics=self.config.n_harmonics
-        )
+        idx_tr = pd.DatetimeIndex(df_tr.index)
+        self._cal_basis = _calendar_basis_state(idx_tr, n_harmonics=self.config.n_harmonics)
+        X_cal = _build_calendar_basis(idx_tr, state=self._cal_basis)
         X_met, X_met_raw = self._build_met_features(df_tr, fit_state=True)
         self._n_cal = X_cal.shape[1]
 
@@ -871,9 +946,7 @@ class SeparableWorldModel:
         df_v = df_s.iloc[valid]
         Y = Y_df.iloc[valid].to_numpy(dtype=float)
 
-        X_cal = _build_calendar_basis(
-            pd.DatetimeIndex(df_v.index), n_harmonics=self.config.n_harmonics
-        )
+        X_cal = self._calendar_basis(pd.DatetimeIndex(df_v.index))
         X_met, X_met_raw = self._build_met_features(df_v, fit_state=False)
 
         S = self.encode(Y)
@@ -946,9 +1019,7 @@ class SeparableWorldModel:
         Yv = Y[fin]
         n = len(df_v)
 
-        X_cal = _build_calendar_basis(
-            pd.DatetimeIndex(df_v.index), n_harmonics=self.config.n_harmonics
-        )
+        X_cal = self._calendar_basis(pd.DatetimeIndex(df_v.index))
         X_met, X_met_raw = self._build_met_features(df_v, fit_state=False)
         base_lat, met_lat = self._predict_latent_components(X_cal, X_met, X_met_raw)
         S_fact = base_lat + met_lat
@@ -1034,9 +1105,7 @@ class SeparableWorldModel:
         Y_arr = Y_df.to_numpy(dtype=float)
         fin_y = np.all(np.isfinite(Y_arr), axis=1)
 
-        X_cal = _build_calendar_basis(
-            pd.DatetimeIndex(df_s.index), n_harmonics=self.config.n_harmonics
-        )
+        X_cal = self._calendar_basis(pd.DatetimeIndex(df_s.index))
         X_met_fact, X_met_raw_fact = self._build_met_features(df_s, fit_state=False)
         X_met_pool, X_met_raw_pool = self._build_met_features(pool_src, fit_state=False)
 
@@ -1142,9 +1211,7 @@ class SeparableWorldModel:
         n_ep = len(df_ep)
         Y_ep = df_ep[self._species].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
 
-        X_cal_ep = _build_calendar_basis(
-            pd.DatetimeIndex(df_ep.index), n_harmonics=self.config.n_harmonics
-        )
+        X_cal_ep = self._calendar_basis(pd.DatetimeIndex(df_ep.index))
         X_met_fact_ep, X_met_raw_fact_ep = self._build_met_features(df_ep, fit_state=False)
 
         df_met_cf = df_ep[self._met_cols].copy()
@@ -1208,9 +1275,7 @@ class SeparableWorldModel:
             if np.any(fin_pre):
                 df_pre = df_pre.iloc[fin_pre]
                 Y_pre = Y_pre[fin_pre]
-                X_cal_pre = _build_calendar_basis(
-                    pd.DatetimeIndex(df_pre.index), n_harmonics=self.config.n_harmonics
-                )
+                X_cal_pre = self._calendar_basis(pd.DatetimeIndex(df_pre.index))
                 X_met_pre, X_met_raw_pre = self._build_met_features(df_pre, fit_state=False)
                 b_pre, m_pre = self._predict_latent_components(X_cal_pre, X_met_pre, X_met_raw_pre)
                 r_tail = self.encode(Y_pre) - (b_pre + m_pre)
@@ -1331,6 +1396,7 @@ class SeparableWorldModel:
             "x_mu": self._x_mu.tolist(),
             "x_sd": self._x_sd.tolist(),
             "n_cal": int(self._n_cal),
+            "calendar_basis": _serialize_calendar_basis(self._cal_basis),
             "phi": self._phi.tolist(),
             "train_resid_centered": self._train_resid_centered.tolist(),
             "fit_metadata": self.fit_metadata_,
@@ -1364,6 +1430,8 @@ class SeparableWorldModel:
         model._x_mu = np.asarray(payload["x_mu"], dtype=float)
         model._x_sd = np.asarray(payload["x_sd"], dtype=float)
         model._n_cal = int(payload["n_cal"])
+        # Optional: absent from archives written before the basis was serialised.
+        model._cal_basis = _deserialize_calendar_basis(payload.get("calendar_basis"))
         model._phi = np.asarray(payload["phi"], dtype=float)
         model._train_resid_centered = np.asarray(payload["train_resid_centered"], dtype=float)
         model.fit_metadata_ = dict(payload.get("fit_metadata", {}))

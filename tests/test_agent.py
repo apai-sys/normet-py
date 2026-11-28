@@ -752,3 +752,220 @@ def test_chronos_impute_backtest_events_tools_and_readings(tools, tmp_path):
     ev_df.to_csv(ev_csv, index=False)
     ev_txt = tools.read_result(str(ev_csv), "events")
     assert "1 episode(s)" in ev_txt and "max_surprise" in ev_txt
+
+
+def test_job_store_launched_without_started_is_running_and_not_pruned(tmp_path):
+    """A newly launched job without started.json must look running to another store and survive prune()."""
+    import subprocess
+    import sys
+    import time
+
+    home = str(tmp_path / "home")
+    server = JobStore(home=home)
+    other = JobStore(home=home)
+
+    job_id = "20260101-000000.000001-abcd"
+    folder = tmp_path / "home" / "jobs" / job_id
+    folder.mkdir(parents=True)
+    (folder / "job.json").write_text(
+        json.dumps(
+            {"id": job_id, "kind": "do_all", "argv": [], "label": "", "folder": str(folder)}
+        ),
+        encoding="utf-8",
+    )
+
+    # 1. Un-PID'd fresh `launched` marker inside LAUNCH_GRACE
+    (folder / "launched").write_text(json.dumps({"launched": time.time()}), encoding="utf-8")
+    assert other.state(job_id) == "running"
+    assert other.prune(dry_run=False)["removed"] == []
+    assert folder.is_dir()
+
+    # 2. Live child PID in `launched` even without `started.json` and with old mtime
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)"])
+    try:
+        (folder / "launched").write_text(
+            json.dumps({"pid": proc.pid, "launched": time.time() - 3600}),
+            encoding="utf-8",
+        )
+        old = time.time() - 3600
+        os.utime(folder / "launched", (old, old))
+        assert other.state(job_id) == "running"
+        assert other.prune(dry_run=False)["removed"] == []
+        assert folder.is_dir()
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+    # Once the child is gone and exit.json was never written, it is failed and prunable.
+    assert other.state(job_id) == "failed"
+    assert server.state(job_id) == "failed"
+    assert other.prune(dry_run=False)["removed"] == [job_id]
+    assert not folder.exists()
+
+
+def test_read_result_and_job_status_handle_all_seven_extended_job_kinds(tools, tmp_path):
+    """Every job kind in _OUTPUTS must produce a real reading when done (never ValueError)."""
+    from normet.agent.tools import _OUTPUTS
+
+    dates = pd.date_range("2024-01-01", periods=6, freq="h")
+
+    # 1. met_features
+    mf_csv = tmp_path / "met_features.csv"
+    pd.DataFrame(
+        {
+            "date": dates,
+            "ws": [2.0] * 6,
+            "u_wind": [1.0] * 6,
+            "v_wind": [-1.0] * 6,
+            "ventilation_coef": [1000.0] * 6,
+        }
+    ).to_csv(mf_csv, index=False)
+    assert "Derived features (3)" in tools.read_result(str(mf_csv), "met_features")
+
+    # 2. normalise_ox
+    ox_csv = tmp_path / "ox_species.csv"
+    pd.DataFrame(
+        {
+            "date": dates,
+            "O3_observed": [40.0] * 6,
+            "O3_normalised": [42.0] * 6,
+            "NO2_observed": [20.0] * 6,
+            "NO2_normalised": [18.0] * 6,
+            "Ox_observed": [60.0] * 6,
+            "Ox_normalised": [60.0] * 6,
+            "NOx_observed": [30.0] * 6,
+            "NOx_normalised": [27.0] * 6,
+            "O3_titration_effect": [2.0] * 6,
+            "f_no2_normalised": [0.3] * 6,
+        }
+    ).to_csv(ox_csv, index=False)
+    ox_txt = tools.read_result(str(ox_csv), "normalise_ox")
+    assert "Conserved Ox–NOx deweathering" in ox_txt and "titration effect" in ox_txt
+
+    # 3. normalise_regime
+    reg_csv = tmp_path / "regime_normalised.csv"
+    pd.DataFrame(
+        {
+            "date": dates,
+            "observed": [30.0] * 6,
+            "normalised": [28.0] * 6,
+            "normalised_unconditioned": [26.0] * 6,
+            "precursor_regime_effect": [2.0] * 6,
+        }
+    ).to_csv(reg_csv, index=False)
+    reg_txt = tools.read_result(str(reg_csv), "normalise_regime")
+    assert "Means by month:" in reg_txt and "precursor regime effect" in reg_txt
+
+    # 4. icn_decompose
+    icn_csv = tmp_path / "icn_decomposition.csv"
+    pd.DataFrame(
+        {"date": dates, "observed": [10.0] * 6, "emi_total": [8.0] * 6, "ws": [2.0] * 6}
+    ).to_csv(icn_csv, index=False)
+    assert "3 components" in tools.read_result(str(icn_csv), "icn_decompose")
+
+    # 5. shapley_interactions (non-empty and empty)
+    si_csv = tmp_path / "interactions.csv"
+    pd.DataFrame(
+        {
+            "term": ["ws", "ws:t2m"],
+            "kind": ["main", "interaction"],
+            "mean": [1.5, -0.3],
+            "std": [0.4, 0.2],
+            "mean_abs": [1.5, 0.3],
+            "max_abs": [2.1, 0.6],
+        }
+    ).to_csv(si_csv, index=False)
+    si_txt = tools.read_result(str(si_csv), "shapley_interactions")
+    assert "1 main effect(s), 1 pairwise interaction(s)" in si_txt and "ws:t2m" in si_txt
+
+    si_empty = tmp_path / "interactions_empty.csv"
+    pd.DataFrame(columns=["term", "kind", "mean", "std", "mean_abs", "max_abs"]).to_csv(
+        si_empty, index=False
+    )
+    assert "0 terms" in tools.read_result(str(si_empty), "shapley_interactions")
+
+    # 6. benchmark (with sibling metadata.json and scores.json)
+    bdir = tmp_path / "benchmark"
+    bdir.mkdir()
+    pd.DataFrame({"date": dates, "value": [12.0] * 6, "ws": [3.0] * 6}).to_csv(
+        bdir / "benchmark.csv", index=False
+    )
+    (bdir / "metadata.json").write_text(json.dumps({"family": "F1_additive", "n_days": 7}))
+    (bdir / "scores.json").write_text(json.dumps({"rmse": 0.42}))
+    b_txt = tools.read_result(str(bdir / "benchmark.csv"), "benchmark")
+    assert "F1_additive" in b_txt and "0.42" in b_txt and "benchmark.csv: 6 rows" in b_txt
+
+    # 7. invert_multisite (JSON summary + sibling site_metrics.csv)
+    idir = tmp_path / "inversion"
+    idir.mkdir()
+    (idir / "summary.json").write_text(
+        json.dumps(
+            {
+                "alpha": 1.2,
+                "spatial_alpha": 0.5,
+                "r2": 0.87,
+                "rmse": 2.1,
+                "n_obs": 120,
+                "intercepts": {"S1": 1.5, "S2": 2.0},
+            }
+        )
+    )
+    pd.DataFrame({"site": ["S1", "S2"], "r2": [0.88, 0.85]}).to_csv(
+        idir / "site_metrics.csv", index=False
+    )
+    inv_txt = tools.read_result(str(idir / "summary.json"), "invert_multisite")
+    assert (
+        "Multi-site footprint inversion" in inv_txt
+        and "0.87" in inv_txt
+        and "Site metrics:" in inv_txt
+    )
+
+    # End-to-end job_status() check across all 7 kinds
+    files_by_kind = {
+        "met_features": (mf_csv, "Derived features"),
+        "normalise_ox": (ox_csv, "Conserved Ox–NOx"),
+        "normalise_regime": (reg_csv, "precursor regime effect"),
+        "icn_decompose": (icn_csv, "3 components"),
+        "shapley_interactions": (si_csv, "1 main effect(s)"),
+        "benchmark": (bdir / "benchmark.csv", "F1_additive"),
+        "invert_multisite": (idir / "summary.json", "Multi-site footprint inversion"),
+    }
+    for idx, (kind, (src_file, expected_phrase)) in enumerate(files_by_kind.items(), start=1):
+        jid = f"20260101-000001.{idx:06d}-{kind[:4]}"
+        jdir = tmp_path / "home" / "jobs" / jid
+        jdir.mkdir(parents=True)
+        (jdir / "job.json").write_text(
+            json.dumps(
+                {
+                    "id": jid,
+                    "kind": kind,
+                    "argv": [kind],
+                    "command": f"normet {kind}",
+                    "folder": str(jdir),
+                }
+            ),
+            encoding="utf-8",
+        )
+        (jdir / "exit.json").write_text(json.dumps({"state": "done", "code": 0}), encoding="utf-8")
+        dest = jdir / _OUTPUTS[kind]
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(src_file.read_text(encoding="utf-8"), encoding="utf-8")
+        if kind == "benchmark":
+            (dest.parent / "metadata.json").write_text(
+                (src_file.parent / "metadata.json").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+        status_txt = tools.job_status(jid)
+        assert "could not read its output" not in status_txt
+        assert expected_phrase in status_txt
+
+
+def test_data_reading_on_header_only_csv(tools, tmp_path):
+    """A 0-row CSV with headers must not claim columns are 'Not numeric'."""
+    empty_csv = tmp_path / "empty.csv"
+    empty_csv.write_text("date,NO2,ws\n", encoding="utf-8")
+    text = tools.inspect_data(data=str(empty_csv))
+    assert "empty.csv: 0 rows × 3 columns." in text
+    assert "Not numeric" not in text
+    assert "Dates NaT" not in text
+    assert "No rows to type or summarise (columns: date, NO2, ws)." in text

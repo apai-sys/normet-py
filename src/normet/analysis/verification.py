@@ -21,13 +21,12 @@ the standard skill score for probabilistic forecasts (Gneiting and Raftery,
                                  carrying its rank as a quantile level. The
                                  wide table a ``normalise`` run returns with
                                  ``aggregate=False`` is its direct input.
-- :func:`crps_observed`       : the point forecast's reference on a skill table:
-                                  its MAE read as a normal's own MAE (sigma * sqrt(2/pi)),
-                                  so the score is the sigma that would carry it -- the MAE
-                                  times ``sqrt(pi/2) ~= 1.253`` -- which puts model and
-                                  baseline on one scale.
+- :func:`crps_observed`       : the point forecast's CRPS reference on a skill
+                                 table -- exactly its MAE, which is the CRPS of
+                                 the point mass it forecast. A spread forecast
+                                 must score below it to be worth its spread.
 
-The first three scores are comparable on equal records with the same units;
+All four scores are comparable on equal records with the same units:
 ``crps_observed`` is the reference a point forecast carries on the same
 record.
 """
@@ -55,11 +54,6 @@ __all__ = [
     "pit_diagnostics",
     "calibration_curve",
 ]
-
-
-#: Reads a point forecast's MAE as a normal's own MAE (sigma * sqrt(2/pi))
-#: and multiplies back to the sigma that would carry it: ``sqrt(pi/2)``.
-_POINT_MASS_FACTOR = float(np.sqrt(np.pi / 2.0))
 
 
 def _as_quantile_level(q: Any, what: str = "quantile level") -> float:
@@ -407,20 +401,19 @@ def crps_from_samples(
 
 
 def crps_observed(y_pred: Any, y_true: Any) -> float:
-    """The CRPS reference for a point forecast: ``sqrt(pi/2)`` times its MAE.
+    """The CRPS reference for a point forecast: its MAE.
 
-    A point forecast carries no distribution, so there is no ensemble score
-    to compute for it; what is needed on a skill table is a reference value
-    on the same scale as a spread score. The convention is to read the
-    forecast's mean absolute error as the normal distribution's own MAE --
-    a Gaussian of standard deviation sigma has MAE ``sigma * sqrt(2/pi)`` --
-    and return the sigma that would carry it, which is the MAE times
-    ``sqrt(pi/2) ~= 1.253``. Quote it as *the point forecast's* CRPS: it
-    reads about 25 % above its MAE, and a spread forecast's score against
-    it answers "is the spread worth its cost?" -- the value of the spread
-    the spread forecast actually carries, not an error in either number.
-    (A point mass's own CRPS is its MAE exactly; the factor is the
-    normal-scale convention, not the degenerate integral.)
+    A point forecast is a point mass, and a point mass's CRPS is exactly the
+    absolute error ``|y - p|`` integrated against the observation's step CDF
+    -- so over a record it is the mean absolute error, in the data's units
+    and on the same scale as any spread forecast's CRPS. A spread forecast
+    scores below it only by carrying more information than the point forecast
+    it is set against; one that scores *above* it is worse than forecasting
+    the median alone, whatever the width of its band.
+
+    (No normal-scale factor belongs here: ``sqrt(pi/2) * MAE`` is the
+    *sigma* of the Gaussian whose MAE is the forecast's error, a different
+    quantity, 25 % larger than the point forecast's own CRPS.)
 
     Parameters
     ----------
@@ -431,8 +424,8 @@ def crps_observed(y_pred: Any, y_true: Any) -> float:
     Returns
     -------
     float
-        The point forecast's CRPS reference = ``sqrt(pi/2) * MAE`` over
-        the finite rows, in the data's units.
+        The point forecast's CRPS = its MAE over the finite rows, in the
+        data's units.
     """
     p = (
         y_pred.to_numpy(dtype=float)
@@ -447,7 +440,7 @@ def crps_observed(y_pred: Any, y_true: Any) -> float:
     mask = np.isfinite(p) & np.isfinite(o)
     if not mask.any():
         raise DataError("Nothing to score: no finite forecast-observation row.")
-    return _POINT_MASS_FACTOR * float(np.mean(np.abs(o[mask] - p[mask])))
+    return float(np.mean(np.abs(o[mask] - p[mask])))
 
 
 def _sample_matrix_and_obs(

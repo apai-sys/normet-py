@@ -55,9 +55,9 @@ it will commit the project to API stability for downstream users.
 
 ## Open
 
-The 1.1 scope is tracked in the execution plan
-(`docs/plans/execution_plan.md`, which also carries the per-milestone progress
-notes); the table below is its snapshot.
+The 1.1 scope is tracked in the maintainers' execution plan (a working note kept
+alongside the checkout rather than published in the wheel, with the per-milestone
+progress notes in `CHANGELOG.md`); the table below is its snapshot.
 
 | Status | Item |
 |:------:|------|

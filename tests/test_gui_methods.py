@@ -159,3 +159,41 @@ def test_about_shows_the_app_icon_and_version(qapp):
         w._about_dialog.close()
     finally:
         w.close()
+
+
+@pytest.mark.parametrize(
+    ("freq", "periods", "expected_en", "expected_zh"),
+    [
+        ("30min", 10, "half-hourly", "半小时"),
+        ("h", 10, "hourly", "逐时"),
+        ("3h", 10, "3-hourly", "每 3 小时"),
+        ("6h", 10, "6-hourly", "每 6 小时"),
+        ("12h", 10, "12-hourly", "每 12 小时"),
+        ("D", 10, "daily", "逐日"),
+        ("W", 10, "weekly", "逐周"),
+        ("MS", 12, "monthly", "逐月"),
+        ("YS", 5, "annual", "逐年"),
+        ("5min", 10, "5-minute", "每 5 分钟"),
+    ],
+)
+def test_methods_info_reports_accurate_time_step(qapp, freq, periods, expected_en, expected_zh):
+    import pandas as pd
+
+    from normet.gui.main_window import MainWindow
+
+    w = MainWindow()
+    try:
+        w.df_raw = pd.DataFrame(
+            {"date": pd.date_range("2020-01-01", periods=periods, freq=freq), "NO2": 1.0}
+        )
+        w._ran["build_model"] = {"backend": "flaml", "covariates": ["ws"], "args": [None, "NO2"]}
+        info = w.methods_info()
+        assert info["step"] == expected_en
+        assert info["step_zh"] == expected_zh
+        para = methods_paragraph(info, "en")
+        assert f"{periods} {expected_en} observations" in para
+        assert "  observations" not in para
+        para_zh = methods_paragraph(info, "zh")
+        assert f"{periods} 个{expected_zh}观测值" in para_zh
+    finally:
+        w.close()

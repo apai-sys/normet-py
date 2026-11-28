@@ -84,8 +84,19 @@ def _load_yaml(path: Path | None) -> dict[str, Any]:
     if path is None:
         return {}
     yaml = require("yaml", hint="pip install pyyaml")
+    click = require("click", hint="pip install click")
     with open(path) as f:
-        return yaml.safe_load(f) or {}
+        try:
+            data = yaml.safe_load(f)
+        except yaml.YAMLError as exc:
+            raise click.BadParameter(
+                f"invalid YAML in {path}: {exc}", param_hint="--config"
+            ) from exc
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise click.UsageError(f"--config file {path} must hold a YAML mapping")
+    return data
 
 
 def _parse_groups(spec: Any) -> dict[str, list[str]] | None:
@@ -125,13 +136,25 @@ def _cfg_int(cfg: dict[str, Any], key: str, default: int) -> int:
     return default if value is None else int(value)
 
 
-def _merge_cli_over_yaml(yaml_cfg: dict[str, Any], cli_args: dict[str, Any]) -> dict[str, Any]:
+def _merge_cli_over_yaml(yaml_cfg: Any, cli_args: dict[str, Any]) -> dict[str, Any]:
     """CLI args win; None values fall back to YAML."""
+    if not isinstance(yaml_cfg, dict):
+        click = require("click", hint="pip install click")
+        raise click.UsageError("--config must hold a YAML mapping")
     out = dict(yaml_cfg)
     for k, v in cli_args.items():
         if v is not None:
             out[k] = v
     return out
+
+
+def _require_option(cfg: dict[str, Any], key: str, flag: str) -> Any:
+    """Return *cfg[key]* when set and non-empty, else raise ``click.UsageError``."""
+    value = cfg.get(key)
+    if value is None or (isinstance(value, str) and not value.strip()):
+        click = require("click", hint="pip install click")
+        raise click.UsageError(f"{flag} is required")
+    return value
 
 
 # ---------- CLI ----------
@@ -277,6 +300,7 @@ def _build_cli() -> Any:
         from ..pipeline.do_all import SingleConfig
 
         cfg = _merge_cli_over_yaml(_load_yaml(opts.pop("config_path", None)), opts)
+        target = _require_option(cfg, "target", "--target")
         if cfg.get("block_mode") == "markov" and not (
             cfg.get("block_hours") is not None and int(cfg["block_hours"]) > 1
         ):
@@ -307,7 +331,7 @@ def _build_cli() -> Any:
 
         out, model, df_prep = do_all(
             df=df,
-            target=cfg["target"],
+            target=target,
             covariates=_split_csv(cfg.get("covariates")),
             variables_resample=_split_csv(cfg.get("resample_vars"))
             or _split_csv(cfg.get("variables_resample")),
@@ -350,12 +374,13 @@ def _build_cli() -> Any:
         from .. import decompose
 
         cfg = _merge_cli_over_yaml(_load_yaml(opts.pop("config_path", None)), opts)
+        target = _require_option(cfg, "target", "--target")
         df = _load_table(input)
 
         out = decompose(
             method=cfg.get("method") or "emission",
             df=df,
-            target=cfg["target"],
+            target=target,
             covariates=_split_csv(cfg.get("covariates")),
             backend=cfg.get("backend") or "flaml",
             n_samples=int(cfg["n_samples"]) if cfg.get("n_samples") is not None else None,
@@ -491,7 +516,7 @@ def _build_cli() -> Any:
                 f"[deweather] re-aggregated bank {bank_path} ({estimate}); wrote {cfg['out_path']}"
             )
             return
-        target = cfg["target"]
+        target = _require_option(cfg, "target", "--target")
         met = _split_csv(cfg.get("met_vars"))
         if not met:
             raise click.UsageError(
@@ -656,11 +681,11 @@ def _build_cli() -> Any:
         from ..foundation import ICNDesign, add_calendar_covariates, icn_decompose
 
         cfg = _merge_cli_over_yaml(_load_yaml(opts.pop("config_path", None)), opts)
-        df = _load_table(input)
-        target = cfg["target"]
+        target = _require_option(cfg, "target", "--target")
         met = _split_csv(cfg.get("met_vars"))
         if not met:
             raise click.UsageError("--met-vars is required.")
+        df = _load_table(input)
         date_col = cfg.get("date_col") or "date"
         df = _prepare_chronos_frame(df, date_col, [target, *met], "icn-decompose")
         est = _load_chronos_estimator(cfg, met, "icn-decompose")
@@ -719,10 +744,11 @@ def _build_cli() -> Any:
         from .. import shapley_interactions
 
         cfg = _merge_cli_over_yaml(_load_yaml(opts.pop("config_path", None)), opts)
+        target = _require_option(cfg, "target", "--target")
         df = _load_table(input)
         res = shapley_interactions(
             df,
-            target=cfg["target"],
+            target=target,
             covariates=_split_csv(cfg.get("covariates")),
             backend=cfg.get("backend") or "flaml",
             n_samples=int(cfg["n_samples"]) if cfg.get("n_samples") is not None else None,
@@ -996,15 +1022,16 @@ def _build_cli() -> Any:
         from .. import normalise_regime_conditioned
 
         cfg = _merge_cli_over_yaml(_load_yaml(opts.pop("config_path", None)), opts)
-        df = _load_table(input)
+        target = _require_option(cfg, "target", "--target")
         precursors = _split_csv(cfg.get("precursors"))
         if not precursors:
             raise click.UsageError(
                 "--precursors is required (the primary tracers defining regime)."
             )
+        df = _load_table(input)
         res = normalise_regime_conditioned(
             df,
-            cfg["target"],
+            target,
             precursors,
             covariates=_split_csv(cfg.get("covariates")) or [],
             variables_resample=_split_csv(cfg.get("resample_vars")),
@@ -1071,8 +1098,8 @@ def _build_cli() -> Any:
         from ..foundation import calibrate_quantiles
 
         cfg = _merge_cli_over_yaml(_load_yaml(opts.pop("config_path", None)), opts)
+        target = _require_option(cfg, "target", "--target")
         df = _load_table(input)
-        target = cfg["target"]
         met = _split_csv(cfg.get("met_vars")) or []
         date_col = cfg.get("date_col") or "date"
         df_reg = _prepare_chronos_frame(df, date_col, [target, *met], "impute")
@@ -1160,8 +1187,8 @@ def _build_cli() -> Any:
     def backtest_cmd(input: Path, **opts: Any) -> None:
         """Rolling multi-horizon probabilistic verification with Chronos-2."""
         cfg = _merge_cli_over_yaml(_load_yaml(opts.pop("config_path", None)), opts)
+        target = _require_option(cfg, "target", "--target")
         df = _load_table(input)
-        target = cfg["target"]
         met = _split_csv(cfg.get("met_vars")) or []
         date_col = cfg.get("date_col") or "date"
         df_reg = _prepare_chronos_frame(df, date_col, [target, *met], "backtest")
@@ -1246,8 +1273,8 @@ def _build_cli() -> Any:
         from .. import detect_events
 
         cfg = _merge_cli_over_yaml(_load_yaml(opts.pop("config_path", None)), opts)
+        value_col = _require_option(cfg, "value_col", "--value-col")
         df = _load_table(input)
-        value_col = cfg["value_col"]
         date_col = cfg.get("date_col") or "date"
         method = cfg.get("method") or "iqr"
         min_length = _cfg_int(cfg, "min_length", 1)
@@ -1410,6 +1437,8 @@ def _build_cli() -> Any:
         from .. import run_scm
 
         cfg = _merge_cli_over_yaml(_load_yaml(opts.pop("config_path", None)), opts)
+        treated = _require_option(cfg, "treated", "--treated")
+        cutoff = _require_option(cfg, "cutoff", "--cutoff")
         df = _load_table(input)
         scm_backend = cfg.get("scm_backend") or "scm"
         scm_kwargs: dict[str, Any] = {}
@@ -1434,8 +1463,8 @@ def _build_cli() -> Any:
             date_col=cfg.get("date_col") or "date",
             unit_col=cfg.get("unit_col") or "ID",
             outcome_col=cfg.get("outcome_col") or "value",
-            treated_unit=cfg["treated"],
-            cutoff_date=cfg["cutoff"],
+            treated_unit=treated,
+            cutoff_date=cutoff,
             donors=_split_csv(cfg.get("donors")),
             scm_backend=scm_backend,
             **scm_kwargs,
@@ -1457,11 +1486,12 @@ def _build_cli() -> Any:
         from .. import cv_score, prepare_data
 
         cfg = _merge_cli_over_yaml(_load_yaml(opts.pop("config_path", None)), opts)
+        target = _require_option(cfg, "target", "--target")
         df = _load_table(input)
         feats = _split_csv(cfg.get("covariates")) or []
         df_prep = prepare_data(
             df,
-            target=cfg["target"],
+            target=target,
             covariates=feats,
             split_method="ts",
             train_fraction=0.999,  # we only need date sorting + value rename here

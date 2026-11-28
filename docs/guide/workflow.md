@@ -138,10 +138,14 @@ result = nm.run_scm(
 print(result.tail())
 ```
 
-Available backends: `scm` (augmented ridge SCM), `abadie` (classic simplex), `did`
-(DiD), `mcnnm` (matrix completion), `robust` (Robust SCM — HSVT de-noising, Amjad et
-al. 2018), `mlscm` (**experimental** — a direct `nm.mlscm` call emits
-`ExperimentalWarning`; `run_scm` suppresses it).
+Available backends (`normet scm --help` lists the same set): `scm` (augmented ridge
+SCM), `ascm` (Ben-Michael et al. 2021 ridge ASCM), `abadie` (classic simplex), `did`
+(DiD), `sdid` (Synthetic DiD), `mcnnm` (matrix completion), `robust` (Robust SCM —
+HSVT de-noising, Amjad et al. 2018), `deweathered` (two-stage deweather-then-SCM),
+`transport` (downwind plume spillover-corrected), `chronos` (zero-shot
+covariate-conditioned SCM, needs `normet[foundation]`) and `mlscm`
+(**experimental** — a direct `nm.mlscm` call emits `ExperimentalWarning`; `run_scm`
+suppresses it).
 
 ### Placebo tests
 
@@ -219,8 +223,10 @@ Three things decide whether this is the right tool for a given record:
 - **The first `context_length` rows are not a result.** The model has no history
   to condition on until then, so `deweather` seeds them with the observed values
   and the curves coincide there by construction. Give it years, not months.
-- **Every Monte-Carlo sample is a full forward pass**, so `n_samples` defaults to
-  8 here rather than the AutoML path's 300. `device=None` picks CUDA, else Apple
+- **Every Monte-Carlo sample is a full forward pass**, so the sample count is far
+  smaller than the AutoML path's 300: `Chronos2Estimator.deweather` takes
+  `n_samples=20`, and the zero-shot pipeline path (`do_all(backend="chronos-2")`,
+  via `resolve_n_samples`) defaults to 8. `device=None` picks CUDA, else Apple
   Silicon's Metal backend (`mps`), else the CPU; the CLI takes `--device` and the
   GUI has a **Device** selector.
 - **`covariate_sensitivity` is the quality gate.** There is no parity plot and no

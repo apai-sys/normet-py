@@ -113,30 +113,57 @@ def polar_plot(
     else:
         raise ValueError(f"Unsupported statistic: {statistic}")
 
+    # `observed=True` keeps only the bins that occur, so the grid shrinks
+    # wherever a direction sector or a speed class is empty (a 10-degree wind
+    # record, a week of hours, a calm-speed gap) and the mesh no longer matches
+    # the theta x r centres. Reindex to the full categorical levels and let the
+    # empty bins draw as gaps.
+    grid = grid.reindex(
+        index=pd.Index(sub["_wd_bin"].cat.categories),
+        columns=pd.Index(sub["_ws_bin"].cat.categories),
+    )
     Z = grid.to_numpy(dtype=float)
+    Z[~np.isfinite(Z)] = np.nan
     theta = np.deg2rad(0.5 * (wd_edges[:-1] + wd_edges[1:]))
     r = 0.5 * (ws_edges[:-1] + ws_edges[1:])
     Theta, R = np.meshgrid(theta, r, indexing="ij")
 
-    if ax is None:
-        fig, ax = plt.subplots(
-            subplot_kw={"projection": "polar"}, figsize=(4.2, 3.6), layout="constrained"
+    own_fig = ax is None
+    fig = None
+    try:
+        if ax is None:
+            fig, ax = plt.subplots(
+                subplot_kw={"projection": "polar"}, figsize=(4.2, 3.6), layout="constrained"
+            )
+        ax.set_theta_zero_location("N")  # type: ignore[union-attr]
+        ax.set_theta_direction(-1)  # type: ignore[union-attr]  # clockwise, as a compass reads
+        # `shading="nearest"` takes the array at the bin centres, so the
+        # reindexed grid's shape is the mesh's shape; the NaNs leave holes.
+        mesh = ax.pcolormesh(Theta, R, Z, cmap=cmap, shading="nearest", rasterized=True)
+        ax.set_thetagrids(  # type: ignore[union-attr]
+            [0, 90, 180, 270], ["N", "E", "S", "W"]
         )
-    ax.set_theta_zero_location("N")  # type: ignore[union-attr]
-    ax.set_theta_direction(-1)  # type: ignore[union-attr]  # clockwise, as a compass reads
-    mesh = ax.pcolormesh(Theta, R, Z, cmap=cmap, shading="auto", rasterized=True)
-    ax.set_thetagrids(  # type: ignore[union-attr]
-        [0, 90, 180, 270], ["N", "E", "S", "W"]
-    )
-    ax.tick_params(axis="y", labelsize=S.SMALL_SIZE)
-    ax.grid(True, color="white", lw=0.4, alpha=0.6)
-    ax.spines["polar"].set_linewidth(S.RC["axes.linewidth"])
-    ax.set_rlabel_position(112.5)  # type: ignore[union-attr]
-    if ax.figure is not None:
-        S.colorbar(
-            ax.figure, mesh, ax, label=f"{statistic} {S.formula(target)}", fraction=0.05, pad=0.1
-        )
-    ax.set_title(title or f"{S.formula(target)} by wind direction and speed")
+        ax.tick_params(axis="y", labelsize=S.SMALL_SIZE)
+        ax.grid(True, color="white", lw=0.4, alpha=0.6)
+        ax.spines["polar"].set_linewidth(S.RC["axes.linewidth"])
+        ax.set_rlabel_position(112.5)  # type: ignore[union-attr]
+        if ax.figure is not None:
+            S.colorbar(
+                ax.figure,
+                mesh,
+                ax,
+                label=f"{statistic} {S.formula(target)}",
+                fraction=0.05,
+                pad=0.1,
+            )
+        ax.set_title(title or f"{S.formula(target)} by wind direction and speed")
+    except Exception:
+        # A figure made here is this call's to keep alive only if it returns:
+        # pyplot holds every figure until closed, so a failed draw would
+        # otherwise leave one behind for the rest of the session.
+        if own_fig and fig is not None:
+            plt.close(fig)
+        raise
     return ax
 
 
@@ -708,7 +735,11 @@ def normalise_plot(
 
     df = result_df.copy()
     if resample:
-        df = df.resample(resample).mean()
+        # Only the numeric series can be averaged: a frame carrying the run's
+        # own labels (a "set" column, a station name, a wind sector) would
+        # otherwise raise in pandas 2.x, whose Resampler.mean is not
+        # numeric_only by default.
+        df = df.resample(resample).mean(numeric_only=True)
 
     if ax is None:
         _, ax = plt.subplots(figsize=(8, 3), layout="constrained")
@@ -902,7 +933,9 @@ def time_series_plot(
 
     df_plot = df.copy()
     if resample:
-        df_plot = df_plot.resample(resample).mean()
+        # As in normalise_plot: average the numeric columns only, so a label
+        # column beside the series does not raise in pandas 2.x.
+        df_plot = df_plot.resample(resample).mean(numeric_only=True)
 
     if ax is None:
         _, ax = plt.subplots(figsize=(8, 3), layout="constrained")

@@ -18,13 +18,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from normet.gui._run_train import crps_reference  # noqa: E402
 
 
-def test_crps_reference_is_the_normal_scaled_mae():
+def test_crps_reference_is_the_point_forecasts_mae():
     rng = np.random.default_rng(3)
     obs = rng.normal(10.0, 2.0, 400)
     pred = obs + rng.normal(0.0, 0.5, 400)
     ref = crps_reference(obs, pred)
     mae = float(np.mean(np.abs(pred - obs)))
-    assert ref is not None and ref == pytest.approx(np.sqrt(np.pi / 2.0) * mae, rel=1e-9)
+    assert ref is not None and ref == pytest.approx(mae, rel=1e-9)
 
 
 def test_crps_reference_survives_an_empty_holdout():

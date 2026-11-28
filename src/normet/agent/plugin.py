@@ -94,6 +94,11 @@ def resolve_server_spec(
     if url:
         if use_uvx or use_python or command:
             raise ValueError("--url cannot be combined with --uvx, --python, or --command.")
+        if toolset != "all":
+            raise ValueError(
+                "--toolset applies to a stdio server; start the remote server with "
+                f"--toolset {toolset}."
+            )
         spec: dict[str, Any] = {
             "transport": "http",
             "url": url.strip(),
@@ -1688,7 +1693,7 @@ def _add_server_args(parser: argparse.ArgumentParser) -> None:
         "--toolset",
         choices=("all", "core"),
         default="all",
-        help="Expose all 26 tools or only the 14 of the standard de-weathering workflow.",
+        help="Expose all 26 tools or only the 14 of the standard de-weathering workflow (stdio only).",
     )
     parser.add_argument("--roots", help="Value for NORMET_MCP_ROOTS.")
     parser.add_argument("--mcp-home", help="Value for NORMET_MCP_HOME.")
@@ -1878,17 +1883,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(out_rows, indent=2))
         return 0
 
-    spec = resolve_server_spec(
-        command=args.command,
-        use_python=args.use_python,
-        use_uvx=args.use_uvx,
-        toolset=args.toolset,
-        roots=args.roots,
-        mcp_home=args.mcp_home,
-        extra_env=args.extra_env,
-        url=args.url,
-        auth_token=args.auth_token,
-    )
+    try:
+        spec = resolve_server_spec(
+            command=args.command,
+            use_python=args.use_python,
+            use_uvx=args.use_uvx,
+            toolset=args.toolset,
+            roots=args.roots,
+            mcp_home=args.mcp_home,
+            extra_env=args.extra_env,
+            url=args.url,
+            auth_token=args.auth_token,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
 
     if args.subcommand == "print-config":
         if args.target == "antigravity":

@@ -24,6 +24,9 @@ KNOWN = (
     "compute_multiscale",
     "pdp",
     "finetune",
+    "trend_call",
+    "trend_breaks_call",
+    "events_call",
 )
 
 #: What the window's tasks return, by the name the script assigns it to.
@@ -32,6 +35,13 @@ RESULTS = {
     "decomposition": "decompose",
     "rolled": "rolling",
     "pd_values": "pdp",
+    "trend_result": "trend",
+}
+
+_TREND_SERIES = {
+    "emi_total": "emission part (emi_total)",
+    "long-term": "long-term trend (separated)",
+    "met_total": "meteorology part (met_total)",
 }
 
 CALENDAR = ("date_unix", "day_julian", "weekday", "hour")
@@ -133,6 +143,7 @@ def config_from_calls(calls: dict[str, dict[str, Any]]) -> dict[str, Any]:
             ("fast_days", "ms_fast"),
             ("meso_days", "ms_meso"),
             ("slow_days", "ms_slow"),
+            ("n_samples", "ms_samples"),
         ):
             if ms.get(src) is not None:
                 c[dst] = ms[src]
@@ -141,6 +152,10 @@ def config_from_calls(calls: dict[str, dict[str, Any]]) -> dict[str, Any]:
         c["pdp_grid"] = pdp["grid_points"]
     tre = calls.get("trend_call")
     if tre:
+        c["tre_segments"] = 1
+        args = tre.get("args") or []
+        if len(args) > 1 and isinstance(args[1], str):
+            c["trend_series"] = _TREND_SERIES.get(args[1], "observed target")
         for src, dst in (
             ("aggregate", "tre_aggregate"),
             ("bootstrap_scheme", "tre_bootstrap"),
@@ -150,6 +165,15 @@ def config_from_calls(calls: dict[str, dict[str, Any]]) -> dict[str, Any]:
         ):
             if tre.get(src) is not None:
                 c[dst] = tre[src]
+    tre_breaks = calls.get("trend_breaks_call")
+    if tre_breaks:
+        args = tre_breaks.get("args") or []
+        if len(args) > 1 and isinstance(args[1], str):
+            c["trend_series"] = _TREND_SERIES.get(args[1], "observed target")
+        if tre_breaks.get("max_segments") is not None:
+            c["tre_segments"] = tre_breaks["max_segments"]
+        if tre_breaks.get("n_bootstrap") is not None:
+            c["tre_n_bootstrap"] = tre_breaks["n_bootstrap"]
     return c
 
 

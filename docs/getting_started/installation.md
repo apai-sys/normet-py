@@ -134,3 +134,9 @@ normet info
 | Parallel/large data | `dask` |
 | CLI | `click`, `pyyaml` |
 | GUI | `PySide6-Essentials`, `pyarrow`, `openpyxl`, `xlrd` |
+| Geo (trajectory regions) | `shapely`, `pyshp` |
+| Statistics (STL, AR/ADF) | `statsmodels` |
+| Foundation model | `chronos-forecasting`, `torch` |
+| Fine-tuning | `foundation` plus `accelerate`, `peft` |
+| Bayesian SCM | `pymc`, `arviz` |
+| MCP server | `mcp`, `uvicorn` |

@@ -1263,3 +1263,57 @@ def test_the_report_language_is_chosen_where_the_report_is_exported(qapp, monkey
             prefs.remove("report_language")
         else:
             prefs.setValue("report_language", kept)
+
+
+def test_synthetic_example_wd_is_compass_bearing():
+    import numpy as np
+
+    from normet.gui._examples import make_deweather_example
+    from normet.gui.polar_window import wind_columns
+
+    df = make_deweather_example(n_days=14)
+    derived, _, _ = wind_columns(df[["PM2.5", "u10", "v10"]].copy())
+    assert np.allclose(df["wd"].to_numpy(), derived["wd"].to_numpy(), atol=1e-12)
+
+
+def test_multiscale_and_rolling_use_own_samples_and_forward_n_cores(qapp, monkeypatch):
+    import pandas as pd
+
+    from normet.gui.main_window import MainWindow
+
+    win = MainWindow()
+    try:
+        win.df_prep = pd.DataFrame(
+            {"date": pd.date_range("2020-01-01", periods=10, freq="h"), "value": 1.0}
+        )
+        win.model = object()
+        win.trained_features = ["ws", "wd"]
+        win.results["normalise"] = pd.DataFrame({"normalised": [1.0] * 10})
+
+        win.ms_samples.setValue(123)
+        assert win.get_config()["ms_samples"] == 123
+        win.apply_config({"ms_samples": 234})
+        assert win.ms_samples.value() == 234
+
+        win.norm_cores.setValue(5)
+        win.roll_samples.setValue(777)
+        win.ms_samples.setValue(123)
+
+        submitted = []
+
+        def fake_submit(label, fn, on_done, on_err, *args, **kwargs):
+            submitted.append((label, kwargs))
+            return True
+
+        monkeypatch.setattr(win.runner, "submit", fake_submit)
+        win._run_multiscale()
+        win._run_rolling()
+
+        assert submitted[0][0] == "multi-scale decomposition"
+        assert submitted[0][1]["n_samples"] == 123
+        assert submitted[0][1]["n_cores"] == 5
+        assert submitted[1][0] == "rolling"
+        assert submitted[1][1]["n_samples"] == 777
+        assert submitted[1][1]["n_cores"] == 5
+    finally:
+        win.close()

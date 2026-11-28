@@ -366,8 +366,25 @@ def _to_series(series: pd.Series | pd.DataFrame, value_col: str | None) -> tuple
     return s.sort_index(), positional
 
 
+def _finite_values(s: pd.Series) -> pd.Series:
+    """``s`` with its missing and non-finite (``±inf``) values dropped.
+
+    ``Series.dropna`` keeps ``±inf``, and one infinite value breaks every
+    consumer of the record differently: scipy's ``theilslopes`` carries it
+    into the pair-wise slopes, the bounded Python selector and the Rust
+    kernel see arrays of different lengths, and -- because the positional
+    time grid is built from an ``isfinite`` mask over the whole series --
+    the grid comes out shorter than the values, a broadcasting crash that
+    names neither the row nor the value. An infinite value has no
+    measurement behind it, so it is dropped with the NaNs, once, before any
+    array is built: both Theil-Sen backends then see the same finite
+    record, and ``n`` counts the rows actually used.
+    """
+    return s[np.isfinite(s.to_numpy())]
+
+
 def _time_grid(s: pd.Series, x: pd.Series, positional: bool) -> np.ndarray:
-    """Time grid for the finite values of ``s`` (``x`` is ``s.dropna()``).
+    """Time grid for the observed values of ``s`` (``x`` is :func:`_finite_values`).
 
     Datetime records are measured in days, so hourly, daily and monthly all
     share one unit. Positional records use the *original step indices* with
@@ -384,7 +401,12 @@ def _time_grid(s: pd.Series, x: pd.Series, positional: bool) -> np.ndarray:
     # The index *is* the grid: a RangeIndex gives 0..n-1, and an integer or
     # float index carries the step coordinate the caller meant -- a masked or
     # gap-ed record keeps its real stops instead of being renumbered 0..n_kept.
+    # The mask is the same one ``x`` was taken with, so the grid and the
+    # values stay one array: an ``±inf`` in the record used to be dropped
+    # here but kept in ``x``, and the two arrays went to the estimators at
+    # different lengths (a broadcasting error in both backends).
     finite = np.isfinite(s.to_numpy())
+    assert int(finite.sum()) == x.size, "the grid and the values must be the same finite record"
     return np.asarray(s.index, dtype=float)[finite]
 
 
@@ -483,7 +505,7 @@ def mann_kendall(
         S, tie-corrected variance, continuity-corrected z and two-sided p.
     """
     s, _ = _to_series(series, value_col)
-    x = s.dropna()
+    x = _finite_values(s)
     if x.size < 8:
         raise DataError(
             f"mann_kendall needs at least 8 observed values, got {x.size} "
@@ -635,6 +657,21 @@ def _theil_sen_large(x: np.ndarray, y: np.ndarray, stats: Any) -> tuple[float, f
     return slope, float(slopes[rl]), float(slopes[ru])
 
 
+def _canonical_zero(value: float) -> float:
+    """``value`` with a negative zero made positive; every other value exact.
+
+    The pair-slope multiset can hold both signed zeros (a record with runs of
+    ``0.0`` and ``-0.0``, or a difference of two equal values appearing in
+    both signs). NumPy's ``partition`` -- the Python path -- may then select
+    the negative one where the Rust kernel's key order selects the positive,
+    which is the only disagreement the backend parity fuzz ever found. Adding
+    ``+0.0`` is an exact identity for every non-zero value (and for ``inf``)
+    and maps ``-0.0`` to ``+0.0``, so the two backends agree bit for bit
+    without moving a number.
+    """
+    return value + 0.0
+
+
 def _theil_sen_rust(x: np.ndarray, y: np.ndarray) -> tuple[float, float, float]:
     """Theil-Sen slope and Sen interval from the optional Rust kernel.
 
@@ -642,6 +679,11 @@ def _theil_sen_rust(x: np.ndarray, y: np.ndarray) -> tuple[float, float, float]:
     (and of scipy's ``theilslopes``) and selects the same order statistics,
     so the values agree bit for bit; the normal quantile is passed in from
     here because the interval ranks are a function of the host's ``ppf``.
+    The one exception is the *sign* of zero when the pair multiset holds
+    both signed zeros: the kernel's unsigned key order puts ``-0.0`` first,
+    while NumPy's selection may not. :func:`theil_sen` canonicalises that
+    sign away (:func:`_canonical_zero`), so the public backends still agree
+    bit for bit.
     Requires the ``normet_rust`` extension; see
     :func:`normet.utils._rust.rust_core`.
     """
@@ -686,12 +728,20 @@ def theil_sen(
     :func:`_theil_sen_large`, which builds the pairwise slopes without
     scipy's n x n temporaries -- a multi-year hourly record would otherwise
     need gigabytes for a matrix it immediately discards.
+
+    Missing values **and non-finite values (``±inf``)** are dropped before
+    either backend is called, so the two see the same finite record and
+    agree on input containing an infinite spike (previously the Python
+    backend carried the infinity through while the Rust kernel rejected the
+    whole call). A negative zero slope/limit is reported as ``+0.0``: the
+    sign of zero is not a number the estimators can promise, and
+    canonicalising it keeps the backends bit-identical.
     """
     if backend not in ("python", "rust"):
         raise ConfigError(f"`backend` must be 'python' or 'rust', got {backend!r}.")
     stats = require_scipy_stats()
     s, positional = _to_series(series, value_col)
-    x = s.dropna()
+    x = _finite_values(s)
     if x.size < 4:
         raise DataError(f"theil_sen needs at least 4 observed values, got {x.size}.")
     xtime = _time_grid(s, x, positional)
@@ -703,6 +753,13 @@ def theil_sen(
     else:
         res = stats.theilslopes(y, xtime)
         slope, ci_low, ci_high = float(res.slope), float(res.low_slope), float(res.high_slope)
+    # The sign of a zero slope is the one bit the two backends may disagree on;
+    # canonicalise it here so "identical numbers" means identical bits too.
+    slope, ci_low, ci_high = (
+        _canonical_zero(slope),
+        _canonical_zero(ci_low),
+        _canonical_zero(ci_high),
+    )
     out = TrendSlope(
         slope=slope,
         ci_low=ci_low,
@@ -1256,7 +1313,7 @@ def detect_trend_breaks(
     TrendBreaks
     """
     s, positional = _to_series(series, value_col)
-    x = s.dropna()
+    x = _finite_values(s)
     n_dropped = int(s.size - x.size)
     n = x.size
     if n < 40:
@@ -1479,7 +1536,7 @@ def trend(
     TrendResult
     """
     s, positional = _to_series(series, value_col)
-    x = s.dropna()
+    x = _finite_values(s)
     n_dropped = int(s.size - x.size)
     if x.size < 15:
         raise DataError(
