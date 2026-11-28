@@ -181,3 +181,66 @@ def test_evaluate_intervention_accepts_a_tz_aware_index():
     )
     assert isinstance(res, HarmonicCounterfactualResult)
     assert np.isfinite(res.summary_metrics["net_impact_pct"])
+
+
+def test_subunit_series_relative_impact_pct_matches_net_impact_pct():
+    """F4: sub-unit BAU (< 1.0) must not dilute relative_impact_pct with a 1.0 floor."""
+    idx = pd.date_range("2019-01-01", periods=24 * 500, freq="h")
+    rng = np.random.default_rng(1)
+    base = (
+        0.30
+        + 0.10 * np.sin(2.0 * np.pi * idx.hour / 24.0)
+        + 0.05 * (idx.dayofweek < 5)
+        + 0.08 * np.sin(2.0 * np.pi * idx.dayofyear / 365.25)
+        + rng.normal(0.0, 0.02, len(idx))
+    )
+    observed = pd.Series(base * np.where(idx >= pd.Timestamp("2020-03-23"), 0.6, 1.0), index=idx)
+
+    res = HarmonicCounterfactual().evaluate_intervention(
+        observed,
+        train_end_date="2019-12-31",
+        intervention_start_date="2020-03-23",
+        val_start_date="2020-01-01",
+    )
+    post = idx >= pd.Timestamp("2020-03-23")
+    mean_rel_pct = float(res.relative_impact_pct[post].mean())
+    assert res.summary_metrics["net_impact_pct"] == pytest.approx(-40.0, abs=3.0)
+    assert mean_rel_pct == pytest.approx(-40.0, abs=3.0)
+    assert abs(mean_rel_pct - res.summary_metrics["net_impact_pct"]) < 1.0
+    np.testing.assert_allclose(
+        res.to_dataframe()["impact_pct"].to_numpy(),
+        res.relative_impact_pct.to_numpy(),
+    )
+
+
+def test_evaluate_intervention_rejects_empty_or_overlapping_windows(baseline):
+    """F5: empty baseline, overlapping boundary, empty post window, or empty series raise ValueError."""
+    with pytest.raises(ValueError, match="Empty baseline window"):
+        HarmonicCounterfactual().evaluate_intervention(
+            baseline,
+            train_end_date="2018-06-01",
+            intervention_start_date="2019-06-01",
+        )
+
+    boundary = baseline.index[24 * 100]
+    with pytest.raises(ValueError, match="strictly after"):
+        HarmonicCounterfactual().evaluate_intervention(
+            baseline,
+            train_end_date=boundary,
+            intervention_start_date=boundary,
+        )
+
+    with pytest.raises(ValueError, match="Empty post-intervention window"):
+        HarmonicCounterfactual().evaluate_intervention(
+            baseline,
+            train_end_date=baseline.index[24 * 100],
+            intervention_start_date="2025-01-01",
+        )
+
+    empty = baseline.iloc[0:0]
+    with pytest.raises(ValueError, match="empty"):
+        HarmonicCounterfactual().evaluate_intervention(
+            empty,
+            train_end_date="2019-06-01",
+            intervention_start_date="2019-07-01",
+        )

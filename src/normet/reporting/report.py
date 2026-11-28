@@ -17,6 +17,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from ..utils.logging import get_logger
@@ -37,13 +38,28 @@ def _fig_to_b64(fig: Any) -> str:
     return "data:image/png;base64," + base64.b64encode(buf.read()).decode("ascii")
 
 
-def _df_table(df: pd.DataFrame, *, max_rows: int = 12) -> str:
+def _fmt_meta(val: Any) -> str:
+    """Render a metadata scalar, normalising missing/empty values to '—'."""
+    if val is None or val == "":
+        return "—"
+    if isinstance(val, float | np.floating) and np.isnan(val):
+        return "—"
+    return str(val)
+
+
+def _normalise_df_head(df: pd.DataFrame, *, max_rows: int = 12) -> pd.DataFrame:
+    """Slice up to ``max_rows`` and normalise all missing values to '—'."""
+    head = df.head(max_rows)
+    return head.astype(object).where(head.notna(), "—")
+
+
+def _df_table(df: Any, *, max_rows: int = 12) -> str:
     """Render a small HTML table for the head of a DataFrame."""
     if not isinstance(df, pd.DataFrame):
-        return f"<pre>{html.escape(repr(df))}</pre>"  # type: ignore[unreachable]
+        return f"<pre>{html.escape(repr(df))}</pre>"
     if df.empty:
         return "<p><em>(empty)</em></p>"
-    head = df.head(max_rows)
+    head = _normalise_df_head(df, max_rows=max_rows)
     return head.to_html(classes="nm-tbl", border=0, na_rep="—", float_format=lambda x: f"{x:.4g}")
 
 
@@ -397,7 +413,7 @@ def generate_html(
         "config_hash",
     ]
     kv_rows = "\n".join(
-        f"<dt>{html.escape(_say(k, lang))}</dt><dd>{html.escape(str(meta.get(k, '—')))}</dd>"
+        f"<dt>{html.escape(_say(k, lang))}</dt><dd>{html.escape(_fmt_meta(meta.get(k)))}</dd>"
         for k in kv_keys
     )
 
@@ -443,7 +459,7 @@ def generate_html(
 <h2>{_say("Model", lang)}</h2>
 <dl class="kv">
   <dt>{_say("type", lang)}</dt><dd>{html.escape(type(run.model).__name__)}</dd>
-  <dt>{_say("backend", lang)}</dt><dd>{html.escape(str(getattr(run.model, "backend", "—")))}</dd>
+  <dt>{_say("backend", lang)}</dt><dd>{html.escape(_fmt_meta(getattr(run.model, "backend", None)))}</dd>
 </dl>
 """
 
@@ -477,6 +493,93 @@ def generate_html(
     out_path.write_text(body, encoding="utf-8")
     log.info("HTML report → %s (%.1f KB)", out_path, out_path.stat().st_size / 1024)
     return out_path
+
+
+def _fmt_md_cell(val: Any) -> str:
+    """Format a single cell for Markdown table output."""
+    if isinstance(val, bool | np.bool_):
+        return str(val)
+    if isinstance(val, int | float | np.number):
+        return f"{val:.4g}"
+    return str(val).replace("|", "\\|").replace("\n", " ")
+
+
+def _df_markdown(df: pd.DataFrame, *, max_rows: int = 12) -> str:
+    """Render the head of a non-empty DataFrame as a Markdown table."""
+    head = _normalise_df_head(df, max_rows=max_rows)
+    try:
+        return head.to_markdown()
+    except Exception as e:
+        log.debug("to_markdown() failed (is 'tabulate' installed?); building table manually: %s", e)
+    cols = [str(c) for c in head.columns]
+    if isinstance(head.index, pd.DatetimeIndex):
+        header = ["date"] + cols
+        rows = [[str(idx)] + [_fmt_md_cell(v) for v in row] for idx, row in head.iterrows()]
+    else:
+        header = cols
+        rows = [[_fmt_md_cell(v) for v in row] for _, row in head.iterrows()]
+    align = ["---"] * len(header)
+    tbl_lines = ["| " + " | ".join(header) + " |", "| " + " | ".join(align) + " |"]
+    for row_cells in rows:
+        tbl_lines.append("| " + " | ".join(row_cells) + " |")
+    return "\n".join(tbl_lines)
+
+
+def _json_or_repr(obj: Any) -> tuple[str, str]:
+    """Return (fence_lang, formatted_text) for arbitrary objects."""
+    try:
+        return "json", json.dumps(obj, indent=2, sort_keys=True, default=repr)
+    except Exception:
+        return "text", repr(obj)
+
+
+def _result_markdown(result: Any, *, max_rows: int = 12) -> list[str]:
+    """Render ``run.result`` (DataFrame, Series, dict, None, or arbitrary object) to Markdown."""
+    if result is None:
+        return ["*(empty)*"]
+    if isinstance(result, pd.DataFrame):
+        return ["*(empty)*"] if result.empty else [_df_markdown(result, max_rows=max_rows)]
+    if isinstance(result, pd.Series):
+        if result.empty:
+            return ["*(empty)*"]
+        col = result.name if result.name is not None else "value"
+        return [_df_markdown(result.to_frame(name=col), max_rows=max_rows)]
+    if isinstance(result, dict):
+        if not result:
+            return ["*(empty)*"]
+        lines: list[str] = []
+        in_bullets = False
+        for key, val in result.items():
+            if val is None or isinstance(val, str | int | float | bool | np.number | np.bool_):
+                lines.append(f"- **{key}**: `{_fmt_meta(val)}`")
+                in_bullets = True
+                continue
+            if in_bullets:
+                lines.append("")
+                in_bullets = False
+            lines.append(f"### {key}")
+            lines.append("")
+            if isinstance(val, pd.DataFrame):
+                lines.append("*(empty)*" if val.empty else _df_markdown(val, max_rows=max_rows))
+            elif isinstance(val, pd.Series):
+                if val.empty:
+                    lines.append("*(empty)*")
+                else:
+                    col = val.name if val.name is not None else "value"
+                    lines.append(_df_markdown(val.to_frame(name=col), max_rows=max_rows))
+            elif isinstance(val, dict | list | tuple | set):
+                lang_tag, text = _json_or_repr(val)
+                lines.extend([f"```{lang_tag}", text, "```"])
+            else:
+                lines.extend(["```text", repr(val), "```"])
+            lines.append("")
+        if lines and lines[-1] == "":
+            lines.pop()
+        return lines
+    if isinstance(result, list | tuple):
+        lang_tag, text = _json_or_repr(result)
+        return [f"```{lang_tag}", text, "```"]
+    return ["```text", repr(result), "```"]
 
 
 def report_to_markdown(
@@ -527,41 +630,13 @@ def report_to_markdown(
         "config_hash",
     ]
     for k in kv_keys:
-        lines.append(f"- **{k}**: `{meta.get(k, '—')}`")
+        lines.append(f"- **{k}**: `{_fmt_meta(meta.get(k))}`")
     lines.append("")
 
     # Result preview
     lines.append("## Result Preview")
     lines.append("")
-    if run.result is None or run.result.empty:
-        lines.append("*(empty)*")
-    else:
-        try:
-            table_str = run.result.head(12).to_markdown()
-        except Exception as e:
-            log.debug(
-                "to_markdown() failed (is 'tabulate' installed?); building table manually: %s", e
-            )
-            df_head = run.result.head(12)
-            cols = list(df_head.columns)
-            if isinstance(df_head.index, pd.DatetimeIndex):
-                header = ["date"] + cols
-                align = ["---"] * len(header)
-                tbl_lines = ["| " + " | ".join(header) + " |", "| " + " | ".join(align) + " |"]
-                for idx, row in df_head.iterrows():
-                    val_strs = [str(idx)] + [
-                        f"{v:.4g}" if isinstance(v, int | float) else str(v) for v in row
-                    ]
-                    tbl_lines.append("| " + " | ".join(val_strs) + " |")
-            else:
-                header = cols
-                align = ["---"] * len(header)
-                tbl_lines = ["| " + " | ".join(header) + " |", "| " + " | ".join(align) + " |"]
-                for idx, row in df_head.iterrows():
-                    val_strs = [f"{v:.4g}" if isinstance(v, int | float) else str(v) for v in row]
-                    tbl_lines.append("| " + " | ".join(val_strs) + " |")
-            table_str = "\n".join(tbl_lines)
-        lines.append(table_str)
+    lines.extend(_result_markdown(run.result))
     lines.append("")
 
     # Model Summary
@@ -569,7 +644,7 @@ def report_to_markdown(
         lines.append("## Model Summary")
         lines.append("")
         lines.append(f"- **type**: `{type(run.model).__name__}`")
-        lines.append(f"- **backend**: `{getattr(run.model, 'backend', '—')}`")
+        lines.append(f"- **backend**: `{_fmt_meta(getattr(run.model, 'backend', None))}`")
         lines.append("")
 
     # Full Provenance Metadata JSON block

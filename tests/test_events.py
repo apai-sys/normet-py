@@ -192,3 +192,47 @@ def test_anomaly_scores_uniform_iqr_zero():
     s = pd.Series(np.full(10, 5.0), index=pd.date_range("2024-01-01", periods=10, freq="D"))
     scores = anomaly_scores(s, method="iqr")
     assert (scores == 0.0).all()
+
+
+def test_detect_events_isolation_clean_and_constant():
+    """IsolationForest should not flag constant series or stationary i.i.d. N(0, 1) noise."""
+    if importlib.util.find_spec("sklearn") is None:
+        pytest.skip("scikit-learn not installed")
+
+    for val in (0.3, 5.0):
+        const = _uniform_series(n=50, val=val)
+        scores = anomaly_scores(const, method="isolation")
+        assert (scores == 0.0).all()
+        assert detect_events(const, method="isolation").empty
+
+    rng = np.random.default_rng(0)
+    clean = pd.Series(
+        rng.normal(size=2000), index=pd.date_range("2020-01-01", periods=2000, freq="h")
+    )
+    ev = detect_events(clean, method="isolation")
+    assert ev.empty
+
+
+def test_detect_events_isolation_spike_episode_and_k_sensitivity():
+    """IsolationForest detects spikes/episodes and honours k for threshold sensitivity."""
+    if importlib.util.find_spec("sklearn") is None:
+        pytest.skip("scikit-learn not installed")
+
+    spike = _spike_series()
+    scores_spike = anomaly_scores(spike, method="isolation")
+    assert scores_spike.iloc[10] > 3.0
+    ev_spike = detect_events(spike, method="isolation")
+    assert len(ev_spike) >= 1
+    assert any(row["start"] <= spike.index[10] <= row["end"] for _, row in ev_spike.iterrows())
+
+    rng = np.random.default_rng(0)
+    ep = pd.Series(
+        rng.normal(0.0, 1.0, 500), index=pd.date_range("2020-01-01", periods=500, freq="h")
+    )
+    ep.iloc[200:225] += 8.0
+    ev_lo = detect_events(ep, method="isolation", k=1.5, min_length=3)
+    ev_mid = detect_events(ep, method="isolation", k=3.0, min_length=3)
+    ev_hi = detect_events(ep, method="isolation", k=20.0, min_length=3)
+    assert len(ev_mid) >= 1
+    assert int(ev_lo["n"].sum()) >= int(ev_mid["n"].sum()) > int(ev_hi["n"].sum())
+    assert ev_hi.empty

@@ -32,6 +32,7 @@ from ._common import (
     _blocked_folds,
     _build_calendar_basis,
     _build_met_design,
+    _calendar_basis_state,
     _ensure_datetime_frame,
     _met_feature_matrix,
     _ridge_cv_fit,
@@ -95,9 +96,18 @@ def _encode_spectral_lag_windows(
     ang_24 = 2.0 * np.pi * np.arange(L, dtype=float) / max(L, 4)
     sin_b, cos_b = np.sin(ang_24), np.cos(ang_24)
 
+    # Windows start at 0, stride, 2*stride, ...; when (n - L) is not a
+    # multiple of the stride they stop short of the newest rows, which then sit
+    # in no patch at all and would keep an older timestamp's score.  A final
+    # window ending at ``n`` covers that tail (it overlaps the previous patch
+    # by (n - L) % stride rows; the per-timestamp score takes the max).
+    starts = list(range(0, n - L + 1, st))
+    if starts[-1] != n - L:
+        starts.append(n - L)
+
     feats: list[np.ndarray] = []
     bounds: list[tuple[int, int]] = []
-    for s in range(0, n - L + 1, st):
+    for s in starts:
         e = s + L
         seg = Y[s:e]
         col_vec: list[float] = []
@@ -193,6 +203,7 @@ class LatentJEPA:
         self._trans_model: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None = None
         self._stat_model: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None = None
         self._n_cal_cols: int = 0
+        self._cal_basis: dict[str, Any] | None = None
         self._prec: np.ndarray = np.empty((0, 0), dtype=float)
         self._med_raw_norm: float = 0.0
         self._scale_raw_norm: float = 1.0
@@ -234,9 +245,12 @@ class LatentJEPA:
         else:
             X_met_full = np.empty((len(df_s), 0), dtype=float)
 
-        X_cal_full = _build_calendar_basis(
-            pd.DatetimeIndex(df_s.index), n_harmonics=self.n_harmonics
-        )
+        idx_cal = pd.DatetimeIndex(df_s.index)
+        if fit_stats or self._cal_basis is None:
+            # Pin the fit window's basis; the fit's calendar design is what the
+            # ridge coefficients (and their standardisation) are on.
+            self._cal_basis = _calendar_basis_state(idx_cal, n_harmonics=self.n_harmonics)
+        X_cal_full = _build_calendar_basis(idx_cal, state=self._cal_basis)
         idx_vals: list[pd.Timestamp] = []
         W_list: list[np.ndarray] = []
         C_list: list[np.ndarray] = []
@@ -393,7 +407,15 @@ class LatentJEPA:
         )
 
     def anomaly_scores(self, df: pd.DataFrame) -> pd.Series:
-        """Return per-timestamp whitened AC-JEPA innovation z-scores aligned to ``df.index``."""
+        """Return per-timestamp whitened AC-JEPA innovation z-scores aligned to ``df.index``.
+
+        Every timestamp carries its own score: the patch windows cover the whole
+        frame, the last one overlapping the previous patch when the frame length
+        is not a multiple of the stride (see
+        :func:`_encode_spectral_lag_windows`), and a row inside several patches
+        takes their maximum. ``ffill``/``bfill`` only stand in for rows a
+        context-limited external encoder leaves outside its patches.
+        """
         df_s = _ensure_datetime_frame(df)
         res = self.predict_latents(df_s)
         E = res.latent_residuals.to_numpy(dtype=float)
@@ -752,14 +774,18 @@ def jepa_scm(
 
         sub_pre = sub.iloc[pre_m]
         y_pre = y_u[pre_m]
-        C_pre = _build_calendar_basis(pd.DatetimeIndex(sub_pre.index), n_harmonics=2)
+        # One calendar design for the whole record, sliced for the fit rows:
+        # the width (quadratic past 90 d, annual past 180 d) and the trend
+        # scale then match between the pre-cutoff fit and its application, and
+        # the pre-only ridge fit still sees pre rows only.
+        C_full = _build_calendar_basis(idx_u, n_harmonics=2)
+        C_pre = C_full[pre_m]
         M_pre, met_state = _build_met_design(
             sub_pre, mcols, met_head=met_head, degree=1, n_knots=n_knots
         )
         X_pre = np.hstack([C_pre, M_pre])
         coef, _y_mu, x_mu, x_sd, _ = _ridge_cv_fit(X_pre, y_pre, alphas=(0.1, 1.0, 10.0, 50.0))
 
-        C_full = _build_calendar_basis(idx_u, n_harmonics=2)
         M_full, _ = _build_met_design(sub, mcols, state=met_state)
         X_full = np.hstack([C_full, M_full])
         Z_full = _standardize_apply(X_full, x_mu, x_sd)

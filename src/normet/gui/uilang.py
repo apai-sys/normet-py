@@ -943,11 +943,24 @@ def _widget(w: QWidget):
     """Every text `w` holds on its own, written in the language in use from its English."""
     if _keep(w):
         return
+    dock_act_en = None
+    if isinstance(w, QDockWidget):
+        act = w.toggleViewAction()
+        if not _keep(act):
+            dock_act_en = _english(act, "text", _orig["QAction.text"](act))
     for cls, key, g, s in _TEXTS:
         if isinstance(w, cls):
             if key == "title" and not (w.isWindow() or isinstance(w, QDockWidget)):
                 continue
             _write(w, key, _orig[g], _orig[s])
+    if dock_act_en is not None:
+        # QDockWidget.setWindowTitle resets toggleViewAction().text() in C++
+        # (dropping mnemonics such as "&Assistant"); restore the action's own.
+        act = w.toggleViewAction()
+        shown = tr(dock_act_en)
+        if _orig["QAction.text"](act) != shown:
+            _orig["QAction.setText"](act, shown)
+        _note(act, "text", dock_act_en, shown)
     if isinstance(w, QComboBox) and not w.isEditable():
         for i in range(w.count()):
             shown = _orig["QComboBox.itemText"](w, i)

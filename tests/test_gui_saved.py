@@ -349,3 +349,48 @@ def test_the_segmented_trend_comes_back_with_the_session(qapp, home, tmp_path):
         assert "trend breaks" in labels or "one regime" in labels, labels[:400]
     finally:
         v.close()
+
+
+def test_script_reads_trend_and_events_calls_and_keeps_trend_result():
+    from normet.gui import _script
+
+    text = "\n".join(
+        [
+            "from normet import build_model",
+            "from normet.gui._multiscale import compute_multiscale",
+            "from normet.gui._run_analyse import events_call",
+            "from normet.gui._trend import trend_breaks_call, trend_call",
+            "df_prep, model = build_model(df, 'PM2.5', covariates=['ws', 'wd'])",
+            "multiscale = compute_multiscale(df_prep, model, y_inf=y, n_samples=44)",
+            "trend_result = trend_call(decomposition, 'emi_total', series_name='x',",
+            "    aggregate='monthly', n_bootstrap=200, block_length=12,",
+            "    bootstrap_scheme='residual', replicate_estimator='theil-sen')",
+            "scores, events = events_call(decomposition, 'emi_total', method='iqr', k=3.5)",
+        ]
+    )
+    calls = _script.read_calls(text)
+    assert {"build_model", "compute_multiscale", "trend_call", "events_call"} <= set(calls)
+    cfg = _script.config_from_calls(calls)
+    assert cfg["ms_samples"] == 44
+    assert cfg["trend_series"] == "emission part (emi_total)"
+    assert cfg["tre_segments"] == 1
+    assert cfg["tre_aggregate"] == "monthly"
+    assert cfg["tre_bootstrap"] == "residual"
+    assert cfg["tre_estimator"] == "theil-sen"
+    assert cfg["tre_block"] == 12
+    assert cfg["tre_n_bootstrap"] == 200
+
+    seg_text = (
+        "trend_result = trend_breaks_call(decomposition, 'long-term', "
+        "max_segments=3, n_bootstrap=300)"
+    )
+    seg_calls = _script.read_calls(seg_text)
+    assert "trend_breaks_call" in seg_calls
+    seg_cfg = _script.config_from_calls(seg_calls)
+    assert seg_cfg["tre_segments"] == 3
+    assert seg_cfg["tre_n_bootstrap"] == 300
+    assert seg_cfg["trend_series"] == "long-term trend (separated)"
+
+    assert _script.RESULTS["trend_result"] == "trend"
+    made = _script.run_script("df = 1\ntrend_result = 'kept-trend'\n")
+    assert made["trend_result"] == "kept-trend"

@@ -485,6 +485,10 @@ class AnalysePanelMixin(QMainWindow):
         self.ms_slow.setValue(365)
         self.ms_slow.setSuffix(" d")
         mf.addRow("Slow window", self.ms_slow)
+        self.ms_samples = NoWheelSpinBox()
+        self.ms_samples.setRange(1, 10_000)
+        self.ms_samples.setValue(100)
+        mf.addRow("Samples", self.ms_samples)
         self._ms_button_tip = (
             "Runs rolling normalisation at three window widths and differences\n"
             "them against each other and against the normalisation's Y_∞ — needs\n"

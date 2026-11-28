@@ -337,3 +337,89 @@ def test_auto_plot_handles_imputation_pdp_and_backtest(monkeypatch):
     fig_bt = _auto_plot(make_run(result=bt_df, kind="backtest"))
     assert fig_bt is not None and fig_bt.axes[0].get_xlabel() == "Lead step"
     plt.close("all")
+
+
+def test_report_to_markdown_handles_non_dataframe_results(tmp_path):
+    """report_to_markdown supports None, empty DataFrames, dicts, Series, and arbitrary objects."""
+    from normet.reporting.report import report_to_markdown
+
+    # 1. None and empty DataFrame
+    for idx, res in enumerate((None, pd.DataFrame())):
+        out = report_to_markdown(make_run(result=res, kind="empty"), tmp_path / f"empty_{idx}.md")
+        assert "*(empty)*" in out.read_text("utf-8")
+
+    # 2. Dict (e.g. SCM bundle with DataFrames, nested dict, scalars, empty DataFrame)
+    scm_like = {
+        "synthetic": pd.DataFrame(
+            {"observed": [1.0, 2.0], "synthetic": [1.1, 1.9]},
+            index=pd.date_range("2024-01-01", periods=2, freq="D"),
+        ),
+        "weights": {"D1": 0.6, "D2": 0.4},
+        "pre_rmse": 0.123,
+        "empty_df": pd.DataFrame(),
+    }
+    md_dict = report_to_markdown(
+        make_run(result=scm_like, kind="scm"), tmp_path / "dict.md"
+    ).read_text("utf-8")
+    assert "### synthetic" in md_dict
+    assert "### weights" in md_dict
+    assert '"D1": 0.6' in md_dict
+    assert "- **pre_rmse**: `0.123`" in md_dict
+    assert "### empty_df" in md_dict
+    assert "*(empty)*" in md_dict
+
+    # 3. Series
+    ser = pd.Series([1.5, 2.5], index=pd.date_range("2024-01-01", periods=2, freq="D"), name="pm25")
+    md_ser = report_to_markdown(
+        make_run(result=ser, kind="series"), tmp_path / "series.md"
+    ).read_text("utf-8")
+    assert "pm25" in md_ser and "1.5" in md_ser
+
+    # 4. Arbitrary object
+    class _CustomObj:
+        def __repr__(self) -> str:
+            return "CustomObj(alpha=42)"
+
+    md_obj = report_to_markdown(
+        make_run(result=_CustomObj(), kind="custom"), tmp_path / "obj.md"
+    ).read_text("utf-8")
+    assert "CustomObj(alpha=42)" in md_obj
+
+
+def test_reports_normalise_missing_values_consistently(tmp_path):
+    """_df_table, generate_html, and report_to_markdown render all missing values as '—'."""
+    import re
+
+    from normet.reporting.report import _df_table, report_to_markdown
+
+    df = pd.DataFrame(
+        {
+            "flt": [1.23456, np.nan],
+            "obj": pd.Series(["x", None], dtype=object),
+            "str": pd.array(["a", None], dtype="string"),
+            "dt": pd.to_datetime(["2021-01-01", None]),
+            "intn": pd.array([7, pd.NA], dtype="Int64"),
+            "booln": pd.array([True, pd.NA], dtype="boolean"),
+        }
+    )
+    tbl_html = _df_table(df)
+    assert "<td>1.235</td>" in tbl_html
+    assert tbl_html.count("<td>—</td>") == 6
+    for bad in ("<td>None</td>", "<td>&lt;NA&gt;</td>", "<td>NaT</td>", "<td>nan</td>"):
+        assert bad not in tbl_html
+
+    run = make_run(result=df, kind="normalise", seed=None)
+    run.metadata["user"] = ""
+
+    html_txt = generate_html(run, tmp_path / "missing.html").read_text("utf-8")
+    assert re.search(r"<dt>seed</dt><dd>—</dd>", html_txt)
+    assert re.search(r"<dt>user</dt><dd>—</dd>", html_txt)
+    assert "<dd>None</dd>" not in html_txt
+
+    md_txt = report_to_markdown(run, tmp_path / "missing.md").read_text("utf-8")
+    assert "- **seed**: `—`" in md_txt
+    assert "- **user**: `—`" in md_txt
+    assert "`None`" not in md_txt
+    for bad_md in ("| None |", "| <NA> |", "| NaT |", "| nan |"):
+        assert bad_md not in md_txt
+    assert "| — |" in md_txt

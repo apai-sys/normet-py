@@ -132,6 +132,14 @@ def data_reading(df: pd.DataFrame, target: str | None = None, name: str = "the t
     *target*, each column's correlation with it."""
     lines = [f"{name}: {len(df):,} rows × {df.shape[1]} columns."]
     dates = _dates(df)
+    if df.empty:
+        if dates is None:
+            lines.append("No 'date' column: normet needs one, with the timestamp of each row.")
+        if target is not None and target not in df.columns:
+            lines.append(f"No column {target!r}.")
+        cols = ", ".join(map(str, df.columns)) or "none"
+        lines.append(f"No rows to type or summarise (columns: {cols}).")
+        return "\n".join(lines)
     panel = panel_units(df)
     if dates is None:
         lines.append("No 'date' column: normet needs one, with the timestamp of each row.")
@@ -695,3 +703,166 @@ def events_reading(df: pd.DataFrame) -> str:
         header_line += f" (showing top {len(top)})"
     header_line += ":"
     return "\n".join([header_line, "", table(cols, rows)])
+
+
+_MET_PHYSICS_FEATURES = (
+    "u_wind",
+    "v_wind",
+    "ventilation_coef",
+    "vpd",
+    "dewpoint_depression",
+    "rh_derived",
+    "stagnation_memory",
+    "photochemical_dose",
+    "wet_scavenging_memory",
+)
+
+
+def met_features_reading(df: pd.DataFrame) -> str:
+    """Derived meteorological physics features added to a table."""
+    lines = [f"Meteorological physics features: {len(df):,} rows × {df.shape[1]} columns."]
+    dates = _dates(df)
+    if dates is not None and not df.empty:
+        lines.append(f"Dates {dates.min()} to {dates.max()}.")
+    present = [
+        c for c in _MET_PHYSICS_FEATURES if c in df.columns and pd.api.types.is_numeric_dtype(df[c])
+    ]
+    if not present:
+        lines.append("No derived meteorological physics features were added.")
+        return "\n".join(lines)
+    if df.empty:
+        lines.append(f"Derived feature columns (0 rows): {', '.join(present)}.")
+        return "\n".join(lines)
+    rows = []
+    for col in present:
+        s = pd.to_numeric(df[col], errors="coerce")
+        rows.append([col, int(s.notna().sum()), s.mean(), s.std(), s.min(), s.max()])
+    lines += [
+        f"Derived features ({len(present)}): {', '.join(present)}.",
+        "",
+        table(["feature", "non-missing", "mean", "std", "min", "max"], rows),
+    ]
+    return "\n".join(lines)
+
+
+def ox_reading(df: pd.DataFrame) -> str:
+    """Conserved Ox–NOx photochemical deweathering summary."""
+    species_rows: list[list[Any]] = []
+    for sp in ("O3", "NO2", "Ox", "NOx", "NO"):
+        obs_col, norm_col = f"{sp}_observed", f"{sp}_normalised"
+        if obs_col in df.columns and norm_col in df.columns:
+            obs = pd.to_numeric(df[obs_col], errors="coerce")
+            norm = pd.to_numeric(df[norm_col], errors="coerce")
+            species_rows.append([sp, obs.mean(), norm.mean(), (obs - norm).mean()])
+    if not species_rows:
+        raise ValueError(
+            "expected Ox–NOx species columns (e.g. O3_observed, O3_normalised), "
+            f"found {', '.join(map(str, df.columns))}"
+        )
+    lines = [f"Conserved Ox–NOx deweathering: {len(df):,} rows."]
+    dates = _dates(df)
+    if dates is not None and not df.empty:
+        lines[0] = (
+            f"Conserved Ox–NOx deweathering: {len(df):,} rows, {dates.min()} to {dates.max()}."
+        )
+    if df.empty:
+        return "\n".join(lines)
+    lines += [
+        "",
+        table(["species", "mean observed", "mean normalised", "mean (obs - norm)"], species_rows),
+    ]
+    extras: list[str] = []
+    if "O3_titration_effect" in df.columns:
+        tit = pd.to_numeric(df["O3_titration_effect"], errors="coerce")
+        extras.append(f"mean O3 titration effect {num(tit.mean())} (std {num(tit.std())})")
+    if "f_no2_normalised" in df.columns:
+        fno2 = pd.to_numeric(df["f_no2_normalised"], errors="coerce")
+        extras.append(f"mean normalised f_NO2 {num(fno2.mean())}")
+    if extras:
+        lines += ["", "; ".join(extras) + "."]
+    return "\n".join(lines)
+
+
+def regime_reading(df: pd.DataFrame) -> str:
+    """Precursor-conditioned regime deweathering summary."""
+    if df.empty:
+        return f"Regime-conditioned deweathering: 0 rows × {df.shape[1]} columns."
+    text = normalised_reading(df)
+    extras: list[str] = []
+    if "normalised_unconditioned" in df.columns:
+        uncond = pd.to_numeric(df["normalised_unconditioned"], errors="coerce")
+        extras.append(f"mean unconditioned normalised {num(uncond.mean())}")
+    if "precursor_regime_effect" in df.columns:
+        eff = pd.to_numeric(df["precursor_regime_effect"], errors="coerce")
+        extras.append(f"precursor regime effect: mean {num(eff.mean())}, std {num(eff.std())}")
+    if extras:
+        return text + "\n" + "; ".join(extras) + "."
+    return text
+
+
+def shapley_interactions_reading(df: pd.DataFrame) -> str:
+    """Grabisch–Roubens Shapley main effects and pairwise interactions summary."""
+    if not {"term", "kind"} <= set(df.columns):
+        return decomposition_reading(df)
+    if df.empty:
+        return "Shapley interactions: 0 terms (no meteorological players)."
+    n_main = int((df["kind"] == "main").sum())
+    n_inter = int((df["kind"] == "interaction").sum())
+    cols = [c for c in ("term", "kind", "mean", "std", "mean_abs", "max_abs") if c in df.columns]
+    top = df.head(25)
+    rows = [[row[c] for c in cols] for _, row in top.iterrows()]
+    header = f"Shapley interactions: {n_main} main effect(s), {n_inter} pairwise interaction(s)"
+    if len(df) > len(top):
+        header += f" (showing top {len(top)})"
+    header += ":"
+    return "\n".join([header, "", table(cols, rows)])
+
+
+def benchmark_reading(
+    df: pd.DataFrame,
+    metadata: dict[str, Any] | None = None,
+    scores: dict[str, Any] | None = None,
+) -> str:
+    """Synthetic benchmark table (with optional metadata and evaluation scores)."""
+    lines = []
+    if metadata:
+        meta_rows = [[k, metadata[k]] for k in metadata]
+        lines += ["Synthetic benchmark:", "", table(["setting", "value"], meta_rows), ""]
+    if scores:
+        score_rows = [[k, scores[k]] for k in scores]
+        lines += ["Benchmark evaluation scores:", "", table(["metric", "value"], score_rows), ""]
+    lines.append(data_reading(df, name="benchmark.csv"))
+    return "\n".join(lines)
+
+
+def inversion_reading(
+    summary: dict[str, Any],
+    site_metrics: pd.DataFrame | None = None,
+    regions: pd.DataFrame | None = None,
+) -> str:
+    """Joint multi-receptor footprint inversion summary."""
+    rows: list[list[Any]] = []
+    for key in ("n_obs", "alpha", "spatial_alpha", "r2", "rmse"):
+        if key in summary:
+            rows.append([key, summary[key]])
+    intercepts = summary.get("intercepts")
+    if isinstance(intercepts, dict) and intercepts:
+        rows.append(["sites", len(intercepts)])
+        rows.append(
+            [
+                "intercepts",
+                ", ".join(f"{k}={num(v)}" for k, v in intercepts.items()),
+            ]
+        )
+    if regions is not None and not regions.empty:
+        rows.append(["regions", len(regions)])
+    lines = [
+        "Multi-site footprint inversion (invert_multisite_footprints):",
+        "",
+        table(["", "value"], rows),
+    ]
+    if site_metrics is not None and not site_metrics.empty:
+        cols = list(site_metrics.columns[:8])
+        sm_rows = [[row[c] for c in cols] for _, row in site_metrics.head(20).iterrows()]
+        lines += ["", "Site metrics:", "", table(cols, sm_rows)]
+    return "\n".join(lines)

@@ -620,6 +620,91 @@ def test_fetch_eea_station_mocked(monkeypatch):
         eea.fetch_eea_station(station="GB9999", country="GB", pollutant="NO2")
 
 
+@pytest.mark.skipif(not requests_available, reason="requests not installed")
+@pytest.mark.skipif(importlib.util.find_spec("pyarrow") is None, reason="pyarrow not installed")
+def test_fetch_eea_station_handles_no_nox_and_case_normalisation(monkeypatch):
+    """NO (EIONET 20) and NOXasNO2 (EIONET 9) must map to their notations in
+    _tidy, and pollutant lookups must be case-insensitive (incl. mixed-case
+    NOXasNO2 and the popup's 'NOX as NO2' anchor)."""
+    from decimal import Decimal
+
+    import requests
+
+    def _blob_for(code: int) -> bytes:
+        raw = pd.DataFrame(
+            {
+                "Samplingpoint": ["DE/DE_SamplingPoint_1"] * 3,
+                "Pollutant": [code, code, code],
+                "Start": [
+                    "2020-01-01 00:00:00",
+                    "2020-01-01 01:00:00",
+                    "2020-01-01 02:00:00",
+                ],
+                "End": [
+                    "2020-01-01 01:00:00",
+                    "2020-01-01 02:00:00",
+                    "2020-01-01 03:00:00",
+                ],
+                "Value": [Decimal("5.0"), Decimal("6.0"), Decimal("-999.0")],
+                "Unit": ["ug.m-3"] * 3,
+                "AggType": ["hour"] * 3,
+                "Validity": [2, 2, -1],
+            }
+        )
+        buf = io.BytesIO()
+        raw.to_parquet(buf)
+        return buf.getvalue()
+
+    popup = (
+        '<p> - Nitrogen monoxide (air): <a href="https://blob/NO.parquet">NO</a>, '
+        "ug/m<sup>3</sup>, (2013 - 2019)</p>"
+        '<p> - Nitrogen oxides (air): <a href="https://blob/NOX.parquet">NOX as NO2</a>, '
+        "ug/m<sup>3</sup>, (2013 - 2019)</p>"
+        '<p> - Nitrogen dioxide (air): <a href="https://blob/NO2.parquet">NO2</a>, '
+        "ug/m<sup>3</sup>, (2013 - 2019)</p>"
+    )
+    feat = {
+        "type": "Feature",
+        "properties": {
+            "AirQualityStationEoICode": "DEUB044",
+            "AQStationName": "Bremen",
+            "CountryCode": "DE",
+            "PopupInfo": popup,
+        },
+        "geometry": {"type": "Point", "coordinates": [8.8, 53.1]},
+    }
+    blobs = {
+        "https://blob/NO.parquet": _blob_for(20),
+        "https://blob/NOX.parquet": _blob_for(9),
+        "https://blob/NO2.parquet": _blob_for(8),
+    }
+
+    def mock_get(url, **kw):
+        if url.endswith("/query"):
+            return _eea_layer_response([feat])
+        return _BytesResponse(blobs[url])
+
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    for query, expected in [
+        ("NO", "NO"),
+        ("no", "NO"),
+        (20, "NO"),
+        ("NOXasNO2", "NOXasNO2"),
+        ("noxasno2", "NOXasNO2"),
+        ("NOX as NO2", "NOXasNO2"),
+        (9, "NOXasNO2"),
+        ("no2", "NO2"),
+    ]:
+        df = eea.fetch_eea_station(station="DEUB044", country="DE", pollutant=query)
+        assert len(df) == 3, query
+        assert df["pollutant"].unique().tolist() == [expected]
+        assert int(df["value"].isna().sum()) == 1
+
+    with pytest.raises(ValueError, match="Unknown pollutant"):
+        eea.fetch_eea_station(station="DEUB044", country="DE", pollutant="XYZ")
+
+
 # ---------------------------------------------------------------------------
 # ERA5 Mocks & Tests
 # ---------------------------------------------------------------------------
@@ -642,12 +727,12 @@ def test_list_ukaq_stations_aurn_live_mocked(monkeypatch):
         {
             "type": "Feature",
             "properties": {"id": "100", "label": "London N. Kensington"},
-            "geometry": {"type": "Point", "coordinates": [51.521, -0.213]},
+            "geometry": {"type": "Point", "coordinates": [-0.213, 51.521]},
         },
         {
             "type": "Feature",
             "properties": {"id": "200", "label": "Birmingham Centre"},
-            "geometry": {"type": "Point", "coordinates": [52.479, -1.906]},
+            "geometry": {"type": "Point", "coordinates": [-1.906, 52.479]},
         },
     ]
 
@@ -694,7 +779,7 @@ def test_list_ukaq_stations_aurn_live_by_pollutant_mocked(monkeypatch):
             "station": {
                 "type": "Feature",
                 "properties": {"id": "100", "label": "London N. Kensington"},
-                "geometry": {"type": "Point", "coordinates": [51.521, -0.213]},
+                "geometry": {"type": "Point", "coordinates": [-0.213, 51.521]},
             },
         },
     ]
@@ -730,7 +815,7 @@ def test_list_ukaq_stations_aurn_live_all_variables_mocked(monkeypatch):
                     "id": "ts-1",
                     "station": {
                         "properties": {"id": "100", "label": "London N. Kensington"},
-                        "geometry": {"coordinates": [51.521, -0.213]},
+                        "geometry": {"coordinates": [-0.213, 51.521]},
                     },
                 }
             ]
@@ -763,7 +848,7 @@ def test_fetch_ukaq_measurements_aurn_live_mocked(monkeypatch):
             "id": "ts-1",
             "station": {
                 "properties": {"id": "100", "label": "London N. Kensington"},
-                "geometry": {"coordinates": [51.521, -0.213]},
+                "geometry": {"coordinates": [-0.213, 51.521]},
             },
         },
     ]
@@ -826,7 +911,7 @@ def test_fetch_ukaq_measurements_aurn_live_skips_none_values(monkeypatch):
             "id": "ts-1",
             "station": {
                 "properties": {"id": "100", "label": "London N. Kensington"},
-                "geometry": {"coordinates": [51.521, -0.213]},
+                "geometry": {"coordinates": [-0.213, 51.521]},
             },
         },
     ]

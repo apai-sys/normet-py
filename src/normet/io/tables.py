@@ -227,7 +227,7 @@ def parse_dates(values: Any, *, dayfirst: bool | None = None) -> tuple[pd.Series
     """One column of times as datetimes, and how they were read, in words (short parts
     joined with " · ", each translated on its own in the window).
 
-    Numbers are read by their size: Unix seconds (1e9 to 1e10) or milliseconds (1e12 to
+    Numbers are read by their size: Unix seconds (1e6 to 1e10) or milliseconds (1e12 to
     1e13), Excel serial days (20 000 to 80 000, from 1899-12-30), 20200131 and
     2020013113 as dates and hours. Text is read value by value; dates written as two
     numbers and a year (31/01/2020) take the order the column itself shows -- the day
@@ -240,6 +240,8 @@ def parse_dates(values: Any, *, dayfirst: bool | None = None) -> tuple[pd.Series
         return s, "as stored"
     if pd.api.types.is_numeric_dtype(s):
         v = pd.to_numeric(s, errors="coerce")
+        if not bool(v.notna().any()):
+            raise ValueError("the column has no numbers")
         lo, hi = float(np.nanmin(v)), float(np.nanmax(v))
         if lo >= 19000101 and hi <= 21001231:
             return pd.to_datetime(
@@ -251,7 +253,7 @@ def parse_dates(values: Any, *, dayfirst: bool | None = None) -> tuple[pd.Series
             ), "as YYYYMMDDHH"
         if lo >= 1e12 and hi < 1e13:
             return pd.to_datetime(v, unit="ms", errors="coerce"), "as Unix milliseconds"
-        if lo >= 1e8 and hi < 1e10:
+        if lo >= 1e6 and hi < 1e10:
             return pd.to_datetime(v, unit="s", errors="coerce"), "as Unix seconds"
         if lo >= 2e4 and hi <= 8e4:
             return (

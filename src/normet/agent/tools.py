@@ -798,7 +798,12 @@ class Tools:
             return ""
         argv = job.get("argv", [])
         cutoff = argv[argv.index("--cutoff") + 1] if "--cutoff" in argv else None
-        return self.read_result(out, kind, cutoff=cutoff)
+        text = self.read_result(out, kind, cutoff=cutoff)
+        if kind == "icn_decompose":
+            extra = os.path.join(folder, "icn_interactions.csv")
+            if os.path.isfile(extra):
+                text += "\n\n" + self.read_result(extra, "shapley_interactions")
+        return text
 
     def job_status(self, job_id: str) -> str:
         """Where a job is; once ended, its readings, the files it left, or its error."""
@@ -871,14 +876,45 @@ class Tools:
             parts.append(readings.normalised_reading(r.result))
         return "\n\n".join(parts)
 
+    def _read_optional_json(self, path: str) -> dict[str, Any] | None:
+        if not os.path.isfile(path) or not self._allowed(path):
+            return None
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else None
+
+    def _read_optional_table(self, path: str) -> pd.DataFrame | None:
+        if not os.path.isfile(path) or not self._allowed(path):
+            return None
+        return self._table(path)
+
     def read_result(self, path: str, kind: str, cutoff: str | None = None) -> str:
-        """A result table read as its *kind* says: ``normalised``/``do_all``/``deweather``,
-        ``decomposition``/``decompose``, ``scm`` (with *cutoff*), ``cv``, ``impute``,
-        ``backtest``, or ``events``."""
-        df = self._table(self.path(path))
+        """A result file read as its *kind* says: ``normalised``/``do_all``/``deweather``,
+        ``decomposition``/``decompose``/``icn_decompose``, ``scm`` (with *cutoff*), ``cv``,
+        ``impute``, ``backtest``, ``events``, ``met_features``, ``benchmark``,
+        ``invert_multisite``, ``normalise_ox``, ``normalise_regime``, or
+        ``shapley_interactions``."""
+        full = self.path(path)
+        if kind == "invert_multisite":
+            if full.lower().endswith(".json"):
+                with open(full, encoding="utf-8") as fh:
+                    summary = json.load(fh)
+                if not isinstance(summary, dict):
+                    raise ValueError("expected a JSON object in inversion summary")
+                parent = os.path.dirname(full)
+                return readings.inversion_reading(
+                    summary,
+                    site_metrics=self._read_optional_table(
+                        os.path.join(parent, "site_metrics.csv")
+                    ),
+                    regions=self._read_optional_table(os.path.join(parent, "regions.csv")),
+                )
+            return readings.data_reading(self._table(full), name=os.path.basename(full))
+
+        df = self._table(full)
         if kind in ("normalised", "do_all", "deweather"):
             return readings.normalised_reading(df)
-        if kind in ("decomposition", "decompose"):
+        if kind in ("decomposition", "decompose", "icn_decompose"):
             return readings.decomposition_reading(df)
         if kind == "scm":
             if not cutoff:
@@ -892,7 +928,26 @@ class Tools:
             return readings.backtest_reading(df)
         if kind == "events":
             return readings.events_reading(df)
-        raise ValueError("kind is normalised, decomposition, scm, cv, impute, backtest, or events")
+        if kind == "met_features":
+            return readings.met_features_reading(df)
+        if kind == "normalise_ox":
+            return readings.ox_reading(df)
+        if kind == "normalise_regime":
+            return readings.regime_reading(df)
+        if kind == "shapley_interactions":
+            return readings.shapley_interactions_reading(df)
+        if kind == "benchmark":
+            parent = os.path.dirname(full)
+            return readings.benchmark_reading(
+                df,
+                metadata=self._read_optional_json(os.path.join(parent, "metadata.json")),
+                scores=self._read_optional_json(os.path.join(parent, "scores.json")),
+            )
+        raise ValueError(
+            "kind is normalised, decomposition, scm, cv, impute, backtest, events, "
+            "met_features, benchmark, invert_multisite, normalise_ox, normalise_regime, "
+            "icn_decompose, or shapley_interactions"
+        )
 
     def figure(
         self, source: str, kind: str, cutoff: str | None = None, dpi: int = 100

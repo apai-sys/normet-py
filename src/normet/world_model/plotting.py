@@ -11,7 +11,6 @@ import pandas as pd
 from ..viz import style as S
 from ..viz.style import styled
 from ._common import (
-    _build_calendar_basis,
     _day_interleaved_folds,
     _ensure_datetime_frame,
     _fast_oof_separability,
@@ -48,7 +47,7 @@ def plot_separability_landscape(
 
     Y = pd.to_numeric(df_s[sp], errors="coerce").to_numpy(dtype=float)
     X_met, _ = wm._build_met_features(df_s, fit_state=False)
-    X_cal = _build_calendar_basis(pd.DatetimeIndex(df_s.index), n_harmonics=wm.config.n_harmonics)
+    X_cal = wm._calendar_basis(pd.DatetimeIndex(df_s.index))
     fin = np.isfinite(Y)
     if X_met.shape[1] > 0:
         fin &= np.all(np.isfinite(X_met), axis=1)

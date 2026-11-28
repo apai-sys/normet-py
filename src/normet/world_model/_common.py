@@ -25,14 +25,81 @@ def _ensure_datetime_frame(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _build_calendar_basis(index: pd.DatetimeIndex, *, n_harmonics: int = 2) -> np.ndarray:
-    """Smooth trend + diurnal/weekly (and annual when span >= 180d) harmonic basis."""
+def _calendar_basis_width(span_days: float, n_harmonics: int) -> int:
+    """Number of columns :func:`_build_calendar_basis` gives a span."""
+    k = max(1, int(n_harmonics))
+    width = 3 + 2 * k  # trend + diurnal harmonics + weekly pair
+    if float(span_days) >= 90.0:
+        width += 1  # quadratic trend
+    if float(span_days) >= 180.0:
+        width += 2 * k  # annual harmonics
+    return width
+
+
+def _align_timestamp(ts: pd.Timestamp, index: pd.DatetimeIndex) -> pd.Timestamp:
+    """``ts`` on ``index``'s clock, so a stored epoch subtracts cleanly."""
+    tz = index.tz
+    if tz is None:
+        return ts.tz_localize(None) if ts.tzinfo is not None else ts
+    return ts.tz_localize(tz) if ts.tzinfo is None else ts.tz_convert(tz)
+
+
+def _calendar_basis_state(index: pd.DatetimeIndex, *, n_harmonics: int = 2) -> dict[str, Any]:
+    """The calendar basis a window pins: epoch, span, bucket and design width.
+
+    :func:`_build_calendar_basis` derives both its *width* (the quadratic and
+    annual columns appear only past 90 d / 180 d) and its *trend scale* from
+    the span of the frame it is handed. A model fitted on one window and
+    evaluated on another therefore has to reuse the **fit** window's spec, or
+    the design width changes (broadcast ``ValueError``) and the fitted trend
+    coefficient is applied on a different scale. Capture the spec at fit time
+    with this function and pass it back as ``state`` on every later call.
+    """
+    h = max(1, int(n_harmonics))
     n = len(index)
     if n == 0:
-        return np.empty((0, 0), dtype=float)
+        return {
+            "t0": None,
+            "span_sec": 3600.0,
+            "span_days": 3600.0 / 86400.0,
+            "n_harmonics": h,
+            "n_cols": 0,
+        }
     t_sec = (index - index[0]).total_seconds().to_numpy(dtype=np.float64)
     span_sec = max(float(t_sec[-1]) if n > 1 else 1.0, 3600.0)
     span_days = span_sec / 86400.0
+    return {
+        "t0": pd.Timestamp(index[0]),
+        "span_sec": span_sec,
+        "span_days": span_days,
+        "n_harmonics": h,
+        "n_cols": _calendar_basis_width(span_days, h),
+    }
+
+
+def _build_calendar_basis(
+    index: pd.DatetimeIndex,
+    *,
+    n_harmonics: int = 2,
+    state: dict[str, Any] | None = None,
+) -> np.ndarray:
+    """Smooth trend + diurnal/weekly (and annual when span >= 180d) harmonic basis.
+
+    With ``state`` (a :func:`_calendar_basis_state` dict) the basis is pinned to
+    a fitted window's epoch, span and column set, so an evaluation window of any
+    length gets exactly the design the model was fitted on.
+    """
+    n = len(index)
+    if n == 0:
+        return np.empty((0, 0), dtype=float)
+    if state is None:
+        state = _calendar_basis_state(index, n_harmonics=n_harmonics)
+    k_max = max(1, int(state["n_harmonics"]))
+    span_sec = float(state["span_sec"])
+    span_days = float(state["span_days"])
+    ref_raw = state.get("t0")
+    ref = index[0] if ref_raw is None else _align_timestamp(pd.Timestamp(ref_raw), index)
+    t_sec = (index - ref).total_seconds().to_numpy(dtype=np.float64)
     t_norm = t_sec / span_sec - 0.5
 
     hr = index.hour.to_numpy(dtype=np.float64) + index.minute.to_numpy(dtype=np.float64) / 60.0
@@ -42,7 +109,6 @@ def _build_calendar_basis(index: pd.DatetimeIndex, *, n_harmonics: int = 2) -> n
     cols: list[np.ndarray] = [t_norm]
     if span_days >= 90.0:
         cols.append(t_norm**2)
-    k_max = max(1, int(n_harmonics))
     for k in range(1, k_max + 1):
         ang_d = 2.0 * np.pi * k * hr / 24.0
         cols.extend([np.sin(ang_d), np.cos(ang_d)])
@@ -494,6 +560,7 @@ def _fast_oof_separability_proj(
     m_hat = np.empty_like(S)
     for k, (tr, te) in enumerate(proj.folds):
         y_tr = S[tr]
+
         mu_y = np.mean(y_tr, axis=0)
         if proj.full_tr[k].shape[0] > 0:
             coef = proj.full_tr[k] @ (y_tr - mu_y[None, :])
@@ -508,6 +575,7 @@ def _fast_oof_separability_proj(
     C_pred = np.empty_like(R)
     for k, (tr, te) in enumerate(proj.folds):
         r_tr = R[tr]
+
         mu_r = np.mean(r_tr, axis=0)
         if proj.met_tr[k].shape[0] > 0:
             c_coef = proj.met_tr[k] @ (r_tr - mu_r[None, :])

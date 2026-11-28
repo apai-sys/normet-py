@@ -4,7 +4,7 @@
 
 ```python
 nm.decompose(method="emission", df=df, target="PM2.5", model=model, covariates=feats)
-nm.decompose(method="meteorology", ...)
+nm.decompose(method="meteorology", df=df, target="PM2.5", model=model, covariates=feats)
 ```
 
 Both are nested-normalisation routes built on `normalise`: they take variables

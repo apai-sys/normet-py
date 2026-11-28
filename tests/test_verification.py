@@ -1,16 +1,19 @@
 """Skill scores: the pinball loss, the CRPS exact against a reference integral, and
-the point forecast's score on the spread scores' scale."""
+the point forecast's CRPS -- its mean absolute error -- as the reference a spread
+forecast must beat."""
 
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
 import pytest
+from scipy.stats import norm
 
 from normet.analysis.verification import (
     crps_from_quantiles,
     crps_from_samples,
     crps_observed,
+    crps_skill_score,
     pinball_loss,
 )
 from normet.core.exceptions import DataError
@@ -259,10 +262,10 @@ def test_crps_from_samples_reads_the_wide_table_directly():
 
 
 def test_the_normal_spread_scores_below_the_point_forecast():
-    # the plan's convention: a spread score and the point-forecast reference
-    # are on one scale -- an honest large spread, scored at its own mean,
-    # reads below the point forecast at the same mean, and a doubled
-    # spread reads far worse than the doubled point error it adds
+    # the point-forecast reference is its own CRPS (its MAE), so an honest
+    # spread, scored at its own mean, must read below the point forecast
+    # that forecast the same mean -- and a doubled spread reads worse than
+    # the doubled point error it adds
     rng = np.random.default_rng(7)
     s = 4.0
     obs = np.full(200, 20.0)
@@ -280,19 +283,61 @@ def test_the_normal_spread_scores_below_the_point_forecast():
 # ------------------------------------------------------ the point forecast
 
 
-def test_crps_observed_is_its_mae_times_the_normal_theory_factor():
+def test_crps_observed_is_the_point_forecasts_mae():
     pred = np.array([1.0, 3.0, 5.0])
     obs = np.array([2.0, 1.0, 6.0])
     mae = np.mean(np.abs(obs - pred))
-    assert crps_observed(pred, obs) == pytest.approx(np.sqrt(np.pi / 2.0) * mae)
+    assert crps_observed(pred, obs) == pytest.approx(mae)
     assert crps_observed(pd.Series(pred), pd.Series(obs)) == crps_observed(pred, obs)
 
 
 def test_crps_observed_drops_the_non_finite_pairs():
     pred = np.array([1.0, np.nan, 3.0])
     obs = np.array([1.0, 1.0, 0.0])
-    # finite rows: |1-1| = 0 and |0-3| = 3, so MAE 1.5, times the factor
-    assert crps_observed(pred, obs) == pytest.approx(np.sqrt(np.pi / 2.0) * 1.5)
+    # finite rows: |1-1| = 0 and |0-3| = 3, so MAE 1.5
+    assert crps_observed(pred, obs) == pytest.approx(1.5)
+
+
+def test_a_band_a_quarter_worse_than_the_point_forecast_scores_negative_skill():
+    """The verdict flips at the point forecast's MAE, not at 1.253 times it.
+
+    A quantile band is scored against the median forecast it is built on. A
+    band whose CRPS is 25 % *worse* than that median's MAE is worse than
+    forecasting the median alone, so its skill score is negative. The old
+    reference -- the MAE read as a normal's sigma, ``sqrt(pi/2) * MAE`` --
+    sat 25 % high, and every band in ``(MAE, 1.253 * MAE)`` was called a
+    win: this is that band.
+    """
+    rng = np.random.default_rng(7)
+    n = 2000
+    y = rng.normal(size=n)
+    median = np.zeros(n)  # a zero-information point forecast
+    mae = float(np.mean(np.abs(y)))
+    levels = np.linspace(0.005, 0.995, 199)
+
+    def band_crps(sigma: float) -> float:
+        q = np.tile(norm.ppf(levels) * sigma, (n, 1))
+        return crps_from_quantiles(q, y, quantiles=list(levels))
+
+    # the Gaussian width whose band is exactly 25 % worse than the median
+    lo, hi = 0.0, 10.0
+    for _ in range(60):
+        mid = 0.5 * (lo + hi)
+        lo, hi = (mid, hi) if band_crps(mid) < 1.25 * mae else (lo, mid)
+    sigma = 0.5 * (lo + hi)
+    crps = band_crps(sigma)
+    assert crps == pytest.approx(1.25 * mae, rel=1e-6)  # the band is the worse one
+    assert crps > mae
+
+    reference = crps_observed(median, y)
+    assert reference == pytest.approx(mae)
+    # skill against the point forecast's own CRPS: negative, the band costs
+    assert crps_skill_score(crps, reference) == pytest.approx(1.0 - crps / mae)
+    assert crps_skill_score(crps, reference) < 0.0
+    # what the inflated reference used to answer for the same band: a "win"
+    inflated = np.sqrt(np.pi / 2.0) * mae
+    assert crps < inflated
+    assert crps_skill_score(crps, inflated) > 0.0
 
 
 # ------------------------------------------------------------- refusals

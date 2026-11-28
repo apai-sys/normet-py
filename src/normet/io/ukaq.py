@@ -229,6 +229,30 @@ def _aurn_live_split_label(label: str) -> str:
     return str(label).rsplit("-", 1)[0].strip()
 
 
+def _aurn_live_point(geometry: Any) -> tuple[float | None, float | None]:
+    """``(latitude, longitude)`` from a station's GeoJSON ``Point`` geometry.
+
+    The SOS API serves station positions as standard GeoJSON, and RFC 7946
+    orders a position **longitude first** (``[lon, lat]``) -- the same order
+    :func:`normet.io.eea._parse_feature` reads the ArcGIS layer's features
+    with. Taking ``coordinates[0]`` as the latitude (as this adapter used
+    to) gave every UK station a latitude between about -8 and +2 and a
+    longitude between 50 and 61: both inside the valid ranges, so nothing
+    raised, and London came back at latitude -0.213, longitude 51.521.
+
+    A missing/blank geometry, or one whose coordinates are not two numbers,
+    yields ``(None, None)`` rather than raising: the rest of the station
+    row is still usable, and the archive sources leave a station without
+    metadata blank in the same way.
+    """
+    coords = (geometry or {}).get("coordinates") or []
+    try:
+        lon, lat = float(coords[0]), float(coords[1])
+    except (IndexError, KeyError, TypeError, ValueError):
+        return None, None
+    return lat, lon
+
+
 def _aurn_live_list_stations(
     *,
     pollutant: str | Iterable[str] | None,
@@ -259,7 +283,7 @@ def _aurn_live_list_stations(
             for ts in timeseries_list:
                 props = (ts.get("station") or {}).get("properties") or {}
                 geom = (ts.get("station") or {}).get("geometry") or {}
-                coords = geom.get("coordinates", [None, None])
+                lat, lon = _aurn_live_point(geom)
                 label = props.get("label", ts.get("label", ""))
                 site = _aurn_live_split_label(label)
                 rows.append(
@@ -267,8 +291,8 @@ def _aurn_live_list_stations(
                         "code": lowered_codes.get(site.lower()),
                         "site": site,
                         "site_type": pd.NA,
-                        "latitude": coords[0],
-                        "longitude": coords[1],
+                        "latitude": lat,
+                        "longitude": lon,
                         "start_date": pd.NaT,
                         "end_date": pd.NaT,
                         "network": "aurn_live",
@@ -285,8 +309,7 @@ def _aurn_live_list_stations(
     seen: set[str] = set()
     for s in stations_raw:
         props = s["properties"]
-        geom = s.get("geometry", {})
-        coords = geom.get("coordinates", [None, None])
+        lat, lon = _aurn_live_point(s.get("geometry") or {})
         site = _aurn_live_split_label(props["label"])
         if site in seen:
             continue
@@ -296,8 +319,8 @@ def _aurn_live_list_stations(
                 "code": lowered_codes.get(site.lower()),
                 "site": site,
                 "site_type": pd.NA,
-                "latitude": coords[0],
-                "longitude": coords[1],
+                "latitude": lat,
+                "longitude": lon,
                 "start_date": pd.NaT,
                 "end_date": pd.NaT,
                 "network": "aurn_live",

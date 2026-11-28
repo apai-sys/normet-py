@@ -543,3 +543,76 @@ def test_date_strings_are_still_read_as_time():
     assert res.time_unit == "day"
     assert res.slope == pytest.approx(0.5, rel=1e-12)
     assert res.slope_per_year == pytest.approx(0.5 * 365.25, rel=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# Regression tests: +/-inf handling across backends and zero sign parity
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("positional", [False, True])
+def test_theil_sen_drops_inf_and_matches_across_backends(positional):
+    """±inf is treated as missing (like NaN) so both backends see the same
+    finite record and positional indices keep their real step coordinates."""
+    from normet.utils._rust import rust_available
+
+    vals = [1.0, 2.0, 3.0, np.inf, 5.0, 6.0, -np.inf, 8.0, 9.0]
+    if positional:
+        s = pd.Series(vals)
+        ref = pd.Series([1.0, 2.0, 3.0, np.nan, 5.0, 6.0, np.nan, 8.0, 9.0])
+    else:
+        idx = pd.date_range("2020-01-01", periods=len(vals), freq="D")
+        s = pd.Series(vals, index=idx)
+        ref = pd.Series([1.0, 2.0, 3.0, np.nan, 5.0, 6.0, np.nan, 8.0, 9.0], index=idx)
+
+    py = theil_sen(s, backend="python")
+    expected = theil_sen(ref, backend="python")
+    assert py == expected
+    assert py.n == 7
+    assert py.slope == pytest.approx(1.0, rel=1e-12)
+    if rust_available():
+        rs = theil_sen(s, backend="rust")
+        assert rs == py
+
+
+def test_mann_kendall_trend_and_breaks_drop_inf_cleanly():
+    """mann_kendall, trend and detect_trend_breaks must all drop ±inf with NaN."""
+    from normet.analysis.trend import detect_trend_breaks
+
+    mk = mann_kendall(pd.Series([1.0, 2.0, 3.0, np.inf, 5.0, 6.0, -np.inf, 8.0, 9.0, np.inf, 11.0]))
+    assert mk.n == 8
+    assert mk.S == 28
+
+    vals = [float(i) for i in range(25)]
+    vals[5] = np.inf
+    vals[15] = -np.inf
+    tr = trend(pd.Series(vals))
+    assert tr.n == 23
+    assert tr.n_dropped == 2
+    assert tr.test.n == 23
+    assert tr.slope.n == 23
+    assert tr.slope.slope == pytest.approx(1.0, rel=1e-12)
+
+    long_vals = [float(i) for i in range(60)]
+    long_vals[20] = np.inf
+    long_vals[40] = -np.inf
+    br = detect_trend_breaks(pd.Series(long_vals), n_bootstrap=50)
+    assert br.n == 58
+    assert br.n_dropped == 2
+    assert br.segments[0].n == 58
+
+
+def test_theil_sen_canonicalises_negative_zero_across_backends():
+    """Mixed +0.0/-0.0 slopes above _THEIL_SEN_LARGE must not differ in sign bit."""
+    from normet.utils._rust import rust_available
+
+    n = 4100
+    s = pd.Series(np.where(np.arange(n) % 2 == 0, 0.0, -0.0))
+    py = theil_sen(s, backend="python")
+    for val in (py.slope, py.ci_low, py.ci_high):
+        assert val == 0.0 and not np.signbit(val)
+    if rust_available():
+        rs = theil_sen(s, backend="rust")
+        assert rs.slope.hex() == py.slope.hex() == "0x0.0p+0"
+        assert rs.ci_low.hex() == py.ci_low.hex() == "0x0.0p+0"
+        assert rs.ci_high.hex() == py.ci_high.hex() == "0x0.0p+0"
