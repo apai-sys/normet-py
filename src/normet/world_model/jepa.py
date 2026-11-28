@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 import pandas as pd
 
 from ..analysis.diagnostics import counterfactual_separability_audit
@@ -728,7 +729,7 @@ def jepa_scm(
     if active.empty:
         active = donor_tbl.iloc[:1]
     sel_donors = active["unit"].astype(str).tolist()
-    w_vec = active["weight"].to_numpy(dtype=float)
+    w_vec: npt.NDArray[np.float64] = active["weight"].to_numpy(dtype=float)
     w_sum = float(np.sum(w_vec))
     w_vec = w_vec / w_sum if w_sum > 0.0 else np.full(len(sel_donors), 1.0 / len(sel_donors))
     weights_ser = pd.Series(w_vec, index=sel_donors, name="weight")

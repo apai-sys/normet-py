@@ -50,6 +50,10 @@ log = get_logger(__name__)
 #: cap off with ``0``.
 THREADS_ENV = "NORMET_TORCH_THREADS"
 
+#: Resolved once, so mypy cannot narrow ``sys.platform`` to the checking host and
+#: call the darwin-only code below unreachable on a Linux CI runner.
+_ON_DARWIN = sys.platform == "darwin"
+
 #: Set once torch has been capped. Left false while no second runtime is loaded,
 #: so that a torch-first import followed by a LightGBM fit can still be capped by
 #: the next ``import_torch`` call.
@@ -64,7 +68,7 @@ def openmp_runtime_images() -> list[str]:
     dependency). Returns an empty list off macOS, where the question does not
     arise.
     """
-    if sys.platform != "darwin":
+    if not _ON_DARWIN:
         return []
     try:
         import ctypes
@@ -101,7 +105,7 @@ def _cap_torch_threads(torch: Any, foreign: list[str]) -> bool:
     global _CAPPED
     if _CAPPED:
         return False
-    if sys.platform != "darwin":
+    if not _ON_DARWIN:
         return False
 
     requested = os.environ.get(THREADS_ENV)

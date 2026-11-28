@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 import pandas as pd
 
 from ..analysis.diagnostics import counterfactual_separability_audit
@@ -359,11 +360,11 @@ class SeparableWorldModel:
                 raise KeyError(f"Column {c!r} not found in DataFrame.")
 
         Y_df = df_s[tcols].apply(pd.to_numeric, errors="coerce")
-        valid = np.all(np.isfinite(Y_df.to_numpy(dtype=float)), axis=1)
+        valid: npt.NDArray[np.bool_] = np.all(np.isfinite(Y_df.to_numpy(dtype=float)), axis=1)
         if mcols:
             X_m_chk = df_s[mcols].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
             valid &= np.all(np.isfinite(X_m_chk), axis=1)
-        df_tr = df_s.iloc[valid]
+        df_tr = df_s.loc[valid]
         Y = Y_df.iloc[valid].to_numpy(dtype=float)
         n, m_dim = Y.shape
         if n < 15:
@@ -864,11 +865,11 @@ class SeparableWorldModel:
         self._require_fitted()
         df_s = _ensure_datetime_frame(df)
         Y_df = df_s[self._species].apply(pd.to_numeric, errors="coerce")
-        valid = np.all(np.isfinite(Y_df.to_numpy(dtype=float)), axis=1)
+        valid: npt.NDArray[np.bool_] = np.all(np.isfinite(Y_df.to_numpy(dtype=float)), axis=1)
         if self._met_cols:
             X_chk = df_s[self._met_cols].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
             valid &= np.all(np.isfinite(X_chk), axis=1)
-        df_v = df_s.iloc[valid]
+        df_v = df_s.loc[valid]
         Y = Y_df.iloc[valid].to_numpy(dtype=float)
 
         X_cal = _build_calendar_basis(
@@ -936,13 +937,13 @@ class SeparableWorldModel:
         self._require_fitted()
         df_s = _ensure_datetime_frame(df)
         Y = df_s[self._species].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
-        fin = np.all(np.isfinite(Y), axis=1)
+        fin: npt.NDArray[np.bool_] = np.all(np.isfinite(Y), axis=1)
         if self._met_cols:
             Xm_chk = (
                 df_s[self._met_cols].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
             )
             fin &= np.all(np.isfinite(Xm_chk), axis=1)
-        df_v = df_s.iloc[fin]
+        df_v = df_s.loc[fin]
         Yv = Y[fin]
         n = len(df_v)
 
@@ -1204,9 +1205,9 @@ class SeparableWorldModel:
             Y_pre = (
                 df_pre[self._species].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
             )
-            fin_pre = np.all(np.isfinite(Y_pre), axis=1)
+            fin_pre: npt.NDArray[np.bool_] = np.all(np.isfinite(Y_pre), axis=1)
             if np.any(fin_pre):
-                df_pre = df_pre.iloc[fin_pre]
+                df_pre = df_pre.loc[fin_pre]
                 Y_pre = Y_pre[fin_pre]
                 X_cal_pre = _build_calendar_basis(
                     pd.DatetimeIndex(df_pre.index), n_harmonics=self.config.n_harmonics

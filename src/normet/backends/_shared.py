@@ -5,6 +5,7 @@ from __future__ import annotations
 import warnings
 
 import numpy as np
+import numpy.typing as npt
 import pandas as pd
 
 
@@ -20,7 +21,9 @@ def resolve_sample_weight(
     if isinstance(sample_weight, str):
         if sample_weight not in df_sub.columns:
             raise ValueError(f"sample_weight column {sample_weight!r} not found in DataFrame.")
-        arr = pd.to_numeric(df_sub[sample_weight], errors="coerce").to_numpy(dtype=float)
+        arr: npt.NDArray[np.float64] = pd.to_numeric(
+            df_sub[sample_weight], errors="coerce"
+        ).to_numpy(dtype=float)
     elif isinstance(sample_weight, pd.Series) and len(sample_weight) == len(df_full):
         if sample_weight.index.equals(df_full.index):
             arr = pd.to_numeric(sample_weight.loc[df_sub.index], errors="coerce").to_numpy(
