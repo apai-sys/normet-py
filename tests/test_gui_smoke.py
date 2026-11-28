@@ -1317,3 +1317,60 @@ def test_multiscale_and_rolling_use_own_samples_and_forward_n_cores(qapp, monkey
         assert submitted[1][1]["n_cores"] == 5
     finally:
         win.close()
+
+
+def test_world_model_engine_returns_a_normalised_frame(qapp, monkeypatch):
+    """The Normalise page offers the latent engine, and it hands back observed/normalised."""
+    import numpy as np
+    import pandas as pd
+
+    from normet.gui.main_window import MainWindow
+
+    win = MainWindow()
+    try:
+        assert win.norm_engine.findText("world_model") >= 0
+        rng = np.random.default_rng(5)
+        n = 24 * 12
+        idx = pd.date_range("2023-01-01", periods=n, freq="h")
+        t = np.arange(n, dtype=float)
+        ws = np.clip(3.0 + np.sin(2 * np.pi * t / 24) + rng.normal(0, 0.3, n), 0.3, 10.0)
+        blh = np.clip(
+            600 + 200 * np.sin(2 * np.pi * (t - 6) / 24) + rng.normal(0, 20, n), 100, 1500
+        )
+        frame = pd.DataFrame(
+            {
+                "date": idx,
+                "NO2": np.maximum(1, 40 + 25 * np.exp(-ws / 3.0) + rng.normal(0, 0.5, n)),
+                "ws": ws,
+                "blh": blh,
+            }
+        )
+        win.df_raw = frame
+        win.df_prep = frame
+        win.model = object()
+        win.trained_features = ["ws", "blh"]
+        win.norm_engine.setCurrentText("world_model")
+        win.target_combo.clear()
+        win.target_combo.addItem("NO2")
+        win.target_combo.setCurrentText("NO2")
+        win.norm_samples.setValue(5)
+
+        monkeypatch.setattr(win, "_check_model", lambda: True)
+        monkeypatch.setattr(win, "_selected_norm_vars", lambda: ["ws", "blh"])
+
+        captured: dict = {}
+
+        def fake_submit(label, fn, on_done, on_err, *args, **kwargs):
+            captured["label"] = label
+            captured["frame"] = fn()
+            return True
+
+        monkeypatch.setattr(win.runner, "submit", fake_submit)
+        win._run_normalise()
+
+        assert captured["label"] == "normalise (world model)"
+        out = captured["frame"]
+        assert {"observed", "normalised"} <= set(out.columns)
+        assert len(out) == n
+    finally:
+        win.close()

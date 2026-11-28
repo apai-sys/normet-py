@@ -160,7 +160,7 @@ CORE_TOOLS = frozenset(
 
 def build_server(tools: Any = None, toolset: str = "all") -> Any:
     """The MCP server over *tools* (a :class:`normet.agent.Tools`; one over the
-    default job store and folders otherwise). ``toolset`` selects 'all' (26
+    default job store and folders otherwise). ``toolset`` selects 'all' (27
     tools) or 'core' (the 14 of the standard de-weathering workflow)."""
     if toolset not in ("all", "core"):
         raise ValueError(f"Unknown toolset {toolset!r}; expected 'all' or 'core'.")
@@ -429,6 +429,40 @@ def build_server(tools: Any = None, toolset: str = "all") -> Any:
             backend=backend,
             n_samples=n_samples,
             cutoff_days=cutoff_days,
+            seed=seed,
+            label=label,
+        )
+
+    @tool
+    def normet_start_world_model(
+        targets: list[str],
+        met_vars: list[str],
+        example: str | None = None,
+        data: str | None = None,
+        met_head: str | None = None,
+        model_backend: str | None = None,
+        n_samples: int | None = None,
+        paired: bool = True,
+        seed: int | None = None,
+        label: str = "",
+    ) -> str:
+        """Start a job: the separable latent world model, then de-weather each
+        target in its latent space. Unlike normet_start_do_all it fits several
+        species at once (and tests whether their mixing commutes with the weather
+        warp), and its meteorological action is a monotone quantile-spline GAM by
+        default (met_head: 'gam', 'linear', 'poly' or 'tree'). Writes
+        world_model.csv with <species>_observed/_normalised/_factual and
+        world_model_summary.json, whose separability_gain can be negative;
+        poll normet_job_status."""
+        return t.start_world_model(
+            targets,
+            met_vars,
+            data=data,
+            example=example,
+            met_head=met_head,
+            model_backend=model_backend,
+            n_samples=n_samples,
+            paired=paired,
             seed=seed,
             label=label,
         )
@@ -894,7 +928,7 @@ def main(argv: list[str] | None = None) -> int:
         "--toolset",
         choices=("all", "core"),
         default="all",
-        help="Tools to expose: 'all' (26) or 'core' (14, the standard de-weathering workflow).",
+        help="Tools to expose: 'all' (27) or 'core' (14, the standard de-weathering workflow).",
     )
     p.add_argument(
         "--transport",

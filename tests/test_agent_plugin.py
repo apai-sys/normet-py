@@ -327,7 +327,8 @@ def test_build_server_core_toolset_registers_only_core(monkeypatch):
     monkeypatch.setattr(m, "_sdk", lambda: (FakeServer, object, RuntimeError))
     all_tools = m.build_server(object(), toolset="all")
     core_tools = m.build_server(object(), toolset="core")
-    assert len(all_tools.names) == 26
+    assert len(all_tools.names) == 27
+    assert "normet_start_world_model" in all_tools.names
     assert set(core_tools.names) == set(m.CORE_TOOLS)
     assert len(core_tools.names) == 14
     with pytest.raises(ValueError):

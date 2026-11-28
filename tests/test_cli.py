@@ -796,3 +796,72 @@ def test_cli_malformed_or_non_mapping_config_returns_usage_error(tmp_path):
         )
         assert res.exit_code == 2, (cfg_file, res.exit_code, res.output)
         assert "Error:" in res.output
+
+
+@needs_click
+def test_cli_world_model_writes_species_blocks(tmp_path):
+    """`normet world-model` fits, de-weathers both species, and writes its certificate."""
+    import numpy as np
+    import pandas as pd
+    from click.testing import CliRunner
+
+    from normet.app.cli import _build_cli
+
+    rng = np.random.default_rng(11)
+    n = 24 * 45
+    idx = pd.date_range("2023-01-01", periods=n, freq="h")
+    t = np.arange(n, dtype=float)
+    ws = np.clip(3.0 + np.sin(2 * np.pi * t / 24) + rng.normal(0, 0.4, n), 0.3, 12.0)
+    blh = np.clip(600 + 200 * np.sin(2 * np.pi * (t - 6) / 24) + rng.normal(0, 30, n), 100, 1800)
+    dilution = 30 * np.exp(-ws / 3.0)
+    frame = pd.DataFrame(
+        {
+            "date": idx,
+            "no2": np.maximum(1, 50 + dilution + rng.normal(0, 0.6, n)),
+            "pm25": np.maximum(1, 25 + 0.5 * dilution + rng.normal(0, 0.5, n)),
+            "ws": ws,
+            "blh": blh,
+        }
+    )
+    csv = tmp_path / "air.csv"
+    frame.to_csv(csv, index=False)
+    out = tmp_path / "world_model.csv"
+    summary = tmp_path / "world_model_summary.json"
+
+    result = CliRunner().invoke(
+        _build_cli(),
+        [
+            "world-model",
+            str(csv),
+            "--target",
+            "no2,pm25",
+            "--met",
+            "ws,blh",
+            "--n-samples",
+            "5",
+            "--out",
+            str(out),
+            "--summary",
+            str(summary),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    written = pd.read_csv(out)
+    for column in (
+        "no2_observed",
+        "no2_normalised",
+        "no2_factual",
+        "pm25_observed",
+        "pm25_normalised",
+    ):
+        assert column in written.columns
+    data = json.loads(summary.read_text())
+    assert data["species"] == ["no2", "pm25"]
+    assert data["met_vars"] == ["ws", "blh"]
+    assert "separability_gain" in data
+
+    missing = CliRunner().invoke(
+        _build_cli(), ["world-model", str(csv), "--met", "ws", "--out", str(out)]
+    )
+    assert missing.exit_code == 2
+    assert "--target" in missing.output

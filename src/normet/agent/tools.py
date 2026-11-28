@@ -72,6 +72,7 @@ _OUTPUTS = {
     "benchmark": "benchmark/benchmark.csv",
     "invert_multisite": "inversion/summary.json",
     "met_features": "met_features.csv",
+    "world_model": "world_model.csv",
 }
 
 
@@ -487,6 +488,50 @@ class Tools:
         ]
         return self._start("normalise_ox", argv, label)
 
+    def start_world_model(
+        self,
+        targets: list[str],
+        met_vars: list[str],
+        data: str | None = None,
+        example: str | None = None,
+        met_head: str | None = None,
+        model_backend: str | None = None,
+        n_samples: int | None = None,
+        paired: bool = True,
+        seed: int | None = None,
+        label: str = "",
+    ) -> str:
+        """Separable latent world-model de-weathering (``normet world-model``).
+
+        Fits the latent model on the dated record and writes
+        ``world_model.csv`` (one ``<species>_observed`` / ``_normalised`` /
+        ``_factual`` block per target) and ``world_model_summary.json`` (the
+        separability certificate). More than one target is allowed; the model
+        then tests whether the mixing step commutes with the weather warp.
+        """
+        if not targets:
+            raise ValueError("give the target column(s) to de-weather")
+        if not met_vars:
+            raise ValueError("give the meteorological covariates to condition on")
+        argv = ["world-model", self._source(data, example)]
+        argv += self._options(
+            target=targets,
+            met=met_vars,
+            met_head=met_head,
+            model_backend=model_backend,
+            n_samples=n_samples,
+            seed=seed,
+        )
+        if not paired:
+            argv += ["--unpaired"]
+        argv += [
+            "--out",
+            _OUTPUTS["world_model"],
+            "--summary",
+            "world_model_summary.json",
+        ]
+        return self._start("world_model", argv, label)
+
     def start_normalise_regime(
         self,
         target: str,
@@ -892,8 +937,8 @@ class Tools:
         """A result file read as its *kind* says: ``normalised``/``do_all``/``deweather``,
         ``decomposition``/``decompose``/``icn_decompose``, ``scm`` (with *cutoff*), ``cv``,
         ``impute``, ``backtest``, ``events``, ``met_features``, ``benchmark``,
-        ``invert_multisite``, ``normalise_ox``, ``normalise_regime``, or
-        ``shapley_interactions``."""
+        ``invert_multisite``, ``normalise_ox``, ``normalise_regime``,
+        ``world_model``, or ``shapley_interactions``."""
         full = self.path(path)
         if kind == "invert_multisite":
             if full.lower().endswith(".json"):
@@ -910,6 +955,12 @@ class Tools:
                     regions=self._read_optional_table(os.path.join(parent, "regions.csv")),
                 )
             return readings.data_reading(self._table(full), name=os.path.basename(full))
+
+        if kind == "world_model":
+            summary = self._read_optional_json(
+                os.path.join(os.path.dirname(full), "world_model_summary.json")
+            )
+            return readings.world_model_reading(self._table(full), summary)
 
         df = self._table(full)
         if kind in ("normalised", "do_all", "deweather"):

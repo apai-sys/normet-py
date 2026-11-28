@@ -257,6 +257,61 @@ def test_start_tools_check_their_arguments(tools, tmp_path):
     assert "Means by month" in tools.read_result(str(dw_csv), "deweather")
 
 
+def test_world_model_start_and_reading(tools, tmp_path):
+    """The world-model job assembles its flags, and its output reads back."""
+    with pytest.raises(ValueError, match="target"):
+        tools.start_world_model([], ["ws"], example="my1")
+    with pytest.raises(ValueError, match="meteorological"):
+        tools.start_world_model(["NO2"], [], example="my1")
+
+    tools.store.submit = lambda kind, argv, label="": {
+        "id": "job-wm",
+        "state": "queued",
+        "command": command_line(argv),
+    }
+    msg = tools.start_world_model(
+        ["NO2", "PM2.5"],
+        ["ws", "blh"],
+        example="my1",
+        met_head="linear",
+        model_backend="separable",
+        n_samples=7,
+        paired=False,
+    )
+    assert "job-wm" in msg and "world_model" in msg
+    assert "--target NO2,PM2.5" in msg and "--met ws,blh" in msg
+    assert "--met-head linear" in msg and "--n-samples 7" in msg
+    assert "--unpaired" in msg and "--summary world_model_summary.json" in msg
+
+    n = 24 * 3
+    idx = pd.date_range("2023-01-01", periods=n, freq="h")
+    frame = pd.DataFrame(
+        {
+            "date": idx,
+            "no2_observed": np.arange(n, dtype=float) + 10.0,
+            "no2_normalised": np.arange(n, dtype=float) + 8.0,
+        }
+    )
+    csv = tmp_path / "world_model.csv"
+    frame.to_csv(csv, index=False)
+    (tmp_path / "world_model_summary.json").write_text(
+        json.dumps(
+            {
+                "separability_gain": {
+                    "mean_rho_lb_raw": 0.10,
+                    "mean_rho_lb_latent": 0.02,
+                    "rho_lb_reduction": -0.08,
+                }
+            }
+        )
+    )
+    text = tools.read_result(str(csv), "world_model")
+    assert "World-model de-weathering" in text
+    assert "no2" in text and "Separability certificate" in text
+    # A negative reduction is called out: the latent split did not beat raw chemistry.
+    assert "negative" in text
+
+
 def test_a_run_read_drawn_and_reported(tools, synthetic_aq, tmp_path):
     pytest.importorskip("lightgbm")
     from normet import do_all, make_run, save_run

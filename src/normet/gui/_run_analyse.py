@@ -209,6 +209,37 @@ class AnalyseRunMixin(QMainWindow):
                 key="chem-needs-automl",
             )
             return
+        if engine == "world_model":
+            # The separable latent model brings its own fit: the trained model is
+            # not used, only the covariates ticked for it. Its output is one
+            # <species>_observed/_normalised block, renamed to the
+            # observed/normalised frame the Normalise tab expects.
+            target = self.target_combo.currentText()
+            met_covariates = [f for f in self.trained_features if f not in TIME_VARS]
+            if not met_covariates:
+                self.notify(
+                    "The world-model engine needs the meteorological covariates: tick them "
+                    "on the Model page (and train once, so the window knows them).",
+                    key="wm-needs-covariates",
+                )
+                return
+
+            def run_world_model() -> pd.DataFrame:
+                from normet.world_model import fit_world_model
+
+                fitted = fit_world_model(self.df_raw, [target], met_covariates)
+                norm = fitted.normalise(
+                    self.df_raw,
+                    n_samples=self.norm_samples.value(),
+                    seed=self.seed_spin.value(),
+                )
+                return norm.to_normet_frame(target)
+
+            self.runner.submit(
+                "normalise (world model)", run_world_model, self._normalise_done, self._show_error
+            )
+            return
+
         if self._is_chronos():
             met_vars = [v for v in resample_vars if v not in TIME_VARS]
             method = (

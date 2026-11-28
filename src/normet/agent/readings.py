@@ -257,6 +257,83 @@ def _periods(index: pd.DatetimeIndex) -> tuple[str, str]:
     return ("YE", "year") if years >= 3 else ("ME", "month")
 
 
+def world_model_reading(result: pd.DataFrame, summary: dict[str, Any] | None = None) -> str:
+    """A world-model de-weathering: each species' observed mean against its
+    normalised mean, plus the fit's separability certificate when the job
+    wrote one.
+
+    The latent split can fail on a record even when the fit converges, so the
+    certificate is part of the reading rather than a footnote: a negative
+    ``rho_lb_reduction`` means the latent space did not separate emission from
+    weather better than raw chemistry there.
+    """
+    df = result.copy()
+    if not isinstance(df.index, pd.DatetimeIndex) and "date" in df.columns:
+        df = df.set_index(pd.to_datetime(df["date"])).drop(columns="date")
+    species = [str(c)[: -len("_observed")] for c in df.columns if str(c).endswith("_observed")]
+    if not species:
+        return data_reading(result, name="the world-model output")
+    lines = [
+        f"World-model de-weathering: {len(df):,} rows, {len(species)} species "
+        f"({', '.join(species)})."
+    ]
+    rows = []
+    for sp in species:
+        obs_col, norm_col = f"{sp}_observed", f"{sp}_normalised"
+        if norm_col not in df.columns:
+            continue
+        obs = pd.to_numeric(df[obs_col], errors="coerce")
+        norm = pd.to_numeric(df[norm_col], errors="coerce")
+        ok = obs.notna() & norm.notna()
+        if not ok.any():
+            continue
+        base = float(obs[ok].mean())
+        part = float(norm[ok].mean()) - base
+        rows.append(
+            [
+                sp,
+                num(base),
+                num(norm[ok].mean()),
+                num(part),
+                f"{100.0 * part / base:+.1f} %" if abs(base) > 0 else "—",
+            ]
+        )
+    lines += [
+        "",
+        table(
+            ["species", "mean observed", "mean normalised", "met part", "change"],
+            rows,
+        ),
+    ]
+    gain = (summary or {}).get("separability_gain") or {}
+    if gain:
+        keep = [
+            k
+            for k in (
+                "mean_rho_lb_raw",
+                "mean_rho_lb_latent",
+                "rho_lb_reduction",
+                "mean_rc_raw",
+                "mean_rc_latent",
+            )
+            if k in gain
+        ]
+        if keep:
+            lines += [
+                "",
+                "Separability certificate (latent against raw):",
+                "",
+                table(["metric", "value"], [[k, num(gain[k])] for k in keep]),
+            ]
+            reduction = gain.get("rho_lb_reduction")
+            if reduction is not None and float(reduction) < 0.0:
+                lines.append(
+                    "rho_lb_reduction is negative: on this record the latent split did "
+                    "not beat raw chemistry — read any trend from it with that caveat."
+                )
+    return "\n".join(lines)
+
+
 def normalised_reading(result: pd.DataFrame) -> str:
     """A normalised series against the observed one: their means overall and by
     year (or month, for a short record), and the meteorological part

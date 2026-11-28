@@ -87,7 +87,9 @@ class AnalysePanelMixin(QMainWindow):
         self.norm_quantiles.setToolTip("Also return the Monte-Carlo quantiles and shade the band.")
         nf.addRow(self.norm_quantiles)
         self.norm_engine = NoWheelComboBox()
-        self.norm_engine.addItems(["standard", "dml", "ox_invariant", "regime_conditioned"])
+        self.norm_engine.addItems(
+            ["standard", "dml", "ox_invariant", "regime_conditioned", "world_model"]
+        )
         self.norm_engine.setToolTip(
             "standard: fitted model + Monte-Carlo weather resampling.\n"
             "dml: orthogonal Double-ML — a smooth low-frequency nuisance basis is\n"
@@ -96,7 +98,9 @@ class AnalysePanelMixin(QMainWindow):
             "ox_invariant: conserved Ox = O3 + NO2 / NOx = NO + NO2 deweathering,\n"
             "repartitioned by the photochemical NO2 fraction.\n"
             "regime_conditioned: deweather the target holding deweathered primary\n"
-            "precursors (NOx, CO, ...) at their emission-driven trajectories."
+            "precursors (NOx, CO, ...) at their emission-driven trajectories.\n"
+            "world_model: separable latent model — a monotone meteorological action\n"
+            "in latent space; no trained model is needed beyond the covariates."
         )
         self.norm_engine.currentTextChanged.connect(self._norm_engine_changed)
         nf.addRow("Engine", self.norm_engine)

@@ -1372,6 +1372,105 @@ def _build_cli() -> Any:
             + f" → {out_path}"
         )
 
+    # ---- world-model (separable latent de-weathering) ----
+    @cli.command("world-model")
+    @click.argument("input", type=click.Path(exists=True, path_type=Path))
+    @click.option(
+        "--target",
+        "targets",
+        required=False,
+        help="Target column(s), comma-separated — the species to de-weather.",
+    )
+    @click.option(
+        "--met",
+        "met_vars",
+        required=False,
+        help="Meteorological column(s) the model conditions on, comma-separated.",
+    )
+    @click.option(
+        "--met-head",
+        "met_head",
+        type=click.Choice(["gam", "linear", "poly", "tree"]),
+        default=None,
+        help="Meteorological action head (default gam: monotone quantile splines).",
+    )
+    @click.option(
+        "--model-backend",
+        "wm_backend",
+        type=click.Choice(["separable", "torch"]),
+        default=None,
+        help="'separable' (NumPy, the default) or 'torch' (differentiable).",
+    )
+    @click.option("--n-samples", "n_samples", type=int, default=None)
+    @click.option("--unpaired", is_flag=True, default=None, help="Skip the paired/ratio pairing.")
+    @click.option("--seed", type=int, default=None)
+    @click.option("--out", "out_path", type=click.Path(path_type=Path), required=True)
+    @click.option(
+        "--summary",
+        "summary_path",
+        type=click.Path(path_type=Path),
+        default=None,
+        help="Write the fit's separability certificate and settings as JSON.",
+    )
+    @click.option("--config", "config_path", type=click.Path(exists=True, path_type=Path))
+    def world_model_cmd(input: Path, **opts: Any) -> None:
+        """Fit the separable latent world model and de-weather each species.
+
+        Unlike ``do-all`` the fit is in a latent space with an explicit
+        meteorological action, and more than one target can be fitted at once
+        (the model tests whether the mixing step commutes with the weather
+        warp). Writes one block of ``<species>_observed`` / ``_normalised`` /
+        ``_factual`` columns; the JSON summary carries ``separability_gain``,
+        which can be negative — check it before reading a trend from the
+        output.
+        """
+        from ..world_model import WorldModelConfig, fit_world_model
+
+        cfg = _merge_cli_over_yaml(_load_yaml(opts.pop("config_path", None)), opts)
+        targets = _split_csv(_require_option(cfg, "targets", "--target")) or []
+        met_vars = _split_csv(_require_option(cfg, "met_vars", "--met")) or []
+        if not targets:
+            raise click.UsageError("--target must name at least one column")
+        if not met_vars:
+            raise click.UsageError("--met must name at least one column")
+
+        df = _load_table(input)
+        config = WorldModelConfig(
+            met_head=str(cfg.get("met_head") or "gam"),
+            backend=str(cfg.get("wm_backend") or "separable"),
+            seed=_cfg_int(cfg, "seed", 7_654_321),
+        )
+        model = fit_world_model(df, targets, met_vars, config=config)
+        res = model.normalise(
+            df,
+            n_samples=_cfg_int(cfg, "n_samples", 100),
+            paired=not bool(cfg.get("unpaired")),
+            seed=_cfg_int(cfg, "seed", 7_654_321),
+        )
+        out = res.df.rename_axis("date").reset_index()
+        _save_table(out, Path(cfg["out_path"]))
+
+        gain = {k: float(v) for k, v in res.separability_gain.items()}
+        summary = {
+            "species": list(res.species),
+            "met_vars": met_vars,
+            "rows": int(len(res.df)),
+            "met_head": config.met_head,
+            "backend": config.backend,
+            "n_samples": _cfg_int(cfg, "n_samples", 100),
+            "paired": not bool(cfg.get("unpaired")),
+            "separability_gain": gain,
+        }
+        if cfg.get("summary_path"):
+            path = Path(cfg["summary_path"])
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+        click.echo(
+            f"[world-model] {len(res.species)} species × {len(res.df):,} rows → "
+            f"{cfg['out_path']}"
+            + f"; rho_lb_reduction {gain.get('rho_lb_reduction', float('nan')):+.3f}"
+        )
+
     # ---- scm ----
     @cli.command("scm")
     @click.argument("input", type=click.Path(exists=True, path_type=Path))
