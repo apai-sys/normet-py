@@ -714,6 +714,37 @@ Grabisch--Roubens 交互项，显示两个变量（比如温度与边界层高�
 下一个站点的特征。衰减按实际经过的小时计算，逐时、逐日和不规则的记录因此共享同一个
 物理核。
 
+\section{世界模型}\label{sec:worldmodeltheory}
+\code{normet.world\_model} 里的模型把去气象化当作潜状态问题，而不是对观测浓度的回归。
+对外是三块，共同的前提只有一条：拟合只看干预前的记录，干预后的气象差异因此不会被当成
+气象响应的一部分吸收掉。
+
+\paragraph{动作条件 JEPA。}\code{LatentJEPA} 把目标序列切成 patch，用多尺度谱/滞后编码器
+（或 Chronos-2 的 \code{embed\_patches}）编码，再学习用气象 patch 预测下一个 patch 的潜
+状态。气象解释不掉的部分留在新息里，\code{detect\_jepa\_events} 把新息的阈值变成事件段。
+静稳窗口会被模型复现、得分低；普通气象下的排放突增得分高——两者是在潜空间里分开的，
+不是在浓度空间里。\code{jepa\_select\_donors} 用同一套潜表示在断点之前给合成控制的供体
+排序，\code{jepa\_scm} 只在断点前做供体加权和逐站 GAM 气象响应。
+
+\paragraph{可分离潜空间世界模型。}\code{SeparableWorldModel} 把潜状态拆成缓变的排放坐标和
+气象动作，经单调分位样条 GAM（\code{met\_head="gam"}，也可 \code{"linear"}、
+\code{"poly"}、\code{"tree"}）映射。多于一个物种时，拟合还会判断混合步骤与气象扭曲是否
+可交换——\code{warp\_then\_mix} 对 \code{mix\_then\_warp}——并记录这个选择，它说的正是
+各污染物的响应是否可分离。\code{normalise} 在这个潜空间里重采样气象；
+\code{counterfactual\_rollout} 在给定窗口内平移或缩放指定的气象列，按模型测到的持续性
+向前推，设了 \code{n\_boot} 时给出移动块自助法的区间。PyTorch 后端
+（\code{backend="torch"}）可微地训练同一结构；默认的可分离后端只需要 NumPy。
+
+\paragraph{站点网络。}\code{MultisiteWorldModel} 给每个站点各拟合一个可分离模型，再把去
+气象化后的面板分解成网络共享的秩 $k$ 区域分量和站点局地残差（\code{decompose}、
+\code{local\_anomaly\_scores}、\code{regional\_what\_if}）。秩是选择而不是估计：一个因子
+就是一条羽流，跨多个气团的网络需要更多。
+
+输出自带一份证书，而且它可能不合格：\code{normalise} 返回 \code{separability\_gain}，
+其中 \code{rho\_lb\_reduction} 把潜空间的交互下界与原始序列相比。归约值为负，说明在这条
+记录上潜空间拆分并不比原始化学组分更好地分开排放与气象，从它读出的趋势继承这一点。
+\code{jepa\_scm} 同理：\code{pre\_rmspe} 大，说明供体池跟不住处理站点，ATT 不该引用。
+
 % ============================ 4. GETTING STARTED ==============================
 \chapter{入门}\label{ch:start}
 

@@ -908,6 +908,54 @@ it the frame is treated as one record and one site's air mass feeds the next sit
 features. Decay is applied per elapsed hour, so hourly, daily and irregular records
 share the same physical kernel.
 
+\section{The world model}\label{sec:worldmodeltheory}
+The models in \code{normet.world\_model} treat de-weathering as a latent state
+problem rather than a regression on observed concentrations. Three pieces are
+exposed, and they share one requirement: the fit sees only the pre-intervention
+record, so a post-intervention weather difference cannot be absorbed as if it
+were part of the weather response.
+
+\paragraph{Action-conditioned JEPA.} \code{LatentJEPA} cuts a target series
+into patches, encodes each patch with a multi-scale spectral/lag encoder (or a
+Chronos-2 \code{embed\_patches} encoder), and learns to predict the next patch's
+latent from the meteorological patch. What the weather does not explain remains
+in the innovation; \code{detect\_jepa\_events} turns a threshold on that
+innovation into episodes. A stagnation window is reproduced by the model and
+therefore scores low, while an emission burst under ordinary weather scores
+high --- the two are separated in latent space, not in concentration space.
+\code{jepa\_select\_donors} uses the same latents to rank synthetic-control
+donors before the cutoff, and \code{jepa\_scm} runs the donor weighting and a
+per-station GAM weather response on the pre-cutoff window only.
+
+\paragraph{Separable latent world model.} \code{SeparableWorldModel} splits the
+latent state into a slowly varying emission coordinate and a meteorological
+action, mapped through a monotone quantile-spline GAM (\code{met\_head="gam"},
+or \code{"linear"}, \code{"poly"}, \code{"tree"}). With more than one species
+the fit also decides whether the mixing step commutes with the meteorological
+warp --- \code{warp\_then\_mix} against \code{mix\_then\_warp} --- and records
+the choice, which is a statement about whether the pollutants' responses are
+separable. \code{normalise} resamples weather in that latent space;
+\code{counterfactual\_rollout} shifts or scales named meteorological columns
+over a window and carries the model's measured persistence forward, with
+moving-block bootstrap bands when \code{n\_boot} is set. The PyTorch backend
+(\code{backend="torch"}) trains the same structure differentiably; the default
+separable backend needs only NumPy.
+
+\paragraph{Station networks.} \code{MultisiteWorldModel} fits one separable
+model per station and decomposes the de-weathered panel into a rank-$k$
+regional component shared by the network and station-local residuals
+(\code{decompose}, \code{local\_anomaly\_scores}, \code{regional\_what\_if}).
+The rank is a choice, not an estimate: one factor is a single plume, and a
+network spanning more than one airshed needs more.
+
+The output carries its own certificate, and it can fail: \code{normalise}
+returns \code{separability\_gain}, whose \code{rho\_lb\_reduction} compares the
+interaction lower bound in latent space with the raw series. A negative
+reduction means the split did not separate emission from weather better than
+raw chemistry on that record, and a trend read from it inherits that. The same
+caution applies to \code{jepa\_scm}: a large \code{pre\_rmspe} says the donor
+pool does not track the treated site, and the ATT should not be quoted.
+
 % ============================ 4. GETTING STARTED ==============================
 \chapter{Getting started}\label{ch:start}
 

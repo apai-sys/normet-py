@@ -15,6 +15,7 @@ The main sub-packages are also documented individually below.
    normet.model
    normet.foundation
    normet.counterfactual
+   normet.world_model
    normet.viz
    normet.reporting
    normet.eval

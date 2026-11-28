@@ -83,6 +83,7 @@ and Chinese (:download:`normet_manual_zh.pdf <manual/normet_manual_zh.pdf>`).
    guide/examples_scm_guide
    guide/examples_scm
    guide/examples_multisite
+   guide/examples_world_model
    guide/examples_caching
    guide/examples_data_adapters
    guide/examples_openaq
