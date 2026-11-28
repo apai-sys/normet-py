@@ -314,6 +314,15 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   switch are unchanged.
 
 ### Changed
+- **`crps_observed` returns the point forecast's own CRPS — its MAE, about
+  20 % lower than before.** It used to return `sqrt(pi/2) * MAE` (1.253x): the
+  *sigma* of the Gaussian whose MAE equals the forecast's error, documented as
+  a normal-scale convention. A point forecast is a point mass, whose CRPS is
+  the absolute error, so the reference is now the MAE itself, on the same scale
+  as `crps_from_quantiles` / `crps_from_samples`. Skill tables built against
+  the old value shift by that factor, and an interval score can now be
+  negative — a spread forecast scoring above the point forecast is worse than
+  forecasting the median alone. The GUI's `crps_reference` follows.
 - **`normalise_ox_invariant` reports its Ox and NOx totals as constituent sums.**
   `Ox_observed`/`Ox_normalised` are now `O3 + NO2` and
   `NOx_observed`/`NOx_normalised` are `NO2 + NO` in the frame's own unit,
@@ -372,6 +381,57 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
     the default `traj_*` column set is unchanged; Transport Studio passes it.
 
 ### Fixed
+- **A second first-principles audit, of the surfaces the first round skipped**
+  (agent/MCP, CLI, GUI session, reporting, io adapters, event and trend
+  statistics, harmonic counterfactual, world model). Defects fixed:
+  - **The world model rebuilt its calendar design from the window being
+    evaluated.** The separable model's Fourier/trend basis (epoch, span, and
+    so the 90 d / 180 d width bucket) was computed from whatever slice it was
+    handed, so a rollout, a normalisation subset or a persistence pre-window
+    could be scored on a different design than its coefficients were fitted on.
+    The basis is now pinned at fit time and carried by `save()`; an archive
+    written before the spec existed falls back to the width implied by its
+    stored column count.
+  - **AC-JEPA dropped the tail patch** when a record was not a whole number of
+    strides, so the last, often most recent, part of a series was never
+    scored; `jepa_scm` likewise changed design width when a station spanned
+    the 90 d / 180 d calendar thresholds.
+  - **A job launched but not yet started** was reported as neither running nor
+    finished, and could be pruned underneath the caller. `JobStore` now counts
+    it as running and keeps it.
+  - **The MCP result readers** knew only the original job kinds: all seven
+    extended kinds now read, an ICN decomposition follows its
+    `icn_interactions.csv`, `invert_multisite` summarises its JSON and side
+    tables, and a header-only CSV reads as empty instead of crashing.
+  - **`normet-plugin --url` with a non-default `--toolset`** ignored the
+    option; it now refuses with a message naming the conflict.
+  - **A missing `--target`, or a `--config` that is malformed or not a
+    mapping**, failed deep inside the pipeline or was accepted silently; both
+    now raise a click usage error naming the flag.
+  - **`theil_sen` kept infinities and `-0.0`**, which corrupted the order
+    statistics (and made the Rust backend disagree with the Python one); both
+    are canonicalised on every backend, and the two agree on positional grids.
+    `mann_kendall`, `trend` and `detect_trend_breaks` drop infinities too.
+  - **Event isolation** mis-read a constant record and a single spike, and the
+    k sensitivity of the isolation statistic was unpinned; both are fixed and
+    tested.
+  - **The harmonic counterfactual** divided a subunit series' relative impact
+    by the parent's level, so its percentage did not equal the net impact's,
+    and accepted empty or overlapping evaluation windows.
+  - **GUI**: the method paragraph hard-coded its time step instead of reading
+    the data's frequency; plot scripts dropped `trend`/`events` calls on
+    export; the synthetic example wrote wind direction as degrees from north
+    rather than a compass bearing; multi-scale and rolling runs reused the
+    parent's sample count and `n_cores`; a dock action lost its mnemonic after
+    a language switch.
+  - **Data adapters**: an EEA station with no NOx column (and lower-case
+    pollutant names) failed to fetch; date parsing mistook early epoch seconds
+    for Excel serials and crashed on an unusable numeric column; the polar plot
+    failed on empty bins, a short record or a coarse direction grid and leaked
+    its figure when the draw failed; `resample` ignored numeric series that sit
+    beside label columns.
+  - **Reports** crashed on a non-DataFrame result, and HTML and Markdown
+    export printed missing values differently.
 - **`scm_mcnnm`'s default lambda was the arbitrary `0.1 * sigma_max` heuristic.**
   On a clean rank-2 null panel that left a pre-period RMSE of 0.41 and a
   spurious post-period ATT of +0.34 (the bias adds symmetrically to a real
